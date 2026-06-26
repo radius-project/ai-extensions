@@ -25,5 +25,10 @@
     "@types/node": "^20.19.43",
     "esbuild": "^0.28.1",
     "typescript": "^5.4.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "read-yaml-file@<2": "^2.1.0"
+    }
   }
 }
