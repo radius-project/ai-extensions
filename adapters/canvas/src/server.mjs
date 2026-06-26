@@ -19,7 +19,7 @@ import {
   generateBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
-} from "@radius/core";
+} from "@radius-project/core";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { execShell, fetchFileFromRepo, fetchRepoTree, github } from "./gh.mjs";

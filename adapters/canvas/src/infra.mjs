@@ -10,7 +10,7 @@ import {
   generatePortalUrl as coreGeneratePortalUrl,
   generateVerifyWorkflow as coreGenerateVerifyWorkflow,
   generateDeployWorkflow as coreGenerateDeployWorkflow,
-} from "@radius/core";
+} from "@radius-project/core";
 
 export function generateAzureOIDC(data) {
     return getPlatform('azure').generateOidc(data);

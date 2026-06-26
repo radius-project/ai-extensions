@@ -1,4 +1,4 @@
-// @radius/core — UI-agnostic core for the Radius Canvas product.
+// @radius-project/core — UI-agnostic core for the Radius Canvas product.
 //
 // This package contains pure logic shared by every UI adapter (canvas, browser,
 // chat): repository modeling, application-graph build/diff, the compute-platform

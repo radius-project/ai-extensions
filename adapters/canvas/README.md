@@ -2,7 +2,7 @@
 
 The Copilot-canvas UI adapter for Radius Canvas. It owns the SDK surface and the
 loopback HTTP host that backs the webview, and delegates all product logic to
-[`@radius/core`](../../radius-core/README.md).
+[`@radius-project/core`](../../radius-core/README.md).
 
 ## Modules
 
@@ -21,7 +21,7 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 ## Build
 
 ```bash
-npm run build:canvas   # esbuild -> .github/radius/extension.mjs
+pnpm build:canvas   # esbuild -> .github/radius/extension.mjs
 ```
 
 `@github/copilot-sdk` is marked external; everything else (the sibling `.mjs`

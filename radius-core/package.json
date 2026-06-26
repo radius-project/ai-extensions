@@ -1,5 +1,5 @@
 {
-  "name": "@radius/core",
+  "name": "@radius-project/core",
   "version": "0.1.0",
   "private": true,
   "description": "UI-agnostic core for the Radius Canvas product: repo modeling, application graph build/diff, compute-platform abstraction, and workflow generation. No SDK / HTTP / DOM dependencies.",

@@ -1,5 +1,5 @@
 {
-  "name": "@radius/canvas",
+  "name": "@radius-project/canvas",
   "version": "0.1.0",
   "private": true,
   "description": "Copilot canvas adapter for the Radius Canvas product. Builds to the single runtime-loadable extension.mjs that the canvas loader runs.",
@@ -9,6 +9,6 @@
     "watch": "node build.mjs --watch"
   },
   "dependencies": {
-    "@radius/core": "*"
+    "@radius-project/core": "workspace:*"
   }
 }

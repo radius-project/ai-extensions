@@ -3,20 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "description": "Deploy with Radius - Copilot canvas extension",
-  "workspaces": [
-    "radius-core",
-    "adapters/*"
-  ],
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=9"
+  },
   "scripts": {
     "build": "node adapters/canvas/build.mjs",
     "watch": "node adapters/canvas/build.mjs --watch",
     "build:canvas": "node adapters/canvas/build.mjs",
     "watch:canvas": "node adapters/canvas/build.mjs --watch",
-    "typecheck": "npm run typecheck:core && npm run typecheck:canvas",
+    "typecheck": "pnpm run typecheck:core && pnpm run typecheck:canvas",
     "typecheck:core": "tsc -p radius-core/tsconfig.json",
-    "typecheck:canvas": "tsc -p adapters/canvas/tsconfig.json"
+    "typecheck:canvas": "tsc -p adapters/canvas/tsconfig.json",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm run build"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.11",
     "@types/node": "^20.19.43",
     "esbuild": "^0.28.1",
     "typescript": "^5.4.0"

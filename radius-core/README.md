@@ -59,7 +59,7 @@ platform never requires touching the workflow templates or any UI adapter.
 3. Add its id to any UI `enum`s (e.g. the canvas `provider` action input in
    `adapters/canvas/src/extension.mjs`). The route/UI layer reads capabilities
    and degrades gracefully, so partial platforms are fine.
-4. `npm run typecheck:core && npm run build:canvas`.
+4. `pnpm typecheck:core && pnpm build:canvas`.
 
 No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
 
@@ -80,7 +80,7 @@ declared in the `joinSession({ canvases, tools })` block in
    telling the agent to `invoke_canvas_action` with the action name.
 4. If the action renders a new page, add a renderer to `pages.mjs` and wire it
    into `PAGE_RENDERERS` in `server.mjs`.
-5. `npm run build:canvas`.
+5. `pnpm build:canvas`.
 
 ## Recipe 3 — Add a new UI adapter
 
@@ -91,7 +91,7 @@ Because all product logic is in `radius-core` behind ports, a new front-end
 2. Implement the ports your adapter needs (`Shell`, `GitHub`, `StateStore`,
    `Clock`, `Logger`) for that environment. The canvas implementations in
    `gh.mjs` (Shell + GitHub) are a reference.
-3. Import use-cases from `@radius/core` and wire them to your transport
+3. Import use-cases from `@radius-project/core` and wire them to your transport
    and rendering. Reuse pure renderers/helpers where the environment allows;
    keep transport-specific code (HTTP host, SDK surface) in the adapter.
 4. Add a build script that bundles the adapter, mirroring
@@ -103,6 +103,6 @@ shared and UI-agnostic, lift it into `radius-core` first.
 ## Commands
 
 ```bash
-npm run typecheck:core   # tsc over radius-core (strict)
-npm run build:canvas     # esbuild -> .github/radius/extension.mjs
+pnpm typecheck:core   # tsc over radius-core (strict)
+pnpm build:canvas     # esbuild -> .github/radius/extension.mjs
 ```
