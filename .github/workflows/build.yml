@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build extension.mjs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Upload extension.mjs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-mjs
+          path: .github/radius/extension.mjs
+          if-no-files-found: error
