@@ -1,0 +1,77 @@
+// @radius/core — UI-agnostic core for the Radius Canvas product.
+//
+// This package contains pure logic shared by every UI adapter (canvas, browser,
+// chat): repository modeling, application-graph build/diff, the compute-platform
+// abstraction, and workflow generation. It must not depend on the Copilot SDK,
+// HTTP, or the DOM. Side effects (shell, GitHub API, state persistence, logging)
+// are reached only through ports — see src/ports.
+//
+// Modules are extracted incrementally from the canvas adapter; see
+// docs/design/radius-extension-modularization.md for the target layout.
+
+export const RADIUS_CORE_VERSION = "0.1.0";
+
+export {
+  MODELED_GRAPH_DEFAULTS,
+  computeDiffHash,
+  buildModeledGraph,
+  stripAPIVersion,
+  addInboundConnections,
+  buildResourceID,
+  compileBicepToARM,
+  buildGraphFromBicep,
+  parseBicepResources,
+  computeGraphDiff,
+} from "./graph/index.js";
+export {
+  parseComposeServices,
+  parseTerraformResources,
+  formatTerraformType,
+  formatTerraformModule,
+  mapFileToResourceType,
+  parseRecipeResources,
+  formatResourceType,
+  radiusTypeToContribDir,
+  CANONICAL_RESOURCE_MAP,
+  categorizeToCanonicalType,
+  resolveCanonicalResources,
+  inferResourcesFromSchema,
+  generateRecipeFromStaticMappings,
+  discoverSourceCodeRefs,
+  fetchBicepFromRepo,
+  generateBicepFromRepo,
+  loadRecipeResources,
+  fetchRecipesFromGitHub,
+  resolveRecipeOutputs,
+  fetchResourceTypeSchema,
+  fetchRecipeFromAnyPlatform,
+  generateRecipeFromContrib,
+} from "./modeling/index.js";
+export {
+  getPlatform,
+  listPlatforms,
+  generatePortalUrl,
+  azure,
+  aws,
+} from "./platforms/index.js";
+export type {
+  ComputePlatform,
+  OidcResult,
+  PortalContext,
+  SecretSpec,
+  PlatformCapabilities,
+} from "./platforms/index.js";
+export {
+  generateVerifyWorkflow,
+  generateDeployWorkflow,
+} from "./workflows/index.js";
+export type {
+  Shell,
+  ShellResult,
+  GitHub,
+  StateStore,
+  Clock,
+  Logger,
+  Ports,
+} from "./ports/index.js";
+
