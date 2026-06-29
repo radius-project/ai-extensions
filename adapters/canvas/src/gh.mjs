@@ -3,7 +3,7 @@
 // (`github`) injected into radius-core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 
 // Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
 // API paths, …) are passed verbatim as argv and can never be interpreted as
@@ -11,7 +11,7 @@ import { execFile } from "node:child_process";
 // spawned directly, so we invoke them via `cmd.exe /c` — but the arguments are
 // still passed as a separate argv array (never concatenated into a single
 // string), which preserves per-argument escaping and avoids command injection.
-function cliExec(cmd, args, opts, cb) {
+export function cliExec(cmd, args, opts, cb) {
     const isWindows = process.platform === "win32";
     const file = isWindows ? "cmd.exe" : cmd;
     const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
@@ -23,27 +23,26 @@ function cliExec(cmd, args, opts, cb) {
     );
 }
 
+// Streaming equivalent of cliExec: spawns a CLI without a shell (argv passed
+// verbatim, Windows-safe via `cmd.exe /c`) and returns the ChildProcess so the
+// caller can stream stdout/stderr and write to stdin.
+export function cliSpawn(cmd, args, opts = {}) {
+    const isWindows = process.platform === "win32";
+    const file = isWindows ? "cmd.exe" : cmd;
+    const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
+    return spawn(file, finalArgs, { windowsHide: true, ...opts });
+}
+
+// Runs a CLI and resolves with trimmed stdout. Pass `opts.stdin` to feed a value
+// (e.g. a secret) over stdin instead of exposing it on the argv/process list.
 export function runCommand(cmd, args, opts = {}) {
+    const { stdin, ...execOpts } = opts;
     return new Promise((resolve, reject) => {
-        cliExec(cmd, args, opts, (err, stdout, stderr) => {
+        const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
             if (err) reject(new Error(stderr || err.message));
             else resolve(stdout.trim());
         });
-    });
-}
-
-export function execShell(command, timeout = 30000) {
-    return new Promise((resolve, reject) => {
-        execFile(command, {
-            shell: true,
-            timeout,
-            encoding: "utf8",
-            maxBuffer: 10 * 1024 * 1024,
-            windowsHide: true,
-        }, (err, stdout) => {
-            if (err) reject(err);
-            else resolve(stdout);
-        });
+        if (stdin !== undefined) child.stdin?.end(stdin);
     });
 }
 

@@ -180,7 +180,13 @@ const session = await joinSession({
                             for (const spec of envPlatform.environmentSecrets(data)) {
                                 if (!spec.value) continue;
                                 const verb = spec.kind === "variable" ? "variable" : "secret";
-                                await runCommand("gh", [verb, "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
+                                // Variables can be passed on argv; secret values are fed over
+                                // stdin so they never appear in the process argument list.
+                                if (verb === "variable") {
+                                    await runCommand("gh", ["variable", "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
+                                } else {
+                                    await runCommand("gh", ["secret", "set", spec.name, "--repo", repo, "--env", data.name], { stdin: spec.value });
+                                }
                                 output += `Secret ${spec.name} set.\n`;
                             }
                         } catch (e) { error = e.message; }
@@ -202,7 +208,7 @@ const session = await joinSession({
                     // Try to detect repo from workspace git remote
                     try {
                         const remoteUrl = await new Promise((resolve) => {
-                            execFile("git", ["-C", session.workspacePath, "remote", "get-url", "origin"], { shell: true, timeout: 5000 }, (err, stdout) => {
+                            execFile("git", ["-C", session.workspacePath, "remote", "get-url", "origin"], { timeout: 5000 }, (err, stdout) => {
                                 if (err) { resolve(''); return; }
                                 resolve(stdout.trim());
                             });

@@ -2,7 +2,7 @@
 // Source: adapters/canvas/src + radius-core. Run `npm run build:canvas`.
 
 // adapters/canvas/src/extension.mjs
-import { execFile as execFile6 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 
 // radius-core/src/graph/model.ts
@@ -2157,7 +2157,7 @@ ${dbRecipeRegister}
 }
 
 // adapters/canvas/src/gh.mjs
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile2, spawn } from "node:child_process";
 function cliExec(cmd, args, opts, cb) {
   const isWindows = process.platform === "win32";
   const file = isWindows ? "cmd.exe" : cmd;
@@ -2169,26 +2169,20 @@ function cliExec(cmd, args, opts, cb) {
     cb
   );
 }
+function cliSpawn(cmd, args, opts = {}) {
+  const isWindows = process.platform === "win32";
+  const file = isWindows ? "cmd.exe" : cmd;
+  const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
+  return spawn(file, finalArgs, { windowsHide: true, ...opts });
+}
 function runCommand(cmd, args, opts = {}) {
+  const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
-    cliExec(cmd, args, opts, (err, stdout, stderr) => {
+    const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
-  });
-}
-function execShell(command, timeout = 3e4) {
-  return new Promise((resolve, reject) => {
-    execFile2(command, {
-      shell: true,
-      timeout,
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true
-    }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout);
-    });
+    if (stdin !== void 0) child.stdin?.end(stdin);
   });
 }
 function ghApiGetContent(apiPath, timeout = 15e3) {
@@ -2247,7 +2241,6 @@ var github = {
 };
 
 // adapters/canvas/src/infra.mjs
-import { execFile as execFile3 } from "node:child_process";
 function generateAzureOIDC(data) {
   return getPlatform("azure").generateOidc(data);
 }
@@ -2255,11 +2248,11 @@ function validateAzureCredentials(data) {
   return new Promise((resolve) => {
     const tenantId = data.tenantId || "";
     const subscriptionId = data.subscriptionId || "";
-    execFile3("az", ["account", "show", "--output", "json"], { shell: true, timeout: 1e4 }, (err, stdout) => {
+    cliExec("az", ["account", "show", "--output", "json"], { timeout: 1e4 }, (err, stdout) => {
       if (err) {
         const loginArgs = ["login", "--output", "json"];
         if (tenantId) loginArgs.splice(1, 0, "--tenant", tenantId);
-        execFile3("az", loginArgs, { shell: true, timeout: 12e4 }, (loginErr, loginOut) => {
+        cliExec("az", loginArgs, { timeout: 12e4 }, (loginErr, loginOut) => {
           if (loginErr) {
             resolve({ success: false, error: "Azure login failed. Please ensure Azure CLI is installed and try again." });
             return;
@@ -2271,7 +2264,7 @@ function validateAzureCredentials(data) {
       try {
         const account = JSON.parse(stdout);
         if (tenantId && account.tenantId !== tenantId) {
-          execFile3("az", ["login", "--tenant", tenantId, "--output", "json"], { shell: true, timeout: 12e4 }, (loginErr) => {
+          cliExec("az", ["login", "--tenant", tenantId, "--output", "json"], { timeout: 12e4 }, (loginErr) => {
             if (loginErr) {
               resolve({ success: false, error: `Failed to login to tenant ${tenantId}.` });
               return;
@@ -2291,7 +2284,7 @@ function finishAuth(subscriptionId, tenantId, resolve) {
   if (subscriptionId) {
     setSubscription(subscriptionId, tenantId, resolve);
   } else {
-    execFile3("az", ["account", "show", "--output", "json"], { shell: true, timeout: 1e4 }, (err, stdout) => {
+    cliExec("az", ["account", "show", "--output", "json"], { timeout: 1e4 }, (err, stdout) => {
       if (err) {
         resolve({ success: false, error: "Failed to read account info." });
         return;
@@ -2312,12 +2305,12 @@ function finishAuth(subscriptionId, tenantId, resolve) {
   }
 }
 function setSubscription(subscriptionId, tenantId, resolve) {
-  execFile3("az", ["account", "set", "--subscription", subscriptionId], { shell: true, timeout: 15e3 }, (err) => {
+  cliExec("az", ["account", "set", "--subscription", subscriptionId], { timeout: 15e3 }, (err) => {
     if (err) {
       resolve({ success: false, error: `Subscription ${subscriptionId} not found or not accessible.` });
       return;
     }
-    execFile3("az", ["account", "show", "--output", "json"], { shell: true, timeout: 1e4 }, (err2, stdout2) => {
+    cliExec("az", ["account", "show", "--output", "json"], { timeout: 1e4 }, (err2, stdout2) => {
       if (err2) {
         resolve({ success: false, error: "Failed to verify subscription." });
         return;
@@ -2356,7 +2349,6 @@ function generatePortalUrl2(resourceType, provider, state) {
 
 // adapters/canvas/src/server.mjs
 import { createServer } from "node:http";
-import { execFile as execFile5 } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
 
 // adapters/canvas/src/vendor.mjs
@@ -2413,7 +2405,7 @@ import { join as join2, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 function escapeHtml(str) {
   if (!str) return "";
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 var __dirname_ext = typeof import.meta.url !== "undefined" ? dirname(fileURLToPath(import.meta.url)) : ".";
 var CREDS_FILE = join2(__dirname_ext, ".radius-credentials.json");
@@ -2430,10 +2422,9 @@ function saveCredentials() {
 }
 
 // adapters/canvas/src/deploy.mjs
-import { execFile as execFile4 } from "node:child_process";
 function ghJson(args, fallback = null, timeout = 15e3) {
   return new Promise((resolve) => {
-    execFile4("gh", args, { shell: true, timeout }, (err, stdout) => {
+    cliExec("gh", args, { timeout }, (err, stdout) => {
       if (err) {
         resolve(fallback);
         return;
@@ -2486,10 +2477,10 @@ async function getRunDetail(repo, runId) {
 }
 function fetchRunLog(repo, runId) {
   return new Promise((resolve) => {
-    execFile4(
+    cliExec(
       "gh",
       ["run", "view", String(runId), "--log", "--repo", repo],
-      { shell: true, timeout: 3e4, maxBuffer: 1024 * 1024 * 20 },
+      { timeout: 3e4, maxBuffer: 1024 * 1024 * 20 },
       (err, stdout) => {
         if (err || !stdout) {
           resolve(null);
@@ -3334,6 +3325,7 @@ function radiusRenderGraph(containerId, resources, options) {
             var node = e.target;
             var d = node.data();
             var links = [];
+            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
             if (repoUrl && d.codeRef) {
                 var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
                 links.push('<a href="' + codeUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">\u{1F4C4} View code</a>');
@@ -3360,7 +3352,7 @@ function radiusRenderGraph(containerId, resources, options) {
             // Azure portal links for live cloud resources (from the deployed graph).
             function azurePortalUrl(armId) { return 'https://portal.azure.com/#@/resource' + armId + '/overview'; }
             if (d.cloudId) {
-                links.push('<a href="' + azurePortalUrl(d.cloudId) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">\u{1F517} View in Azure portal</a>');
+                links.push('<a href="' + escLocal(azurePortalUrl(d.cloudId)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">\u{1F517} View in Azure portal</a>');
             }
             if (d.cloudResources) {
                 try {
@@ -3368,12 +3360,11 @@ function radiusRenderGraph(containerId, resources, options) {
                     for (var ci = 0; ci < cloudList.length; ci++) {
                         var cr = cloudList[ci];
                         var crLabel = cr.name || (cr.type ? cr.type.split('/').pop() : 'resource');
-                        links.push('<a href="' + azurePortalUrl(cr.id) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">\u{1F517} ' + crLabel + ' in Azure portal</a>');
+                        links.push('<a href="' + escLocal(azurePortalUrl(cr.id)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">\u{1F517} ' + escLocal(crLabel) + ' in Azure portal</a>');
                     }
                 } catch (err) { /* ignore */ }
             }
-            links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76); font-size:11px;">Type: ' + (d.resourceType || 'unknown') + '</div>');
-            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+            links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76); font-size:11px;">Type: ' + escLocal(d.resourceType || 'unknown') + '</div>');
             var safeTitle = escLocal((d.label || '').replace('\\n', ' \u2014 '));
             popup.innerHTML = '<div style="font-weight:600; margin-bottom:6px; font-size:13px;">' + safeTitle + '</div>' + links.join('');
             var pos = node.renderedPosition();
@@ -4514,7 +4505,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Auto-create one (App Registration, client secret, federated credential, Contributor role) using your <code>az</code> CLI login.
+      <strong>No App Registration?</strong> Auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">\u26A1 Auto-create credentials</button>
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
@@ -4794,7 +4785,6 @@ function appendLog(text, color) {
 }
 
 // Auto-setup button handler
-window._autoSetupClientSecret = null;
 document.getElementById('btn-auto-setup').addEventListener('click', function() {
     var btn = this;
     var statusEl = document.getElementById('auto-setup-status');
@@ -4837,8 +4827,6 @@ document.getElementById('btn-auto-setup').addEventListener('click', function() {
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
         if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
         if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
-        // Store the client secret for the deploy step
-        if (data.clientSecret) window._autoSetupClientSecret = data.clientSecret;
         // Clear the highlight if it was set
         document.getElementById('auto-setup-section').style.border = '1px dashed var(--border-color-default, #d1d9e0)';
         statusEl.innerHTML = '<span style="color:#1a7f37;">\u2705 Credentials created successfully!</span><br><small style="color:var(--text-color-muted, #656d76);">' + (data.steps || []).join('<br>') + '</small>';
@@ -4886,10 +4874,6 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();
         envData.subscriptionId = document.getElementById('az-sub-id').value.trim();
         envData.resourceGroup = resourceGroup;
-        // Include clientSecret if it was set by auto-setup
-        if (window._autoSetupClientSecret) {
-            envData.clientSecret = window._autoSetupClientSecret;
-        }
     } else {
         envData.roleArn = document.querySelector('[data-aws-role-arn]')?.dataset?.awsRoleArn || '';
         envData.region = document.querySelector('[data-aws-region]')?.dataset?.awsRegion || '';
@@ -5227,13 +5211,13 @@ function createRequestHandler(instanceId) {
         const subscriptionId = (data.subscriptionId || "").trim();
         if (subscriptionId) {
           try {
-            await execShell(`az account set --subscription "${subscriptionId}" 2>nul`, 1e4);
+            await runCommand("az", ["account", "set", "--subscription", subscriptionId], { timeout: 1e4 });
           } catch (e) {
           }
         }
         let acct;
         try {
-          const acctJson = await execShell("az account show -o json 2>nul", 1e4);
+          const acctJson = await runCommand("az", ["account", "show", "-o", "json"], { timeout: 1e4 });
           acct = JSON.parse(acctJson);
         } catch (e) {
           res.setHeader("Content-Type", "application/json");
@@ -5269,14 +5253,13 @@ function createRequestHandler(instanceId) {
       try {
         let runCmd2 = function(cmd, args) {
           return new Promise((resolve) => {
-            ef(cmd, args, { shell: true, timeout: 6e4 }, (err, stdout, stderr) => {
+            cliExec(cmd, args, { timeout: 6e4 }, (err, stdout, stderr) => {
               resolve({ code: err ? err.code || 1 : 0, stdout: stdout || "", stderr: stderr || "" });
             });
           });
         };
         var runCmd = runCmd2;
         const data = JSON.parse(body);
-        const { execFile: ef } = await import("node:child_process");
         const targetRepo = data.repo || "";
         const envName = data.environment || "dev";
         const resourceGroup = data.resourceGroup || "";
@@ -5330,16 +5313,6 @@ function createRequestHandler(instanceId) {
           }
         }
         steps.push("\u2705 Service Principal ready");
-        steps.push("Creating client secret...");
-        const secretResult = await runCmd2("az", ["ad", "app", "credential", "reset", "--id", clientId, "--display-name", "radius-deploy", "--query", "password", "-o", "tsv"]);
-        if (secretResult.code !== 0) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "Failed to create client secret: " + secretResult.stderr, steps }));
-          return;
-        }
-        const clientSecret = secretResult.stdout.trim();
-        steps.push("\u2705 Client secret created");
         steps.push("Creating federated credential for GitHub OIDC...");
         const fedParams = JSON.stringify({
           name: `github-actions-${envName}`,
@@ -5376,7 +5349,6 @@ function createRequestHandler(instanceId) {
           clientId,
           tenantId,
           subscriptionId,
-          clientSecret,
           resourceGroup,
           cluster: clusterName,
           appName,
@@ -5393,16 +5365,16 @@ function createRequestHandler(instanceId) {
       let body = "";
       for await (const chunk of req) body += chunk;
       try {
-        let runGh2 = function(args) {
+        let runGh2 = function(args, stdin) {
           return new Promise((resolve) => {
-            ef("gh", args, { shell: true, timeout: 3e4 }, (err, stdout, stderr) => {
+            const child = cliExec("gh", args, { timeout: 3e4 }, (err, stdout, stderr) => {
               resolve({ code: err ? err.code || 1 : 0, stdout: stdout || "", stderr: stderr || "" });
             });
+            if (stdin !== void 0) child.stdin?.end(stdin);
           });
         };
         var runGh = runGh2;
         const data = JSON.parse(body);
-        const { execFile: ef } = await import("node:child_process");
         const targetRepo = data.repo || "";
         const envName = data.environment || "dev";
         const provider = data.provider || "azure";
@@ -5422,17 +5394,15 @@ function createRequestHandler(instanceId) {
           const clientId = data.clientId || azureCreds.clientId || "";
           const tenantId = data.tenantId || azureCreds.tenantId || "";
           const subscriptionId = data.subscriptionId || azureCreds.subscriptionId || "";
-          const clientSecret = data.clientSecret || "";
           const rg = data.resourceGroup || "";
           const k8s = data.cluster || "";
           if (clientId) await runGh2(["variable", "set", "AZURE_CLIENT_ID", "--body", clientId, "--env", envName, "--repo", targetRepo]);
           if (tenantId) await runGh2(["variable", "set", "AZURE_TENANT_ID", "--body", tenantId, "--env", envName, "--repo", targetRepo]);
           if (subscriptionId) await runGh2(["variable", "set", "AZURE_SUBSCRIPTION_ID", "--body", subscriptionId, "--env", envName, "--repo", targetRepo]);
-          if (clientSecret) await runGh2(["secret", "set", "RADIUS_CLIENT_SECRET", "--body", clientSecret, "--env", envName, "--repo", targetRepo]);
           if (rg) await runGh2(["variable", "set", "AZURE_RESOURCE_GROUP", "--body", rg, "--env", envName, "--repo", targetRepo]);
           if (k8s) await runGh2(["variable", "set", "RADIUS_K8S_CLUSTER", "--body", k8s, "--env", envName, "--repo", targetRepo]);
-          const setCount = [clientId, tenantId, subscriptionId, clientSecret, rg, k8s].filter(Boolean).length;
-          steps.push(`Set ${setCount}/6 environment values for Azure.`);
+          const setCount = [clientId, tenantId, subscriptionId, rg, k8s].filter(Boolean).length;
+          steps.push(`Set ${setCount}/5 environment values for Azure.`);
           if (!clientId || !tenantId || !subscriptionId) {
             steps.push("\u26A0\uFE0F Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually.");
           }
@@ -5441,7 +5411,7 @@ function createRequestHandler(instanceId) {
           const region = data.region || awsCreds.region || "us-east-1";
           const accountId = data.accountId || awsCreds.accountId || "";
           const k8s = data.cluster || "";
-          if (roleArn) await runGh2(["secret", "set", "AWS_IAM_ROLE_ARN", "--body", roleArn, "--env", envName, "--repo", targetRepo]);
+          if (roleArn) await runGh2(["secret", "set", "AWS_IAM_ROLE_ARN", "--env", envName, "--repo", targetRepo], roleArn);
           if (region) await runGh2(["variable", "set", "AWS_REGION", "--body", region, "--env", envName, "--repo", targetRepo]);
           if (accountId) await runGh2(["variable", "set", "AWS_ACCOUNT_ID", "--body", accountId, "--env", envName, "--repo", targetRepo]);
           if (k8s) await runGh2(["variable", "set", "RADIUS_K8S_CLUSTER", "--body", k8s, "--env", envName, "--repo", targetRepo]);
@@ -5809,7 +5779,7 @@ data: ${JSON.stringify(data)}
       try {
         const [personalRepos, orgRepos] = await Promise.all([
           new Promise((resolve) => {
-            execFile5("gh", ["repo", "list", "--limit", "30", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { shell: true, timeout: 15e3 }, (err, stdout) => {
+            cliExec("gh", ["repo", "list", "--limit", "30", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { timeout: 15e3 }, (err, stdout) => {
               if (err) {
                 resolve([]);
                 return;
@@ -5818,14 +5788,14 @@ data: ${JSON.stringify(data)}
             });
           }),
           new Promise((resolve) => {
-            execFile5("gh", ["org", "list"], { shell: true, timeout: 15e3 }, (err, stdout) => {
+            cliExec("gh", ["org", "list"], { timeout: 15e3 }, (err, stdout) => {
               if (err || !stdout.trim()) {
                 resolve([]);
                 return;
               }
               const orgs = stdout.trim().split("\n").filter(Boolean);
               const orgPromises = orgs.map((org) => new Promise((res2) => {
-                execFile5("gh", ["repo", "list", org, "--limit", "20", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { shell: true, timeout: 15e3 }, (err2, stdout2) => {
+                cliExec("gh", ["repo", "list", org, "--limit", "20", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { timeout: 15e3 }, (err2, stdout2) => {
                   if (err2) {
                     res2([]);
                     return;
@@ -5860,7 +5830,7 @@ data: ${JSON.stringify(data)}
           return;
         }
         const result = await new Promise((resolve) => {
-          execFile5("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`, "--jq", ".[].name"], { shell: true, timeout: 15e3 }, (err, stdout) => {
+          cliExec("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`, "--jq", ".[].name"], { timeout: 15e3 }, (err, stdout) => {
             if (err) {
               resolve([]);
               return;
@@ -5992,7 +5962,7 @@ data: ${JSON.stringify(data)}
           const { tmpdir: td } = await import("node:os");
           const { join: jn } = await import("node:path");
           const existingResult = await new Promise((resolve) => {
-            execFile5("gh", ["api", `/repos/${repo}/contents/${bicepPath}?ref=${commitBranch}`, "--jq", ".sha"], { shell: true, timeout: 1e4 }, (err, stdout) => {
+            cliExec("gh", ["api", `/repos/${repo}/contents/${bicepPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 1e4 }, (err, stdout) => {
               resolve(err ? "" : stdout.trim());
             });
           });
@@ -6005,7 +5975,7 @@ data: ${JSON.stringify(data)}
           const tmpPath = jn(td(), "radius-bicep-commit-" + Date.now() + ".json");
           wfs(tmpPath, commitPayload);
           await new Promise((resolve) => {
-            execFile5("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepPath}`, "--input", tmpPath], { shell: true, timeout: 3e4 }, (err) => {
+            cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepPath}`, "--input", tmpPath], { timeout: 3e4 }, (err) => {
               try {
                 uls(tmpPath);
               } catch {
@@ -6019,7 +5989,7 @@ data: ${JSON.stringify(data)}
             extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
           }, null, 2);
           const existingConfig = await new Promise((resolve) => {
-            execFile5("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { shell: true, timeout: 1e4 }, (err, stdout) => {
+            cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 1e4 }, (err, stdout) => {
               resolve(err ? "" : stdout.trim());
             });
           });
@@ -6032,7 +6002,7 @@ data: ${JSON.stringify(data)}
           const tmpPath2 = jn(td(), "radius-bicepconfig-commit-" + Date.now() + ".json");
           wfs(tmpPath2, configPayload);
           await new Promise((resolve) => {
-            execFile5("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { shell: true, timeout: 3e4 }, (err) => {
+            cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 3e4 }, (err) => {
               try {
                 uls(tmpPath2);
               } catch {
@@ -6059,7 +6029,7 @@ data: ${JSON.stringify(data)}
         const data = JSON.parse(body);
         const repo = data.repo || "";
         const result = await new Promise((resolve) => {
-          execFile5("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`], { shell: true, timeout: 15e3 }, (err, stdout, stderr) => {
+          cliExec("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`], { timeout: 15e3 }, (err, stdout, stderr) => {
             if (err) {
               resolve({ error: stderr || err.message });
               return;
@@ -6524,7 +6494,7 @@ data: ${JSON.stringify(data)}
       }, runCmd2 = function(cmd, args, opts) {
         return new Promise((resolve) => {
           sendEvent2("cmd", `$ ${cmd} ${args.join(" ")}`);
-          const proc = spawn(cmd, args, { shell: true, timeout: 12e4 });
+          const proc = cliSpawn(cmd, args, { timeout: 12e4 });
           let output = "";
           if (opts?.stdin) {
             proc.stdin?.write(opts.stdin);
@@ -6556,7 +6526,7 @@ data: ${JSON.stringify(data)}
       res.writeHead(200);
       const entry2 = servers.get(instanceId);
       const params = entry2?.state?.deployParams || {};
-      const { execSync, spawn } = await import("node:child_process");
+      const { execSync } = await import("node:child_process");
       const env = params.environment || "dev";
       const provider = params.provider || "azure";
       const cluster = params.cluster || "";
@@ -6730,19 +6700,19 @@ data: ${JSON.stringify(data)}
         if (data.provider === "azure") {
           if (data.subscriptionId) {
             try {
-              await execShell(`az account set --subscription "${data.subscriptionId}" 2>nul`, 1e4);
+              await runCommand("az", ["account", "set", "--subscription", data.subscriptionId], { timeout: 1e4 });
             } catch (e) {
             }
           }
-          const subFlag = data.subscriptionId ? ` --subscription "${data.subscriptionId}"` : "";
+          const subArgs = data.subscriptionId ? ["--subscription", data.subscriptionId] : [];
           try {
-            const aksJson = await execShell(`az aks list --query "[].{id:name, name:name, resourceGroup:resourceGroup}" -o json${subFlag}`, 3e4);
+            const aksJson = await runCommand("az", ["aks", "list", "--query", "[].{id:name, name:name, resourceGroup:resourceGroup}", "-o", "json", ...subArgs], { timeout: 3e4 });
             result.clusters = JSON.parse(aksJson);
           } catch (e) {
             result.clusters = [];
           }
           try {
-            const rgJson = await execShell(`az group list --query "[].{id:name, name:name}" -o json${subFlag}`, 3e4);
+            const rgJson = await runCommand("az", ["group", "list", "--query", "[].{id:name, name:name}", "-o", "json", ...subArgs], { timeout: 3e4 });
             result.resourceGroups = JSON.parse(rgJson);
           } catch (e) {
             result.resourceGroups = [];
@@ -6752,8 +6722,8 @@ data: ${JSON.stringify(data)}
               const rg = result.resourceGroups.length > 0 ? result.resourceGroups[0].id : "";
               const clusterName = result.clusters[0].id;
               if (rg && clusterName) {
-                await execShell(`az aks get-credentials --name "${clusterName}" --resource-group "${rg}" --overwrite-existing`, 2e4);
-                const nsJson = await execShell('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"', 1e4);
+                await runCommand("az", ["aks", "get-credentials", "--name", clusterName, "--resource-group", rg, "--overwrite-existing"], { timeout: 2e4 });
+                const nsJson = await runCommand("kubectl", ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"], { timeout: 1e4 });
                 result.namespaces = nsJson.replace(/"/g, "").split(" ").filter(Boolean);
               } else {
                 result.namespaces = ["default", "kube-system", "radius-system"];
@@ -6766,20 +6736,20 @@ data: ${JSON.stringify(data)}
           }
         } else {
           try {
-            const eksJson = await execShell('aws eks list-clusters --query "clusters" --output json 2>nul', 15e3);
+            const eksJson = await runCommand("aws", ["eks", "list-clusters", "--query", "clusters", "--output", "json"], { timeout: 15e3 });
             const clusterNames = JSON.parse(eksJson);
             result.clusters = clusterNames.map((n) => ({ id: n, name: n }));
           } catch (e) {
             result.clusters = [];
           }
           try {
-            const vpcJson = await execShell('aws ec2 describe-vpcs --query "Vpcs[].{id:VpcId, name:VpcId}" --output json 2>nul', 15e3);
+            const vpcJson = await runCommand("aws", ["ec2", "describe-vpcs", "--query", "Vpcs[].{id:VpcId, name:VpcId}", "--output", "json"], { timeout: 15e3 });
             result.vpcs = JSON.parse(vpcJson);
           } catch (e) {
             result.vpcs = [];
           }
           try {
-            const subnetJson = await execShell('aws ec2 describe-subnets --query "Subnets[].{id:SubnetId, name:SubnetId}" --output json 2>nul', 15e3);
+            const subnetJson = await runCommand("aws", ["ec2", "describe-subnets", "--query", "Subnets[].{id:SubnetId, name:SubnetId}", "--output", "json"], { timeout: 15e3 });
             result.subnets = JSON.parse(subnetJson);
           } catch (e) {
             result.subnets = [];
@@ -7029,7 +6999,11 @@ var session = await joinSession({
               for (const spec of envPlatform.environmentSecrets(data)) {
                 if (!spec.value) continue;
                 const verb = spec.kind === "variable" ? "variable" : "secret";
-                await runCommand("gh", [verb, "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
+                if (verb === "variable") {
+                  await runCommand("gh", ["variable", "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
+                } else {
+                  await runCommand("gh", ["secret", "set", spec.name, "--repo", repo, "--env", data.name], { stdin: spec.value });
+                }
                 output += `Secret ${spec.name} set.
 `;
               }
@@ -7050,7 +7024,7 @@ var session = await joinSession({
         } else if (!entry.state.contextRepo && session.workspacePath) {
           try {
             const remoteUrl = await new Promise((resolve) => {
-              execFile6("git", ["-C", session.workspacePath, "remote", "get-url", "origin"], { shell: true, timeout: 5e3 }, (err, stdout) => {
+              execFile3("git", ["-C", session.workspacePath, "remote", "get-url", "origin"], { timeout: 5e3 }, (err, stdout) => {
                 if (err) {
                   resolve("");
                   return;

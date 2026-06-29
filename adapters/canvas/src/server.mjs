@@ -9,7 +9,6 @@
 // extension.ts.
 
 import { createServer } from "node:http";
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   buildGraphFromBicep,
@@ -22,7 +21,7 @@ import {
 } from "@radius-project/core";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { execShell, fetchFileFromRepo, fetchRepoTree, github } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
@@ -138,12 +137,12 @@ function createRequestHandler(instanceId) {
                 // Azure CLI session (and optionally switch subscription). If there
                 // is no session, we tell them to run `az login` in their terminal.
                 if (subscriptionId) {
-                    try { await execShell(`az account set --subscription "${subscriptionId}" 2>nul`, 10000); } catch (e) {}
+                    try { await runCommand("az", ["account", "set", "--subscription", subscriptionId], { timeout: 10000 }); } catch (e) {}
                 }
 
                 let acct;
                 try {
-                    const acctJson = await execShell('az account show -o json 2>nul', 10000);
+                    const acctJson = await runCommand("az", ["account", "show", "-o", "json"], { timeout: 10000 });
                     acct = JSON.parse(acctJson);
                 } catch (e) {
                     res.setHeader("Content-Type", "application/json");
@@ -178,13 +177,12 @@ function createRequestHandler(instanceId) {
             return;
         }
 
-        // Auto-setup Azure credentials: create App Registration, secret, federated cred, role assignment
+        // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
         if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
             try {
                 const data = JSON.parse(body);
-                const { execFile: ef } = await import("node:child_process");
                 const targetRepo = data.repo || '';
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
@@ -199,9 +197,7 @@ function createRequestHandler(instanceId) {
 
                 function runCmd(cmd, args) {
                     return new Promise((resolve) => {
-                        // shell:true is required on Windows, where `az` (and `gh`) are
-                        // .cmd wrappers that cannot be spawned directly without a shell.
-                        ef(cmd, args, { shell: true, timeout: 60000 }, (err, stdout, stderr) => {
+                        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
                     });
@@ -259,19 +255,7 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push('✅ Service Principal ready');
 
-                // Step 4: Create Client Secret
-                steps.push('Creating client secret...');
-                const secretResult = await runCmd('az', ['ad', 'app', 'credential', 'reset', '--id', clientId, '--display-name', 'radius-deploy', '--query', 'password', '-o', 'tsv']);
-                if (secretResult.code !== 0) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Failed to create client secret: ' + secretResult.stderr, steps }));
-                    return;
-                }
-                const clientSecret = secretResult.stdout.trim();
-                steps.push('✅ Client secret created');
-
-                // Step 5: Create Federated Credential for GitHub Actions OIDC
+                // Step 4: Create Federated Credential for GitHub Actions OIDC
                 steps.push('Creating federated credential for GitHub OIDC...');
                 const fedParams = JSON.stringify({
                     name: `github-actions-${envName}`,
@@ -292,7 +276,7 @@ function createRequestHandler(instanceId) {
                     steps.push('✅ Federated credential created');
                 }
 
-                // Step 6: Assign Contributor role on the resource group
+                // Step 5: Assign Contributor role on the resource group
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
                 const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
@@ -309,7 +293,6 @@ function createRequestHandler(instanceId) {
                     clientId,
                     tenantId,
                     subscriptionId,
-                    clientSecret,
                     resourceGroup,
                     cluster: clusterName,
                     appName,
@@ -329,7 +312,6 @@ function createRequestHandler(instanceId) {
             for await (const chunk of req) body += chunk;
             try {
                 const data = JSON.parse(body);
-                const { execFile: ef } = await import("node:child_process");
                 const targetRepo = data.repo || '';
                 const envName = data.environment || 'dev';
                 const provider = data.provider || 'azure';
@@ -341,11 +323,12 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                function runGh(args) {
+                function runGh(args, stdin) {
                     return new Promise((resolve) => {
-                        ef("gh", args, { shell: true, timeout: 30000 }, (err, stdout, stderr) => {
+                        const child = cliExec("gh", args, { timeout: 30000 }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
+                        if (stdin !== undefined) child.stdin?.end(stdin);
                     });
                 }
 
@@ -365,19 +348,17 @@ function createRequestHandler(instanceId) {
                     const clientId = data.clientId || azureCreds.clientId || '';
                     const tenantId = data.tenantId || azureCreds.tenantId || '';
                     const subscriptionId = data.subscriptionId || azureCreds.subscriptionId || '';
-                    const clientSecret = data.clientSecret || '';
                     const rg = data.resourceGroup || '';
                     const k8s = data.cluster || '';
 
                     if (clientId) await runGh(['variable', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
                     if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
                     if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
-                    if (clientSecret) await runGh(['secret', 'set', 'RADIUS_CLIENT_SECRET', '--body', clientSecret, '--env', envName, '--repo', targetRepo]);
                     if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
                     if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
 
-                    const setCount = [clientId, tenantId, subscriptionId, clientSecret, rg, k8s].filter(Boolean).length;
-                    steps.push(`Set ${setCount}/6 environment values for Azure.`);
+                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s].filter(Boolean).length;
+                    steps.push(`Set ${setCount}/5 environment values for Azure.`);
                     if (!clientId || !tenantId || !subscriptionId) {
                         steps.push('⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually.');
                     }
@@ -387,7 +368,7 @@ function createRequestHandler(instanceId) {
                     const accountId = data.accountId || awsCreds.accountId || '';
                     const k8s = data.cluster || '';
 
-                    if (roleArn) await runGh(['secret', 'set', 'AWS_IAM_ROLE_ARN', '--body', roleArn, '--env', envName, '--repo', targetRepo]);
+                    if (roleArn) await runGh(['secret', 'set', 'AWS_IAM_ROLE_ARN', '--env', envName, '--repo', targetRepo], roleArn);
                     if (region) await runGh(['variable', 'set', 'AWS_REGION', '--body', region, '--env', envName, '--repo', targetRepo]);
                     if (accountId) await runGh(['variable', 'set', 'AWS_ACCOUNT_ID', '--body', accountId, '--env', envName, '--repo', targetRepo]);
                     if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
@@ -809,18 +790,18 @@ function createRequestHandler(instanceId) {
                 // Fetch personal repos and org repos in parallel
                 const [personalRepos, orgRepos] = await Promise.all([
                     new Promise((resolve) => {
-                        execFile("gh", ["repo", "list", "--limit", "30", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { shell: true, timeout: 15000 }, (err, stdout) => {
+                        cliExec("gh", ["repo", "list", "--limit", "30", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { timeout: 15000 }, (err, stdout) => {
                             if (err) { resolve([]); return; }
                             resolve(stdout.trim().split('\n').filter(Boolean));
                         });
                     }),
                     new Promise((resolve) => {
                         // Get orgs the user belongs to, then fetch repos from each
-                        execFile("gh", ["org", "list"], { shell: true, timeout: 15000 }, (err, stdout) => {
+                        cliExec("gh", ["org", "list"], { timeout: 15000 }, (err, stdout) => {
                             if (err || !stdout.trim()) { resolve([]); return; }
                             const orgs = stdout.trim().split('\n').filter(Boolean);
                             const orgPromises = orgs.map(org => new Promise((res2) => {
-                                execFile("gh", ["repo", "list", org, "--limit", "20", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { shell: true, timeout: 15000 }, (err2, stdout2) => {
+                                cliExec("gh", ["repo", "list", org, "--limit", "20", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner"], { timeout: 15000 }, (err2, stdout2) => {
                                     if (err2) { res2([]); return; }
                                     res2(stdout2.trim().split('\n').filter(Boolean));
                                 });
@@ -849,7 +830,7 @@ function createRequestHandler(instanceId) {
                 const repo = data.repo;
                 if (!repo) { res.writeHead(200); res.end(JSON.stringify({ branches: [] })); return; }
                 const result = await new Promise((resolve) => {
-                    execFile("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`, "--jq", ".[].name"], { shell: true, timeout: 15000 }, (err, stdout) => {
+                    cliExec("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`, "--jq", ".[].name"], { timeout: 15000 }, (err, stdout) => {
                         if (err) { resolve([]); return; }
                         resolve(stdout.trim().split('\n').filter(Boolean));
                     });
@@ -1000,7 +981,7 @@ function createRequestHandler(instanceId) {
 
                     // Check if app.bicep already exists on that branch
                     const existingResult = await new Promise((resolve) => {
-                        execFile("gh", ["api", `/repos/${repo}/contents/${bicepPath}?ref=${commitBranch}`, "--jq", ".sha"], { shell: true, timeout: 10000 }, (err, stdout) => {
+                        cliExec("gh", ["api", `/repos/${repo}/contents/${bicepPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
                             resolve(err ? '' : stdout.trim());
                         });
                     });
@@ -1013,7 +994,7 @@ function createRequestHandler(instanceId) {
                     const tmpPath = jn(td(), 'radius-bicep-commit-' + Date.now() + '.json');
                     wfs(tmpPath, commitPayload);
                     await new Promise((resolve) => {
-                        execFile("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepPath}`, "--input", tmpPath], { shell: true, timeout: 30000 }, (err) => {
+                        cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepPath}`, "--input", tmpPath], { timeout: 30000 }, (err) => {
                             try { uls(tmpPath); } catch {}
                             resolve(err ? false : true);
                         });
@@ -1026,7 +1007,7 @@ function createRequestHandler(instanceId) {
                         extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
                     }, null, 2);
                     const existingConfig = await new Promise((resolve) => {
-                        execFile("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { shell: true, timeout: 10000 }, (err, stdout) => {
+                        cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
                             resolve(err ? '' : stdout.trim());
                         });
                     });
@@ -1039,7 +1020,7 @@ function createRequestHandler(instanceId) {
                     const tmpPath2 = jn(td(), 'radius-bicepconfig-commit-' + Date.now() + '.json');
                     wfs(tmpPath2, configPayload);
                     await new Promise((resolve) => {
-                        execFile("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { shell: true, timeout: 30000 }, (err) => {
+                        cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 30000 }, (err) => {
                             try { uls(tmpPath2); } catch {}
                             resolve(err ? false : true);
                         });
@@ -1064,7 +1045,7 @@ function createRequestHandler(instanceId) {
                 const data = JSON.parse(body);
                 const repo = data.repo || '';
                 const result = await new Promise((resolve) => {
-                    execFile("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`], { shell: true, timeout: 15000 }, (err, stdout, stderr) => {
+                    cliExec("gh", ["api", "--paginate", `/repos/${repo}/branches?per_page=100`], { timeout: 15000 }, (err, stdout, stderr) => {
                         if (err) { resolve({ error: stderr || err.message }); return; }
                         try {
                             const raw = JSON.parse(stdout.trim());
@@ -1621,7 +1602,7 @@ function createRequestHandler(instanceId) {
 
             const entry = servers.get(instanceId);
             const params = entry?.state?.deployParams || {};
-            const { execSync, spawn } = await import("node:child_process");
+            const { execSync } = await import("node:child_process");
 
             const env = params.environment || 'dev';
             const provider = params.provider || 'azure';
@@ -1640,7 +1621,7 @@ function createRequestHandler(instanceId) {
             function runCmd(cmd, args, opts) {
                 return new Promise((resolve) => {
                     sendEvent('cmd', `$ ${cmd} ${args.join(' ')}`);
-                    const proc = spawn(cmd, args, { shell: true, timeout: 120000 });
+                    const proc = cliSpawn(cmd, args, { timeout: 120000 });
                     let output = '';
                     if (opts?.stdin) { proc.stdin?.write(opts.stdin); proc.stdin?.end(); }
                     proc.stdout?.on('data', (d) => { const s = d.toString(); output += s; sendEvent('stdout', s.trimEnd()); });
@@ -1862,15 +1843,15 @@ function createRequestHandler(instanceId) {
                 if (data.provider === "azure") {
                     // Set tenant/subscription context before querying
                     if (data.subscriptionId) {
-                        try { await execShell(`az account set --subscription "${data.subscriptionId}" 2>nul`, 10000); } catch (e) {}
+                        try { await runCommand("az", ["account", "set", "--subscription", data.subscriptionId], { timeout: 10000 }); } catch (e) {}
                     }
-                    const subFlag = data.subscriptionId ? ` --subscription "${data.subscriptionId}"` : '';
+                    const subArgs = data.subscriptionId ? ["--subscription", data.subscriptionId] : [];
                     try {
-                        const aksJson = await execShell(`az aks list --query "[].{id:name, name:name, resourceGroup:resourceGroup}" -o json${subFlag}`, 30000);
+                        const aksJson = await runCommand("az", ["aks", "list", "--query", "[].{id:name, name:name, resourceGroup:resourceGroup}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.clusters = JSON.parse(aksJson);
                     } catch (e) { result.clusters = []; }
                     try {
-                        const rgJson = await execShell(`az group list --query "[].{id:name, name:name}" -o json${subFlag}`, 30000);
+                        const rgJson = await runCommand("az", ["group", "list", "--query", "[].{id:name, name:name}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.resourceGroups = JSON.parse(rgJson);
                     } catch (e) { result.resourceGroups = []; }
                     // If we got a cluster, try to get namespaces from it
@@ -1879,8 +1860,8 @@ function createRequestHandler(instanceId) {
                             const rg = result.resourceGroups.length > 0 ? result.resourceGroups[0].id : '';
                             const clusterName = result.clusters[0].id;
                             if (rg && clusterName) {
-                                await execShell(`az aks get-credentials --name "${clusterName}" --resource-group "${rg}" --overwrite-existing`, 20000);
-                                const nsJson = await execShell('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"', 10000);
+                                await runCommand("az", ["aks", "get-credentials", "--name", clusterName, "--resource-group", rg, "--overwrite-existing"], { timeout: 20000 });
+                                const nsJson = await runCommand("kubectl", ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"], { timeout: 10000 });
                                 result.namespaces = nsJson.replace(/"/g, '').split(' ').filter(Boolean);
                             } else {
                                 result.namespaces = ['default', 'kube-system', 'radius-system'];
@@ -1893,16 +1874,16 @@ function createRequestHandler(instanceId) {
                     }
                 } else {
                     try {
-                        const eksJson = await execShell('aws eks list-clusters --query "clusters" --output json 2>nul', 15000);
+                        const eksJson = await runCommand("aws", ["eks", "list-clusters", "--query", "clusters", "--output", "json"], { timeout: 15000 });
                         const clusterNames = JSON.parse(eksJson);
                         result.clusters = clusterNames.map(n => ({ id: n, name: n }));
                     } catch (e) { result.clusters = []; }
                     try {
-                        const vpcJson = await execShell('aws ec2 describe-vpcs --query "Vpcs[].{id:VpcId, name:VpcId}" --output json 2>nul', 15000);
+                        const vpcJson = await runCommand("aws", ["ec2", "describe-vpcs", "--query", "Vpcs[].{id:VpcId, name:VpcId}", "--output", "json"], { timeout: 15000 });
                         result.vpcs = JSON.parse(vpcJson);
                     } catch (e) { result.vpcs = []; }
                     try {
-                        const subnetJson = await execShell('aws ec2 describe-subnets --query "Subnets[].{id:SubnetId, name:SubnetId}" --output json 2>nul', 15000);
+                        const subnetJson = await runCommand("aws", ["ec2", "describe-subnets", "--query", "Subnets[].{id:SubnetId, name:SubnetId}", "--output", "json"], { timeout: 15000 });
                         result.subnets = JSON.parse(subnetJson);
                     } catch (e) { result.subnets = []; }
                     result.namespaces = ['default', 'kube-system', 'radius-system'];

@@ -166,5 +166,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Radius canvas adapter local credential cache
+.radius-credentials.json
+**/.radius-credentials.json
+
 # TypeScript
 *.tsbuildinfo

@@ -4,13 +4,12 @@
 // deploy output into per-resource progress/status the deployingPage renders.
 // Reads GitHub via the gh CLI; portal links come from ./infra.mjs.
 
-import { execFile } from "node:child_process";
-import { ghApiGetContent } from "./gh.mjs";
+import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
 
 export function ghJson(args, fallback = null, timeout = 15000) {
     return new Promise((resolve) => {
-        execFile("gh", args, { shell: true, timeout }, (err, stdout) => {
+        cliExec("gh", args, { timeout }, (err, stdout) => {
             if (err) { resolve(fallback); return; }
             try { resolve(JSON.parse(stdout.trim())); } catch (e) { resolve(fallback); }
         });
@@ -52,8 +51,8 @@ export async function getRunDetail(repo, runId) {
 
 export function fetchRunLog(repo, runId) {
     return new Promise((resolve) => {
-        execFile("gh", ["run", "view", String(runId), "--log", "--repo", repo],
-            { shell: true, timeout: 30000, maxBuffer: 1024 * 1024 * 20 }, (err, stdout) => {
+        cliExec("gh", ["run", "view", String(runId), "--log", "--repo", repo],
+            { timeout: 30000, maxBuffer: 1024 * 1024 * 20 }, (err, stdout) => {
             if (err || !stdout) { resolve(null); return; }
             resolve(stdout);
         });

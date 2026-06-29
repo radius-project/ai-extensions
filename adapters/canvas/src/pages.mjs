@@ -1094,7 +1094,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Auto-create one (App Registration, client secret, federated credential, Contributor role) using your <code>az</code> CLI login.
+      <strong>No App Registration?</strong> Auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">⚡ Auto-create credentials</button>
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
@@ -1374,7 +1374,6 @@ function appendLog(text, color) {
 }
 
 // Auto-setup button handler
-window._autoSetupClientSecret = null;
 document.getElementById('btn-auto-setup').addEventListener('click', function() {
     var btn = this;
     var statusEl = document.getElementById('auto-setup-status');
@@ -1417,8 +1416,6 @@ document.getElementById('btn-auto-setup').addEventListener('click', function() {
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
         if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
         if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
-        // Store the client secret for the deploy step
-        if (data.clientSecret) window._autoSetupClientSecret = data.clientSecret;
         // Clear the highlight if it was set
         document.getElementById('auto-setup-section').style.border = '1px dashed var(--border-color-default, #d1d9e0)';
         statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Credentials created successfully!</span><br><small style="color:var(--text-color-muted, #656d76);">' + (data.steps || []).join('<br>') + '</small>';
@@ -1466,10 +1463,6 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();
         envData.subscriptionId = document.getElementById('az-sub-id').value.trim();
         envData.resourceGroup = resourceGroup;
-        // Include clientSecret if it was set by auto-setup
-        if (window._autoSetupClientSecret) {
-            envData.clientSecret = window._autoSetupClientSecret;
-        }
     } else {
         envData.roleArn = document.querySelector('[data-aws-role-arn]')?.dataset?.awsRoleArn || '';
         envData.region = document.querySelector('[data-aws-region]')?.dataset?.awsRegion || '';

@@ -579,6 +579,7 @@ function radiusRenderGraph(containerId, resources, options) {
             var node = e.target;
             var d = node.data();
             var links = [];
+            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
             if (repoUrl && d.codeRef) {
                 var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
                 links.push('<a href="' + codeUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">📄 View code</a>');
@@ -605,7 +606,7 @@ function radiusRenderGraph(containerId, resources, options) {
             // Azure portal links for live cloud resources (from the deployed graph).
             function azurePortalUrl(armId) { return 'https://portal.azure.com/#@/resource' + armId + '/overview'; }
             if (d.cloudId) {
-                links.push('<a href="' + azurePortalUrl(d.cloudId) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 View in Azure portal</a>');
+                links.push('<a href="' + escLocal(azurePortalUrl(d.cloudId)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 View in Azure portal</a>');
             }
             if (d.cloudResources) {
                 try {
@@ -613,12 +614,11 @@ function radiusRenderGraph(containerId, resources, options) {
                     for (var ci = 0; ci < cloudList.length; ci++) {
                         var cr = cloudList[ci];
                         var crLabel = cr.name || (cr.type ? cr.type.split('/').pop() : 'resource');
-                        links.push('<a href="' + azurePortalUrl(cr.id) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 ' + crLabel + ' in Azure portal</a>');
+                        links.push('<a href="' + escLocal(azurePortalUrl(cr.id)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 ' + escLocal(crLabel) + ' in Azure portal</a>');
                     }
                 } catch (err) { /* ignore */ }
             }
-            links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76); font-size:11px;">Type: ' + (d.resourceType || 'unknown') + '</div>');
-            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+            links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76); font-size:11px;">Type: ' + escLocal(d.resourceType || 'unknown') + '</div>');
             var safeTitle = escLocal((d.label || '').replace('\\n', ' — '));
             popup.innerHTML = '<div style="font-weight:600; margin-bottom:6px; font-size:13px;">' + safeTitle + '</div>' + links.join('');
             var pos = node.renderedPosition();
