@@ -113,7 +113,9 @@ export function generateAWSOIDC(data) {
 }
 
 export function generateVerifyWorkflow(env, provider) {
-    return coreGenerateVerifyWorkflow(env, getPlatform(provider));
+    const platform = getPlatform(provider);
+    if (!platform) throw new Error(`Unknown provider: ${provider}`);
+    return coreGenerateVerifyWorkflow(env, platform);
 }
 
 export function generateDeployWorkflow(env, provider, appFile, creds) {
