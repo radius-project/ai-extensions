@@ -66,8 +66,15 @@ jobs:
           echo "✅ Pushed \$IMAGE"
 ${clusterAuth}
       - name: Install k3d
+        env:
+          K3D_VERSION: v5.7.4
         run: |
-          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          # Download a pinned, released k3d binary instead of piping a remote
+          # install script into bash, so the install is deterministic and not
+          # subject to upstream script changes.
+          curl -sfL -o /tmp/k3d "https://github.com/k3d-io/k3d/releases/download/\${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
 
       - name: Create k3d cluster for Radius control plane
         run: |

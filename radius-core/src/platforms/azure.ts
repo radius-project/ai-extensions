@@ -13,10 +13,10 @@ export const azure: ComputePlatform = {
       output: `# Azure Federated Identity Configuration
 # Run these commands to set up OIDC for GitHub Actions:
 
-# 1. Set repository secrets:
-gh secret set AZURE_TENANT_ID --body "${data.tenantId || ""}"
-gh secret set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
-gh secret set AZURE_CLIENT_ID --body "${data.clientId || ""}"
+# 1. Set repository variables (these identifiers are not secret):
+gh variable set AZURE_TENANT_ID --body "${data.tenantId || ""}"
+gh variable set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
+gh variable set AZURE_CLIENT_ID --body "${data.clientId || ""}"
 
 # 2. Create federated credential (via Azure CLI):
 az ad app federated-credential create \\
@@ -39,11 +39,11 @@ az role assignment create \\
 
   environmentSecrets(data: any) {
     return [
-      { kind: "secret" as const, name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
+      { kind: "variable" as const, name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
       { kind: "variable" as const, name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
       { kind: "variable" as const, name: "AZURE_LOCATION", value: data.location },
     ];
-  }
+  },
 
   portalUrl(resourceType: string, ctx: PortalContext): string {
     const subscriptionId = ctx.subscriptionId;
@@ -86,9 +86,9 @@ az role assignment create \\
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: \${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify Azure Credentials
         run: |
@@ -111,9 +111,9 @@ az role assignment create \\
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: \${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Capture target AKS kubeconfig (static admin credentials)
         run: |
@@ -126,15 +126,15 @@ az role assignment create \\
           TARGET_REGION=\$(az aks show --name "\${{ vars.RADIUS_K8S_CLUSTER }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --query location -o tsv)
           echo "TARGET_REGION=\$TARGET_REGION" >> "\$GITHUB_ENV"
 `,
-  radCredentialRegister: `rad credential register azure sp --client-id "\${{ secrets.AZURE_CLIENT_ID }}" --client-secret "\${{ secrets.RADIUS_CLIENT_SECRET }}" --tenant-id "\${{ secrets.AZURE_TENANT_ID }}"
-          rad env update "\${{ env.RADIUS_ENV }}" --azure-subscription-id "\${{ secrets.AZURE_SUBSCRIPTION_ID }}" --azure-resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}"`,
-  recipeAuthEnv: `,{\\"name\\":\\"ARM_CLIENT_ID\\",\\"value\\":\\"\${{ secrets.AZURE_CLIENT_ID }}\\"},{\\"name\\":\\"ARM_TENANT_ID\\",\\"value\\":\\"\${{ secrets.AZURE_TENANT_ID }}\\"},{\\"name\\":\\"ARM_SUBSCRIPTION_ID\\",\\"value\\":\\"\${{ secrets.AZURE_SUBSCRIPTION_ID }}\\"},{\\"name\\":\\"ARM_USE_OIDC\\",\\"value\\":\\"true\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_URL\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_URL\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_TOKEN\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_TOKEN\\"}`,
+  radCredentialRegister: `rad credential register azure wi --client-id "\${{ vars.AZURE_CLIENT_ID }}" --tenant-id "\${{ vars.AZURE_TENANT_ID }}"
+          rad env update "\${{ env.RADIUS_ENV }}" --azure-subscription-id "\${{ vars.AZURE_SUBSCRIPTION_ID }}" --azure-resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}"`,
+  recipeAuthEnv: `,{\\"name\\":\\"ARM_CLIENT_ID\\",\\"value\\":\\"\${{ vars.AZURE_CLIENT_ID }}\\"},{\\"name\\":\\"ARM_TENANT_ID\\",\\"value\\":\\"\${{ vars.AZURE_TENANT_ID }}\\"},{\\"name\\":\\"ARM_SUBSCRIPTION_ID\\",\\"value\\":\\"\${{ vars.AZURE_SUBSCRIPTION_ID }}\\"},{\\"name\\":\\"ARM_USE_OIDC\\",\\"value\\":\\"true\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_URL\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_URL\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_TOKEN\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_TOKEN\\"}`,
   dbRecipeRegister: `          # Database: managed Azure MySQL Flexible Server (azure/terraform recipe)
           rad recipe register default \\
             --resource-type "Radius.Data/mySqlDatabases" \\
             --template-kind terraform \\
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Data/mySqlDatabases/recipes/azure/terraform?ref=\${{ env.RESOURCE_TYPES_CONTRIB_REF }}" \\
-            --parameters azure_subscription_id="\${{ secrets.AZURE_SUBSCRIPTION_ID }}" \\
+            --parameters azure_subscription_id="\${{ vars.AZURE_SUBSCRIPTION_ID }}" \\
             --parameters resourceGroupName="\${{ vars.AZURE_RESOURCE_GROUP }}" \\
             --parameters location="\$TARGET_REGION" \\
             --environment "\${{ env.RADIUS_ENV }}"`,

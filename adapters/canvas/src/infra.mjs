@@ -114,12 +114,14 @@ export function generateAWSOIDC(data) {
 
 export function generateVerifyWorkflow(env, provider) {
     const platform = getPlatform(provider);
-    if (!platform) throw new Error(`Unknown provider: ${provider}`);
+    if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
     return coreGenerateVerifyWorkflow(env, platform);
 }
 
 export function generateDeployWorkflow(env, provider, appFile, creds) {
-    return coreGenerateDeployWorkflow(env, getPlatform(provider), appFile);
+    const platform = getPlatform(provider);
+    if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
+    return coreGenerateDeployWorkflow(env, platform, appFile);
 }
 
 export function generatePortalUrl(resourceType, provider, state) {

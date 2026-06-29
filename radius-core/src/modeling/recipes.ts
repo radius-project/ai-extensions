@@ -26,6 +26,19 @@ export function mapFileToResourceType(baseName: string): string {
   return typeMap[baseName] || `Radius.Core/${baseName}`;
 }
 
+// Built-in (legacy un-grouped) Kubernetes API groups that appear without a
+// dotted DNS suffix in Radius/Bicep recipe types (e.g. apps/Deployment).
+const K8S_CORE_GROUPS = new Set([
+  "apps", "core", "batch", "extensions", "policy", "autoscaling", "networking", "rbac", "storage",
+]);
+
+// True when a Bicep resource-type group segment denotes a Kubernetes API group.
+// Covers both the short built-in groups (apps, core, batch, …) and the dotted
+// DNS-style groups such as networking.k8s.io or rbac.authorization.k8s.io.
+function isKubernetesGroup(group: string): boolean {
+  return K8S_CORE_GROUPS.has(group) || group.endsWith("k8s.io") || group.endsWith("kubernetes.io");
+}
+
 // Parse a recipe bicep file to extract concrete resource declarations
 export function parseRecipeResources(content: string): any[] {
   const resources: any[] = [];
@@ -51,7 +64,7 @@ export function parseRecipeResources(content: string): any[] {
     let providerCategory = "cloud";
     if (resourceType.startsWith("AWS.")) providerCategory = "aws";
     else if (resourceType.startsWith("Microsoft.")) providerCategory = "azure";
-    else if (resourceType.includes("/") && (resourceType.startsWith("apps/") || resourceType.startsWith("core/") || resourceType.startsWith("batch/"))) providerCategory = "kubernetes";
+    else if (resourceType.includes("/") && isKubernetesGroup(resourceType.split("/")[0])) providerCategory = "kubernetes";
 
     resources.push({
       name: symName,

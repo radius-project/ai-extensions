@@ -59,7 +59,7 @@ The popup lands directly on the create-environment form for the chosen provider.
 **AWS**:
 - secrets: `AWS_IAM_ROLE_ARN`; vars: `AWS_REGION`, `AWS_ACCOUNT_ID`, `RADIUS_K8S_CLUSTER`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
 
-- secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`; vars: `AZURE_RESOURCE_GROUP`, `RADIUS_K8S_CLUSTER`
+- secrets: _(none — Azure auth uses OIDC workload identity)_; vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `RADIUS_K8S_CLUSTER`
 
 ## Common errors and fixes
 

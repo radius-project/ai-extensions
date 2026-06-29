@@ -496,6 +496,20 @@ function formatTerraformModule(source, name) {
 }
 
 // radius-core/src/modeling/recipes.ts
+var K8S_CORE_GROUPS = /* @__PURE__ */ new Set([
+  "apps",
+  "core",
+  "batch",
+  "extensions",
+  "policy",
+  "autoscaling",
+  "networking",
+  "rbac",
+  "storage"
+]);
+function isKubernetesGroup(group) {
+  return K8S_CORE_GROUPS.has(group) || group.endsWith("k8s.io") || group.endsWith("kubernetes.io");
+}
 function parseRecipeResources(content) {
   const resources = [];
   const resourceRegex = /resource\s+(\w+)\s+'([^']+)'/g;
@@ -513,7 +527,7 @@ function parseRecipeResources(content) {
     let providerCategory = "cloud";
     if (resourceType.startsWith("AWS.")) providerCategory = "aws";
     else if (resourceType.startsWith("Microsoft.")) providerCategory = "azure";
-    else if (resourceType.includes("/") && (resourceType.startsWith("apps/") || resourceType.startsWith("core/") || resourceType.startsWith("batch/"))) providerCategory = "kubernetes";
+    else if (resourceType.includes("/") && isKubernetesGroup(resourceType.split("/")[0])) providerCategory = "kubernetes";
     resources.push({
       name: symName,
       type: resourceType,
@@ -1232,10 +1246,10 @@ var azure = {
       output: `# Azure Federated Identity Configuration
 # Run these commands to set up OIDC for GitHub Actions:
 
-# 1. Set repository secrets:
-gh secret set AZURE_TENANT_ID --body "${data.tenantId || ""}"
-gh secret set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
-gh secret set AZURE_CLIENT_ID --body "${data.clientId || ""}"
+# 1. Set repository variables (these identifiers are not secret):
+gh variable set AZURE_TENANT_ID --body "${data.tenantId || ""}"
+gh variable set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
+gh variable set AZURE_CLIENT_ID --body "${data.clientId || ""}"
 
 # 2. Create federated credential (via Azure CLI):
 az ad app federated-credential create \\
@@ -1257,9 +1271,9 @@ az role assignment create \\
   },
   environmentSecrets(data) {
     return [
-      { kind: "secret", name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
-      { kind: "secret", name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
-      { kind: "secret", name: "AZURE_LOCATION", value: data.location }
+      { kind: "variable", name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
+      { kind: "variable", name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
+      { kind: "variable", name: "AZURE_LOCATION", value: data.location }
     ];
   },
   portalUrl(resourceType, ctx) {
@@ -1300,9 +1314,9 @@ az role assignment create \\
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: \${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify Azure Credentials
         run: |
@@ -1325,9 +1339,9 @@ az role assignment create \\
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: \${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Capture target AKS kubeconfig (static admin credentials)
         run: |
@@ -1340,15 +1354,15 @@ az role assignment create \\
           TARGET_REGION=$(az aks show --name "\${{ vars.RADIUS_K8S_CLUSTER }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --query location -o tsv)
           echo "TARGET_REGION=$TARGET_REGION" >> "$GITHUB_ENV"
 `,
-  radCredentialRegister: `rad credential register azure sp --client-id "\${{ secrets.AZURE_CLIENT_ID }}" --client-secret "\${{ secrets.RADIUS_CLIENT_SECRET }}" --tenant-id "\${{ secrets.AZURE_TENANT_ID }}"
-          rad env update "\${{ env.RADIUS_ENV }}" --azure-subscription-id "\${{ secrets.AZURE_SUBSCRIPTION_ID }}" --azure-resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}"`,
-  recipeAuthEnv: `,{\\"name\\":\\"ARM_CLIENT_ID\\",\\"value\\":\\"\${{ secrets.AZURE_CLIENT_ID }}\\"},{\\"name\\":\\"ARM_TENANT_ID\\",\\"value\\":\\"\${{ secrets.AZURE_TENANT_ID }}\\"},{\\"name\\":\\"ARM_SUBSCRIPTION_ID\\",\\"value\\":\\"\${{ secrets.AZURE_SUBSCRIPTION_ID }}\\"},{\\"name\\":\\"ARM_USE_OIDC\\",\\"value\\":\\"true\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_URL\\",\\"value\\":\\"$ACTIONS_ID_TOKEN_REQUEST_URL\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_TOKEN\\",\\"value\\":\\"$ACTIONS_ID_TOKEN_REQUEST_TOKEN\\"}`,
+  radCredentialRegister: `rad credential register azure wi --client-id "\${{ vars.AZURE_CLIENT_ID }}" --tenant-id "\${{ vars.AZURE_TENANT_ID }}"
+          rad env update "\${{ env.RADIUS_ENV }}" --azure-subscription-id "\${{ vars.AZURE_SUBSCRIPTION_ID }}" --azure-resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}"`,
+  recipeAuthEnv: `,{\\"name\\":\\"ARM_CLIENT_ID\\",\\"value\\":\\"\${{ vars.AZURE_CLIENT_ID }}\\"},{\\"name\\":\\"ARM_TENANT_ID\\",\\"value\\":\\"\${{ vars.AZURE_TENANT_ID }}\\"},{\\"name\\":\\"ARM_SUBSCRIPTION_ID\\",\\"value\\":\\"\${{ vars.AZURE_SUBSCRIPTION_ID }}\\"},{\\"name\\":\\"ARM_USE_OIDC\\",\\"value\\":\\"true\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_URL\\",\\"value\\":\\"$ACTIONS_ID_TOKEN_REQUEST_URL\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_TOKEN\\",\\"value\\":\\"$ACTIONS_ID_TOKEN_REQUEST_TOKEN\\"}`,
   dbRecipeRegister: `          # Database: managed Azure MySQL Flexible Server (azure/terraform recipe)
           rad recipe register default \\
             --resource-type "Radius.Data/mySqlDatabases" \\
             --template-kind terraform \\
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Data/mySqlDatabases/recipes/azure/terraform?ref=\${{ env.RESOURCE_TYPES_CONTRIB_REF }}" \\
-            --parameters azure_subscription_id="\${{ secrets.AZURE_SUBSCRIPTION_ID }}" \\
+            --parameters azure_subscription_id="\${{ vars.AZURE_SUBSCRIPTION_ID }}" \\
             --parameters resourceGroupName="\${{ vars.AZURE_RESOURCE_GROUP }}" \\
             --parameters location="$TARGET_REGION" \\
             --environment "\${{ env.RADIUS_ENV }}"`
@@ -1369,17 +1383,17 @@ Account ID: ${data.accountId || ""}
 Region: ${data.region || ""}
 
 # GitHub Actions will use OIDC to assume a role in this account.
-# The following secrets have been configured:
+# The following variables have been configured (these identifiers are not secret):
 
-gh secret set AWS_ACCOUNT_ID --body "${data.accountId || ""}"
-gh secret set AWS_REGION --body "${data.region || ""}"
+gh variable set AWS_ACCOUNT_ID --body "${data.accountId || ""}"
+gh variable set AWS_REGION --body "${data.region || ""}"
 `
     };
   },
   environmentSecrets(data) {
     return [
-      { kind: "secret", name: "AWS_ACCOUNT_ID", value: data.accountId },
-      { kind: "secret", name: "AWS_REGION", value: data.region }
+      { kind: "variable", name: "AWS_ACCOUNT_ID", value: data.accountId },
+      { kind: "variable", name: "AWS_REGION", value: data.region }
     ];
   },
   portalUrl(resourceType, ctx) {
@@ -1469,7 +1483,7 @@ gh secret set AWS_REGION --body "${data.region || ""}"
           EOF
           echo "TARGET_KUBECONFIG=/tmp/target-kubeconfig" >> "$GITHUB_ENV"
 `,
-  radCredentialRegister: `rad credential register aws access-key --access-key-id "\${{ secrets.AWS_ACCESS_KEY_ID }}" --secret-access-key "\${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+  radCredentialRegister: `rad credential register aws irsa --iam-role "\${{ secrets.AWS_IAM_ROLE_ARN }}"
           rad env update "\${{ env.RADIUS_ENV }}" --aws-region "\${{ vars.AWS_REGION }}" --aws-account-id "\${{ vars.AWS_ACCOUNT_ID }}"`,
   recipeAuthEnv: ``,
   dbRecipeRegister: `          # Database: managed AWS RDS MySQL (aws/terraform recipe)
@@ -1762,8 +1776,15 @@ jobs:
           echo "\u2705 Pushed $IMAGE"
 ${clusterAuth}
       - name: Install k3d
+        env:
+          K3D_VERSION: v5.7.4
         run: |
-          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          # Download a pinned, released k3d binary instead of piping a remote
+          # install script into bash, so the install is deterministic and not
+          # subject to upstream script changes.
+          curl -sfL -o /tmp/k3d "https://github.com/k3d-io/k3d/releases/download/\${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
 
       - name: Create k3d cluster for Radius control plane
         run: |
@@ -2137,12 +2158,20 @@ ${dbRecipeRegister}
 
 // adapters/canvas/src/gh.mjs
 import { execFile as execFile2 } from "node:child_process";
+function cliExec(cmd, args, opts, cb) {
+  const isWindows = process.platform === "win32";
+  const file = isWindows ? "cmd.exe" : cmd;
+  const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
+  return execFile2(
+    file,
+    finalArgs,
+    { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts },
+    cb
+  );
+}
 function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const isWindows = process.platform === "win32";
-    const shell = isWindows ? "powershell" : "bash";
-    const shellArgs = isWindows ? ["-NoProfile", "-Command", [cmd, ...args].join(" ")] : ["-c", [cmd, ...args].join(" ")];
-    execFile2(shell, shellArgs, { ...opts, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    cliExec(cmd, args, opts, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
@@ -2164,7 +2193,7 @@ function execShell(command, timeout = 3e4) {
 }
 function ghApiGetContent(apiPath, timeout = 15e3) {
   return new Promise((resolve) => {
-    execFile2("gh", ["api", apiPath, "--jq", ".content"], { shell: true, timeout }, (err, stdout) => {
+    cliExec("gh", ["api", apiPath, "--jq", ".content"], { timeout }, (err, stdout) => {
       if (err || !stdout || !stdout.trim()) {
         resolve(null);
         return;
@@ -2179,7 +2208,7 @@ function ghApiGetContent(apiPath, timeout = 15e3) {
 }
 function ghApiListNames(apiPath, timeout = 15e3) {
   return new Promise((resolve) => {
-    execFile2("gh", ["api", apiPath, "--jq", `[.[].name]`], { shell: true, timeout }, (err, stdout) => {
+    cliExec("gh", ["api", apiPath, "--jq", `[.[].name]`], { timeout }, (err, stdout) => {
       if (err) {
         resolve([]);
         return;
@@ -2198,7 +2227,7 @@ function fetchFileFromRepo(repo, path, branch = "main") {
 function fetchRepoTree(repo, branch = "main") {
   return new Promise((resolve) => {
     const args = ["api", `/repos/${repo}/git/trees/${branch}?recursive=1`, "--jq", `[.tree[].path]`];
-    execFile2("gh", args, { shell: true, timeout: 3e4 }, (err, stdout) => {
+    cliExec("gh", args, { timeout: 3e4 }, (err, stdout) => {
       if (err) {
         resolve([]);
         return;
@@ -2312,10 +2341,14 @@ function generateAWSOIDC(data) {
   return getPlatform("aws").generateOidc(data);
 }
 function generateVerifyWorkflow2(env, provider) {
-  return generateVerifyWorkflow(env, getPlatform(provider));
+  const platform = getPlatform(provider);
+  if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
+  return generateVerifyWorkflow(env, platform);
 }
 function generateDeployWorkflow2(env, provider, appFile, creds) {
-  return generateDeployWorkflow(env, getPlatform(provider), appFile);
+  const platform = getPlatform(provider);
+  if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
+  return generateDeployWorkflow(env, platform, appFile);
 }
 function generatePortalUrl2(resourceType, provider, state) {
   return generatePortalUrl(resourceType, provider, state);
@@ -2923,6 +2956,14 @@ function radiusRenderGraph(containerId, resources, options) {
     options = options || {};
     var container = document.getElementById(containerId);
     if (!container) return null;
+
+    // The graph libraries are loaded from a CDN (see vendor.mjs). If that fetch
+    // failed (offline / blocked network), cytoscape is undefined \u2014 surface a
+    // recoverable message instead of throwing and breaking the whole panel.
+    if (typeof cytoscape === 'undefined') {
+        container.innerHTML = '<div style="padding:16px;color:#cf222e;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
+        return null;
+    }
 
     // Destroy previous instance
     if (window.__cyInstances[containerId]) {
@@ -5384,9 +5425,9 @@ function createRequestHandler(instanceId) {
           const clientSecret = data.clientSecret || "";
           const rg = data.resourceGroup || "";
           const k8s = data.cluster || "";
-          if (clientId) await runGh2(["secret", "set", "AZURE_CLIENT_ID", "--body", clientId, "--env", envName, "--repo", targetRepo]);
-          if (tenantId) await runGh2(["secret", "set", "AZURE_TENANT_ID", "--body", tenantId, "--env", envName, "--repo", targetRepo]);
-          if (subscriptionId) await runGh2(["secret", "set", "AZURE_SUBSCRIPTION_ID", "--body", subscriptionId, "--env", envName, "--repo", targetRepo]);
+          if (clientId) await runGh2(["variable", "set", "AZURE_CLIENT_ID", "--body", clientId, "--env", envName, "--repo", targetRepo]);
+          if (tenantId) await runGh2(["variable", "set", "AZURE_TENANT_ID", "--body", tenantId, "--env", envName, "--repo", targetRepo]);
+          if (subscriptionId) await runGh2(["variable", "set", "AZURE_SUBSCRIPTION_ID", "--body", subscriptionId, "--env", envName, "--repo", targetRepo]);
           if (clientSecret) await runGh2(["secret", "set", "RADIUS_CLIENT_SECRET", "--body", clientSecret, "--env", envName, "--repo", targetRepo]);
           if (rg) await runGh2(["variable", "set", "AZURE_RESOURCE_GROUP", "--body", rg, "--env", envName, "--repo", targetRepo]);
           if (k8s) await runGh2(["variable", "set", "RADIUS_K8S_CLUSTER", "--body", k8s, "--env", envName, "--repo", targetRepo]);
@@ -6626,9 +6667,9 @@ data: ${JSON.stringify(data)}
           const azSubId = oidc?.subscriptionId || oidc?.AZURE_SUBSCRIPTION_ID || "";
           const azClientId = oidc?.clientId || oidc?.AZURE_CLIENT_ID || "";
           const azTenantId = oidc?.tenantId || oidc?.AZURE_TENANT_ID || "";
-          if (azSubId) await runCmd2("gh", ["secret", "set", "AZURE_SUBSCRIPTION_ID", "--body", azSubId, "--env", env, "--repo", targetRepo]);
-          if (azClientId) await runCmd2("gh", ["secret", "set", "AZURE_CLIENT_ID", "--body", azClientId, "--env", env, "--repo", targetRepo]);
-          if (azTenantId) await runCmd2("gh", ["secret", "set", "AZURE_TENANT_ID", "--body", azTenantId, "--env", env, "--repo", targetRepo]);
+          if (azSubId) await runCmd2("gh", ["variable", "set", "AZURE_SUBSCRIPTION_ID", "--body", azSubId, "--env", env, "--repo", targetRepo]);
+          if (azClientId) await runCmd2("gh", ["variable", "set", "AZURE_CLIENT_ID", "--body", azClientId, "--env", env, "--repo", targetRepo]);
+          if (azTenantId) await runCmd2("gh", ["variable", "set", "AZURE_TENANT_ID", "--body", azTenantId, "--env", env, "--repo", targetRepo]);
         } else {
           if (cluster) await runCmd2("gh", ["variable", "set", "RADIUS_K8S_CLUSTER", "--body", cluster, "--env", env, "--repo", targetRepo]);
           await runCmd2("gh", ["variable", "set", "AWS_REGION", "--body", oidc?.region || "us-east-1", "--env", env, "--repo", targetRepo]);

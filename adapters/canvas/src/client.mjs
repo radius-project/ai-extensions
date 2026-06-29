@@ -202,6 +202,14 @@ function radiusRenderGraph(containerId, resources, options) {
     var container = document.getElementById(containerId);
     if (!container) return null;
 
+    // The graph libraries are loaded from a CDN (see vendor.mjs). If that fetch
+    // failed (offline / blocked network), cytoscape is undefined — surface a
+    // recoverable message instead of throwing and breaking the whole panel.
+    if (typeof cytoscape === 'undefined') {
+        container.innerHTML = '<div style="padding:16px;color:#cf222e;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
+        return null;
+    }
+
     // Destroy previous instance
     if (window.__cyInstances[containerId]) {
         window.__cyInstances[containerId].destroy();

@@ -5,14 +5,27 @@
 
 import { execFile } from "node:child_process";
 
+// Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
+// API paths, …) are passed verbatim as argv and can never be interpreted as
+// shell syntax. On Windows these CLIs are usually `.cmd` shims that cannot be
+// spawned directly, so we invoke them via `cmd.exe /c` — but the arguments are
+// still passed as a separate argv array (never concatenated into a single
+// string), which preserves per-argument escaping and avoids command injection.
+function cliExec(cmd, args, opts, cb) {
+    const isWindows = process.platform === "win32";
+    const file = isWindows ? "cmd.exe" : cmd;
+    const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
+    return execFile(
+        file,
+        finalArgs,
+        { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts },
+        cb,
+    );
+}
+
 export function runCommand(cmd, args, opts = {}) {
     return new Promise((resolve, reject) => {
-        const isWindows = process.platform === "win32";
-        const shell = isWindows ? "powershell" : "bash";
-        const shellArgs = isWindows
-            ? ["-NoProfile", "-Command", [cmd, ...args].join(" ")]
-            : ["-c", [cmd, ...args].join(" ")];
-        execFile(shell, shellArgs, { ...opts, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        cliExec(cmd, args, opts, (err, stdout, stderr) => {
             if (err) reject(new Error(stderr || err.message));
             else resolve(stdout.trim());
         });
@@ -43,7 +56,7 @@ export const AWS_REGIONS = [
 
 export function ghApiGetContent(apiPath, timeout = 15000) {
     return new Promise((resolve) => {
-        execFile("gh", ["api", apiPath, "--jq", ".content"], { shell: true, timeout }, (err, stdout) => {
+        cliExec("gh", ["api", apiPath, "--jq", ".content"], { timeout }, (err, stdout) => {
             if (err || !stdout || !stdout.trim()) { resolve(null); return; }
             try { resolve(Buffer.from(stdout.trim(), 'base64').toString('utf8')); }
             catch (e) { resolve(null); }
@@ -53,7 +66,7 @@ export function ghApiGetContent(apiPath, timeout = 15000) {
 
 export function ghApiListNames(apiPath, timeout = 15000) {
     return new Promise((resolve) => {
-        execFile("gh", ["api", apiPath, "--jq", `[.[].name]`], { shell: true, timeout }, (err, stdout) => {
+        cliExec("gh", ["api", apiPath, "--jq", `[.[].name]`], { timeout }, (err, stdout) => {
             if (err) { resolve([]); return; }
             try { resolve(JSON.parse(stdout)); } catch (e) { resolve([]); }
         });
@@ -66,9 +79,8 @@ export function fetchFileFromRepo(repo, path, branch = 'main') {
 
 export function fetchRepoTree(repo, branch = 'main') {
     return new Promise((resolve) => {
-        // Use simpler jq that avoids pipe issues on Windows shell
         const args = ["api", `/repos/${repo}/git/trees/${branch}?recursive=1`, "--jq", `[.tree[].path]`];
-        execFile("gh", args, { shell: true, timeout: 30000 }, (err, stdout) => {
+        cliExec("gh", args, { timeout: 30000 }, (err, stdout) => {
             if (err) { resolve([]); return; }
             try { resolve(JSON.parse(stdout)); } catch (e) { resolve([]); }
         });

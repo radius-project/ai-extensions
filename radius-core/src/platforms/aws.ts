@@ -15,18 +15,18 @@ Account ID: ${data.accountId || ""}
 Region: ${data.region || ""}
 
 # GitHub Actions will use OIDC to assume a role in this account.
-# The following secrets have been configured:
+# The following variables have been configured (these identifiers are not secret):
 
-gh secret set AWS_ACCOUNT_ID --body "${data.accountId || ""}"
-gh secret set AWS_REGION --body "${data.region || ""}"
+gh variable set AWS_ACCOUNT_ID --body "${data.accountId || ""}"
+gh variable set AWS_REGION --body "${data.region || ""}"
 `,
     };
   },
 
   environmentSecrets(data: any) {
     return [
-      { kind: "secret" as const, name: "AWS_ACCOUNT_ID", value: data.accountId },
-      { kind: "secret" as const, name: "AWS_REGION", value: data.region },
+      { kind: "variable" as const, name: "AWS_ACCOUNT_ID", value: data.accountId },
+      { kind: "variable" as const, name: "AWS_REGION", value: data.region },
     ];
   },
 
@@ -120,7 +120,7 @@ gh secret set AWS_REGION --body "${data.region || ""}"
           EOF
           echo "TARGET_KUBECONFIG=/tmp/target-kubeconfig" >> "\$GITHUB_ENV"
 `,
-  radCredentialRegister: `rad credential register aws access-key --access-key-id "\${{ secrets.AWS_ACCESS_KEY_ID }}" --secret-access-key "\${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+  radCredentialRegister: `rad credential register aws irsa --iam-role "\${{ secrets.AWS_IAM_ROLE_ARN }}"
           rad env update "\${{ env.RADIUS_ENV }}" --aws-region "\${{ vars.AWS_REGION }}" --aws-account-id "\${{ vars.AWS_ACCOUNT_ID }}"`,
   recipeAuthEnv: ``,
   dbRecipeRegister: `          # Database: managed AWS RDS MySQL (aws/terraform recipe)

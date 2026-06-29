@@ -369,9 +369,9 @@ function createRequestHandler(instanceId) {
                     const rg = data.resourceGroup || '';
                     const k8s = data.cluster || '';
 
-                    if (clientId) await runGh(['secret', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
-                    if (tenantId) await runGh(['secret', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
-                    if (subscriptionId) await runGh(['secret', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
+                    if (clientId) await runGh(['variable', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
+                    if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
+                    if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
                     if (clientSecret) await runGh(['secret', 'set', 'RADIUS_CLIENT_SECRET', '--body', clientSecret, '--env', envName, '--repo', targetRepo]);
                     if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
                     if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
@@ -1789,9 +1789,9 @@ function createRequestHandler(instanceId) {
                     const azSubId = oidc?.subscriptionId || oidc?.AZURE_SUBSCRIPTION_ID || '';
                     const azClientId = oidc?.clientId || oidc?.AZURE_CLIENT_ID || '';
                     const azTenantId = oidc?.tenantId || oidc?.AZURE_TENANT_ID || '';
-                    if (azSubId) await runCmd('gh', ['secret', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', azSubId, '--env', env, '--repo', targetRepo]);
-                    if (azClientId) await runCmd('gh', ['secret', 'set', 'AZURE_CLIENT_ID', '--body', azClientId, '--env', env, '--repo', targetRepo]);
-                    if (azTenantId) await runCmd('gh', ['secret', 'set', 'AZURE_TENANT_ID', '--body', azTenantId, '--env', env, '--repo', targetRepo]);
+                    if (azSubId) await runCmd('gh', ['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', azSubId, '--env', env, '--repo', targetRepo]);
+                    if (azClientId) await runCmd('gh', ['variable', 'set', 'AZURE_CLIENT_ID', '--body', azClientId, '--env', env, '--repo', targetRepo]);
+                    if (azTenantId) await runCmd('gh', ['variable', 'set', 'AZURE_TENANT_ID', '--body', azTenantId, '--env', env, '--repo', targetRepo]);
                 } else {
                     if (cluster) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', cluster, '--env', env, '--repo', targetRepo]);
                     await runCmd('gh', ['variable', 'set', 'AWS_REGION', '--body', oidc?.region || 'us-east-1', '--env', env, '--repo', targetRepo]);
