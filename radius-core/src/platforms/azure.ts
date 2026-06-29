@@ -40,10 +40,10 @@ az role assignment create \\
   environmentSecrets(data: any) {
     return [
       { kind: "secret" as const, name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
-      { kind: "secret" as const, name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
-      { kind: "secret" as const, name: "AZURE_LOCATION", value: data.location },
+      { kind: "variable" as const, name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
+      { kind: "variable" as const, name: "AZURE_LOCATION", value: data.location },
     ];
-  },
+  }
 
   portalUrl(resourceType: string, ctx: PortalContext): string {
     const subscriptionId = ctx.subscriptionId;
