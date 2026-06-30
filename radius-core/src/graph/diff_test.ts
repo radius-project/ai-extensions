@@ -39,11 +39,8 @@ describe("computeGraphDiff", () => {
     const base = [makeResource("applications.datastores/mongoDatabases", "db")];
     const head = [makeResource("applications.datastores/postgreSQLDatabases", "db")];
     const result = computeGraphDiff(base, head);
-    const db = result.find((r) => r.name === "db");
-    expect(db?.diffStatus).toBe("modified");
-    // The old resource should not appear as a separate removed entry
-    const removed = result.filter((r) => r.diffStatus === "removed");
-    expect(removed).toHaveLength(0);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ name: "db", diffStatus: "modified" });
   });
 
   it("marks a resource as modified when connections change", () => {
