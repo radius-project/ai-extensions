@@ -16,6 +16,7 @@
     "typecheck": "pnpm run typecheck:core && pnpm run typecheck:canvas",
     "typecheck:core": "tsc -p radius-core/tsconfig.json",
     "typecheck:canvas": "tsc -p adapters/canvas/tsconfig.json",
+    "test": "node test/run.mjs",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "pnpm run build"
