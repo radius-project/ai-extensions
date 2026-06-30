@@ -28,8 +28,9 @@ describe("computeGraphDiff", () => {
   });
 
   it("marks a resource with identical id and content as unchanged", () => {
-    const r = makeResource("applications.core/containers", "api");
-    const result = computeGraphDiff([r], [r]);
+    const base = makeResource("applications.core/containers", "api");
+    const head = makeResource("applications.core/containers", "api");
+    const result = computeGraphDiff([base], [head]);
     expect(result).toHaveLength(1);
     expect(result[0].diffStatus).toBe("unchanged");
   });
