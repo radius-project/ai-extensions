@@ -14,6 +14,9 @@ importers:
       '@changesets/cli':
         specifier: ^2.27.11
         version: 2.31.0(@types/node@20.19.43)
+      '@radius-project/core':
+        specifier: workspace:*
+        version: link:radius-core
       '@types/node':
         specifier: ^20.19.43
         version: 20.19.43
