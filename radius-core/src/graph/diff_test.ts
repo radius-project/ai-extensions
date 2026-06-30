@@ -55,11 +55,16 @@ describe("computeGraphDiff", () => {
   });
 
   it("handles null/undefined inputs gracefully", () => {
-    expect(() => computeGraphDiff(null as any, null as any)).not.toThrow();
-    const result = computeGraphDiff(null as any, null as any);
-    expect(result).toEqual([]);
+    for (const [base, head] of [
+      [null, null],
+      [undefined, undefined],
+      [null, undefined],
+      [undefined, null],
+    ] as any) {
+      expect(() => computeGraphDiff(base, head)).not.toThrow();
+      expect(computeGraphDiff(base, head)).toEqual([]);
+    }
   });
-
   it("reports all three statuses together in one diff", () => {
     const sharedType = "applications.core/containers";
     const unchanged = makeResource(sharedType, "unchanged");
