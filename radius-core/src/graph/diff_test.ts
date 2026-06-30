@@ -72,6 +72,8 @@ describe("computeGraphDiff", () => {
     const head = [unchanged, modifiedHead, added];
 
     const result = computeGraphDiff(base, head);
+    expect(result).toHaveLength(4);
+    expect(new Set(result.map((r) => r.name)).size).toBe(4);
     const byName = Object.fromEntries(result.map((r) => [r.name, r.diffStatus]));
 
     expect(byName["unchanged"]).toBe("unchanged");
