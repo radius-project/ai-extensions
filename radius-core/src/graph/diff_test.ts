@@ -35,12 +35,40 @@ describe("computeGraphDiff", () => {
     expect(result[0].diffStatus).toBe("unchanged");
   });
 
-  it("marks a resource as modified when its type changes", () => {
-    const base = [makeResource("applications.datastores/mongoDatabases", "db")];
-    const head = [makeResource("applications.datastores/postgreSQLDatabases", "db")];
-    const result = computeGraphDiff(base, head);
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({ name: "db", diffStatus: "modified" });
+  it("produces removed + added entries when a resource's type changes", () => {
+    const mongoDb = makeResource("applications.datastores/mongoDatabases", "db");
+    const postgresDb = makeResource("applications.datastores/postgreSQLDatabases", "db");
+    const result = computeGraphDiff([mongoDb], [postgresDb]);
+
+    expect(result).toHaveLength(2);
+    const removed = result.find((r) => r.type === "applications.datastores/mongoDatabases");
+    const added = result.find((r) => r.type === "applications.datastores/postgreSQLDatabases");
+    expect(removed?.diffStatus).toBe("removed");
+    expect(added?.diffStatus).toBe("added");
+  });
+
+  it("marks a container as modified when the db it connects to changes type", () => {
+    const mongoId = buildResourceID("applications.datastores/mongoDatabases", "db");
+    const postgresId = buildResourceID("applications.datastores/postgreSQLDatabases", "db");
+
+    const baseContainer = makeResource("applications.core/containers", "api", {
+      connections: [{ id: mongoId, direction: "Outbound" }],
+    });
+    const headContainer = makeResource("applications.core/containers", "api", {
+      connections: [{ id: postgresId, direction: "Outbound" }],
+    });
+    const mongoDb = makeResource("applications.datastores/mongoDatabases", "db");
+    const postgresDb = makeResource("applications.datastores/postgreSQLDatabases", "db");
+
+    const result = computeGraphDiff([baseContainer, mongoDb], [headContainer, postgresDb]);
+
+    const container = result.find((r) => r.name === "api");
+    const mongo = result.find((r) => r.type === "applications.datastores/mongoDatabases");
+    const postgres = result.find((r) => r.type === "applications.datastores/postgreSQLDatabases");
+
+    expect(container?.diffStatus).toBe("modified");
+    expect(mongo?.diffStatus).toBe("removed");
+    expect(postgres?.diffStatus).toBe("added");
   });
 
   it("marks a resource as modified when connections change", () => {
@@ -65,13 +93,16 @@ describe("computeGraphDiff", () => {
       expect(computeGraphDiff(base, head)).toEqual([]);
     }
   });
-  it("reports all three statuses together in one diff", () => {
-    const sharedType = "applications.core/containers";
-    const unchanged = makeResource(sharedType, "unchanged");
-    const removed = makeResource(sharedType, "removed");
-    const added = makeResource(sharedType, "added");
-    const modified = makeResource(sharedType, "modified");
-    const modifiedHead = makeResource(sharedType, "modified", { type: "applications.core/gateways" });
+
+  it("reports all four statuses together in one diff", () => {
+    const type = "applications.core/containers";
+    const unchanged = makeResource(type, "unchanged");
+    const removed = makeResource(type, "removed");
+    const added = makeResource(type, "added");
+    const modified = makeResource(type, "modified", { connections: [] });
+    const modifiedHead = makeResource(type, "modified", {
+      connections: [{ id: "some-id", direction: "Outbound" }],
+    });
 
     const base = [unchanged, removed, modified];
     const head = [unchanged, modifiedHead, added];
