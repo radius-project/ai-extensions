@@ -447,13 +447,19 @@ jobs:
           fi
           APP_NS="${NAMESPACE}-${BICEP_APP_NAME}"
 
-          kubectl create namespace "$APP_NS" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret generic ghcr-registry-creds \
-            -n "$APP_NS" \
-            --from-literal=username="${{ github.actor }}" \
-            --from-literal=password="${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          echo "✅ Registry credentials secret 'ghcr-registry-creds' created in namespace '$APP_NS'."
+          # The recipe loads the registry secret from context.runtime.kubernetes.namespace.
+          # Per the containerImages README that is the environment namespace, but depending
+          # on the Radius version it can resolve to the per-app namespace, so create the
+          # secret in both to be safe.
+          for NS in "$NAMESPACE" "$APP_NS"; do
+            kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+            kubectl create secret generic ghcr-registry-creds \
+              -n "$NS" \
+              --from-literal=username="${{ github.actor }}" \
+              --from-literal=password="${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            echo "✅ Registry credentials secret 'ghcr-registry-creds' created in namespace '$NS'."
+          done
 
       - name: Run rad commands
         env:
