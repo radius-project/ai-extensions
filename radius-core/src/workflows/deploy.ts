@@ -1,24 +1,35 @@
 import type { ComputePlatform } from "../platforms/index.js";
 import { fillTemplate } from "./template.js";
-import deployTemplate from "./templates/deploy.yml";
+import deployAzureTemplate from "./templates/deploy-azure.yml";
+import deployAwsTemplate from "./templates/deploy-aws.yml";
+
+// Provider-specific static deploy templates. Each is a 1:1 port of the Radius
+// "run rad commands" workflow (radius-project/radius#12250), stripped to a
+// single cloud provider. The committed workflow is never generated inline; only
+// the `{{ENV}}` and `{{APP_FILE}}` placeholder tokens are filled in.
+const DEPLOY_TEMPLATES: Record<string, string> = {
+  azure: deployAzureTemplate,
+  aws: deployAwsTemplate,
+};
 
 /**
- * Build the application-deploy GitHub Actions workflow YAML from the static
- * `templates/deploy.yml` template. The template is committed as-is; only the
- * placeholder tokens (`{{ENV}}`, `{{APP_FILE}}`, and the platform-specific
- * snippets) are filled in — the workflow is never generated inline.
+ * Build the application-deploy GitHub Actions workflow YAML by selecting the
+ * provider-specific static template for `platform` and filling its `{{ENV}}`
+ * (dispatch default) and `{{APP_FILE}}` placeholders.
  */
 export function generateDeployWorkflow(
   env: string,
   platform: ComputePlatform,
   appFile: string,
 ): string {
-  return fillTemplate(deployTemplate, {
+  const template = DEPLOY_TEMPLATES[platform.id];
+  if (!template) {
+    throw new Error(
+      `No deploy template for platform "${platform.id}". Supported platforms: ${Object.keys(DEPLOY_TEMPLATES).join(", ")}.`,
+    );
+  }
+  return fillTemplate(template, {
     ENV: env,
     APP_FILE: appFile,
-    CLUSTER_AUTH: platform.deployClusterAuthSteps,
-    RAD_CRED_REGISTER: platform.radCredentialRegister,
-    RECIPE_AUTH_ENV: platform.recipeAuthEnv,
-    DB_RECIPE_REGISTER: platform.dbRecipeRegister,
   });
 }

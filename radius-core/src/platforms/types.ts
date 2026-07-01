@@ -61,12 +61,4 @@ export interface ComputePlatform {
   // ----- GitHub Actions workflow fragments (verbatim YAML / shell) -----
   /** Steps injected into the credential-verification workflow. */
   readonly verifyWorkflowSteps: string;
-  /** Steps that authenticate to the target cluster in the deploy workflow. */
-  readonly deployClusterAuthSteps: string;
-  /** `rad credential register` + `rad env update` lines for this platform. */
-  readonly radCredentialRegister: string;
-  /** Extra env injected into dynamic-rp so recipes can auth to the cloud. */
-  readonly recipeAuthEnv: string;
-  /** `rad recipe register` block for the managed database on this platform. */
-  readonly dbRecipeRegister: string;
 }

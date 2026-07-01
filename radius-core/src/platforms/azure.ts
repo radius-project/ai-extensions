@@ -158,40 +158,9 @@ az role assignment create \\
 
       - name: Verify AKS Access
         run: |
-          az aks get-credentials --name "\${{ vars.RADIUS_K8S_CLUSTER }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --overwrite-existing
+          az aks get-credentials --name "\${{ vars.AZURE_AKS_CLUSTER_NAME }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --overwrite-existing
           kubelogin convert-kubeconfig -l azurecli
           kubectl cluster-info
           echo "✅ AKS cluster accessible"
 `,
-  deployClusterAuthSteps: `
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: \${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: \${{ vars.AZURE_TENANT_ID }}
-          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Capture target AKS kubeconfig (static admin credentials)
-        run: |
-          az aks get-credentials \\
-            --name "\${{ vars.RADIUS_K8S_CLUSTER }}" \\
-            --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" \\
-            --admin --overwrite-existing --file /tmp/target-kubeconfig
-          echo "TARGET_KUBECONFIG=/tmp/target-kubeconfig" >> "\$GITHUB_ENV"
-          # Provision cloud data services in the same region as the target cluster.
-          TARGET_REGION=\$(az aks show --name "\${{ vars.RADIUS_K8S_CLUSTER }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --query location -o tsv)
-          echo "TARGET_REGION=\$TARGET_REGION" >> "\$GITHUB_ENV"
-`,
-  radCredentialRegister: `rad credential register azure wi --client-id "\${{ vars.AZURE_CLIENT_ID }}" --tenant-id "\${{ vars.AZURE_TENANT_ID }}"
-          rad env update "\${{ env.RADIUS_ENV }}" --azure-subscription-id "\${{ vars.AZURE_SUBSCRIPTION_ID }}" --azure-resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}"`,
-  recipeAuthEnv: `,{\\"name\\":\\"ARM_CLIENT_ID\\",\\"value\\":\\"\${{ vars.AZURE_CLIENT_ID }}\\"},{\\"name\\":\\"ARM_TENANT_ID\\",\\"value\\":\\"\${{ vars.AZURE_TENANT_ID }}\\"},{\\"name\\":\\"ARM_SUBSCRIPTION_ID\\",\\"value\\":\\"\${{ vars.AZURE_SUBSCRIPTION_ID }}\\"},{\\"name\\":\\"ARM_USE_OIDC\\",\\"value\\":\\"true\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_URL\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_URL\\"},{\\"name\\":\\"ARM_OIDC_REQUEST_TOKEN\\",\\"value\\":\\"\$ACTIONS_ID_TOKEN_REQUEST_TOKEN\\"}`,
-  dbRecipeRegister: `          # Database: managed Azure MySQL Flexible Server (azure/terraform recipe)
-          rad recipe register default \\
-            --resource-type "Radius.Data/mySqlDatabases" \\
-            --template-kind terraform \\
-            --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Data/mySqlDatabases/recipes/azure/terraform?ref=\${{ env.RESOURCE_TYPES_CONTRIB_REF }}" \\
-            --parameters azure_subscription_id="\${{ vars.AZURE_SUBSCRIPTION_ID }}" \\
-            --parameters resourceGroupName="\${{ vars.AZURE_RESOURCE_GROUP }}" \\
-            --parameters location="\$TARGET_REGION" \\
-            --environment "\${{ env.RADIUS_ENV }}"`,
 };

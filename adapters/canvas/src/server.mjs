@@ -22,6 +22,7 @@ import {
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
@@ -307,6 +308,39 @@ function createRequestHandler(instanceId) {
         }
 
         // Create GitHub Environment with secrets/variables and commit verify workflow
+        if (pathname === "/api/app-params" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body);
+                const repo = data.repo || "";
+                if (!repo) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "No repository specified.", params: [] }));
+                    return;
+                }
+                // Resolve the branch the deploy will run against (the caller's
+                // selection, else the repo default) and locate the app.bicep the
+                // same way the deploy route does (.radius/app.bicep, then app.bicep).
+                let branch = data.branch || "";
+                if (!branch) {
+                    const def = await runCommand("gh", ["repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]).catch(() => "");
+                    branch = (def || "").trim() || "main";
+                }
+                let source = await fetchFileFromRepo(repo, ".radius/app.bicep", branch);
+                if (!source) source = await fetchFileFromRepo(repo, "app.bicep", branch);
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ branch, found: !!source, params: source ? appParams(source) : [] }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: e.message, params: [] }));
+            }
+            return;
+        }
+
         if (pathname === "/api/create-environment" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
@@ -355,7 +389,8 @@ function createRequestHandler(instanceId) {
                     if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
                     if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
                     if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (k8s) await runGh(['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (data.location) await runGh(['variable', 'set', 'AZURE_LOCATION', '--body', data.location, '--env', envName, '--repo', targetRepo]);
 
                     const setCount = [clientId, tenantId, subscriptionId, rg, k8s].filter(Boolean).length;
                     steps.push(`Set ${setCount}/5 environment values for Azure.`);
@@ -368,12 +403,58 @@ function createRequestHandler(instanceId) {
                     const accountId = data.accountId || awsCreds.accountId || '';
                     const k8s = data.cluster || '';
 
-                    if (roleArn) await runGh(['secret', 'set', 'AWS_IAM_ROLE_ARN', '--env', envName, '--repo', targetRepo], roleArn);
+                    if (roleArn) await runGh(['variable', 'set', 'AWS_ROLE_ARN', '--body', roleArn, '--env', envName, '--repo', targetRepo]);
                     if (region) await runGh(['variable', 'set', 'AWS_REGION', '--body', region, '--env', envName, '--repo', targetRepo]);
                     if (accountId) await runGh(['variable', 'set', 'AWS_ACCOUNT_ID', '--body', accountId, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (k8s) await runGh(['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
                     if (data.vpcId) await runGh(['variable', 'set', 'RADIUS_VPC_ID', '--body', data.vpcId, '--env', envName, '--repo', targetRepo]);
                     if (data.subnetIds) await runGh(['variable', 'set', 'RADIUS_SUBNET_IDS', '--body', data.subnetIds, '--env', envName, '--repo', targetRepo]);
+                }
+
+                // Step 2b: Resolve and provision application parameters. Parse the
+                // app.bicep the deploy will run against, merge any values the user
+                // supplied in the form, auto-generate a value for every required
+                // parameter that has no Bicep default and was left blank, and skip
+                // blank params that do have a default (Bicep applies it). The result
+                // is stored as a single JSON secret the deploy workflow reads and
+                // expands into `--parameters name=value` pairs.
+                try {
+                    let paramBranch = data.branch || '';
+                    if (!paramBranch) {
+                        const def = await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '');
+                        paramBranch = (def || '').trim() || 'main';
+                    }
+                    let bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', paramBranch);
+                    let bicepPath = '.radius/app.bicep';
+                    if (!bicepSource) {
+                        bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', paramBranch);
+                        bicepPath = 'app.bicep';
+                    }
+                    if (bicepSource) {
+                        const parsed = appParams(bicepSource);
+                        const resolved = resolveDeployParams(parsed, data.deployParams || {});
+                        // Split into secret (provisioned as a secret, appended by the
+                        // workflow) and non-secret (inlined into the rad deploy command).
+                        const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
+                        await runGh(['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo], Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}');
+
+                        // Build the rad deploy command with non-secret params inline and
+                        // store it as an environment variable. The deploy workflow reads
+                        // it via `inputs.rad_commands || vars.RADIUS_RAD_COMMANDS`, so it
+                        // applies on both explicit dispatch and the verify→deploy auto
+                        // trigger (where inputs are empty). Secret params are appended by
+                        // the workflow from RADIUS_DEPLOY_PARAMS.
+                        const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
+                        await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
+
+                        const names = Object.keys(resolved);
+                        if (names.length > 0) {
+                            const generated = parsed.filter((p) => !p.hasDefault && !( (data.deployParams || {})[p.name] || '' ).toString().trim()).map((p) => p.name);
+                            steps.push(`Provisioned ${names.length} application parameter(s)` + (generated.length ? ` (auto-generated: ${generated.join(', ')})` : '') + '.');
+                        }
+                    }
+                } catch (paramErr) {
+                    steps.push('⚠️ Could not resolve application parameters: ' + paramErr.message);
                 }
 
                 // Step 3: Commit the verify-credentials workflow
@@ -1767,9 +1848,9 @@ function createRequestHandler(instanceId) {
 
                 // Set variables and secrets
                 if (provider === 'azure') {
-                    if (cluster) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', cluster, '--env', env, '--repo', targetRepo]);
+                    if (cluster) await runCmd('gh', ['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', cluster, '--env', env, '--repo', targetRepo]);
                     if (resourceGroup) await runCmd('gh', ['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', resourceGroup, '--env', env, '--repo', targetRepo]);
-                    if (namespace) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
+                    if (namespace) await runCmd('gh', ['variable', 'set', 'KUBERNETES_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
                     const azSubId = oidc?.subscriptionId || oidc?.AZURE_SUBSCRIPTION_ID || '';
                     const azClientId = oidc?.clientId || oidc?.AZURE_CLIENT_ID || '';
                     const azTenantId = oidc?.tenantId || oidc?.AZURE_TENANT_ID || '';
@@ -1777,10 +1858,11 @@ function createRequestHandler(instanceId) {
                     if (azClientId) await runCmd('gh', ['variable', 'set', 'AZURE_CLIENT_ID', '--body', azClientId, '--env', env, '--repo', targetRepo]);
                     if (azTenantId) await runCmd('gh', ['variable', 'set', 'AZURE_TENANT_ID', '--body', azTenantId, '--env', env, '--repo', targetRepo]);
                 } else {
-                    if (cluster) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', cluster, '--env', env, '--repo', targetRepo]);
+                    if (cluster) await runCmd('gh', ['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', cluster, '--env', env, '--repo', targetRepo]);
                     await runCmd('gh', ['variable', 'set', 'AWS_REGION', '--body', oidc?.region || 'us-east-1', '--env', env, '--repo', targetRepo]);
-                    if (namespace) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
+                    if (namespace) await runCmd('gh', ['variable', 'set', 'KUBERNETES_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
                     if (oidc?.accountId) await runCmd('gh', ['variable', 'set', 'AWS_ACCOUNT_ID', '--body', oidc.accountId, '--env', env, '--repo', targetRepo]);
+                    if (oidc?.roleArn) await runCmd('gh', ['variable', 'set', 'AWS_ROLE_ARN', '--body', oidc.roleArn, '--env', env, '--repo', targetRepo]);
                 }
 
                 // Step 4: Trigger the workflow on the target repo

@@ -3,7 +3,56 @@
 // (`github`) injected into radius-core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+
+// The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment.
+// gh always prefers that env token over the user's stored (keyring) login, but
+// the injected token is an OAuth token minted WITHOUT the `workflow` scope, so
+// any `gh api ... PUT /contents/.github/workflows/...` is rejected with a 403.
+// When the user has a stored gh login (which the gh CLI requests with the
+// `workflow` scope), we drop the injected env tokens for `gh` invocations so gh
+// falls back to that full-scope credential. Detection is memoized and, if no
+// stored login exists, we leave the env untouched so the injected token is
+// still used.
+let _ghKeyringChecked = false;
+let _ghHasKeyring = false;
+function ghHasKeyringLogin() {
+    if (_ghKeyringChecked) return _ghHasKeyring;
+    _ghKeyringChecked = true;
+    try {
+        const isWindows = process.platform === "win32";
+        const file = isWindows ? "cmd.exe" : "gh";
+        const args = isWindows ? ["/c", "gh", "auth", "token"] : ["auth", "token"];
+        const env = { ...process.env };
+        delete env.GH_TOKEN;
+        delete env.GITHUB_TOKEN;
+        const out = execFileSync(file, args, {
+            env,
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 5000,
+            windowsHide: true,
+        })
+            .toString()
+            .trim();
+        _ghHasKeyring = out.length > 0;
+    } catch {
+        _ghHasKeyring = false;
+    }
+    return _ghHasKeyring;
+}
+
+// Build the child environment for a `gh` invocation. When a stored gh login is
+// available, strip the app-injected GH_TOKEN/GITHUB_TOKEN so gh uses the
+// full-scope keyring credential; otherwise pass the environment through
+// unchanged so the injected token still authenticates gh.
+function ghChildEnv(baseEnv) {
+    const env = { ...(baseEnv || process.env) };
+    if (ghHasKeyringLogin()) {
+        delete env.GH_TOKEN;
+        delete env.GITHUB_TOKEN;
+    }
+    return env;
+}
 
 // Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
 // API paths, …) are passed verbatim as argv and can never be interpreted as
@@ -15,12 +64,9 @@ export function cliExec(cmd, args, opts, cb) {
     const isWindows = process.platform === "win32";
     const file = isWindows ? "cmd.exe" : cmd;
     const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
-    return execFile(
-        file,
-        finalArgs,
-        { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts },
-        cb,
-    );
+    const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
+    if (cmd === "gh") execOpts.env = ghChildEnv(execOpts.env);
+    return execFile(file, finalArgs, execOpts, cb);
 }
 
 // Streaming equivalent of cliExec: spawns a CLI without a shell (argv passed
@@ -30,7 +76,9 @@ export function cliSpawn(cmd, args, opts = {}) {
     const isWindows = process.platform === "win32";
     const file = isWindows ? "cmd.exe" : cmd;
     const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
-    return spawn(file, finalArgs, { windowsHide: true, ...opts });
+    const spawnOpts = { windowsHide: true, ...opts };
+    if (cmd === "gh") spawnOpts.env = ghChildEnv(spawnOpts.env);
+    return spawn(file, finalArgs, spawnOpts);
 }
 
 // Runs a CLI and resolves with trimmed stdout. Pass `opts.stdin` to feed a value
