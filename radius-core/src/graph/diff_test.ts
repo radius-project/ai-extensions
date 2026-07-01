@@ -12,7 +12,7 @@ describe("computeGraphDiff", () => {
   });
 
   it("marks a resource present only in head as added", () => {
-    const head = [makeResource("applications.core/containers", "api")];
+    const head = [makeResource("Radius.Compute/containers", "api")];
     const result = computeGraphDiff([], head);
     expect(result).toHaveLength(1);
     expect(result[0].diffStatus).toBe("added");
@@ -20,7 +20,7 @@ describe("computeGraphDiff", () => {
   });
 
   it("marks a resource present only in base as removed", () => {
-    const base = [makeResource("applications.core/containers", "api")];
+    const base = [makeResource("Radius.Compute/containers", "api")];
     const result = computeGraphDiff(base, []);
     expect(result).toHaveLength(1);
     expect(result[0].diffStatus).toBe("removed");
@@ -28,43 +28,43 @@ describe("computeGraphDiff", () => {
   });
 
   it("marks a resource with identical id and content as unchanged", () => {
-    const base = makeResource("applications.core/containers", "api");
-    const head = makeResource("applications.core/containers", "api");
+    const base = makeResource("Radius.Compute/containers", "api");
+    const head = makeResource("Radius.Compute/containers", "api");
     const result = computeGraphDiff([base], [head]);
     expect(result).toHaveLength(1);
     expect(result[0].diffStatus).toBe("unchanged");
   });
 
   it("produces removed + added entries when a resource's type changes", () => {
-    const mongoDb = makeResource("applications.datastores/mongoDatabases", "db");
-    const postgresDb = makeResource("applications.datastores/postgreSQLDatabases", "db");
+    const mongoDb = makeResource("Radius.Data/mongoDatabases", "db");
+    const postgresDb = makeResource("Radius.Data/postgreSQLDatabases", "db");
     const result = computeGraphDiff([mongoDb], [postgresDb]);
 
     expect(result).toHaveLength(2);
-    const removed = result.find((r) => r.type === "applications.datastores/mongoDatabases");
-    const added = result.find((r) => r.type === "applications.datastores/postgreSQLDatabases");
+    const removed = result.find((r) => r.type === "Radius.Data/mongoDatabases");
+    const added = result.find((r) => r.type === "Radius.Data/postgreSQLDatabases");
     expect(removed?.diffStatus).toBe("removed");
     expect(added?.diffStatus).toBe("added");
   });
 
   it("marks a container as modified when the db it connects to changes type", () => {
-    const mongoId = buildResourceID("applications.datastores/mongoDatabases", "db");
-    const postgresId = buildResourceID("applications.datastores/postgreSQLDatabases", "db");
+    const mongoId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const postgresId = buildResourceID("Radius.Data/postgreSQLDatabases", "db");
 
-    const baseContainer = makeResource("applications.core/containers", "api", {
+    const baseContainer = makeResource("Radius.Compute/containers", "api", {
       connections: [{ id: mongoId, direction: "Outbound" }],
     });
-    const headContainer = makeResource("applications.core/containers", "api", {
+    const headContainer = makeResource("Radius.Compute/containers", "api", {
       connections: [{ id: postgresId, direction: "Outbound" }],
     });
-    const mongoDb = makeResource("applications.datastores/mongoDatabases", "db");
-    const postgresDb = makeResource("applications.datastores/postgreSQLDatabases", "db");
+    const mongoDb = makeResource("Radius.Data/mongoDatabases", "db");
+    const postgresDb = makeResource("Radius.Data/postgreSQLDatabases", "db");
 
     const result = computeGraphDiff([baseContainer, mongoDb], [headContainer, postgresDb]);
 
     const container = result.find((r) => r.name === "api");
-    const mongo = result.find((r) => r.type === "applications.datastores/mongoDatabases");
-    const postgres = result.find((r) => r.type === "applications.datastores/postgreSQLDatabases");
+    const mongo = result.find((r) => r.type === "Radius.Data/mongoDatabases");
+    const postgres = result.find((r) => r.type === "Radius.Data/postgreSQLDatabases");
 
     expect(container?.diffStatus).toBe("modified");
     expect(mongo?.diffStatus).toBe("removed");
@@ -72,9 +72,9 @@ describe("computeGraphDiff", () => {
   });
 
   it("marks a resource as modified when connections change", () => {
-    const base = [makeResource("applications.core/containers", "api", { connections: [] })];
+    const base = [makeResource("Radius.Compute/containers", "api", { connections: [] })];
     const head = [
-      makeResource("applications.core/containers", "api", {
+      makeResource("Radius.Compute/containers", "api", {
         connections: [{ id: "some-id", direction: "Outbound" }],
       }),
     ];
@@ -95,7 +95,7 @@ describe("computeGraphDiff", () => {
   });
 
   it("reports all four statuses together in one diff", () => {
-    const type = "applications.core/containers";
+    const type = "Radius.Compute/containers";
     const unchanged = makeResource(type, "unchanged");
     const removed = makeResource(type, "removed");
     const added = makeResource(type, "added");
@@ -119,7 +119,7 @@ describe("computeGraphDiff", () => {
   });
 
   it("preserves all resource fields on diffed entries", () => {
-    const r = makeResource("applications.core/containers", "api");
+    const r = makeResource("Radius.Compute/containers", "api");
     const result = computeGraphDiff([], [r]);
     expect(result[0]).toMatchObject({ id: r.id, name: r.name, type: r.type });
   });
