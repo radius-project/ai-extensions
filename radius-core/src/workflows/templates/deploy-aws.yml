@@ -341,14 +341,6 @@ jobs:
           cat bicepconfig.json
 
       - name: Create Radius environment and recipe pack
-        env:
-          # Registry credentials for the containerImages image push, provisioned
-          # the Radius-native way: a Radius.Security/secrets resource materializes
-          # them into the environment namespace where the containerImages recipe
-          # reads them. Passed as secure deploy parameters so the token is never
-          # written into the generated bicep (which is echoed) and is masked in logs.
-          REGISTRY_USERNAME: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ env.RESOURCE_TYPES_CONTRIB_REPO }}"
           REF="${{ env.RESOURCE_TYPES_CONTRIB_REF }}"
@@ -358,8 +350,11 @@ jobs:
           # The recipe builds images with the in-pod BuildKit and pushes them to
           # $BUILD_REGISTRY, authenticating with the Kubernetes Secret named
           # $REGISTRY_SECRET_NAME. That secret is provisioned the Radius-native way
-          # by the Radius.Security/secrets resource below (environment-scoped, so it
-          # materializes into the environment namespace where the recipe reads it).
+          # by an application-scoped Radius.Security/secrets resource declared in the
+          # app's own bicep, so it materializes into the application namespace where
+          # the recipe reads it (context.runtime.kubernetes.namespace). Only the
+          # secret NAME is wired here via the recipe pack's registrySecretName; the
+          # credentials themselves are supplied to the app deploy step further below.
           # The registry path must be lowercase.
           BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository_owner) }}" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="ghcr-registry-creds"
@@ -393,12 +388,6 @@ jobs:
           # recipe and a Radius.Core/environments resource that references it.
           cat > radius-env.bicep <<EOF
           extension radius
-
-          @description('Registry username for containerImages image push.')
-          param registryUsername string
-          @secure()
-          @description('Registry password/token for containerImages image push.')
-          param registryPassword string
 
           resource recipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
             name: '$PACK_NAME'
@@ -451,30 +440,13 @@ jobs:
               }
             }
           }
-
-          resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
-            name: '$REGISTRY_SECRET_NAME'
-            properties: {
-              environment: env.id
-              data: {
-                username: {
-                  value: registryUsername
-                }
-                password: {
-                  value: registryPassword
-                }
-              }
-            }
-          }
           EOF
 
           echo "Generated radius-env.bicep:"
           cat radius-env.bicep
           echo ""
           echo "Deploying Radius.Core/environments and recipe pack..."
-          rad deploy radius-env.bicep \
-            --parameters registryUsername="$REGISTRY_USERNAME" \
-            --parameters registryPassword="$REGISTRY_PASSWORD"
+          rad deploy radius-env.bicep
           echo "✅ Environment '$ENVIRONMENT' created with recipe pack."
 
       - name: Verify app namespace on target cluster
@@ -504,6 +476,12 @@ jobs:
           # by the default deploy below. Read via the environment (not inlined into
           # the script) so values with quotes/newlines can't break the shell.
           RADIUS_DEPLOY_PARAMS: ${{ secrets.RADIUS_DEPLOY_PARAMS }}
+          # Registry credentials for the Radius.Compute/containerImages image push.
+          # The app's application-scoped Radius.Security/secrets resource materializes
+          # these into the app namespace where the recipe reads them, so they are passed
+          # as secure bicep parameters to `rad deploy $APP_FILE` (never inlined/recorded).
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
           # pipefail so a failed `rad` whose output is piped through `tee` is detected
           # via PIPESTATUS rather than masked by tee's exit code.
@@ -516,6 +494,15 @@ jobs:
           if ! grep -q 'extension radiusCompute' "$APP_FILE" 2>/dev/null; then
             echo "Injecting 'extension radiusCompute' into $APP_FILE"
             sed -i '/^extension radius$/a extension radiusCompute' "$APP_FILE" 2>/dev/null || true
+          fi
+
+          # Only pass registry credentials when the app bicep actually declares the
+          # registryUsername/registryPassword params (i.e. it uses containerImages with
+          # an authenticated registry). Passing parameters the template doesn't declare
+          # would fail the deploy, so guard on their presence.
+          APP_WANTS_REGISTRY_CREDS=0
+          if grep -q 'param registryUsername' "$APP_FILE" 2>/dev/null; then
+            APP_WANTS_REGISTRY_CREDS=1
           fi
 
           # Aggregate result accumulators. The result is written by a trap on EXIT so
@@ -618,6 +605,10 @@ jobs:
                 if [ -n "$APP_IMAGE" ]; then
                   EXTRA_PARAMS+=(--parameters "image=$APP_IMAGE")
                 fi
+                if [ "$APP_WANTS_REGISTRY_CREDS" = "1" ]; then
+                  EXTRA_PARAMS+=(--parameters "registryUsername=$REGISTRY_USERNAME")
+                  EXTRA_PARAMS+=(--parameters "registryPassword=$REGISTRY_PASSWORD")
+                fi
                 if [ -n "${RADIUS_DEPLOY_PARAMS//[[:space:]]/}" ]; then
                   while IFS= read -r _pname; do
                     [ -z "$_pname" ] && continue
@@ -651,6 +642,10 @@ jobs:
             DEPLOY_PARAMS=()
             if [ -n "$APP_IMAGE" ]; then
               DEPLOY_PARAMS+=(--parameters "image=$APP_IMAGE")
+            fi
+            if [ "$APP_WANTS_REGISTRY_CREDS" = "1" ]; then
+              DEPLOY_PARAMS+=(--parameters "registryUsername=$REGISTRY_USERNAME")
+              DEPLOY_PARAMS+=(--parameters "registryPassword=$REGISTRY_PASSWORD")
             fi
             # Expand the application parameters JSON ({"name":"value", …}) into
             # --parameters name=value pairs. Each value is read back from the JSON
