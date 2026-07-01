@@ -1,0 +1,25 @@
+name: Radius - Verify Credentials
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to verify'
+        required: true
+        default: '{{ENV}}'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+{{VERIFY_STEPS}}
+      - name: Summary
+        run: |
+          echo "## ✅ Credentials Verified" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "Provider: {{PROVIDER_ID}}" >> $GITHUB_STEP_SUMMARY

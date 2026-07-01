@@ -1,33 +1,17 @@
 import type { ComputePlatform } from "../platforms/index.js";
+import { fillTemplate } from "./template.js";
+import verifyTemplate from "./templates/verify.yml";
 
-/** Generate the credential-verification GitHub Actions workflow YAML. */
+/**
+ * Build the credential-verification GitHub Actions workflow YAML from the static
+ * `templates/verify.yml` template. The template is committed as-is; only the
+ * `{{ENV}}`, `{{VERIFY_STEPS}}`, and `{{PROVIDER_ID}}` placeholders are filled
+ * in — the workflow is never generated inline.
+ */
 export function generateVerifyWorkflow(env: string, platform: ComputePlatform): string {
-  const steps = platform.verifyWorkflowSteps;
-  const providerId = platform.id;
-  return `name: Radius - Verify Credentials
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to verify'
-        required: true
-        default: '${env}'
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    environment: \${{ inputs.environment }}
-    steps:
-      - uses: actions/checkout@v4
-${steps}
-      - name: Summary
-        run: |
-          echo "## ✅ Credentials Verified" >> \$GITHUB_STEP_SUMMARY
-          echo "Environment: \${{ inputs.environment }}" >> \$GITHUB_STEP_SUMMARY
-          echo "Provider: ${providerId}" >> \$GITHUB_STEP_SUMMARY
-`;
+  return fillTemplate(verifyTemplate, {
+    ENV: env,
+    VERIFY_STEPS: platform.verifyWorkflowSteps,
+    PROVIDER_ID: platform.id,
+  });
 }

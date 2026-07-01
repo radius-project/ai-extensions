@@ -41,6 +41,9 @@ build/Release
 node_modules/
 jspm_packages/
 
+# Corepack package-manager cache (created when COREPACK_HOME points into the repo)
+.corepack-cache/
+
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
 

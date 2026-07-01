@@ -1682,18 +1682,23 @@ async function generateRecipeFromContrib(gh, radiusType, provider) {
   return { resources: staticResult, source: "static-fallback", recipe: null };
 }
 
-// radius-core/src/workflows/verify.ts
-function generateVerifyWorkflow(env, platform) {
-  const steps = platform.verifyWorkflowSteps;
-  const providerId = platform.id;
-  return `name: Radius - Verify Credentials
+// radius-core/src/workflows/template.ts
+function fillTemplate(template, vars) {
+  return template.replace(
+    /\{\{([A-Z_]+)\}\}/g,
+    (match, key) => Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match
+  );
+}
+
+// radius-core/src/workflows/templates/verify.yml
+var verify_default = `name: Radius - Verify Credentials
 on:
   workflow_dispatch:
     inputs:
       environment:
         description: 'Environment to verify'
         required: true
-        default: '${env}'
+        default: '{{ENV}}'
 
 permissions:
   id-token: write
@@ -1705,455 +1710,36 @@ jobs:
     environment: \${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
-${steps}
+{{VERIFY_STEPS}}
       - name: Summary
         run: |
           echo "## \u2705 Credentials Verified" >> $GITHUB_STEP_SUMMARY
           echo "Environment: \${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "Provider: ${providerId}" >> $GITHUB_STEP_SUMMARY
+          echo "Provider: {{PROVIDER_ID}}" >> $GITHUB_STEP_SUMMARY
 `;
+
+// radius-core/src/workflows/verify.ts
+function generateVerifyWorkflow(env, platform) {
+  return fillTemplate(verify_default, {
+    ENV: env,
+    VERIFY_STEPS: platform.verifyWorkflowSteps,
+    PROVIDER_ID: platform.id
+  });
 }
+
+// radius-core/src/workflows/templates/deploy.yml
+var deploy_default = 'name: Deploy Radius Application\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        description: \'Radius environment name\'\n        required: true\n        default: \'{{ENV}}\'\n  workflow_run:\n    workflows: ["Radius - Verify Credentials"]\n    types: [completed]\n\npermissions:\n  id-token: write\n  contents: write\n\nenv:\n  RESOURCE_TYPES_CONTRIB_REF: update-secrets\n  RADIUS_ENV: ${{ inputs.environment || \'{{ENV}}\' }}\n\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    environment: ${{ inputs.environment || \'{{ENV}}\' }}\n    if: ${{ github.event_name == \'workflow_dispatch\' || github.event.workflow_run.conclusion == \'success\' }}\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Build and push application image\n        run: |\n          set -euo pipefail\n          # Build the app container image from the repo Dockerfile and push it to\n          # GHCR so the Radius container runs the REAL application instead of a\n          # base-image placeholder (a bare base image has no app code or start\n          # command and crash-loops, hanging the deploy). The package is private;\n          # a pull secret is injected into the deploy namespace below so the\n          # target cluster can pull it. Requires an environment secret GHCR_PAT\n          # (a PAT with write:packages). Skipped when the repo has no Dockerfile.\n          if [ ! -f Dockerfile ]; then\n            echo "No Dockerfile found; skipping image build (app.bicep default image will be used)"\n            exit 0\n          fi\n          if [ -z "${{ secrets.GHCR_PAT }}" ]; then\n            echo "\u274C GHCR_PAT secret is not set. Add a PAT with write:packages as an environment secret named GHCR_PAT." >&2\n            exit 1\n          fi\n          IMAGE_BASE="ghcr.io/$(echo \'${{ github.repository }}\' | tr \'[:upper:]\' \'[:lower:]\')"\n          IMAGE="${IMAGE_BASE}:${{ github.sha }}"\n          echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin\n          docker build -t "$IMAGE" -t "${IMAGE_BASE}:latest" .\n          docker push "$IMAGE"\n          docker push "${IMAGE_BASE}:latest"\n          echo "APP_IMAGE=$IMAGE" >> "$GITHUB_ENV"\n          echo "\u2705 Pushed $IMAGE"\n{{CLUSTER_AUTH}}\n      - name: Install k3d\n        env:\n          K3D_VERSION: v5.7.4\n        run: |\n          # Download a pinned, released k3d binary instead of piping a remote\n          # install script into bash, so the install is deterministic and not\n          # subject to upstream script changes.\n          curl -sfL -o /tmp/k3d "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"\n          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d\n          k3d version\n\n      - name: Create k3d cluster for Radius control plane\n        run: |\n          for attempt in 1 2 3; do\n            if k3d cluster create radius-cp --no-lb --wait; then\n              break\n            fi\n            echo "k3d cluster creation attempt $attempt failed; retrying..."\n            k3d cluster delete radius-cp || true\n            sleep 10\n          done\n          k3d cluster list | grep -q radius-cp\n\n      - name: Install Radius CLI\n        run: |\n          for attempt in 1 2 3; do\n            if wget -q "https://raw.githubusercontent.com/radius-project/radius/main/deploy/install.sh" -O /tmp/rad-install.sh && /bin/bash /tmp/rad-install.sh; then\n              break\n            fi\n            echo "Radius CLI install attempt $attempt failed; retrying..."\n            sleep 10\n          done\n          rad version || { echo "\u274C Radius CLI install failed"; exit 1; }\n\n      - name: Install Radius Control Plane on k3d\n        run: |\n          rad install kubernetes --set rp.publicEndpointOverride=localhost\n\n      - name: Point recipe execution at target cluster\n        run: |\n          # Mount the static target-cluster kubeconfig into dynamic-rp so that\n          # recipe-provisioned resources (containers, databases) land on the\n          # TARGET cluster instead of the ephemeral k3d control-plane cluster.\n          kubectl create secret generic radius-target-kubeconfig \\\n            -n radius-system --from-file=kubeconfig="$TARGET_KUBECONFIG"\n          CN=$(kubectl get deployment dynamic-rp -n radius-system -o jsonpath=\'{.spec.template.spec.containers[0].name}\')\n          kubectl patch deployment dynamic-rp -n radius-system --type strategic -p "{\\"spec\\":{\\"template\\":{\\"spec\\":{\\"containers\\":[{\\"name\\":\\"$CN\\",\\"env\\":[{\\"name\\":\\"KUBECONFIG\\",\\"value\\":\\"/var/run/target/kubeconfig\\"},{\\"name\\":\\"KUBE_CONFIG_PATH\\",\\"value\\":\\"/var/run/target/kubeconfig\\"}{{RECIPE_AUTH_ENV}}],\\"volumeMounts\\":[{\\"name\\":\\"target-kubeconfig\\",\\"mountPath\\":\\"/var/run/target\\",\\"readOnly\\":true}]}],\\"volumes\\":[{\\"name\\":\\"target-kubeconfig\\",\\"secret\\":{\\"secretName\\":\\"radius-target-kubeconfig\\"}}]}}}}"\n          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=180s\n\n      - name: Configure external deployment target\n        run: |\n          rad workspace create kubernetes default\n          rad group create default\n          rad group switch default\n          rad env create "${{ env.RADIUS_ENV }}" --namespace "${{ env.RADIUS_ENV }}"\n          rad env switch "${{ env.RADIUS_ENV }}"\n          {{RAD_CRED_REGISTER}}\n\n      - name: Reset application namespace on target cluster\n        run: |\n          # Radius creates the app namespace on the (k3d) control-plane cluster,\n          # but recipes execute against the target cluster. The k3d control plane\n          # (and thus terraform state) is ephemeral, so reset the target app\n          # namespace each run to keep deploys idempotent and conflict-free.\n          for ns in "${{ env.RADIUS_ENV }}-${{ env.RADIUS_ENV }}"; do\n            kubectl --kubeconfig "$TARGET_KUBECONFIG" delete namespace "$ns" --ignore-not-found --wait=true\n          done\n          for ns in "${{ env.RADIUS_ENV }}" "${{ env.RADIUS_ENV }}-${{ env.RADIUS_ENV }}"; do\n            kubectl --kubeconfig "$TARGET_KUBECONFIG" create namespace "$ns" \\\n              --dry-run=client -o yaml | kubectl --kubeconfig "$TARGET_KUBECONFIG" apply -f -\n          done\n          # If we built a private app image, give the deploy namespace\'s default\n          # service account a GHCR pull secret. Radius schedules container pods\n          # under the "default" SA with no imagePullSecrets, so without this the\n          # private image can\'t be pulled on the target cluster.\n          if [ -n "${APP_IMAGE:-}" ]; then\n            NS="${{ env.RADIUS_ENV }}-${{ env.RADIUS_ENV }}"\n            kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" create secret docker-registry ghcr-pull \\\n              --docker-server=ghcr.io \\\n              --docker-username="${{ github.actor }}" \\\n              --docker-password="${{ secrets.GHCR_PAT }}" \\\n              --dry-run=client -o yaml | kubectl --kubeconfig "$TARGET_KUBECONFIG" apply -f -\n            for i in $(seq 1 30); do\n              kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" get serviceaccount default >/dev/null 2>&1 && break\n              sleep 2\n            done\n            kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" patch serviceaccount default \\\n              -p \'{"imagePullSecrets":[{"name":"ghcr-pull"}]}\'\n          fi\n\n      - name: Register resource types and recipes\n        run: |\n          git clone --depth 1 --branch ${{ env.RESOURCE_TYPES_CONTRIB_REF }} https://github.com/radius-project/resource-types-contrib.git /tmp/rtc\n          REF="${{ env.RESOURCE_TYPES_CONTRIB_REF }}"\n          # resource-types-contrib layout: <Category>/<typeName>/<typeName>.yaml\n          # with recipes under <Category>/<typeName>/recipes/kubernetes/{terraform,bicep}\n          for type_dir in /tmp/rtc/*/*/; do\n            type_name=$(basename "$type_dir")\n            yaml="${type_dir}${type_name}.yaml"\n            [ -f "$yaml" ] || continue\n            # The database recipe is registered explicitly below (provider-gated,\n            # cloud-managed), so skip it in the generic kubernetes recipe loop.\n            [ "$type_name" = "mySqlDatabases" ] && continue\n            ns=$(grep -E \'^namespace:\' "$yaml" | head -1 | awk \'{print $2}\')\n            [ -z "$ns" ] && continue\n            echo "Registering $ns/$type_name"\n            rad resource-type create -f "$yaml" || true\n            rel=${type_dir#/tmp/rtc/}\n            rel=${rel%/}\n            if [ -d "${type_dir}recipes/kubernetes/terraform" ]; then\n              rad recipe register default \\\n                --resource-type "$ns/$type_name" \\\n                --template-kind terraform \\\n                --template-path "git::https://github.com/radius-project/resource-types-contrib.git//${rel}/recipes/kubernetes/terraform?ref=${REF}" \\\n                --environment "${{ env.RADIUS_ENV }}" || true\n            elif [ -d "${type_dir}recipes/kubernetes/bicep" ]; then\n              rad recipe register default \\\n                --resource-type "$ns/$type_name" \\\n                --template-kind bicep \\\n                --template-path "${type_dir}recipes/kubernetes/bicep" \\\n                --environment "${{ env.RADIUS_ENV }}" || true\n            fi\n          done\n{{DB_RECIPE_REGISTER}}\n          echo "\u2705 Resource types and recipes registered"\n\n      - name: Reload control plane to pick up new resource types\n        run: |\n          # Newly-created (non-default) resource types are not recognised by the\n          # deployment engine / UCP until their pods refresh their provider cache.\n          kubectl rollout restart deployment -n radius-system\n          kubectl rollout status deployment -n radius-system --timeout=240s\n\n      - name: Register custom resource types and recipes (post-reload)\n        run: |\n          # Repo-local custom resource types (generated on the fly when a type\n          # has no recipe in resource-types-contrib, e.g. redisCaches) MUST be\n          # registered AFTER the control-plane reload. The reload re-seeds the\n          # built-in default registrations (Radius.Compute/*,\n          # Radius.Data/mySqlDatabases, Radius.Security/secrets) into each\n          # provider\'s "global" location, OVERWRITING any non-built-in types\n          # registered earlier \u2014 so registering before the reload would be lost\n          # on every (re)run and break the deploy. UCP resolves resource types by\n          # reading the location live, so registering here (after the re-seed)\n          # makes them routable without another restart. Layout mirrors contrib:\n          # .radius/resource-types/<category>/<typeName>/<typeName>.yaml with\n          # recipes under <typeName>/recipes/kubernetes/{terraform,bicep}. The\n          # recipe is fetched by the deployment engine over git from this repo,\n          # so the repo must be public (same constraint as contrib).\n          for type_dir in "$GITHUB_WORKSPACE"/.radius/resource-types/*/*/; do\n            [ -d "$type_dir" ] || continue\n            type_name=$(basename "$type_dir")\n            yaml="${type_dir}${type_name}.yaml"\n            [ -f "$yaml" ] || continue\n            ns=$(grep -E \'^namespace:\' "$yaml" | head -1 | awk \'{print $2}\')\n            [ -z "$ns" ] && continue\n            echo "Registering custom $ns/$type_name from repo"\n            rad resource-type create -f "$yaml"\n            rel=${type_dir#$GITHUB_WORKSPACE/}\n            rel=${rel%/}\n            if [ -d "${type_dir}recipes/kubernetes/terraform" ]; then\n              rad recipe register default \\\n                --resource-type "$ns/$type_name" \\\n                --template-kind terraform \\\n                --template-path "git::https://github.com/${{ github.repository }}.git//${rel}/recipes/kubernetes/terraform?ref=${{ github.sha }}" \\\n                --environment "${{ env.RADIUS_ENV }}"\n            elif [ -d "${type_dir}recipes/kubernetes/bicep" ]; then\n              rad recipe register default \\\n                --resource-type "$ns/$type_name" \\\n                --template-kind bicep \\\n                --template-path "${type_dir}recipes/kubernetes/bicep" \\\n                --environment "${{ env.RADIUS_ENV }}"\n            fi\n          done\n          echo "\u2705 Custom resource types and recipes registered"\n\n      - name: Build Bicep extensions for custom resource types\n        run: |\n          # Custom resource types (e.g. redisCaches) are not part of the\n          # published radius Bicep extension, so Bicep would route them to the\n          # Azure ARM provider and fail. Publish a local Bicep extension from\n          # each repo-local type manifest so app.bicep can resolve the type and\n          # target the Radius control plane. bicepconfig.json references these\n          # as ./bicep-extensions/<typeName>.tgz (relative to .radius/).\n          mkdir -p .radius/bicep-extensions\n          for type_dir in "$GITHUB_WORKSPACE"/.radius/resource-types/*/*/; do\n            [ -d "$type_dir" ] || continue\n            type_name=$(basename "$type_dir")\n            yaml="${type_dir}${type_name}.yaml"\n            [ -f "$yaml" ] || continue\n            echo "Publishing Bicep extension for $type_name"\n            rad bicep publish-extension -f "$yaml" --target ".radius/bicep-extensions/${type_name}.tgz" --force\n          done\n\n      - name: Ensure bicepconfig.json exists\n        run: |\n          # bicep cannot compile app.bicep (rad deploy) without a bicepconfig.json\n          # that registers the Radius extension types. The Radius Canvas extension normally\n          # commits this next to app.bicep, but if it is missing at deploy time we\n          # synthesize one here so the deployment never fails for a missing config.\n          set -uo pipefail\n          if [ -f "app.bicep" ]; then CFG_DIR="."; else CFG_DIR=".radius"; fi\n          CFG="$CFG_DIR/bicepconfig.json"\n          if [ -f "$CFG" ]; then\n            echo "\u2705 Found existing $CFG"\n          else\n            echo "\u26A0 $CFG not found \u2014 generating it"\n            mkdir -p "$CFG_DIR"\n            {\n              echo \'{\'\n              echo \'  "experimentalFeaturesEnabled": { "extensibility": true },\'\n              echo \'  "extensions": {\'\n              # Reference each repo-local custom resource type extension (published as\n              # ./bicep-extensions/<typeName>.tgz above) so custom types resolve.\n              if [ -d "$CFG_DIR/bicep-extensions" ]; then\n                for tgz in "$CFG_DIR"/bicep-extensions/*.tgz; do\n                  [ -f "$tgz" ] || continue\n                  tname=$(basename "$tgz" .tgz)\n                  echo "    \\"$tname\\": \\"./bicep-extensions/$tname.tgz\\","\n                done\n              fi\n              echo \'    "radius": "br:biceptypes.azurecr.io/radius:latest"\'\n              echo \'  }\'\n              echo \'}\'\n            } > "$CFG"\n            echo "Generated $CFG:"\n            cat "$CFG"\n          fi\n\n      - name: Deploy Application\n        run: |\n          set -uo pipefail\n          # Azure MySQL requires 8-128 chars with 3 of: upper, lower, digit, special.\n          DB_PASSWORD="Aa1!$(openssl rand -hex 16)"\n          if [ -f "{{APP_FILE}}" ]; then APP="{{APP_FILE}}"; elif [ -f "app.bicep" ]; then APP="app.bicep"; elif [ -f ".radius/app.bicep" ]; then APP=".radius/app.bicep"; else echo "\u274C No app.bicep found in repository"; exit 1; fi\n          echo "Deploying $APP"\n\n          LOG="$RUNNER_TEMP/rad-deploy.log"\n          : > "$LOG"\n\n          # \u2500\u2500 Radius control-plane log tail \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n          # The Radius control plane runs on the in-runner k3d cluster. Recipe\n          # execution (terraform/bicep) and deployment-engine orchestration emit\n          # real-time logs from the radius-system pods \u2014 a lower-latency, more\n          # detailed source than the Azure activity log (and the authoritative\n          # place the exact terraform/recipe failure cause is printed).\n          CP_LOG="$RUNNER_TEMP/deploy-controlplane.log"\n          : > "$CP_LOG"\n          CP_CTX="k3d-radius-cp"\n          start_cp_tail() {\n            kubectl config get-contexts "$CP_CTX" >/dev/null 2>&1 || CP_CTX="$(kubectl config current-context 2>/dev/null)"\n            for d in $(kubectl --context "$CP_CTX" -n radius-system get deploy -o name 2>/dev/null); do\n              ( kubectl --context "$CP_CTX" -n radius-system logs "$d" \\\n                  --all-containers=true -f --since=10s --prefix=true 2>/dev/null \\\n                | stdbuf -oL grep -iE \'recipe|terraform|tofu|deploymentengine|deployment engine|provision|creating|creation complete|succeeded|completed|processing|updating|destroy|apply|error|fail|azurerm_|aws_|/providers/|radius.|applications.\' \\\n                >> "$CP_LOG" ) &\n            done\n          }\n          start_cp_tail || true\n\n          # \u2500\u2500 Azure activity-log poller \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n          # Captures fine-grained per-resource provisioning status from the\n          # target resource group\'s activity log so the Radius Canvas can color\n          # each planned graph node (yellow\u2192green/red) as Azure creates it.\n          ACTIVITY_LOG="$RUNNER_TEMP/deploy-activity.log"\n          : > "$ACTIVITY_LOG"\n          ACT_RG="${{ vars.AZURE_RESOURCE_GROUP }}"\n          ACT_START=$(date -u -d \'-2 minutes\' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)\n          refresh_activity() {\n            [ -z "$ACT_RG" ] && return 0\n            az monitor activity-log list \\\n              --resource-group "$ACT_RG" \\\n              --start-time "$ACT_START" \\\n              --query "[?resourceId!=null].{status:status.value, rid:resourceId, op:operationName.localizedValue, t:eventTimestamp}" \\\n              -o json 2>/dev/null > "$RUNNER_TEMP/activity-raw.json" || return 0\n            jq -r \'sort_by(.t) | .[] | "\\(.status)|\\(.rid)|\\(.op)"\' "$RUNNER_TEMP/activity-raw.json" 2>/dev/null > "$ACTIVITY_LOG" || true\n          }\n\n          # \u2500\u2500 Live progress publisher \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n          # Publishes the growing rad-deploy log AND the activity log to a\n          # throwaway branch (radius-deploy-status) so the Radius Canvas can poll\n          # real per-resource status in real time. The branch is force-reset on\n          # every deploy.\n          STATUS_BRANCH="radius-deploy-status"\n          STATUS_DIR="$RUNNER_TEMP/radius-status"\n          rm -rf "$STATUS_DIR"; mkdir -p "$STATUS_DIR"\n          (\n            cd "$STATUS_DIR"\n            git init -q\n            git checkout -q --orphan "$STATUS_BRANCH"\n            git config user.email "github-actions[bot]@users.noreply.github.com"\n            git config user.name "github-actions[bot]"\n            git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"\n          ) || true\n          publish() {\n            cp "$LOG" "$STATUS_DIR/deploy-progress.log" 2>/dev/null || true\n            cp "$ACTIVITY_LOG" "$STATUS_DIR/deploy-activity.log" 2>/dev/null || true\n            cp "$CP_LOG" "$STATUS_DIR/deploy-controlplane.log" 2>/dev/null || true\n            printf \'%s\\n\' "$1" > "$STATUS_DIR/deploy-state.txt"\n            (\n              cd "$STATUS_DIR"\n              git add -A >/dev/null 2>&1 || true\n              git commit -q --allow-empty -m "deploy progress: $1" >/dev/null 2>&1 || true\n              git push -q -f origin "$STATUS_BRANCH" >/dev/null 2>&1 || true\n            )\n          }\n\n          # \u2500\u2500 Run rad deploy in the FOREGROUND, streaming output live \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n          # rad deploy runs in the foreground and its combined stdout+stderr is\n          # piped through tee so EVERY line (including errors) shows up in the\n          # GitHub Actions workflow log in real time for debugging, while also\n          # being appended to the live log file the canvas polls. A lightweight\n          # background helper publishes periodic status snapshots to the status\n          # branch so the canvas\'s live progress view keeps updating during the\n          # deploy.\n          DEPLOY_START=$(date -u +%s)\n          echo "\u25B6 Deployment started at $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$LOG"\n\n          refresh_activity\n          publish "in_progress"\n          (\n            while true; do\n              refresh_activity\n              publish "in_progress"\n              sleep 5\n            done\n          ) &\n          PUB_PID=$!\n\n          IMG_ARG=""\n          [ -n "${APP_IMAGE:-}" ] && IMG_ARG="-p appImage=$APP_IMAGE"\n          rad deploy "$APP" --environment "${{ env.RADIUS_ENV }}" --application "${{ env.RADIUS_ENV }}" -p dbPassword="$DB_PASSWORD" $IMG_ARG 2>&1 | tee -a "$LOG"\n          RAD_EXIT=${PIPESTATUS[0]}\n\n          kill "$PUB_PID" 2>/dev/null || true\n          wait "$PUB_PID" 2>/dev/null || true\n\n          DEPLOY_END=$(date -u +%s)\n          echo "\u25A0 Deployment finished at $(date -u +%Y-%m-%dT%H:%M:%SZ) (exit $RAD_EXIT, $((DEPLOY_END - DEPLOY_START))s)" | tee -a "$LOG"\n\n          refresh_activity\n\n          # Capture the deployed application graph and stage it for the status\n          # branch so the canvas can render the REAL deployed graph.\n          if [ "$RAD_EXIT" -eq 0 ]; then\n            APP_NAME=$(rad app list -o json 2>/dev/null | jq -r \'.[0].name // empty\')\n            if [ -n "$APP_NAME" ]; then\n              rad app graph -a "$APP_NAME" -o json > "$STATUS_DIR/deploy-graph.json" 2>/dev/null || true\n            fi\n          fi\n\n          # Final publish: write the COMPLETE log + deployed graph, THEN the\n          # terminal state marker LAST. Settle and publish twice so the very last\n          # bytes reliably land on the status branch before the job exits.\n          STATE=$([ "$RAD_EXIT" -eq 0 ] && echo "succeeded" || echo "failed")\n          publish "$STATE"\n          sleep 4\n          publish "$STATE"\n\n          # rad deploy output already streamed live to this workflow log above\n          # (via tee), so no need to re-dump it. On failure, surface the radius\n          # control-plane / recipe log too, since that holds the authoritative\n          # terraform/recipe failure cause.\n          if [ "$RAD_EXIT" -ne 0 ] && [ -s "$CP_LOG" ]; then\n            echo "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 radius control-plane / recipe log \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"\n            cat "$CP_LOG"\n          fi\n          exit "$RAD_EXIT"\n\n      - name: Show Application Status\n        run: |\n          APP_NAME=$(rad app list -o json | jq -r \'.[0].name // empty\')\n          if [ -n "$APP_NAME" ]; then\n            rad app graph -a "$APP_NAME"\n          else\n            echo "No application found after deploy"\n          fi\n        continue-on-error: true\n';
 
 // radius-core/src/workflows/deploy.ts
 function generateDeployWorkflow(env, platform, appFile) {
-  const clusterAuth = platform.deployClusterAuthSteps;
-  const radCredRegister = platform.radCredentialRegister;
-  const recipeAuthEnv = platform.recipeAuthEnv;
-  const dbRecipeRegister = platform.dbRecipeRegister;
-  return `name: Deploy Radius Application
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Radius environment name'
-        required: true
-        default: '${env}'
-  workflow_run:
-    workflows: ["Radius - Verify Credentials"]
-    types: [completed]
-
-permissions:
-  id-token: write
-  contents: write
-
-env:
-  RESOURCE_TYPES_CONTRIB_REF: update-secrets
-  RADIUS_ENV: \${{ inputs.environment || '${env}' }}
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: \${{ inputs.environment || '${env}' }}
-    if: \${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and push application image
-        run: |
-          set -euo pipefail
-          # Build the app container image from the repo Dockerfile and push it to
-          # GHCR so the Radius container runs the REAL application instead of a
-          # base-image placeholder (a bare base image has no app code or start
-          # command and crash-loops, hanging the deploy). The package is private;
-          # a pull secret is injected into the deploy namespace below so the
-          # target cluster can pull it. Requires an environment secret GHCR_PAT
-          # (a PAT with write:packages). Skipped when the repo has no Dockerfile.
-          if [ ! -f Dockerfile ]; then
-            echo "No Dockerfile found; skipping image build (app.bicep default image will be used)"
-            exit 0
-          fi
-          if [ -z "\${{ secrets.GHCR_PAT }}" ]; then
-            echo "\u274C GHCR_PAT secret is not set. Add a PAT with write:packages as an environment secret named GHCR_PAT." >&2
-            exit 1
-          fi
-          IMAGE_BASE="ghcr.io/$(echo '\${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          IMAGE="\${IMAGE_BASE}:\${{ github.sha }}"
-          echo "\${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "\${{ github.actor }}" --password-stdin
-          docker build -t "$IMAGE" -t "\${IMAGE_BASE}:latest" .
-          docker push "$IMAGE"
-          docker push "\${IMAGE_BASE}:latest"
-          echo "APP_IMAGE=$IMAGE" >> "$GITHUB_ENV"
-          echo "\u2705 Pushed $IMAGE"
-${clusterAuth}
-      - name: Install k3d
-        env:
-          K3D_VERSION: v5.7.4
-        run: |
-          # Download a pinned, released k3d binary instead of piping a remote
-          # install script into bash, so the install is deterministic and not
-          # subject to upstream script changes.
-          curl -sfL -o /tmp/k3d "https://github.com/k3d-io/k3d/releases/download/\${K3D_VERSION}/k3d-linux-amd64"
-          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
-          k3d version
-
-      - name: Create k3d cluster for Radius control plane
-        run: |
-          for attempt in 1 2 3; do
-            if k3d cluster create radius-cp --no-lb --wait; then
-              break
-            fi
-            echo "k3d cluster creation attempt $attempt failed; retrying..."
-            k3d cluster delete radius-cp || true
-            sleep 10
-          done
-          k3d cluster list | grep -q radius-cp
-
-      - name: Install Radius CLI
-        run: |
-          for attempt in 1 2 3; do
-            if wget -q "https://raw.githubusercontent.com/radius-project/radius/main/deploy/install.sh" -O /tmp/rad-install.sh && /bin/bash /tmp/rad-install.sh; then
-              break
-            fi
-            echo "Radius CLI install attempt $attempt failed; retrying..."
-            sleep 10
-          done
-          rad version || { echo "\u274C Radius CLI install failed"; exit 1; }
-
-      - name: Install Radius Control Plane on k3d
-        run: |
-          rad install kubernetes --set rp.publicEndpointOverride=localhost
-
-      - name: Point recipe execution at target cluster
-        run: |
-          # Mount the static target-cluster kubeconfig into dynamic-rp so that
-          # recipe-provisioned resources (containers, databases) land on the
-          # TARGET cluster instead of the ephemeral k3d control-plane cluster.
-          kubectl create secret generic radius-target-kubeconfig \\
-            -n radius-system --from-file=kubeconfig="$TARGET_KUBECONFIG"
-          CN=$(kubectl get deployment dynamic-rp -n radius-system -o jsonpath='{.spec.template.spec.containers[0].name}')
-          kubectl patch deployment dynamic-rp -n radius-system --type strategic -p "{\\"spec\\":{\\"template\\":{\\"spec\\":{\\"containers\\":[{\\"name\\":\\"$CN\\",\\"env\\":[{\\"name\\":\\"KUBECONFIG\\",\\"value\\":\\"/var/run/target/kubeconfig\\"},{\\"name\\":\\"KUBE_CONFIG_PATH\\",\\"value\\":\\"/var/run/target/kubeconfig\\"}${recipeAuthEnv}],\\"volumeMounts\\":[{\\"name\\":\\"target-kubeconfig\\",\\"mountPath\\":\\"/var/run/target\\",\\"readOnly\\":true}]}],\\"volumes\\":[{\\"name\\":\\"target-kubeconfig\\",\\"secret\\":{\\"secretName\\":\\"radius-target-kubeconfig\\"}}]}}}}"
-          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=180s
-
-      - name: Configure external deployment target
-        run: |
-          rad workspace create kubernetes default
-          rad group create default
-          rad group switch default
-          rad env create "\${{ env.RADIUS_ENV }}" --namespace "\${{ env.RADIUS_ENV }}"
-          rad env switch "\${{ env.RADIUS_ENV }}"
-          ${radCredRegister}
-
-      - name: Reset application namespace on target cluster
-        run: |
-          # Radius creates the app namespace on the (k3d) control-plane cluster,
-          # but recipes execute against the target cluster. The k3d control plane
-          # (and thus terraform state) is ephemeral, so reset the target app
-          # namespace each run to keep deploys idempotent and conflict-free.
-          for ns in "\${{ env.RADIUS_ENV }}-\${{ env.RADIUS_ENV }}"; do
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" delete namespace "$ns" --ignore-not-found --wait=true
-          done
-          for ns in "\${{ env.RADIUS_ENV }}" "\${{ env.RADIUS_ENV }}-\${{ env.RADIUS_ENV }}"; do
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" create namespace "$ns" \\
-              --dry-run=client -o yaml | kubectl --kubeconfig "$TARGET_KUBECONFIG" apply -f -
-          done
-          # If we built a private app image, give the deploy namespace's default
-          # service account a GHCR pull secret. Radius schedules container pods
-          # under the "default" SA with no imagePullSecrets, so without this the
-          # private image can't be pulled on the target cluster.
-          if [ -n "\${APP_IMAGE:-}" ]; then
-            NS="\${{ env.RADIUS_ENV }}-\${{ env.RADIUS_ENV }}"
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" create secret docker-registry ghcr-pull \\
-              --docker-server=ghcr.io \\
-              --docker-username="\${{ github.actor }}" \\
-              --docker-password="\${{ secrets.GHCR_PAT }}" \\
-              --dry-run=client -o yaml | kubectl --kubeconfig "$TARGET_KUBECONFIG" apply -f -
-            for i in $(seq 1 30); do
-              kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" get serviceaccount default >/dev/null 2>&1 && break
-              sleep 2
-            done
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" -n "$NS" patch serviceaccount default \\
-              -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}'
-          fi
-
-      - name: Register resource types and recipes
-        run: |
-          git clone --depth 1 --branch \${{ env.RESOURCE_TYPES_CONTRIB_REF }} https://github.com/radius-project/resource-types-contrib.git /tmp/rtc
-          REF="\${{ env.RESOURCE_TYPES_CONTRIB_REF }}"
-          # resource-types-contrib layout: <Category>/<typeName>/<typeName>.yaml
-          # with recipes under <Category>/<typeName>/recipes/kubernetes/{terraform,bicep}
-          for type_dir in /tmp/rtc/*/*/; do
-            type_name=$(basename "$type_dir")
-            yaml="\${type_dir}\${type_name}.yaml"
-            [ -f "$yaml" ] || continue
-            # The database recipe is registered explicitly below (provider-gated,
-            # cloud-managed), so skip it in the generic kubernetes recipe loop.
-            [ "$type_name" = "mySqlDatabases" ] && continue
-            ns=$(grep -E '^namespace:' "$yaml" | head -1 | awk '{print $2}')
-            [ -z "$ns" ] && continue
-            echo "Registering $ns/$type_name"
-            rad resource-type create -f "$yaml" || true
-            rel=\${type_dir#/tmp/rtc/}
-            rel=\${rel%/}
-            if [ -d "\${type_dir}recipes/kubernetes/terraform" ]; then
-              rad recipe register default \\
-                --resource-type "$ns/$type_name" \\
-                --template-kind terraform \\
-                --template-path "git::https://github.com/radius-project/resource-types-contrib.git//\${rel}/recipes/kubernetes/terraform?ref=\${REF}" \\
-                --environment "\${{ env.RADIUS_ENV }}" || true
-            elif [ -d "\${type_dir}recipes/kubernetes/bicep" ]; then
-              rad recipe register default \\
-                --resource-type "$ns/$type_name" \\
-                --template-kind bicep \\
-                --template-path "\${type_dir}recipes/kubernetes/bicep" \\
-                --environment "\${{ env.RADIUS_ENV }}" || true
-            fi
-          done
-${dbRecipeRegister}
-          echo "\u2705 Resource types and recipes registered"
-
-      - name: Reload control plane to pick up new resource types
-        run: |
-          # Newly-created (non-default) resource types are not recognised by the
-          # deployment engine / UCP until their pods refresh their provider cache.
-          kubectl rollout restart deployment -n radius-system
-          kubectl rollout status deployment -n radius-system --timeout=240s
-
-      - name: Register custom resource types and recipes (post-reload)
-        run: |
-          # Repo-local custom resource types (generated on the fly when a type
-          # has no recipe in resource-types-contrib, e.g. redisCaches) MUST be
-          # registered AFTER the control-plane reload. The reload re-seeds the
-          # built-in default registrations (Radius.Compute/*,
-          # Radius.Data/mySqlDatabases, Radius.Security/secrets) into each
-          # provider's "global" location, OVERWRITING any non-built-in types
-          # registered earlier \u2014 so registering before the reload would be lost
-          # on every (re)run and break the deploy. UCP resolves resource types by
-          # reading the location live, so registering here (after the re-seed)
-          # makes them routable without another restart. Layout mirrors contrib:
-          # .radius/resource-types/<category>/<typeName>/<typeName>.yaml with
-          # recipes under <typeName>/recipes/kubernetes/{terraform,bicep}. The
-          # recipe is fetched by the deployment engine over git from this repo,
-          # so the repo must be public (same constraint as contrib).
-          for type_dir in "$GITHUB_WORKSPACE"/.radius/resource-types/*/*/; do
-            [ -d "$type_dir" ] || continue
-            type_name=$(basename "$type_dir")
-            yaml="\${type_dir}\${type_name}.yaml"
-            [ -f "$yaml" ] || continue
-            ns=$(grep -E '^namespace:' "$yaml" | head -1 | awk '{print $2}')
-            [ -z "$ns" ] && continue
-            echo "Registering custom $ns/$type_name from repo"
-            rad resource-type create -f "$yaml"
-            rel=\${type_dir#$GITHUB_WORKSPACE/}
-            rel=\${rel%/}
-            if [ -d "\${type_dir}recipes/kubernetes/terraform" ]; then
-              rad recipe register default \\
-                --resource-type "$ns/$type_name" \\
-                --template-kind terraform \\
-                --template-path "git::https://github.com/\${{ github.repository }}.git//\${rel}/recipes/kubernetes/terraform?ref=\${{ github.sha }}" \\
-                --environment "\${{ env.RADIUS_ENV }}"
-            elif [ -d "\${type_dir}recipes/kubernetes/bicep" ]; then
-              rad recipe register default \\
-                --resource-type "$ns/$type_name" \\
-                --template-kind bicep \\
-                --template-path "\${type_dir}recipes/kubernetes/bicep" \\
-                --environment "\${{ env.RADIUS_ENV }}"
-            fi
-          done
-          echo "\u2705 Custom resource types and recipes registered"
-
-      - name: Build Bicep extensions for custom resource types
-        run: |
-          # Custom resource types (e.g. redisCaches) are not part of the
-          # published radius Bicep extension, so Bicep would route them to the
-          # Azure ARM provider and fail. Publish a local Bicep extension from
-          # each repo-local type manifest so app.bicep can resolve the type and
-          # target the Radius control plane. bicepconfig.json references these
-          # as ./bicep-extensions/<typeName>.tgz (relative to .radius/).
-          mkdir -p .radius/bicep-extensions
-          for type_dir in "$GITHUB_WORKSPACE"/.radius/resource-types/*/*/; do
-            [ -d "$type_dir" ] || continue
-            type_name=$(basename "$type_dir")
-            yaml="\${type_dir}\${type_name}.yaml"
-            [ -f "$yaml" ] || continue
-            echo "Publishing Bicep extension for $type_name"
-            rad bicep publish-extension -f "$yaml" --target ".radius/bicep-extensions/\${type_name}.tgz" --force
-          done
-
-      - name: Ensure bicepconfig.json exists
-        run: |
-          # bicep cannot compile app.bicep (rad deploy) without a bicepconfig.json
-          # that registers the Radius extension types. The Radius Canvas extension normally
-          # commits this next to app.bicep, but if it is missing at deploy time we
-          # synthesize one here so the deployment never fails for a missing config.
-          set -uo pipefail
-          if [ -f "app.bicep" ]; then CFG_DIR="."; else CFG_DIR=".radius"; fi
-          CFG="$CFG_DIR/bicepconfig.json"
-          if [ -f "$CFG" ]; then
-            echo "\u2705 Found existing $CFG"
-          else
-            echo "\u26A0 $CFG not found \u2014 generating it"
-            mkdir -p "$CFG_DIR"
-            {
-              echo '{'
-              echo '  "experimentalFeaturesEnabled": { "extensibility": true },'
-              echo '  "extensions": {'
-              # Reference each repo-local custom resource type extension (published as
-              # ./bicep-extensions/<typeName>.tgz above) so custom types resolve.
-              if [ -d "$CFG_DIR/bicep-extensions" ]; then
-                for tgz in "$CFG_DIR"/bicep-extensions/*.tgz; do
-                  [ -f "$tgz" ] || continue
-                  tname=$(basename "$tgz" .tgz)
-                  echo "    \\"$tname\\": \\"./bicep-extensions/$tname.tgz\\","
-                done
-              fi
-              echo '    "radius": "br:biceptypes.azurecr.io/radius:latest"'
-              echo '  }'
-              echo '}'
-            } > "$CFG"
-            echo "Generated $CFG:"
-            cat "$CFG"
-          fi
-
-      - name: Deploy Application
-        run: |
-          set -uo pipefail
-          # Azure MySQL requires 8-128 chars with 3 of: upper, lower, digit, special.
-          DB_PASSWORD="Aa1!$(openssl rand -hex 16)"
-          if [ -f "${appFile}" ]; then APP="${appFile}"; elif [ -f "app.bicep" ]; then APP="app.bicep"; elif [ -f ".radius/app.bicep" ]; then APP=".radius/app.bicep"; else echo "\u274C No app.bicep found in repository"; exit 1; fi
-          echo "Deploying $APP"
-
-          LOG="$RUNNER_TEMP/rad-deploy.log"
-          : > "$LOG"
-
-          # \u2500\u2500 Radius control-plane log tail \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-          # The Radius control plane runs on the in-runner k3d cluster. Recipe
-          # execution (terraform/bicep) and deployment-engine orchestration emit
-          # real-time logs from the radius-system pods \u2014 a lower-latency, more
-          # detailed source than the Azure activity log (and the authoritative
-          # place the exact terraform/recipe failure cause is printed).
-          CP_LOG="$RUNNER_TEMP/deploy-controlplane.log"
-          : > "$CP_LOG"
-          CP_CTX="k3d-radius-cp"
-          start_cp_tail() {
-            kubectl config get-contexts "$CP_CTX" >/dev/null 2>&1 || CP_CTX="$(kubectl config current-context 2>/dev/null)"
-            for d in $(kubectl --context "$CP_CTX" -n radius-system get deploy -o name 2>/dev/null); do
-              ( kubectl --context "$CP_CTX" -n radius-system logs "$d" \\
-                  --all-containers=true -f --since=10s --prefix=true 2>/dev/null \\
-                | stdbuf -oL grep -iE 'recipe|terraform|tofu|deploymentengine|deployment engine|provision|creating|creation complete|succeeded|completed|processing|updating|destroy|apply|error|fail|azurerm_|aws_|/providers/|radius.|applications.' \\
-                >> "$CP_LOG" ) &
-            done
-          }
-          start_cp_tail || true
-
-          # \u2500\u2500 Azure activity-log poller \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-          # Captures fine-grained per-resource provisioning status from the
-          # target resource group's activity log so the Radius Canvas can color
-          # each planned graph node (yellow\u2192green/red) as Azure creates it.
-          ACTIVITY_LOG="$RUNNER_TEMP/deploy-activity.log"
-          : > "$ACTIVITY_LOG"
-          ACT_RG="\${{ vars.AZURE_RESOURCE_GROUP }}"
-          ACT_START=$(date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-          refresh_activity() {
-            [ -z "$ACT_RG" ] && return 0
-            az monitor activity-log list \\
-              --resource-group "$ACT_RG" \\
-              --start-time "$ACT_START" \\
-              --query "[?resourceId!=null].{status:status.value, rid:resourceId, op:operationName.localizedValue, t:eventTimestamp}" \\
-              -o json 2>/dev/null > "$RUNNER_TEMP/activity-raw.json" || return 0
-            jq -r 'sort_by(.t) | .[] | "\\(.status)|\\(.rid)|\\(.op)"' "$RUNNER_TEMP/activity-raw.json" 2>/dev/null > "$ACTIVITY_LOG" || true
-          }
-
-          # \u2500\u2500 Live progress publisher \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-          # Publishes the growing rad-deploy log AND the activity log to a
-          # throwaway branch (radius-deploy-status) so the Radius Canvas can poll
-          # real per-resource status in real time. The branch is force-reset on
-          # every deploy.
-          STATUS_BRANCH="radius-deploy-status"
-          STATUS_DIR="$RUNNER_TEMP/radius-status"
-          rm -rf "$STATUS_DIR"; mkdir -p "$STATUS_DIR"
-          (
-            cd "$STATUS_DIR"
-            git init -q
-            git checkout -q --orphan "$STATUS_BRANCH"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git config user.name "github-actions[bot]"
-            git remote add origin "https://x-access-token:\${{ github.token }}@github.com/\${{ github.repository }}.git"
-          ) || true
-          publish() {
-            cp "$LOG" "$STATUS_DIR/deploy-progress.log" 2>/dev/null || true
-            cp "$ACTIVITY_LOG" "$STATUS_DIR/deploy-activity.log" 2>/dev/null || true
-            cp "$CP_LOG" "$STATUS_DIR/deploy-controlplane.log" 2>/dev/null || true
-            printf '%s\\n' "$1" > "$STATUS_DIR/deploy-state.txt"
-            (
-              cd "$STATUS_DIR"
-              git add -A >/dev/null 2>&1 || true
-              git commit -q --allow-empty -m "deploy progress: $1" >/dev/null 2>&1 || true
-              git push -q -f origin "$STATUS_BRANCH" >/dev/null 2>&1 || true
-            )
-          }
-
-          # \u2500\u2500 Run rad deploy in the FOREGROUND, streaming output live \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-          # rad deploy runs in the foreground and its combined stdout+stderr is
-          # piped through tee so EVERY line (including errors) shows up in the
-          # GitHub Actions workflow log in real time for debugging, while also
-          # being appended to the live log file the canvas polls. A lightweight
-          # background helper publishes periodic status snapshots to the status
-          # branch so the canvas's live progress view keeps updating during the
-          # deploy.
-          DEPLOY_START=$(date -u +%s)
-          echo "\u25B6 Deployment started at $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$LOG"
-
-          refresh_activity
-          publish "in_progress"
-          (
-            while true; do
-              refresh_activity
-              publish "in_progress"
-              sleep 5
-            done
-          ) &
-          PUB_PID=$!
-
-          IMG_ARG=""
-          [ -n "\${APP_IMAGE:-}" ] && IMG_ARG="-p appImage=$APP_IMAGE"
-          rad deploy "$APP" --environment "\${{ env.RADIUS_ENV }}" --application "\${{ env.RADIUS_ENV }}" -p dbPassword="$DB_PASSWORD" $IMG_ARG 2>&1 | tee -a "$LOG"
-          RAD_EXIT=\${PIPESTATUS[0]}
-
-          kill "$PUB_PID" 2>/dev/null || true
-          wait "$PUB_PID" 2>/dev/null || true
-
-          DEPLOY_END=$(date -u +%s)
-          echo "\u25A0 Deployment finished at $(date -u +%Y-%m-%dT%H:%M:%SZ) (exit $RAD_EXIT, $((DEPLOY_END - DEPLOY_START))s)" | tee -a "$LOG"
-
-          refresh_activity
-
-          # Capture the deployed application graph and stage it for the status
-          # branch so the canvas can render the REAL deployed graph.
-          if [ "$RAD_EXIT" -eq 0 ]; then
-            APP_NAME=$(rad app list -o json 2>/dev/null | jq -r '.[0].name // empty')
-            if [ -n "$APP_NAME" ]; then
-              rad app graph -a "$APP_NAME" -o json > "$STATUS_DIR/deploy-graph.json" 2>/dev/null || true
-            fi
-          fi
-
-          # Final publish: write the COMPLETE log + deployed graph, THEN the
-          # terminal state marker LAST. Settle and publish twice so the very last
-          # bytes reliably land on the status branch before the job exits.
-          STATE=$([ "$RAD_EXIT" -eq 0 ] && echo "succeeded" || echo "failed")
-          publish "$STATE"
-          sleep 4
-          publish "$STATE"
-
-          # rad deploy output already streamed live to this workflow log above
-          # (via tee), so no need to re-dump it. On failure, surface the radius
-          # control-plane / recipe log too, since that holds the authoritative
-          # terraform/recipe failure cause.
-          if [ "$RAD_EXIT" -ne 0 ] && [ -s "$CP_LOG" ]; then
-            echo "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 radius control-plane / recipe log \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-            cat "$CP_LOG"
-          fi
-          exit "$RAD_EXIT"
-
-      - name: Show Application Status
-        run: |
-          APP_NAME=$(rad app list -o json | jq -r '.[0].name // empty')
-          if [ -n "$APP_NAME" ]; then
-            rad app graph -a "$APP_NAME"
-          else
-            echo "No application found after deploy"
-          fi
-        continue-on-error: true
-`;
+  return fillTemplate(deploy_default, {
+    ENV: env,
+    APP_FILE: appFile,
+    CLUSTER_AUTH: platform.deployClusterAuthSteps,
+    RAD_CRED_REGISTER: platform.radCredentialRegister,
+    RECIPE_AUTH_ENV: platform.recipeAuthEnv,
+    DB_RECIPE_REGISTER: platform.dbRecipeRegister
+  });
 }
 
 // adapters/canvas/src/gh.mjs
