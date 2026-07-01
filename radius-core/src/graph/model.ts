@@ -36,9 +36,22 @@ export function computeDiffHash(properties: any, dependsOn: any[] = []): string 
     if (!NON_AUTHORABLE_PROPERTIES.has(k)) authorable[k] = v;
   }
   const sorted = [...dependsOn].sort();
-  const payload = JSON.stringify({ properties: authorable, dependsOn: sorted });
+  // Sort keys to match Go's encoding/json behavior (alphabetical map key order)
+  const payload = JSON.stringify({ properties: authorable, dependsOn: sorted }, sortedReplacer);
   const hash = createHash("sha256").update(payload).digest("hex");
   return `sha256:${hash}`;
+}
+
+/** JSON replacer that sorts object keys alphabetically, matching Go's encoding/json. */
+function sortedReplacer(_key: string, value: any): any {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const sorted: any = {};
+    for (const k of Object.keys(value).sort()) {
+      sorted[k] = value[k];
+    }
+    return sorted;
+  }
+  return value;
 }
 
 /**

@@ -72,6 +72,18 @@ describe("computeDiffHash", () => {
     const hash2 = computeDiffHash({ foo: "bar" });
     expect(hash1).toBe(hash2);
   });
+
+  it("produces the same hash regardless of property insertion order", () => {
+    const hash1 = computeDiffHash({ alpha: "1", beta: "2", gamma: "3" });
+    const hash2 = computeDiffHash({ gamma: "3", alpha: "1", beta: "2" });
+    expect(hash1).toBe(hash2);
+  });
+
+  it("sorts nested object keys for deterministic hashing", () => {
+    const hash1 = computeDiffHash({ container: { image: "node:18", port: 3000 } });
+    const hash2 = computeDiffHash({ container: { port: 3000, image: "node:18" } });
+    expect(hash1).toBe(hash2);
+  });
 });
 
 describe("buildModeledGraph", () => {
