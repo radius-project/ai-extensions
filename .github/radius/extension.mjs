@@ -4055,8 +4055,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Subscription ID</label>
         <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.subscriptionId || "")}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
       </div>
+      <div style="display:flex; flex-direction:column; gap:4px; grid-column:1 / -1;">
+        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Client ID <span style="font-weight:400;">(optional \u2014 App Registration)</span></label>
+        <input id="az-client-id" type="text" placeholder="Leave blank to auto-create a new App Registration" value="${escapeHtml(oidcAzure?.clientId || "")}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
+      </div>
     </div>
-    <input type="hidden" id="az-client-id" value="${escapeHtml(oidcAzure?.clientId || "")}" />
     <button id="btn-verify-azure" style="padding:6px 14px; background:#1f883d; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">\u2713 Verify Azure Login</button>
     <div id="verify-azure-status" style="margin-top:8px; font-size:12px; display:none;"></div>
   </div>
@@ -4091,7 +4094,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login.
+      <strong>No App Registration?</strong> Leave the Client ID blank to auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login. Enter an existing Client ID above to reuse it instead.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">\u26A1 Auto-create credentials</button>
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
