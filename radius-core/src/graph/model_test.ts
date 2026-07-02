@@ -307,11 +307,11 @@ describe("buildModeledGraph", () => {
         },
       };
       const graph = buildModeledGraph(template);
-      // Should resolve the dependency — the hash will include it
       const frontend = graph.resources.find((r: any) => r.name === "frontend");
       expect(frontend).toBeDefined();
-      expect(frontend.diffHash).toMatch(/^sha256:/);
-    });
+
+      const dbId = buildResourceID("Radius.Data/mongoDatabases", "mydb");
+      expect(frontend!.diffHash).toBe(computeDiffHash({}, [dbId]));
 
     it("rewrites symbolic connection sources to resourceId expressions", () => {
       const template = {
