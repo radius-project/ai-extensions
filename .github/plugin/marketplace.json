@@ -1,5 +1,5 @@
 {
-  "name": "ai-extensions",
+  "name": "radius-plugins",
   "metadata": {
     "description": "Radius plugins for GitHub Copilot CLI — model, visualize, and deploy applications with Radius.",
     "version": "0.1.0"
