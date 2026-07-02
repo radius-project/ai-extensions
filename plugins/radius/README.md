@@ -1,25 +1,35 @@
 # Radius Plugin
 
-Model, visualize, and deploy applications with [Radius](https://radapp.io) from
-GitHub Copilot CLI. The plugin bundles four skills and a canvas extension that
-turn Copilot into a Radius application-modeling and deployment assistant.
+Model, visualize, and deploy applications with [Radius](https://radapp.io)
+directly from GitHub Copilot. The plugin bundles four skills and a canvas
+extension that turn Copilot into a Radius application-modeling and deployment
+assistant.
+
+It is a standard [GitHub Copilot plugin](https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-cli-plugins),
+so it works anywhere plugins are supported — including the
+[GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins)
+and the GitHub Copilot CLI.
 
 ## Installation
 
-### Via the GitHub Copilot CLI plugin marketplace
+### GitHub Copilot app
+
+Open app settings, click **Plugins**, then browse to and install the `radius`
+plugin from the `radius-project/ai-extensions` marketplace. See
+[Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins)
+for details.
+
+### GitHub Copilot CLI
 
 ```bash
-# 1. Open GitHub Copilot CLI
-copilot
-
-# 2. Add this marketplace (one-time setup)
+# Add this marketplace (one-time setup)
 /plugin marketplace add radius-project/ai-extensions
 
-# 3. Install the plugin
+# Install the plugin
 /plugin install radius@ai-extensions
 ```
 
-Restart your Copilot CLI session after installing so the skills and the canvas
+Restart your Copilot session after installing so the skills and the canvas
 extension become available.
 
 ## What's included
@@ -35,7 +45,7 @@ extension become available.
 
 ### Canvas extension
 
-`extensions/radius/extension.mjs` registers the **Radius** canvas (`lattice`)
+`extensions/radius/extension.mjs` registers the **Radius** canvas
 plus supporting tools for OIDC configuration, `app.bicep` generation,
 application-graph rendering, PR graph diffs, and environment creation. It is a
 built artifact — see [Development](#development) to rebuild it.
@@ -45,10 +55,10 @@ built artifact — see [Development](#development) to rebuild it.
 Once installed, just ask Copilot naturally:
 
 ```
-You: generate an app.bicep for this repo
-You: show me the application graph
-You: set up cloud credentials for Azure
-You: deploy my app
+generate an app.bicep for this repo
+show me the application graph
+set up cloud credentials for Azure
+deploy my app
 ```
 
 ## Development

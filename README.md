@@ -1,14 +1,20 @@
-# Radius for GitHub Copilot CLI
+# Radius for GitHub Copilot
 
-A GitHub Copilot CLI **plugin marketplace** for modeling and deploying
-applications with Radius. The product logic is UI-agnostic and lives in a shared
-core; the canvas adapter wires it into the Copilot canvas surface, and the whole
-thing is packaged as an installable plugin.
+A GitHub Copilot **plugin** for modeling and deploying applications with Radius.
+The product logic is UI-agnostic and lives in a shared core; the canvas adapter
+wires it into the Copilot canvas surface, and the whole thing is packaged as an
+installable plugin (distributed through the marketplace in this repo) that works
+anywhere GitHub Copilot plugins are supported — the GitHub Copilot app and the
+GitHub Copilot CLI.
 
 ## Install the plugin
 
+In the **GitHub Copilot app**, open app settings, click **Plugins**, and install
+the `radius` plugin from the `radius-project/ai-extensions` marketplace.
+
+In the **GitHub Copilot CLI**:
+
 ```bash
-# In GitHub Copilot CLI
 /plugin marketplace add radius-project/ai-extensions
 /plugin install radius@ai-extensions
 ```

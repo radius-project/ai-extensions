@@ -355,9 +355,14 @@ function computeGraphDiff(baseResources, headResources) {
   const base = baseResources || [];
   const head = headResources || [];
   const keyOf = (r) => r.id || r.name || "";
+  const lastSeg = (r) => {
+    const s = keyOf(r).split("/");
+    return s[s.length - 1];
+  };
   const diffResources = [];
   const baseMap = new Map(base.map((r) => [keyOf(r), r]));
   const headIds = new Set(head.map((r) => keyOf(r)));
+  const baseBySymName = new Map(base.map((r) => [lastSeg(r), r]));
   for (const r of head) {
     if (baseMap.has(keyOf(r))) {
       const b = baseMap.get(keyOf(r));
@@ -365,11 +370,18 @@ function computeGraphDiff(baseResources, headResources) {
       const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections });
       diffResources.push({ ...r, diffStatus: baseComp !== headComp ? "modified" : "unchanged" });
     } else {
-      diffResources.push({ ...r, diffStatus: "added" });
+      const symName = lastSeg(r);
+      const baseByName = baseBySymName.get(symName);
+      if (baseByName && baseMap.has(keyOf(baseByName)) && !headIds.has(keyOf(baseByName))) {
+        diffResources.push({ ...r, diffStatus: "modified" });
+        baseMap.delete(keyOf(baseByName));
+      } else {
+        diffResources.push({ ...r, diffStatus: "added" });
+      }
     }
   }
   for (const r of base) {
-    if (!headIds.has(keyOf(r))) {
+    if (!headIds.has(keyOf(r)) && baseMap.has(keyOf(r))) {
       diffResources.push({ ...r, diffStatus: "removed" });
     }
   }
