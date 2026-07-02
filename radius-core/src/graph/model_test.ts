@@ -315,7 +315,6 @@ describe("buildModeledGraph", () => {
     });
 
     it("rewrites symbolic connection sources to resourceId expressions", () => {
-      const template = {
         resources: {
           frontend: {
             type: "Radius.Compute/containers@2023-10-01-preview",
