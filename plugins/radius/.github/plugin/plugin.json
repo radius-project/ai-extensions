@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft-07/schema",
   "name": "radius",
   "version": "0.1.0",
   "description": "Model, visualize, and deploy applications with Radius from GitHub Copilot CLI — generate app.bicep, build and diff the application graph, configure cloud credentials, and deploy via GitHub Actions.",
