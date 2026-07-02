@@ -1,5 +1,70 @@
 import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
 
+const AZURE_PORTAL_BASE = "https://portal.azure.com/#";
+
+function buildResourceGroupResourceListUrl(subscriptionId: string, resourceGroup: string): string {
+  return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
+}
+
+function buildResourceUrl(armResourceId: string): string {
+  return `${AZURE_PORTAL_BASE}@/resource${armResourceId}/overview`;
+}
+
+function extractTypeFromArmId(value: string): string {
+  const providersIndex = value.toLowerCase().indexOf("/providers/");
+  if (providersIndex === -1) return "";
+
+  const providerPath = value.slice(providersIndex + "/providers/".length).split("?")[0];
+  const parts = providerPath.split("/").filter(Boolean);
+  if (parts.length < 2) return "";
+
+  const providerNamespace = parts[0];
+  const typeParts: string[] = [];
+
+  // ARM IDs alternate as type/name/type/name after the provider namespace.
+  for (let i = 1; i < parts.length; i += 2) {
+    typeParts.push(parts[i]);
+  }
+
+  return `${providerNamespace}/${typeParts.join("/")}`;
+}
+
+function normalizeAzureResourceType(resourceType: string): string {
+  const trimmed = (resourceType || "").trim();
+  if (!trimmed) return "";
+
+  const noApiVersion = trimmed.split("@")[0].trim();
+  if (!noApiVersion) return "";
+
+  if (noApiVersion.toLowerCase().startsWith("/subscriptions/")) {
+    return extractTypeFromArmId(noApiVersion);
+  }
+
+  if (noApiVersion.startsWith("Microsoft.")) {
+    return noApiVersion;
+  }
+
+  return "";
+}
+
+function normalizeArmResourceId(resourceRef: string): string {
+  const trimmed = (resourceRef || "").trim();
+  if (!trimmed) return "";
+
+  const noQuery = trimmed.split("?")[0].trim();
+  if (!noQuery.toLowerCase().startsWith("/subscriptions/")) return "";
+
+  const normalized = `/${noQuery.replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  return normalized;
+}
+
+function isKubernetesResourceType(resourceType: string): boolean {
+  const t = (resourceType || "").trim();
+  if (!t) return false;
+
+  return /^(apps|core|batch|autoscaling|networking\.k8s\.io|storage\.k8s\.io|rbac\.authorization\.k8s\.io|apiextensions\.k8s\.io)\//i.test(t);
+}
+
 export const azure: ComputePlatform = {
   id: "azure",
   displayName: "Azure",
@@ -48,38 +113,29 @@ az role assignment create \\
   portalUrl(resourceType: string, ctx: PortalContext): string {
     const subscriptionId = ctx.subscriptionId;
     const resourceGroup = ctx.resourceGroup;
-        const azureBase = 'https://portal.azure.com/#@/resource';
-        const rg = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers`;
+    const clusterName = (ctx.clusterName || "").trim();
 
-        if (resourceType.includes('DBforPostgreSQL') || resourceType.includes('PostgreSQL Flexible Server')) {
-            return `${azureBase}${rg}/Microsoft.DBforPostgreSQL/flexibleServers/radius-postgres/overview`;
-        }
-        if (resourceType.includes('DBforMySQL') || resourceType.includes('MySQL Flexible Server')) {
-            return `${azureBase}${rg}/Microsoft.DBforMySQL/flexibleServers/radius-mysql/overview`;
-        }
-        if (resourceType.includes('Cache/redis') || resourceType.includes('Cache for Redis')) {
-            return `${azureBase}${rg}/Microsoft.Cache/redis/radius-redis/overview`;
-        }
-        if (resourceType.includes('DocumentDB') || resourceType.includes('Cosmos DB')) {
-            return `${azureBase}${rg}/Microsoft.DocumentDB/databaseAccounts/radius-cosmos/overview`;
-        }
-        if (resourceType.includes('KeyVault') || resourceType.includes('Key Vault')) {
-            return `${azureBase}${rg}/Microsoft.KeyVault/vaults/radius-kv/overview`;
-        }
-        if (resourceType.includes('ContainerRegistry') || resourceType.includes('Container Registry')) {
-            return `${azureBase}${rg}/Microsoft.ContainerRegistry/registries/radiusacr/overview`;
-        }
-        if (resourceType.includes('applicationGateways') || resourceType.includes('Application Gateway')) {
-            return `${azureBase}${rg}/Microsoft.Network/applicationGateways/radius-appgw/overview`;
-        }
-        if (resourceType.includes('Compute/disks') || resourceType.includes('Managed Disk')) {
-            return `${azureBase}${rg}/Microsoft.Compute/disks/radius-disk/overview`;
-        }
-        // K8s resources link to AKS cluster
-        if (resourceType.includes('apps/Deployment') || resourceType.includes('core/Service') || resourceType.includes('Ingress') || resourceType.includes('PersistentVolume')) {
-            return `${azureBase}${rg}/Microsoft.ContainerService/managedClusters/radius-aks/overview`;
-        }
-    return "";
+    const armResourceId = normalizeArmResourceId(resourceType);
+    if (armResourceId) {
+      return buildResourceUrl(armResourceId);
+    }
+
+    const normalizedArmType = normalizeAzureResourceType(resourceType);
+    if (normalizedArmType) {
+      // Type-only values do not identify a concrete instance.
+      return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
+    }
+
+    // Radius resources often materialize to Kubernetes objects on AKS.
+    if (isKubernetesResourceType(resourceType) || resourceType.startsWith("Radius.")) {
+      if (clusterName) {
+        const clusterId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
+        return buildResourceUrl(clusterId);
+      }
+      return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
+    }
+
+    return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
   },
 
   verifyWorkflowSteps: `
