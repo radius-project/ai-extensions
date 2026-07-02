@@ -21,6 +21,11 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
   const baseMap = new Map(base.map((r) => [keyOf(r), r]));
   const headIds = new Set(head.map((r) => keyOf(r)));
   const baseBySymName = new Map(base.map((r) => [lastSeg(r), r]));
+  const baseNameCounts = new Map<string, number>();
+  for (const r of base) {
+    const symName = lastSeg(r);
+    baseNameCounts.set(symName, (baseNameCounts.get(symName) || 0) + 1);
+  }
 
   for (const r of head) {
     if (baseMap.has(keyOf(r))) {
@@ -31,7 +36,12 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
     } else {
       const symName = lastSeg(r);
       const baseByName = baseBySymName.get(symName);
-      if (baseByName && baseMap.has(keyOf(baseByName)) && !headIds.has(keyOf(baseByName))) {
+      if (
+        baseByName &&
+        baseNameCounts.get(symName) === 1 &&
+        baseMap.has(keyOf(baseByName)) &&
+        !headIds.has(keyOf(baseByName))
+      ) {
         // Same name, different type — treat as modified, consume the base entry.
         diffResources.push({ ...r, diffStatus: "modified" });
         baseMap.delete(keyOf(baseByName));
