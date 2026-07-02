@@ -74,5 +74,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `.github/radius/extension.mjs` — environment creation (`/api/create-environment`) and workflow generation (`generateVerifyWorkflow`, `generateDeployWorkflow`)
-- `.github/radius/extension.mjs` — environment secret/variable writes via `gh secret set ... --env` / `gh variable set ... --env`
+- `plugins/radius/extensions/radius/extension.mjs` — environment creation (`/api/create-environment`) and workflow generation (`generateVerifyWorkflow`, `generateDeployWorkflow`)
+- `plugins/radius/extensions/radius/extension.mjs` — environment secret/variable writes via `gh secret set ... --env` / `gh variable set ... --env`

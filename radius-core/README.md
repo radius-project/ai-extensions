@@ -31,7 +31,7 @@ adapters/canvas/              The Copilot-canvas UI adapter (thin).
     infra.mjs                 OIDC / workflow / portal wrappers over the core.
     gh.mjs                    Shell + GitHub API port primitives.
     shared.mjs               escapeHtml + shared credential state.
-  build.mjs                   esbuild bundle -> .github/radius/extension.mjs.
+  build.mjs                   esbuild bundle -> plugins/radius/extensions/radius/extension.mjs.
 ```
 
 ### The dependency rule
@@ -104,5 +104,5 @@ shared and UI-agnostic, lift it into `radius-core` first.
 
 ```bash
 pnpm typecheck:core   # tsc over radius-core (strict)
-pnpm build:canvas     # esbuild -> .github/radius/extension.mjs
+pnpm build:canvas     # esbuild -> plugins/radius/extensions/radius/extension.mjs
 ```

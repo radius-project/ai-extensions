@@ -114,6 +114,6 @@ resource db 'Radius.Data/postgreSqlDatabases@2025-08-01-preview' = {
 
 ## Related files
 
-- `.github/radius/extension.mjs` — repo analysis → bicep generation (`generateBicepFromRepo`)
-- `.github/radius/extension.mjs` — commit/update `.radius/app.bicep` via GitHub Contents API (`/api/commit-app-bicep`)
+- `plugins/radius/extensions/radius/extension.mjs` — repo analysis → bicep generation (`generateBicepFromRepo`)
+- `plugins/radius/extensions/radius/extension.mjs` — commit/update `.radius/app.bicep` via GitHub Contents API (`/api/commit-app-bicep`)
 - Upstream contrib repo: https://github.com/radius-project/resource-types-contrib (browse `Compute/`, `Data/`, `Security/` for available resource types)

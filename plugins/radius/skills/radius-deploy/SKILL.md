@@ -68,6 +68,6 @@ POST /repos/{owner}/{repo}/actions/workflows/radius-deploy.yml/dispatches
 
 ## Related files
 
-- `.github/radius/extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit to `.github/workflows/radius-deploy.yml`
-- `.github/radius/extension.mjs` — deploy dispatch + run polling (uses `gh workflow run radius-deploy.yml` and `gh run list`)
+- `plugins/radius/extensions/radius/extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit to `.github/workflows/radius-deploy.yml`
+- `plugins/radius/extensions/radius/extension.mjs` — deploy dispatch + run polling (uses `gh workflow run radius-deploy.yml` and `gh run list`)
 - Workflow lives in user repo at `.github/workflows/radius-deploy.yml`

@@ -76,9 +76,9 @@ The canvas will:
 
 ## Related files
 
-- `.github/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
-- `.github/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
-- `.github/radius/extension.mjs` — static-from-bicep graph build (`buildGraphFromBicep`, `parseBicepResources`)
-- `.github/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
-- `.github/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and graph artifacts
-- `.github/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
+- `plugins/radius/extensions/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
+- `plugins/radius/extensions/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
+- `plugins/radius/extensions/radius/extension.mjs` — static-from-bicep graph build (`buildGraphFromBicep`, `parseBicepResources`)
+- `plugins/radius/extensions/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
+- `plugins/radius/extensions/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and graph artifacts
+- `plugins/radius/extensions/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
