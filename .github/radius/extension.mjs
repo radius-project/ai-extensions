@@ -464,7 +464,6 @@ function parseTerraformResources(content) {
       const modBlock = content.substring(modStart, modStart + 500);
       const sourceMatch = modBlock.match(/source\s*=\s*"([^"]+)"/);
       const source = sourceMatch ? sourceMatch[1] : modName;
-      f;
       resources.push({
         name: modName,
         type: source,
@@ -1550,7 +1549,7 @@ async function loadRecipeResources(gh, recipePath, format) {
   const ghApiListNames2 = (p) => gh.listNames(p);
   const files = await ghApiListNames2(`/repos/radius-project/resource-types-contrib/contents/${recipePath}`);
   if (files.length === 0) return null;
-  const mainFile = files.find((f2) => f2.endsWith(".bicep") || f2 === "main.tf") || files[0];
+  const mainFile = files.find((f) => f.endsWith(".bicep") || f === "main.tf") || files[0];
   const content = await ghApiGetContent2(`/repos/radius-project/resource-types-contrib/contents/${recipePath}/${mainFile}`);
   if (!content) return null;
   const concreteResources = format === "terraform" ? parseTerraformResources(content) : parseRecipeResources(content);
@@ -6408,7 +6407,7 @@ data: ${JSON.stringify(data)}
                 let live = null;
                 let prevLen = -1;
                 let stableHits = 0;
-                for (let f2 = 0; f2 < 12; f2++) {
+                for (let f = 0; f < 12; f++) {
                   const ds = await fetchDeployState(repo);
                   const cur = await fetchLiveDeployLog(repo);
                   if (cur) live = cur;
