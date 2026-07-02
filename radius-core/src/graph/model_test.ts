@@ -312,6 +312,7 @@ describe("buildModeledGraph", () => {
 
       const dbId = buildResourceID("Radius.Data/mongoDatabases", "mydb");
       expect(frontend!.diffHash).toBe(computeDiffHash({}, [dbId]));
+    });
 
     it("rewrites symbolic connection sources to resourceId expressions", () => {
       const template = {
