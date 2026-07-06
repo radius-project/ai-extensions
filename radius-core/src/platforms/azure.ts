@@ -10,35 +10,12 @@ function buildResourceUrl(armResourceId: string): string {
   return `${AZURE_PORTAL_BASE}@/resource${armResourceId}/overview`;
 }
 
-function extractTypeFromArmId(value: string): string {
-  const providersIndex = value.toLowerCase().indexOf("/providers/");
-  if (providersIndex === -1) return "";
-
-  const providerPath = value.slice(providersIndex + "/providers/".length).split("?")[0];
-  const parts = providerPath.split("/").filter(Boolean);
-  if (parts.length < 2) return "";
-
-  const providerNamespace = parts[0];
-  const typeParts: string[] = [];
-
-  // ARM IDs alternate as type/name/type/name after the provider namespace.
-  for (let i = 1; i < parts.length; i += 2) {
-    typeParts.push(parts[i]);
-  }
-
-  return `${providerNamespace}/${typeParts.join("/")}`;
-}
-
 function normalizeAzureResourceType(resourceType: string): string {
   const trimmed = (resourceType || "").trim();
   if (!trimmed) return "";
 
   const noApiVersion = trimmed.split("@")[0].trim();
   if (!noApiVersion) return "";
-
-  if (noApiVersion.toLowerCase().startsWith("/subscriptions/")) {
-    return extractTypeFromArmId(noApiVersion);
-  }
 
   if (noApiVersion.startsWith("Microsoft.")) {
     return noApiVersion;
@@ -52,9 +29,11 @@ function normalizeArmResourceId(resourceRef: string): string {
   if (!trimmed) return "";
 
   const noQuery = trimmed.split("?")[0].trim();
-  if (!noQuery.toLowerCase().startsWith("/subscriptions/")) return "";
+  // Strip leading slashes before the prefix check so "//subscriptions/..." is handled.
+  const stripped = noQuery.replace(/^\/+/, "");
+  if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
 
-  const normalized = `/${noQuery.replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  const normalized = `/${stripped.replace(/\/+$/, "")}`;
   return normalized;
 }
 
@@ -73,19 +52,20 @@ export const azure: ComputePlatform = {
   supports: { oidc: true, portalUrl: true },
 
   generateOidc(data: any): OidcResult {
+    const d = data || {};
     return {
       message: "Azure OIDC configuration generated",
       output: `# Azure Federated Identity Configuration
 # Run these commands to set up OIDC for GitHub Actions:
 
 # 1. Set repository variables (these identifiers are not secret):
-gh variable set AZURE_TENANT_ID --body "${data.tenantId || ""}"
-gh variable set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
-gh variable set AZURE_CLIENT_ID --body "${data.clientId || ""}"
+gh variable set AZURE_TENANT_ID --body "${d.tenantId || ""}"
+gh variable set AZURE_SUBSCRIPTION_ID --body "${d.subscriptionId || ""}"
+gh variable set AZURE_CLIENT_ID --body "${d.clientId || ""}"
 
 # 2. Create federated credential (via Azure CLI):
 az ad app federated-credential create \\
-  --id ${data.clientId || "<CLIENT_ID>"} \\
+  --id ${d.clientId || "<CLIENT_ID>"} \\
   --parameters '{
     "name": "github-actions-oidc",
     "issuer": "https://token.actions.githubusercontent.com",
@@ -95,18 +75,19 @@ az ad app federated-credential create \\
 
 # 3. Assign Contributor role on the subscription:
 az role assignment create \\
-  --assignee ${data.clientId || "<CLIENT_ID>"} \\
+  --assignee ${d.clientId || "<CLIENT_ID>"} \\
   --role "Contributor" \\
-  --scope "/subscriptions/${data.subscriptionId || "<SUBSCRIPTION_ID>"}"
+  --scope "/subscriptions/${d.subscriptionId || "<SUBSCRIPTION_ID>"}"
 `,
     };
   },
 
   environmentSecrets(data: any) {
+    const d = data || {};
     return [
-      { kind: "variable" as const, name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
-      { kind: "variable" as const, name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
-      { kind: "variable" as const, name: "AZURE_LOCATION", value: data.location },
+      { kind: "variable" as const, name: "AZURE_SUBSCRIPTION_ID", value: d.subscriptionId },
+      { kind: "variable" as const, name: "AZURE_RESOURCE_GROUP", value: d.resourceGroup },
+      { kind: "variable" as const, name: "AZURE_LOCATION", value: d.location },
     ];
   },
 
