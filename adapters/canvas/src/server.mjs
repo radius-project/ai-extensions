@@ -1185,7 +1185,10 @@ function createRequestHandler(instanceId) {
                         r.deployStatus = s;
                         if (r.outputResources) r.outputResources.forEach(o => {
                             o.deployStatus = s;
-                            if (s === 'success') o.portalUrl = generatePortalUrl(o.id || o.type || o.displayType || '', provider, entry.state);
+                            if (s === 'success') {
+                                const portalUrlKey = provider === 'azure' ? (o.id || o.type || o.displayType || '') : (o.type || o.displayType || o.id || '');
+                                o.portalUrl = generatePortalUrl(portalUrlKey, provider, entry.state);
+                            }
                         });
                     };
 
