@@ -349,14 +349,14 @@ jobs:
           # Registry and credentials for the Radius.Compute/containerImages recipe.
           # The recipe builds images with the in-pod BuildKit and pushes them to
           # $BUILD_REGISTRY, authenticating with the Kubernetes Secret named
-          # $REGISTRY_SECRET_NAME. That secret is provisioned the Radius-native way
-          # by an application-scoped Radius.Security/secrets resource declared in the
-          # app's own bicep, so it materializes into the application namespace where
-          # the recipe reads it (context.runtime.kubernetes.namespace). Only the
-          # secret NAME is wired here via the recipe pack's registrySecretName; the
-          # credentials themselves are supplied to the app deploy step further below.
-          # The registry path must be lowercase.
-          BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository_owner) }}" | tr '[:upper:]' '[:lower:]')
+          # $REGISTRY_SECRET_NAME. Because the recipe loads that Secret via the
+          # in-cluster provider (the control-plane cluster where dynamic-rp/BuildKit
+          # run), the secret is provisioned directly onto the control plane by the
+          # "Provision registry credentials on control plane" step below, from the
+          # default GitHub token. Only the secret NAME is wired here via the recipe
+          # pack's registrySecretName. $BUILD_REGISTRY is ghcr.io/<owner>/<repo> so
+          # images land under the repository's package namespace; it must be lowercase.
+          BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="ghcr-registry-creds"
 
           # Select the provider-specific Terraform recipe pack. An AWS environment
@@ -462,6 +462,38 @@ jobs:
             kubectl --kubeconfig "$TARGET_KUBECONFIG" get namespace "$APP_NS" 2>/dev/null ||               kubectl --kubeconfig "$TARGET_KUBECONFIG" create namespace "$APP_NS"
           fi
 
+      - name: Provision registry credentials on control plane
+        env:
+          # The Radius.Compute/containerImages recipe authenticates its BuildKit
+          # image push by loading the Kubernetes Secret named by registrySecretName
+          # via the in-cluster provider -- i.e. from the CONTROL PLANE cluster where
+          # the dynamic-rp/BuildKit pods run, NOT the target cluster. Provision that
+          # secret here directly from the default GitHub token so no registry
+          # credentials need to live in the application bicep.
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          REGISTRY_SECRET_NAME="ghcr-registry-creds"
+          ENV_NS="${{ vars.KUBERNETES_NAMESPACE || 'default' }}"
+          BICEP_APP_NAME=$(grep -oP "name:\s*'\K[^']+" ".radius/app.bicep" 2>/dev/null | head -1)
+          [ -z "$BICEP_APP_NAME" ] && BICEP_APP_NAME="app"
+          APP_NS="default-$BICEP_APP_NAME"
+          # The recipe reads the secret from context.runtime.kubernetes.namespace on
+          # the control plane. Materialize it in both the environment namespace and
+          # the application namespace so the read resolves regardless of scope. These
+          # kubectl calls run against the default kubeconfig (the control plane), not
+          # the target cluster.
+          for NS in "$ENV_NS" "$APP_NS"; do
+            kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+            kubectl create secret generic "$REGISTRY_SECRET_NAME" \
+              --namespace "$NS" \
+              --from-literal=username="$REGISTRY_USERNAME" \
+              --from-literal=password="$REGISTRY_PASSWORD" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            echo "Provisioned $REGISTRY_SECRET_NAME in control-plane namespace $NS"
+          done
+
       - name: Run rad commands
         env:
           # Pass caller input through the environment to avoid command injection.
@@ -476,12 +508,6 @@ jobs:
           # by the default deploy below. Read via the environment (not inlined into
           # the script) so values with quotes/newlines can't break the shell.
           RADIUS_DEPLOY_PARAMS: ${{ secrets.RADIUS_DEPLOY_PARAMS }}
-          # Registry credentials for the Radius.Compute/containerImages image push.
-          # The app's application-scoped Radius.Security/secrets resource materializes
-          # these into the app namespace where the recipe reads them, so they are passed
-          # as secure bicep parameters to `rad deploy $APP_FILE` (never inlined/recorded).
-          REGISTRY_USERNAME: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
           # pipefail so a failed `rad` whose output is piped through `tee` is detected
           # via PIPESTATUS rather than masked by tee's exit code.
@@ -496,14 +522,6 @@ jobs:
             sed -i '/^extension radius$/a extension radiusCompute' "$APP_FILE" 2>/dev/null || true
           fi
 
-          # Only pass registry credentials when the app bicep actually declares the
-          # registryUsername/registryPassword params (i.e. it uses containerImages with
-          # an authenticated registry). Passing parameters the template doesn't declare
-          # would fail the deploy, so guard on their presence.
-          APP_WANTS_REGISTRY_CREDS=0
-          if grep -q 'param registryUsername' "$APP_FILE" 2>/dev/null; then
-            APP_WANTS_REGISTRY_CREDS=1
-          fi
 
           # Aggregate result accumulators. The result is written by a trap on EXIT so
           # the combined `rad-commands-result` artifact is complete even when a command
@@ -605,10 +623,6 @@ jobs:
                 if [ -n "$APP_IMAGE" ]; then
                   EXTRA_PARAMS+=(--parameters "image=$APP_IMAGE")
                 fi
-                if [ "$APP_WANTS_REGISTRY_CREDS" = "1" ]; then
-                  EXTRA_PARAMS+=(--parameters "registryUsername=$REGISTRY_USERNAME")
-                  EXTRA_PARAMS+=(--parameters "registryPassword=$REGISTRY_PASSWORD")
-                fi
                 if [ -n "${RADIUS_DEPLOY_PARAMS//[[:space:]]/}" ]; then
                   while IFS= read -r _pname; do
                     [ -z "$_pname" ] && continue
@@ -642,10 +656,6 @@ jobs:
             DEPLOY_PARAMS=()
             if [ -n "$APP_IMAGE" ]; then
               DEPLOY_PARAMS+=(--parameters "image=$APP_IMAGE")
-            fi
-            if [ "$APP_WANTS_REGISTRY_CREDS" = "1" ]; then
-              DEPLOY_PARAMS+=(--parameters "registryUsername=$REGISTRY_USERNAME")
-              DEPLOY_PARAMS+=(--parameters "registryPassword=$REGISTRY_PASSWORD")
             fi
             # Expand the application parameters JSON ({"name":"value", …}) into
             # --parameters name=value pairs. Each value is read back from the JSON
