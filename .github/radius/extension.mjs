@@ -1255,7 +1255,11 @@ function normalizeArmResourceId(resourceRef) {
   const noQuery = trimmed.split("?")[0].trim();
   const stripped = noQuery.replace(/^\/+/, "");
   if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
-  const normalized = `/${stripped.replace(/\/+$/, "")}`;
+  let end = stripped.length;
+  while (end > 0 && stripped.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  const normalized = `/${stripped.slice(0, end)}`;
   return normalized;
 }
 function isKubernetesResourceType(resourceType) {
