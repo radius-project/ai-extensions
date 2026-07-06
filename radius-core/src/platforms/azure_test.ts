@@ -189,8 +189,7 @@ describe("azure platform", () => {
       expect(url).not.toContain("api-version");
     });
 
-    it("returns resource group url for non-ARM paths that start with /subscriptions/ but are too short", () => {
-      // normalizeArmResourceId returns "" for non-subscriptions paths
+    it("returns the resource group url for non-ARM strings", () => {
       const url = azure.portalUrl("random/string", ctx);
       expect(url).toBe(rgUrl);
     });
