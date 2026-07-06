@@ -42,7 +42,7 @@ pnpm -C radius-core test:watch     # run tests in watch mode
 Run a single test file:
 
 ```bash
-pnpm -C radius-core test -- src/platforms/azure_test.ts
+pnpm -C radius-core test -- src/graph/diff_test.ts
 ```
 
 The Copilot SDK (`@github/copilot-sdk`) is resolved by the canvas loader at
