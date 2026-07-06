@@ -64,23 +64,4 @@ gh variable set AWS_REGION --body "${data.region || ""}"
         }
     return "";
   },
-
-  verifyWorkflowSteps: `
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: \${{ vars.AWS_ROLE_ARN }}
-          aws-region: \${{ vars.AWS_REGION }}
-
-      - name: Verify AWS Credentials
-        run: |
-          aws sts get-caller-identity
-          echo "✅ AWS OIDC login successful"
-
-      - name: Verify EKS Access
-        run: |
-          aws eks update-kubeconfig --name "\${{ vars.AWS_EKS_CLUSTER_NAME }}" --region "\${{ vars.AWS_REGION }}"
-          kubectl cluster-info
-          echo "✅ EKS cluster accessible"
-`,
 };

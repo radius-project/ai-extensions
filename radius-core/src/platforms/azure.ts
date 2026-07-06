@@ -137,30 +137,4 @@ az role assignment create \\
 
     return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
   },
-
-  verifyWorkflowSteps: `
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: \${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: \${{ vars.AZURE_TENANT_ID }}
-          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Verify Azure Credentials
-        run: |
-          az account show
-          echo "✅ Azure OIDC login successful"
-
-      - name: Set up kubelogin
-        uses: azure/use-kubelogin@v1
-        with:
-          kubelogin-version: 'v0.1.4'
-
-      - name: Verify AKS Access
-        run: |
-          az aks get-credentials --name "\${{ vars.AZURE_AKS_CLUSTER_NAME }}" --resource-group "\${{ vars.AZURE_RESOURCE_GROUP }}" --overwrite-existing
-          kubelogin convert-kubeconfig -l azurecli
-          kubectl cluster-info
-          echo "✅ AKS cluster accessible"
-`,
 };

@@ -57,8 +57,4 @@ export interface ComputePlatform {
 
   /** Cloud-portal deep link for a deployed resource, or "" when unknown. */
   portalUrl(resourceType: string, ctx: PortalContext): string;
-
-  // ----- GitHub Actions workflow fragments (verbatim YAML / shell) -----
-  /** Steps injected into the credential-verification workflow. */
-  readonly verifyWorkflowSteps: string;
 }
