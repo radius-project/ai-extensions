@@ -154,7 +154,20 @@ describe("generatePortalUrl", () => {
 
   it("handles kubernetes resource types on azure when cluster state is present (links to AKS)", () => {
     const url = generatePortalUrl("apps/Deployment", "azure", { radiusK8sCluster: "radius-aks" });
-    expect(url).toContain("managedClusters");
+    expect(url).toContain("managedClusters/radius-aks");
+  });
+
+  it("prefers deployParams.cluster when present (azure kubernetes types)", () => {
+    const url = generatePortalUrl("apps/Deployment", "azure", {
+      deployParams: { cluster: "dp-aks" },
+      radiusK8sCluster: "radius-aks",
+    });
+    expect(url).toContain("managedClusters/dp-aks");
+  });
+
+  it("uses k8sCluster as a legacy fallback (azure kubernetes types)", () => {
+    const url = generatePortalUrl("apps/Deployment", "azure", { k8sCluster: "legacy-aks" });
+    expect(url).toContain("managedClusters/legacy-aks");
   });
 
   it("handles kubernetes resource types on aws (links to EKS)", () => {
