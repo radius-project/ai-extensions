@@ -172,3 +172,4 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+.impeccable/
