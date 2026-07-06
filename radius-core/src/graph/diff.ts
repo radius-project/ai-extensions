@@ -3,19 +3,29 @@
 // radius_render_graph_diff action, and the PR-diff markdown generator).
 //
 // Both inputs must be resource arrays produced by buildGraphFromBicep() so that
-// ids/types are constructed identically. Resources are matched by id. A type
-// change (e.g. mongo→postgres) produces a "removed" entry for the old resource
-// and an "added" entry for the new one; any resource that connected to the old
-// resource will show as "modified" because its connections reference a different id.
+// ids/types are constructed identically. Resources are matched by id first; when
+// a head resource has no id match, it falls back to matching the last id segment
+// (resource name) in the base set so that a type change (e.g. mysql→postgres) is
+// reported as "modified" rather than a spurious add+remove pair.
 
 export function computeGraphDiff(baseResources: any[], headResources: any[]): any[] {
   const base = baseResources || [];
   const head = headResources || [];
   const keyOf = (r: any) => r.id || r.name || "";
+  const lastSeg = (r: any) => {
+    const s = keyOf(r).split("/");
+    return s[s.length - 1];
+  };
 
   const diffResources: any[] = [];
   const baseMap = new Map(base.map((r) => [keyOf(r), r]));
   const headIds = new Set(head.map((r) => keyOf(r)));
+  const baseBySymName = new Map(base.map((r) => [lastSeg(r), r]));
+  const baseNameCounts = new Map<string, number>();
+  for (const r of base) {
+    const symName = lastSeg(r);
+    baseNameCounts.set(symName, (baseNameCounts.get(symName) || 0) + 1);
+  }
 
   for (const r of head) {
     if (baseMap.has(keyOf(r))) {
@@ -24,11 +34,24 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
       const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections });
       diffResources.push({ ...r, diffStatus: baseComp !== headComp ? "modified" : "unchanged" });
     } else {
-      diffResources.push({ ...r, diffStatus: "added" });
+      const symName = lastSeg(r);
+      const baseByName = baseBySymName.get(symName);
+      if (
+        baseByName &&
+        baseNameCounts.get(symName) === 1 &&
+        baseMap.has(keyOf(baseByName)) &&
+        !headIds.has(keyOf(baseByName))
+      ) {
+        // Same name, different type — treat as modified, consume the base entry.
+        diffResources.push({ ...r, diffStatus: "modified" });
+        baseMap.delete(keyOf(baseByName));
+      } else {
+        diffResources.push({ ...r, diffStatus: "added" });
+      }
     }
   }
   for (const r of base) {
-    if (!headIds.has(keyOf(r))) {
+    if (!headIds.has(keyOf(r)) && baseMap.has(keyOf(r))) {
       diffResources.push({ ...r, diffStatus: "removed" });
     }
   }
