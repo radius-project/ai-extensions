@@ -398,5 +398,15 @@ describe("azure platform", () => {
       const minCtx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
       expect(() => azure.portalUrl("apps/Deployment", minCtx)).not.toThrow();
     });
+
+    it("portalUrl does not crash with null resourceType", () => {
+      const ctx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
+      expect(() => azure.portalUrl(null as unknown as string, ctx)).not.toThrow();
+    });
+
+    it("portalUrl does not crash with undefined resourceType", () => {
+      const ctx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
+      expect(() => azure.portalUrl(undefined as unknown as string, ctx)).not.toThrow();
+    });
   });
 });

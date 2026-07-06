@@ -99,23 +99,24 @@ az role assignment create \\
   },
 
   portalUrl(resourceType: string, ctx: PortalContext): string {
+    const rt = (resourceType || "").trim();
     const subscriptionId = ctx.subscriptionId;
     const resourceGroup = ctx.resourceGroup;
     const clusterName = (ctx.clusterName || "").trim();
 
-    const armResourceId = normalizeArmResourceId(resourceType);
+    const armResourceId = normalizeArmResourceId(rt);
     if (armResourceId) {
       return buildResourceUrl(armResourceId);
     }
 
-    const normalizedArmType = normalizeAzureResourceType(resourceType);
+    const normalizedArmType = normalizeAzureResourceType(rt);
     if (normalizedArmType) {
       // Type-only values do not identify a concrete instance.
       return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
     }
 
     // Radius resources often materialize to Kubernetes objects on AKS.
-    if (isKubernetesResourceType(resourceType) || resourceType.startsWith("Radius.")) {
+    if (isKubernetesResourceType(rt) || rt.startsWith("Radius.")) {
       if (clusterName) {
         const clusterId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
         return buildResourceUrl(clusterId);
