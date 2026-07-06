@@ -36,7 +36,9 @@ export function generatePortalUrl(
   const resourceGroup =
     state?.deployParams?.resourceGroup || state?.azureResourceGroup || "radius-rg";
   const region = state?.oidcAws?.region || "us-east-1";
+  const clusterName =
+    state?.deployParams?.cluster || state?.radiusK8sCluster || state?.k8sCluster || "";
   const platform = getPlatform(provider);
   if (!platform) return "";
-  return platform.portalUrl(resourceType, { subscriptionId, resourceGroup, region });
+  return platform.portalUrl(resourceType, { subscriptionId, resourceGroup, region, clusterName });
 }

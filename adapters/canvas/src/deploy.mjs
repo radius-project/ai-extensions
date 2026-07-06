@@ -217,7 +217,11 @@ export function applyActivityToResources(entries, resources, provider, state) {
                     if (cur === 'failed' && e.status !== 'failed') continue;
                     if (rank[e.status] > rank[cur] || (e.status === 'failed' && cur !== 'failed')) {
                         o.deployStatus = e.status;
-                        if (e.status === 'success') o.portalUrl = generatePortalUrl(o.type || o.displayType || '', provider, state);
+                        if (e.rid && !o.id) o.id = e.rid;
+                        if (e.status === 'success') {
+                            const portalUrlKey = provider === 'azure' ? (o.id || e.rid || o.type || o.displayType || '') : (o.type || o.displayType || o.id || e.rid || '');
+                            o.portalUrl = generatePortalUrl(portalUrlKey, provider, state);
+                        }
                         changes.push((e.status === 'failed' ? '✗' : e.status === 'success' ? '✓' : '▷') + ' ' + (o.displayType || o.type) + (e.name ? ' "' + e.name + '"' : '') + ' — ' + e.status);
                     }
                 }
