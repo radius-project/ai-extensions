@@ -9,8 +9,13 @@ import {
   generatePortalUrl as coreGeneratePortalUrl,
   generateVerifyWorkflow as coreGenerateVerifyWorkflow,
   generateDeployWorkflow as coreGenerateDeployWorkflow,
+  DEPLOY_DISPATCHER_FILE,
+  DEPLOY_AZURE_FILE,
+  DEPLOY_AWS_FILE,
 } from "@radius-project/core";
 import { cliExec } from "./gh.mjs";
+
+export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 
 export function generateAzureOIDC(data) {
     return getPlatform('azure').generateOidc(data);
@@ -118,10 +123,16 @@ export function generateVerifyWorkflow(env, provider) {
     return coreGenerateVerifyWorkflow(env, platform);
 }
 
-export function generateDeployWorkflow(env, provider, appFile, creds) {
-    const platform = getPlatform(provider);
-    if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
-    return coreGenerateDeployWorkflow(env, platform, appFile);
+/**
+ * Generate the deploy workflow files (dispatcher + both provider workflows).
+ * Returns an object mapping bare workflow filename -> YAML content; the caller
+ * commits each under `.github/workflows/`. The provider is auto-detected at
+ * runtime by the dispatcher, so all three files are emitted regardless of the
+ * environment's cloud. `provider`/`creds` are accepted for call-site
+ * compatibility but not used for generation.
+ */
+export function generateDeployWorkflow(env, appFile) {
+    return coreGenerateDeployWorkflow(env, appFile);
 }
 export function generatePortalUrl(resourceType, provider, state) {
     return coreGeneratePortalUrl(resourceType, provider, state);

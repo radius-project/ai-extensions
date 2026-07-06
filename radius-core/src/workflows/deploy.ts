@@ -1,35 +1,48 @@
-import type { ComputePlatform } from "../platforms/index.js";
 import { fillTemplate } from "./template.js";
-import deployAzureTemplate from "./templates/deploy-azure.yml";
-import deployAwsTemplate from "./templates/deploy-aws.yml";
+import dispatcherTemplate from "./templates/run-rad-commands.yml";
+import azureTemplate from "./templates/run-rad-commands-azure.yml";
+import awsTemplate from "./templates/run-rad-commands-aws.yml";
 
-// Provider-specific static deploy templates. Each is a 1:1 port of the Radius
-// "run rad commands" workflow (radius-project/radius#12250), stripped to a
-// single cloud provider. The committed workflow is never generated inline; only
-// the `{{ENV}}` and `{{APP_FILE}}` placeholder tokens are filled in.
-const DEPLOY_TEMPLATES: Record<string, string> = {
-  azure: deployAzureTemplate,
-  aws: deployAwsTemplate,
-};
+// The pinned ref of radius-project/radius that hosts the shared composite
+// actions (setup-control-plane, restore-state, register-resource-types,
+// run-rad-commands, teardown) referenced by the provider workflows. Bump this
+// once radius-project/radius#12250 merges to point at a stable ref (e.g. `main`
+// or a release tag).
+const RADIUS_REF = "add-deploy-workflow";
+
+// Committed workflow file names. All three are always committed to the target
+// repo's .github/workflows/: the dispatcher references both provider workflows
+// by path, and the provider is selected at runtime by the dispatcher's `detect`
+// job — so both provider files must exist regardless of the environment's cloud.
+export const DEPLOY_DISPATCHER_FILE = "run-rad-commands.yml";
+export const DEPLOY_AZURE_FILE = "run-rad-commands-azure.yml";
+export const DEPLOY_AWS_FILE = "run-rad-commands-aws.yml";
+
+export type DeployWorkflowFiles = Record<string, string>;
 
 /**
- * Build the application-deploy GitHub Actions workflow YAML by selecting the
- * provider-specific static template for `platform` and filling its `{{ENV}}`
- * (dispatch default) and `{{APP_FILE}}` placeholders.
+ * Build the application-deploy GitHub Actions workflows, mirroring the
+ * composite-action structure of radius-project/radius#12250.
+ *
+ * Returns the three files that get committed to the target repo's
+ * `.github/workflows/`: the unified `run-rad-commands.yml` dispatcher plus the
+ * reusable `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider
+ * workflows. The provider-agnostic phases live in composite actions referenced
+ * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Only
+ * the `{{ENV}}`, `{{APP_FILE}}` and `{{RADIUS_REF}}` placeholders are filled.
  */
-export function generateDeployWorkflow(
-  env: string,
-  platform: ComputePlatform,
-  appFile: string,
-): string {
-  const template = DEPLOY_TEMPLATES[platform.id];
-  if (!template) {
-    throw new Error(
-      `No deploy template for platform "${platform.id}". Supported platforms: ${Object.keys(DEPLOY_TEMPLATES).join(", ")}.`,
-    );
-  }
-  return fillTemplate(template, {
-    ENV: env,
-    APP_FILE: appFile,
-  });
+export function generateDeployWorkflow(env: string, appFile: string): DeployWorkflowFiles {
+  return {
+    [DEPLOY_DISPATCHER_FILE]: fillTemplate(dispatcherTemplate, { ENV: env }),
+    [DEPLOY_AZURE_FILE]: fillTemplate(azureTemplate, {
+      ENV: env,
+      APP_FILE: appFile,
+      RADIUS_REF,
+    }),
+    [DEPLOY_AWS_FILE]: fillTemplate(awsTemplate, {
+      ENV: env,
+      APP_FILE: appFile,
+      RADIUS_REF,
+    }),
+  };
 }

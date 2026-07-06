@@ -26,6 +26,7 @@ import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand 
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
+  DEPLOY_DISPATCHER_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -42,6 +43,29 @@ import {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
+
+// Bare filename of the legacy monolithic deploy workflow that the composite-
+// action model (run-rad-commands*.yml) replaces. Removed from target repos on
+// commit so it does not double-trigger alongside the new dispatcher.
+const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
+
+/**
+ * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
+ * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
+ * it can be called from any request handler regardless of its local gh runner.
+ */
+function deleteLegacyDeployWorkflow(targetRepo) {
+    const path = '.github/workflows/' + LEGACY_DEPLOY_WORKFLOW_FILE;
+    return new Promise((resolve) => {
+        cliExec('gh', ['api', '/repos/' + targetRepo + '/contents/' + path, '--jq', '.sha'], { timeout: 30000 }, (err, stdout) => {
+            const sha = err ? '' : (stdout || '').trim();
+            if (!sha) { resolve(false); return; }
+            cliExec('gh', ['api', '--method', 'DELETE', '/repos/' + targetRepo + '/contents/' + path,
+                '-f', 'message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)',
+                '-f', 'sha=' + sha], { timeout: 30000 }, () => resolve(true));
+        });
+    });
+}
 
 // Timestamp of the last request served to any canvas webview. Updated by the
 // request handler and read by the host-channel keepalive via the getter below
@@ -495,38 +519,46 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push('✅ Verify workflow committed.');
 
-                // Step 4: Also commit the deploy workflow
-                steps.push('Committing deploy workflow...');
-                const deployWorkflow = generateDeployWorkflow(envName, provider, '.radius/app.bicep', null);
-                const deployContent = Buffer.from(deployWorkflow).toString('base64');
-                const deployPath = '.github/workflows/radius-deploy.yml';
+                // Step 4: Also commit the deploy workflows (dispatcher + both
+                // provider workflows). The dispatcher references both provider
+                // files by path, so all three must exist in the target repo.
+                steps.push('Committing deploy workflows...');
+                const deployWorkflows = generateDeployWorkflow(envName, '.radius/app.bicep');
 
-                const deployCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + deployPath, '--jq', '.sha']);
-                const deploySha = deployCheckResult.code === 0 ? deployCheckResult.stdout.trim() : '';
+                for (const [fileName, content] of Object.entries(deployWorkflows)) {
+                    const deployContent = Buffer.from(content).toString('base64');
+                    const deployPath = '.github/workflows/' + fileName;
 
-                const deployCommitBody = JSON.stringify({
-                    message: 'Add Radius deploy workflow for environment ' + envName,
-                    content: deployContent,
-                    ...(deploySha ? { sha: deploySha } : {})
-                });
+                    const deployCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + deployPath, '--jq', '.sha']);
+                    const deploySha = deployCheckResult.code === 0 ? deployCheckResult.stdout.trim() : '';
 
-                const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
-                writeFileSync(tmpFile2, deployCommitBody);
+                    const deployCommitBody = JSON.stringify({
+                        message: 'Add Radius deploy workflow (' + fileName + ') for environment ' + envName,
+                        content: deployContent,
+                        ...(deploySha ? { sha: deploySha } : {})
+                    });
 
-                const deployCommitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
-                try { unlinkSync(tmpFile2); } catch {}
+                    const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
+                    writeFileSync(tmpFile2, deployCommitBody);
 
-                if (deployCommitResult.code !== 0) {
-                    steps.push('❌ Failed to commit deploy workflow.');
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({
-                        error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
-                        steps
-                    }));
-                    return;
+                    const deployCommitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
+                    try { unlinkSync(tmpFile2); } catch {}
+
+                    if (deployCommitResult.code !== 0) {
+                        steps.push('❌ Failed to commit deploy workflow ' + fileName + '.');
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
+                            steps
+                        }));
+                        return;
+                    }
                 }
-                steps.push('✅ Deploy workflow committed.');
+                // Best-effort: remove the legacy monolithic deploy workflow so it
+                // does not double-trigger alongside the new dispatcher.
+                await deleteLegacyDeployWorkflow(targetRepo);
+                steps.push('✅ Deploy workflows committed.');
 
                 // Step 5: Dispatch the verify workflow
                 steps.push('Dispatching verify-credentials workflow...');
@@ -1367,12 +1399,12 @@ function createRequestHandler(instanceId) {
                         addLog('Waiting for the deploy workflow to start...');
                         let dRunId = null;
                         for (let attempt = 0; attempt < 24 && !dRunId; attempt++) {
-                            dRunId = await findWorkflowRun(repo, 'radius-deploy.yml', dispatchedAt, null);
+                            dRunId = await findWorkflowRun(repo, DEPLOY_DISPATCHER_FILE, dispatchedAt, null);
                             if (!dRunId) await delay(5000);
                         }
                         if (!dRunId) {
-                            addLog('⚠ No deploy run found for radius-deploy.yml.');
-                            entry.state.deployError = 'The deploy workflow (radius-deploy.yml) did not start. Check that the workflow exists on branch ' + branch + ' and that Actions are enabled for ' + repo + '.';
+                            addLog('⚠ No deploy run found for ' + DEPLOY_DISPATCHER_FILE + '.');
+                            entry.state.deployError = 'The deploy workflow (' + DEPLOY_DISPATCHER_FILE + ') did not start. Check that the workflow exists on branch ' + branch + ' and that Actions are enabled for ' + repo + '.';
                             entry.state.deployStatus = 'failed';
                             return;
                         }
@@ -1716,9 +1748,9 @@ function createRequestHandler(instanceId) {
             }
 
             try {
-                // Step 1: Generate the deploy workflow
-                sendEvent('info', 'Generating GitHub Actions deploy workflow...');
-                const workflow = generateDeployWorkflow(env, provider, appFile, oidc);
+                // Step 1: Generate the deploy workflows (dispatcher + both providers)
+                sendEvent('info', 'Generating GitHub Actions deploy workflows...');
+                const workflows = generateDeployWorkflow(env, appFile);
                 const targetRepo = params.targetRepo || '';
 
                 if (!targetRepo) {
@@ -1730,29 +1762,36 @@ function createRequestHandler(instanceId) {
 
                 sendEvent('stdout', 'Target repository: ' + targetRepo);
 
-                // Step 2: Commit workflow to target repo via GitHub API
-                sendEvent('info', 'Committing workflow to ' + targetRepo + '...');
-                const workflowContent = Buffer.from(workflow).toString('base64');
-                const filePath = '.github/workflows/radius-deploy.yml';
+                // Step 2: Commit workflows to target repo via GitHub API. The
+                // dispatcher references both provider workflows by path, so all
+                // three files must be committed.
+                sendEvent('info', 'Committing workflows to ' + targetRepo + '...');
+                for (const [fileName, content] of Object.entries(workflows)) {
+                    const workflowContent = Buffer.from(content).toString('base64');
+                    const filePath = '.github/workflows/' + fileName;
 
-                // Check if file already exists (to get sha for update)
-                const checkResult = await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + filePath, '--jq', '.sha']);
-                const existingSha = checkResult.code === 0 ? checkResult.output.trim() : '';
+                    // Check if file already exists (to get sha for update)
+                    const checkResult = await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + filePath, '--jq', '.sha']);
+                    const existingSha = checkResult.code === 0 ? checkResult.output.trim() : '';
 
-                const commitBody = JSON.stringify({
-                    message: 'Add Radius deploy workflow for environment ' + env,
-                    content: workflowContent,
-                    ...(existingSha ? { sha: existingSha } : {})
-                });
+                    const commitBody = JSON.stringify({
+                        message: 'Add Radius deploy workflow (' + fileName + ') for environment ' + env,
+                        content: workflowContent,
+                        ...(existingSha ? { sha: existingSha } : {})
+                    });
 
-                const commitResult = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + filePath, '--input', '-'], { stdin: commitBody });
-                if (commitResult.code !== 0) {
-                    sendEvent('error', 'Failed to commit workflow to repository. Check repo permissions.');
-                    sendEvent('done', 'failed');
-                    res.end();
-                    return;
+                    const commitResult = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + filePath, '--input', '-'], { stdin: commitBody });
+                    if (commitResult.code !== 0) {
+                        sendEvent('error', 'Failed to commit workflow ' + fileName + ' to repository. Check repo permissions.');
+                        sendEvent('done', 'failed');
+                        res.end();
+                        return;
+                    }
                 }
-                sendEvent('stdout', 'Workflow committed to ' + targetRepo);
+                // Best-effort: remove the legacy monolithic deploy workflow so it
+                // does not double-trigger alongside the new dispatcher.
+                await deleteLegacyDeployWorkflow(targetRepo);
+                sendEvent('stdout', 'Workflows committed to ' + targetRepo);
 
                 // Step 2b: Ensure the app definition AND its bicepconfig.json exist
                 // in the repo BEFORE triggering the deploy.
@@ -1867,14 +1906,14 @@ function createRequestHandler(instanceId) {
 
                 // Step 4: Trigger the workflow on the target repo
                 sendEvent('info', 'Triggering deployment workflow on ' + targetRepo + '...');
-                const triggerResult = await runCmd('gh', ['workflow', 'run', 'radius-deploy.yml', '-f', 'environment=' + env, '--repo', targetRepo]);
+                const triggerResult = await runCmd('gh', ['workflow', 'run', DEPLOY_DISPATCHER_FILE, '-f', 'environment=' + env, '--repo', targetRepo]);
 
                 if (triggerResult.code === 0) {
                     sendEvent('success', 'Workflow triggered! Waiting for run to start...');
 
                     // Wait a moment then get the run ID
                     await new Promise(r => setTimeout(r, 5000));
-                    const runsResult = await runCmd('gh', ['run', 'list', '--workflow=radius-deploy.yml', '--limit', '1', '--json', 'databaseId,status', '--repo', targetRepo]);
+                    const runsResult = await runCmd('gh', ['run', 'list', '--workflow=' + DEPLOY_DISPATCHER_FILE, '--limit', '1', '--json', 'databaseId,status', '--repo', targetRepo]);
 
                     try {
                         const runs = JSON.parse(runsResult.output);

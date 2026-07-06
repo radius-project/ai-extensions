@@ -64,7 +64,11 @@ export type {
 export {
   generateVerifyWorkflow,
   generateDeployWorkflow,
+  DEPLOY_DISPATCHER_FILE,
+  DEPLOY_AZURE_FILE,
+  DEPLOY_AWS_FILE,
 } from "./workflows/index.js";
+export type { DeployWorkflowFiles } from "./workflows/index.js";
 export type {
   Shell,
   ShellResult,
