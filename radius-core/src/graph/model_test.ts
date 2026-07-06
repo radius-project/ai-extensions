@@ -177,7 +177,7 @@ describe("buildModeledGraph", () => {
 
   it("resolves outbound connections from resourceId expressions", () => {
     // Classic array format: entry = { type, name, properties: { connections: {...} }, dependsOn }
-    // After collectARMResources normalizes, properties is the inner properties object
+    // Note: collectARMResources returns array entries unchanged; in this format `properties` is already the inner properties object.
     const template = {
       resources: [
         {
