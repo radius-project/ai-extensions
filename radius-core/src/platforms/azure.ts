@@ -1,8 +1,6 @@
 import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
 
 const AZURE_PORTAL_BASE = "https://portal.azure.com/#";
-const FORWARD_SLASH_CHAR_CODE = 47;
-
 function buildResourceGroupResourceListUrl(subscriptionId: string, resourceGroup: string): string {
   return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
 }
@@ -31,11 +29,15 @@ function normalizeArmResourceId(resourceRef: string): string {
 
   const noQuery = trimmed.split("?")[0].trim();
   // Strip leading slashes before the prefix check so "//subscriptions/..." is handled.
-  const stripped = noQuery.replace(/^\/+/, "");
+  let start = 0;
+  while (start < noQuery.length && noQuery[start] === "/") {
+    start += 1;
+  }
+  const stripped = noQuery.slice(start);
   if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
 
   let end = stripped.length;
-  while (end > 0 && stripped.charCodeAt(end - 1) === FORWARD_SLASH_CHAR_CODE) {
+  while (end > 0 && stripped[end - 1] === "/") {
     end -= 1;
   }
   const normalized = `/${stripped.slice(0, end)}`;
