@@ -25,19 +25,9 @@ function computeDiffHash(properties, dependsOn = []) {
     if (!NON_AUTHORABLE_PROPERTIES.has(k)) authorable[k] = v;
   }
   const sorted = [...dependsOn].sort();
-  const payload = JSON.stringify({ properties: authorable, dependsOn: sorted }, sortedReplacer);
+  const payload = JSON.stringify({ properties: authorable, dependsOn: sorted });
   const hash = createHash("sha256").update(payload).digest("hex");
   return `sha256:${hash}`;
-}
-function sortedReplacer(_key, value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const sorted = {};
-    for (const k of Object.keys(value).sort()) {
-      sorted[k] = value[k];
-    }
-    return sorted;
-  }
-  return value;
 }
 function buildModeledGraph(template) {
   const rawResources = collectARMResources(template.resources);
@@ -365,9 +355,14 @@ function computeGraphDiff(baseResources, headResources) {
   const base = baseResources || [];
   const head = headResources || [];
   const keyOf = (r) => r.id || r.name || "";
+  const lastSeg = (r) => {
+    const s = keyOf(r).split("/");
+    return s[s.length - 1];
+  };
   const diffResources = [];
   const baseMap = new Map(base.map((r) => [keyOf(r), r]));
   const headIds = new Set(head.map((r) => keyOf(r)));
+  const baseBySymName = new Map(base.map((r) => [lastSeg(r), r]));
   for (const r of head) {
     if (baseMap.has(keyOf(r))) {
       const b = baseMap.get(keyOf(r));
@@ -375,11 +370,18 @@ function computeGraphDiff(baseResources, headResources) {
       const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections });
       diffResources.push({ ...r, diffStatus: baseComp !== headComp ? "modified" : "unchanged" });
     } else {
-      diffResources.push({ ...r, diffStatus: "added" });
+      const symName = lastSeg(r);
+      const baseByName = baseBySymName.get(symName);
+      if (baseByName && baseMap.has(keyOf(baseByName)) && !headIds.has(keyOf(baseByName))) {
+        diffResources.push({ ...r, diffStatus: "modified" });
+        baseMap.delete(keyOf(baseByName));
+      } else {
+        diffResources.push({ ...r, diffStatus: "added" });
+      }
     }
   }
   for (const r of base) {
-    if (!headIds.has(keyOf(r))) {
+    if (!headIds.has(keyOf(r)) && baseMap.has(keyOf(r))) {
       diffResources.push({ ...r, diffStatus: "removed" });
     }
   }
@@ -1232,52 +1234,6 @@ param image string
 }
 
 // radius-core/src/platforms/azure.ts
-var AZURE_PORTAL_BASE = "https://portal.azure.com/#";
-function buildResourceGroupResourceListUrl(subscriptionId, resourceGroup) {
-  return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
-}
-function buildResourceUrl(armResourceId) {
-  return `${AZURE_PORTAL_BASE}@/resource${armResourceId}/overview`;
-}
-function extractTypeFromArmId(value) {
-  const providersIndex = value.toLowerCase().indexOf("/providers/");
-  if (providersIndex === -1) return "";
-  const providerPath = value.slice(providersIndex + "/providers/".length).split("?")[0];
-  const parts = providerPath.split("/").filter(Boolean);
-  if (parts.length < 2) return "";
-  const providerNamespace = parts[0];
-  const typeParts = [];
-  for (let i = 1; i < parts.length; i += 2) {
-    typeParts.push(parts[i]);
-  }
-  return `${providerNamespace}/${typeParts.join("/")}`;
-}
-function normalizeAzureResourceType(resourceType) {
-  const trimmed = (resourceType || "").trim();
-  if (!trimmed) return "";
-  const noApiVersion = trimmed.split("@")[0].trim();
-  if (!noApiVersion) return "";
-  if (noApiVersion.toLowerCase().startsWith("/subscriptions/")) {
-    return extractTypeFromArmId(noApiVersion);
-  }
-  if (noApiVersion.startsWith("Microsoft.")) {
-    return noApiVersion;
-  }
-  return "";
-}
-function normalizeArmResourceId(resourceRef) {
-  const trimmed = (resourceRef || "").trim();
-  if (!trimmed) return "";
-  const noQuery = trimmed.split("?")[0].trim();
-  if (!noQuery.toLowerCase().startsWith("/subscriptions/")) return "";
-  const normalized = `/${noQuery.replace(/^\/+/, "").replace(/\/+$/, "")}`;
-  return normalized;
-}
-function isKubernetesResourceType(resourceType) {
-  const t = (resourceType || "").trim();
-  if (!t) return false;
-  return /^(apps|core|batch|autoscaling|networking\.k8s\.io|storage\.k8s\.io|rbac\.authorization\.k8s\.io|apiextensions\.k8s\.io)\//i.test(t);
-}
 var azure = {
   id: "azure",
   displayName: "Azure",
@@ -1323,23 +1279,36 @@ az role assignment create \\
   portalUrl(resourceType, ctx) {
     const subscriptionId = ctx.subscriptionId;
     const resourceGroup = ctx.resourceGroup;
-    const clusterName = (ctx.clusterName || "").trim();
-    const armResourceId = normalizeArmResourceId(resourceType);
-    if (armResourceId) {
-      return buildResourceUrl(armResourceId);
+    const azureBase = "https://portal.azure.com/#@/resource";
+    const rg = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers`;
+    if (resourceType.includes("DBforPostgreSQL") || resourceType.includes("PostgreSQL Flexible Server")) {
+      return `${azureBase}${rg}/Microsoft.DBforPostgreSQL/flexibleServers/radius-postgres/overview`;
     }
-    const normalizedArmType = normalizeAzureResourceType(resourceType);
-    if (normalizedArmType) {
-      return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
+    if (resourceType.includes("DBforMySQL") || resourceType.includes("MySQL Flexible Server")) {
+      return `${azureBase}${rg}/Microsoft.DBforMySQL/flexibleServers/radius-mysql/overview`;
     }
-    if (isKubernetesResourceType(resourceType) || resourceType.startsWith("Radius.")) {
-      if (clusterName) {
-        const clusterId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
-        return buildResourceUrl(clusterId);
-      }
-      return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
+    if (resourceType.includes("Cache/redis") || resourceType.includes("Cache for Redis")) {
+      return `${azureBase}${rg}/Microsoft.Cache/redis/radius-redis/overview`;
     }
-    return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
+    if (resourceType.includes("DocumentDB") || resourceType.includes("Cosmos DB")) {
+      return `${azureBase}${rg}/Microsoft.DocumentDB/databaseAccounts/radius-cosmos/overview`;
+    }
+    if (resourceType.includes("KeyVault") || resourceType.includes("Key Vault")) {
+      return `${azureBase}${rg}/Microsoft.KeyVault/vaults/radius-kv/overview`;
+    }
+    if (resourceType.includes("ContainerRegistry") || resourceType.includes("Container Registry")) {
+      return `${azureBase}${rg}/Microsoft.ContainerRegistry/registries/radiusacr/overview`;
+    }
+    if (resourceType.includes("applicationGateways") || resourceType.includes("Application Gateway")) {
+      return `${azureBase}${rg}/Microsoft.Network/applicationGateways/radius-appgw/overview`;
+    }
+    if (resourceType.includes("Compute/disks") || resourceType.includes("Managed Disk")) {
+      return `${azureBase}${rg}/Microsoft.Compute/disks/radius-disk/overview`;
+    }
+    if (resourceType.includes("apps/Deployment") || resourceType.includes("core/Service") || resourceType.includes("Ingress") || resourceType.includes("PersistentVolume")) {
+      return `${azureBase}${rg}/Microsoft.ContainerService/managedClusters/radius-aks/overview`;
+    }
+    return "";
   },
   verifyWorkflowSteps: `
       - name: Azure Login (OIDC)
@@ -1537,10 +1506,9 @@ function generatePortalUrl(resourceType, provider, state) {
   const subscriptionId = state?.oidcAzure?.subscriptionId || "00000000-0000-0000-0000-000000000000";
   const resourceGroup = state?.deployParams?.resourceGroup || state?.azureResourceGroup || "radius-rg";
   const region = state?.oidcAws?.region || "us-east-1";
-  const clusterName = state?.deployParams?.cluster || state?.radiusK8sCluster || state?.k8sCluster || "";
   const platform = getPlatform(provider);
   if (!platform) return "";
-  return platform.portalUrl(resourceType, { subscriptionId, resourceGroup, region, clusterName });
+  return platform.portalUrl(resourceType, { subscriptionId, resourceGroup, region });
 }
 
 // ../../radius-core/src/modeling/recipe-resolver.ts
@@ -2677,8 +2645,7 @@ function applyActivityToResources(entries, resources, provider, state) {
           if (cur === "failed" && e.status !== "failed") continue;
           if (rank[e.status] > rank[cur] || e.status === "failed" && cur !== "failed") {
             o.deployStatus = e.status;
-            if (e.rid && !o.id) o.id = e.rid;
-            if (e.status === "success") o.portalUrl = generatePortalUrl2(o.id || e.rid || o.type || o.displayType || "", provider, state);
+            if (e.status === "success") o.portalUrl = generatePortalUrl2(o.type || o.displayType || "", provider, state);
             changes.push((e.status === "failed" ? "\u2717" : e.status === "success" ? "\u2713" : "\u25B7") + " " + (o.displayType || o.type) + (e.name ? ' "' + e.name + '"' : "") + " \u2014 " + e.status);
           }
         }
@@ -6189,7 +6156,7 @@ data: ${JSON.stringify(data)}
             r.deployStatus = s;
             if (r.outputResources) r.outputResources.forEach((o) => {
               o.deployStatus = s;
-              if (s === "success") o.portalUrl = generatePortalUrl2(o.id || o.type || o.displayType || "", provider, entry2.state);
+              if (s === "success") o.portalUrl = generatePortalUrl2(o.type || o.displayType || "", provider, entry2.state);
             });
           };
           (async () => {
