@@ -30,6 +30,21 @@ pnpm watch           # rebuild on change
 pnpm typecheck       # typecheck core + canvas
 ```
 
+## Running Tests
+
+Tests currently live in `radius-core` and are run with Vitest.
+
+```bash
+pnpm -C radius-core test           # run all core tests once
+pnpm -C radius-core test:watch     # run tests in watch mode
+```
+
+Run a single test file:
+
+```bash
+pnpm -C radius-core test -- src/graph/diff_test.ts
+```
+
 The Copilot SDK (`@github/copilot-sdk`) is resolved by the canvas loader at
 runtime and is intentionally not bundled.
 
