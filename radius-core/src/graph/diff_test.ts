@@ -19,8 +19,7 @@ describe("computeGraphDiff", () => {
     ];
     const result = computeGraphDiff([], head);
     expect(result).toHaveLength(2);
-    expect(result[0].diffStatus).toBe("added");
-    expect(result[1].diffStatus).toBe("added");
+    expect(result.every((r: any) => r.diffStatus === "added")).toBe(true);
   });
 
   it("marks all base resources as removed when head is empty", () => {
