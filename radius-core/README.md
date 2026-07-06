@@ -126,5 +126,5 @@ pnpm test:watch
 Run a single test file:
 
 ```bash
-pnpm -C radius-core test -- src/platforms/azure_test.ts
+pnpm -C radius-core test -- src/graph/diff_test.ts
 ```
