@@ -121,9 +121,11 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("radius-rg");
   });
 
-  it("returns empty string for an unrecognized resource type on a valid platform", () => {
+  it("falls back to the azure resource group resource list for an unrecognized resource type", () => {
     const url = generatePortalUrl("UnknownResource", "azure", {});
-    expect(url).toBe("");
+    expect(url).toContain("portal.azure.com");
+    expect(url).toContain("00000000-0000-0000-0000-000000000000");
+    expect(url).toContain("radius-rg/resources");
   });
 
   it("returns empty string when provider is null", () => {
@@ -136,9 +138,11 @@ describe("generatePortalUrl", () => {
     expect(url).toBe("");
   });
 
-  it("handles azure KeyVault resource type", () => {
+  it("falls back to the azure resource group resource list for unsupported shorthand azure resource types", () => {
     const url = generatePortalUrl("KeyVault", "azure", {});
-    expect(url).toContain("KeyVault/vaults");
+    expect(url).toContain("portal.azure.com");
+    expect(url).toContain("00000000-0000-0000-0000-000000000000");
+    expect(url).toContain("radius-rg/resources");
   });
 
   it("handles aws ECR resource type", () => {
@@ -148,8 +152,8 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("us-west-2");
   });
 
-  it("handles kubernetes resource types on azure (links to AKS)", () => {
-    const url = generatePortalUrl("apps/Deployment", "azure", {});
+  it("handles kubernetes resource types on azure when cluster state is present (links to AKS)", () => {
+    const url = generatePortalUrl("apps/Deployment", "azure", { radiusK8sCluster: "radius-aks" });
     expect(url).toContain("managedClusters");
   });
 
