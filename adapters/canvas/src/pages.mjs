@@ -105,7 +105,7 @@ export function pageShell(title, bodyContent) {
   button:hover, .verify-btn:hover { background: #2ea043; }
   .resolved-name { font-weight: 400; color: #1a7f37; font-size: 12px; }
   #graph-container { width: 100%; height: 450px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; position: relative; }
-  #graph-container:empty { display: none !important; border: none; height: 0; }
+  #graph-container:empty { border-color: transparent; }
   .legend { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
