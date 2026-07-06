@@ -106,3 +106,25 @@ shared and UI-agnostic, lift it into `radius-core` first.
 pnpm typecheck:core   # tsc over radius-core (strict)
 pnpm build:canvas     # esbuild -> .github/radius/extension.mjs
 ```
+
+## Testing
+
+Run tests from the workspace root:
+
+```bash
+pnpm -C radius-core test         # run all tests once
+pnpm -C radius-core test:watch   # run in watch mode
+```
+
+Or run from inside `radius-core/`:
+
+```bash
+pnpm test
+pnpm test:watch
+```
+
+Run a single test file:
+
+```bash
+pnpm -C radius-core test -- src/graph/diff_test.ts
+```
