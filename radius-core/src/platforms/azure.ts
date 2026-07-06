@@ -1,6 +1,7 @@
 import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
 
 const AZURE_PORTAL_BASE = "https://portal.azure.com/#";
+const FORWARD_SLASH_CHAR_CODE = 47;
 
 function buildResourceGroupResourceListUrl(subscriptionId: string, resourceGroup: string): string {
   return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
@@ -34,7 +35,7 @@ function normalizeArmResourceId(resourceRef: string): string {
   if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
 
   let end = stripped.length;
-  while (end > 0 && stripped.charCodeAt(end - 1) === 47) {
+  while (end > 0 && stripped.charCodeAt(end - 1) === FORWARD_SLASH_CHAR_CODE) {
     end -= 1;
   }
   const normalized = `/${stripped.slice(0, end)}`;

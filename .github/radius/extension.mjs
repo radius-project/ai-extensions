@@ -1233,6 +1233,7 @@ param image string
 
 // radius-core/src/platforms/azure.ts
 var AZURE_PORTAL_BASE = "https://portal.azure.com/#";
+var FORWARD_SLASH_CHAR_CODE = 47;
 function buildResourceGroupResourceListUrl(subscriptionId, resourceGroup) {
   return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
 }
@@ -1256,7 +1257,7 @@ function normalizeArmResourceId(resourceRef) {
   const stripped = noQuery.replace(/^\/+/, "");
   if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
   let end = stripped.length;
-  while (end > 0 && stripped.charCodeAt(end - 1) === 47) {
+  while (end > 0 && stripped.charCodeAt(end - 1) === FORWARD_SLASH_CHAR_CODE) {
     end -= 1;
   }
   const normalized = `/${stripped.slice(0, end)}`;
