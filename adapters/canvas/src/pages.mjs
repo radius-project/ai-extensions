@@ -1461,10 +1461,9 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
     // First create the GitHub environment with secrets, variables, and workflows
     var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
     envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
-    // Application parameters are no longer collected from the UI. Send an empty
-    // object so the server still auto-generates values for params without a
-    // Bicep default (e.g. the app's @secure() password) and inlines the rest.
-    envData.deployParams = {};
+    // Application parameters are not collected from the UI. The server parses the
+    // app.bicep only to auto-generate values for required params without a Bicep
+    // default (e.g. the app's @secure() password) and inlines the rest.
     if (provider === 'azure') {
         envData.clientId = document.getElementById('az-client-id').value.trim();
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();

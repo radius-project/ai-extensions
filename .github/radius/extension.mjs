@@ -5068,10 +5068,9 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
     // First create the GitHub environment with secrets, variables, and workflows
     var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
     envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
-    // Application parameters are no longer collected from the UI. Send an empty
-    // object so the server still auto-generates values for params without a
-    // Bicep default (e.g. the app's @secure() password) and inlines the rest.
-    envData.deployParams = {};
+    // Application parameters are not collected from the UI. The server parses the
+    // app.bicep only to auto-generate values for required params without a Bicep
+    // default (e.g. the app's @secure() password) and inlines the rest.
     if (provider === 'azure') {
         envData.clientId = document.getElementById('az-client-id').value.trim();
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();
@@ -5682,15 +5681,14 @@ function createRequestHandler(instanceId) {
           }
           if (bicepSource) {
             const parsed = appParams(bicepSource);
-            const resolved = resolveDeployParams(parsed, data.deployParams || {});
+            const resolved = resolveDeployParams(parsed);
             const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
             await runGh2(["secret", "set", "RADIUS_DEPLOY_PARAMS", "--env", envName, "--repo", targetRepo], Object.keys(secretParams).length ? JSON.stringify(secretParams) : "{}");
             const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
             await runGh2(["variable", "set", "RADIUS_RAD_COMMANDS", "--env", envName, "--repo", targetRepo, "--body", radCommand]);
             const names = Object.keys(resolved);
             if (names.length > 0) {
-              const generated = parsed.filter((p) => !p.hasDefault && !((data.deployParams || {})[p.name] || "").toString().trim()).map((p) => p.name);
-              steps.push(`Provisioned ${names.length} application parameter(s)` + (generated.length ? ` (auto-generated: ${generated.join(", ")})` : "") + ".");
+              steps.push(`Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(", ")}).`);
             }
           }
         } catch (paramErr) {

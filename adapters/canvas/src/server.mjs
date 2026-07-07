@@ -430,13 +430,13 @@ function createRequestHandler(instanceId) {
                     if (data.subnetIds) await runGh(['variable', 'set', 'RADIUS_SUBNET_IDS', '--body', data.subnetIds, '--env', envName, '--repo', targetRepo]);
                 }
 
-                // Step 2b: Resolve and provision application parameters. Parse the
-                // app.bicep the deploy will run against, merge any values the user
-                // supplied in the form, auto-generate a value for every required
-                // parameter that has no Bicep default and was left blank, and skip
-                // blank params that do have a default (Bicep applies it). The result
-                // is stored as a single JSON secret the deploy workflow reads and
-                // expands into `--parameters name=value` pairs.
+                // Step 2b: Provision application parameters. Parse the app.bicep the
+                // deploy will run against and auto-generate a value for every required
+                // parameter that has no Bicep default (e.g. an @secure() password),
+                // skipping params that do have a default (Bicep applies it). Values are
+                // no longer collected from the UI. The result is stored as a single
+                // JSON secret the deploy workflow reads and expands into
+                // `--parameters name=value` pairs.
                 try {
                     let paramBranch = data.branch || '';
                     if (!paramBranch) {
@@ -451,7 +451,7 @@ function createRequestHandler(instanceId) {
                     }
                     if (bicepSource) {
                         const parsed = appParams(bicepSource);
-                        const resolved = resolveDeployParams(parsed, data.deployParams || {});
+                        const resolved = resolveDeployParams(parsed);
                         // Split into secret (provisioned as a secret, appended by the
                         // workflow) and non-secret (inlined into the rad deploy command).
                         const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
@@ -468,8 +468,7 @@ function createRequestHandler(instanceId) {
 
                         const names = Object.keys(resolved);
                         if (names.length > 0) {
-                            const generated = parsed.filter((p) => !p.hasDefault && !( (data.deployParams || {})[p.name] || '' ).toString().trim()).map((p) => p.name);
-                            steps.push(`Provisioned ${names.length} application parameter(s)` + (generated.length ? ` (auto-generated: ${generated.join(', ')})` : '') + '.');
+                            steps.push(`Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(', ')}).`);
                         }
                     }
                 } catch (paramErr) {
