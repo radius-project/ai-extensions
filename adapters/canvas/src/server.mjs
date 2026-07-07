@@ -233,7 +233,6 @@ function createRequestHandler(instanceId) {
                 // Step 1: Get account info — use provided values or fall back to az CLI
                 let tenantId = data.tenantId || '';
                 let subscriptionId = data.subscriptionId || '';
-                let existingClientId = data.clientId || '';
 
                 if (!tenantId || !subscriptionId) {
                     steps.push('Checking Azure CLI login...');
@@ -250,23 +249,19 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 2: Create App Registration (skip if clientId already provided)
-                let clientId = existingClientId;
+                // Step 2: Create a fresh App Registration. We always auto-create
+                // new credentials rather than reusing an existing Client ID.
                 const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
-                if (!clientId) {
-                    steps.push(`Creating App Registration: ${appName}...`);
-                    const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
-                    if (appResult.code !== 0) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
-                        return;
-                    }
-                    clientId = appResult.stdout.trim();
-                    steps.push(`✅ App Registration created: ${clientId}`);
-                } else {
-                    steps.push(`✅ Using existing App Registration: ${clientId}`);
+                steps.push(`Creating App Registration: ${appName}...`);
+                const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
+                if (appResult.code !== 0) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
+                    return;
                 }
+                const clientId = appResult.stdout.trim();
+                steps.push(`✅ App Registration created: ${clientId}`);
 
                 // Step 3: Create Service Principal
                 steps.push('Creating Service Principal...');

@@ -4700,12 +4700,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Leave the Client ID blank to auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login. Enter an existing Client ID to reuse it instead.
+      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated Client ID appears below.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">\u26A1 Auto-create credentials</button>
     <div style="display:flex; flex-direction:column; gap:4px; flex-basis:100%;">
-      <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Client ID <span style="font-weight:400;">(optional \u2014 existing App Registration)</span></label>
-      <input id="az-client-id" type="text" placeholder="Leave blank to auto-create a new App Registration" value="${escapeHtml(oidcAzure?.clientId || "")}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-inset, #eff2f5);" />
+      <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Client ID <span style="font-weight:400;">(auto-created)</span></label>
+      <input id="az-client-id" type="text" readonly placeholder="Auto-created when you click Auto-create credentials" value="${escapeHtml(oidcAzure?.clientId || "")}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-inset, #eff2f5);" />
     </div>
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
   </div>
@@ -5011,8 +5011,7 @@ document.getElementById('btn-auto-setup').addEventListener('click', function() {
             resourceGroup: resourceGroup,
             cluster: cluster,
             subscriptionId: document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '',
-            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : '',
-            clientId: document.getElementById('az-client-id') ? document.getElementById('az-client-id').value.trim() : ''
+            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : ''
         })
     }).then(function(r) { return r.json(); }).then(function(data) {
         btn.disabled = false;
@@ -5500,7 +5499,6 @@ function createRequestHandler(instanceId) {
         const steps = [];
         let tenantId = data.tenantId || "";
         let subscriptionId = data.subscriptionId || "";
-        let existingClientId = data.clientId || "";
         if (!tenantId || !subscriptionId) {
           steps.push("Checking Azure CLI login...");
           const acctResult = await runCmd2("az", ["account", "show", "--output", "json"]);
@@ -5515,22 +5513,17 @@ function createRequestHandler(instanceId) {
           subscriptionId = subscriptionId || account.id;
         }
         steps.push(`\u2705 Using subscription=${subscriptionId}, tenant=${tenantId}`);
-        let clientId = existingClientId;
         const appName = `radius-deploy-${targetRepo.replace("/", "-")}`;
-        if (!clientId) {
-          steps.push(`Creating App Registration: ${appName}...`);
-          const appResult = await runCmd2("az", ["ad", "app", "create", "--display-name", appName, "--query", "appId", "-o", "tsv"]);
-          if (appResult.code !== 0) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Failed to create App Registration: " + appResult.stderr, steps }));
-            return;
-          }
-          clientId = appResult.stdout.trim();
-          steps.push(`\u2705 App Registration created: ${clientId}`);
-        } else {
-          steps.push(`\u2705 Using existing App Registration: ${clientId}`);
+        steps.push(`Creating App Registration: ${appName}...`);
+        const appResult = await runCmd2("az", ["ad", "app", "create", "--display-name", appName, "--query", "appId", "-o", "tsv"]);
+        if (appResult.code !== 0) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Failed to create App Registration: " + appResult.stderr, steps }));
+          return;
         }
+        const clientId = appResult.stdout.trim();
+        steps.push(`\u2705 App Registration created: ${clientId}`);
         steps.push("Creating Service Principal...");
         const spResult = await runCmd2("az", ["ad", "sp", "create", "--id", clientId]);
         if (spResult.code !== 0 && !spResult.stderr.includes("already exists")) {
