@@ -1826,30 +1826,14 @@ jobs:
           BUILD_REGISTRY=$(echo "\${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="ghcr-registry-creds"
 
-          # Select the provider-specific Terraform recipe pack. Both provider packs
-          # bundle the shared Kubernetes compute/data recipes and differ only in the
-          # mySQL database recipe and cloud provider config.
-          PACK_NAME="azure-terraform"
-          # The Azure mySQL recipe reads subscription, resource group, and
-          # location from the Radius recipe context (var.context.azure), which
-          # Radius populates from the environment's providers.azure block below.
-          # It declares no azure_subscription_id/resourceGroupName/location
-          # variables, so passing them as recipe parameters makes Terraform fail
-          # with "Extraneous JSON object property". Pass no parameters here.
-          MYSQL_RECIPE=$(cat <<EOF
-          'Radius.Data/mySqlDatabases': {
-            kind: 'terraform'
-            source: 'git::$REPO//Data/mySqlDatabases/recipes/azure/terraform?ref=sk593/add-azure-mysql-recipe'
-          }
-          EOF
-          )
-          CLOUD_PROVIDER=$(cat <<EOF
-          azure: {
-            subscriptionId: '\${{ vars.AZURE_SUBSCRIPTION_ID }}'
-            resourceGroupName: '\${{ vars.AZURE_RESOURCE_GROUP }}'
-          }
-          EOF
-          )
+          # Azure recipe pack: provision the data / messaging / AI resource types
+          # with Azure Verified Modules (Bicep, from mcr.microsoft.com/bicep/avm),
+          # mirroring radius-project/resource-types-contrib recipepack/azure. The
+          # application image is still built from the repo source by the Kubernetes
+          # containerImages recipe, and the container recipe consumes that image.
+          # The types the AVM pack omits (persistentVolumes, routes, secrets) stay
+          # on the shared Kubernetes Terraform recipes so apps using them keep working.
+          PACK_NAME="azure-avm"
           echo "Selected recipe pack: $PACK_NAME"
 
           # Generate a Bicep file that defines a recipe pack bundling every
@@ -1861,6 +1845,9 @@ jobs:
             name: '$PACK_NAME'
             properties: {
               recipes: {
+                // Build the application image from the repo source with the in-pod
+                // BuildKit and push it to the build registry; the container recipe
+                // below consumes the resulting image reference.
                 'Radius.Compute/containerImages': {
                   kind: 'terraform'
                   source: 'git::$REPO//Compute/containerImages/recipes/kubernetes/terraform?ref=$REF'
@@ -1869,10 +1856,251 @@ jobs:
                     registrySecretName: '$REGISTRY_SECRET_NAME'
                   }
                 }
+                // Container recipe from the Azure recipe pack (Bicep kube-recipe).
                 'Radius.Compute/containers': {
-                  kind: 'terraform'
-                  source: 'git::$REPO//Compute/containers/recipes/kubernetes/terraform?ref=$REF'
+                  kind: 'bicep'
+                  source: 'ghcr.io/radius-project/kube-recipes/containers:latest'
                 }
+                // Azure Verified Module (Bicep) recipes for the data / messaging /
+                // AI resource types, copied from resource-types-contrib recipepack/azure.
+                'Radius.Data/redisCaches': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    skuName: '{{context.resource.properties.size == "S" ? "Balanced_B0" : "Balanced_B1"}}'
+                    highAvailability: 'Disabled'
+                    database: {
+                      name: 'default'
+                      accessKeysAuthentication: 'Enabled'
+                    }
+                    publicNetworkAccess: 'Enabled'
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'hostName'
+                    port: 'port'
+                    url: 'primaryConnectionString'
+                  }
+                }
+                'Radius.AI/models': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/cognitive-services/account:0.15.0'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    kind: 'OpenAI'
+                    sku: 'S0'
+                    customSubDomainName: '{{context.resource.name}}'
+                    disableLocalAuth: false
+                    publicNetworkAccess: 'Enabled'
+                    deployments: [
+                      {
+                        name: 'chat'
+                        model: {
+                          format: 'OpenAI'
+                          name: '{{context.resource.properties.model}}'
+                          version: '2025-08-07'
+                        }
+                        sku: {
+                          name: 'GlobalStandard'
+                          capacity: 1
+                        }
+                      }
+                    ]
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    endpoint: 'endpoint'
+                    apiKey: 'primaryKey'
+                  }
+                }
+                'Radius.AI/search': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/search/search-service:0.12.2'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    sku: 'basic'
+                    disableLocalAuth: false
+                    replicaCount: 1
+                    partitionCount: 1
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    endpoint: 'endpoint'
+                    apiKey: 'primaryKey'
+                  }
+                }
+                'Radius.Data/mongoDatabases': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/document-db/database-account:0.19.0'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    capabilitiesToAdd: [
+                      'EnableMongo'
+                    ]
+                    mongodbDatabases: [
+                      {
+                        name: '{{context.resource.properties.database}}'
+                      }
+                    ]
+                    networkRestrictions: {
+                      ipRules: []
+                      publicNetworkAccess: 'Enabled'
+                    }
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    endpoint: 'endpoint'
+                    connectionString: 'primaryReadWriteConnectionString'
+                  }
+                }
+                'Radius.Data/mySqlDatabases': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    administratorLogin: '{{context.resource.properties.username}}'
+                    administratorLoginPassword: '{{context.resource.properties.password}}'
+                    skuName: 'Standard_B1ms'
+                    tier: 'Burstable'
+                    version: '{{context.resource.properties.version == "5.7" ? "5.7" : "8.0.21"}}'
+                    databases: [
+                      {
+                        name: '{{context.resource.properties.database}}'
+                      }
+                    ]
+                    availabilityZone: -1
+                    highAvailability: 'Disabled'
+                    geoRedundantBackup: 'Disabled'
+                    storageSizeGB: 32
+                    publicNetworkAccess: 'Enabled'
+                    firewallRules: [
+                      {
+                        name: 'allow-all'
+                        startIpAddress: '0.0.0.0'
+                        endIpAddress: '255.255.255.255'
+                      }
+                    ]
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'fqdn'
+                  }
+                }
+                'Radius.Data/postgreSqlDatabases': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/db-for-postgre-sql/flexible-server:0.15.2'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    administratorLogin: '{{context.resource.properties.username}}'
+                    administratorLoginPassword: '{{context.resource.properties.password}}'
+                    authConfig: {
+                      activeDirectoryAuth: 'Enabled'
+                      passwordAuth: 'Enabled'
+                    }
+                    skuName: '{{context.resource.properties.size == "S" ? "Standard_B1ms" : "Standard_D2ds_v5"}}'
+                    tier: '{{context.resource.properties.size == "S" ? "Burstable" : "GeneralPurpose"}}'
+                    databases: [
+                      {
+                        name: '{{context.resource.properties.database}}'
+                      }
+                    ]
+                    version: '16'
+                    availabilityZone: -1
+                    highAvailability: 'Disabled'
+                    geoRedundantBackup: 'Disabled'
+                    storageSizeGB: 32
+                    publicNetworkAccess: 'Enabled'
+                    firewallRules: [
+                      {
+                        name: 'allow-all'
+                        startIpAddress: '0.0.0.0'
+                        endIpAddress: '255.255.255.255'
+                      }
+                    ]
+                    enableAdvancedThreatProtection: false
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'fqdn'
+                  }
+                }
+                'Radius.Data/sqlServerDatabases': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/sql/server:0.21.4'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    administratorLogin: '{{context.resource.properties.username}}'
+                    administratorLoginPassword: '{{context.resource.properties.password}}'
+                    publicNetworkAccess: 'Enabled'
+                    firewallRules: [
+                      {
+                        name: 'AllowAllWindowsAzureIps'
+                        startIpAddress: '0.0.0.0'
+                        endIpAddress: '0.0.0.0'
+                      }
+                    ]
+                    databases: [
+                      {
+                        name: '{{context.resource.properties.database}}'
+                        availabilityZone: -1
+                        sku: {
+                          name: 'Basic'
+                          tier: 'Basic'
+                        }
+                        maxSizeBytes: 2147483648
+                        zoneRedundant: false
+                      }
+                    ]
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'fullyQualifiedDomainName'
+                  }
+                }
+                'Radius.Messaging/rabbitMQ': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    skuObject: {
+                      name: 'Standard'
+                    }
+                    zoneRedundant: false
+                    disableLocalAuth: false
+                    queues: [
+                      {
+                        name: '{{context.resource.properties.queue}}'
+                      }
+                    ]
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'name'
+                    connectionString: 'primaryConnectionString'
+                  }
+                }
+                'Radius.Messaging/kafka': {
+                  kind: 'bicep'
+                  source: 'mcr.microsoft.com/bicep/avm/res/event-hub/namespace:0.14.2'
+                  parameters: {
+                    name: '{{context.resource.name}}'
+                    skuName: 'Standard'
+                    skuCapacity: 1
+                    disableLocalAuth: false
+                    eventhubs: [
+                      {
+                        name: '{{context.resource.properties.topic}}'
+                      }
+                    ]
+                    enableTelemetry: false
+                  }
+                  outputs: {
+                    host: 'name'
+                    connectionString: 'primaryConnectionString'
+                  }
+                }
+                // Kubernetes Terraform recipes for the types the AVM pack omits.
                 'Radius.Compute/persistentVolumes': {
                   kind: 'terraform'
                   source: 'git::$REPO//Compute/persistentVolumes/recipes/kubernetes/terraform?ref=$REF'
@@ -1881,15 +2109,10 @@ jobs:
                   kind: 'terraform'
                   source: 'git::$REPO//Compute/routes/recipes/kubernetes/terraform?ref=$REF'
                 }
-                'Radius.Data/postgreSqlDatabases': {
-                  kind: 'terraform'
-                  source: 'git::$REPO//Data/postgreSqlDatabases/recipes/kubernetes/terraform?ref=$REF'
-                }
                 'Radius.Security/secrets': {
                   kind: 'terraform'
                   source: 'git::$REPO//Security/secrets/recipes/kubernetes/terraform?ref=$REF'
                 }
-          $MYSQL_RECIPE
               }
             }
           }
@@ -1904,7 +2127,10 @@ jobs:
                 kubernetes: {
                   namespace: '$NAMESPACE'
                 }
-          $CLOUD_PROVIDER
+                azure: {
+                  subscriptionId: '\${{ vars.AZURE_SUBSCRIPTION_ID }}'
+                  resourceGroupName: '\${{ vars.AZURE_RESOURCE_GROUP }}'
+                }
               }
             }
           }
