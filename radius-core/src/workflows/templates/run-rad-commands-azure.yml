@@ -199,7 +199,14 @@ jobs:
           # resource and a Radius.Core/environments resource referencing it.
           RECIPE_PACK_URL="https://raw.githubusercontent.com/radius-project/resource-types-contrib/${{ env.RECIPE_PACK_REF }}/${{ env.RECIPE_PACK_PATH }}"
           echo "Downloading recipe pack from $RECIPE_PACK_URL"
-          curl -fsSL "$RECIPE_PACK_URL" -o radius-env.bicep
+          # Place the recipe pack next to the app file so `rad deploy` resolves the
+          # repo's own bicepconfig.json (which declares the `radius` extension). bicep
+          # resolves the config nearest the .bicep file, so writing it to $APP_DIR
+          # (e.g. .radius/) picks up .radius/bicepconfig.json instead of the workspace
+          # root, where no config exists.
+          APP_DIR=$(dirname "$APP_FILE")
+          ENV_BICEP="$APP_DIR/radius-env.bicep"
+          curl -fsSL "$RECIPE_PACK_URL" -o "$ENV_BICEP"
 
           # routesGatewayName is a required pack parameter, but it only matters when
           # a Radius.Compute/routes resource is actually deployed. Default to empty
@@ -208,10 +215,10 @@ jobs:
           ROUTES_GATEWAY_NAMESPACE="${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE || 'default' }}"
 
           echo "Recipe pack file:"
-          cat radius-env.bicep
+          cat "$ENV_BICEP"
           echo ""
           echo "Deploying Radius.Core/environments and recipe pack..."
-          rad deploy radius-env.bicep \
+          rad deploy "$ENV_BICEP" \
             --parameters environmentName="$ENVIRONMENT" \
             --parameters environmentNamespace="$NAMESPACE" \
             --parameters azureSubscriptionId="${{ vars.AZURE_SUBSCRIPTION_ID }}" \
