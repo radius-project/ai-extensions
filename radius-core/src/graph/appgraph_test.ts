@@ -4,6 +4,7 @@ import { buildResourceID } from "./model.js";
 
 const frontendId = buildResourceID("Radius.Compute/containers", "frontend");
 const cacheId = buildResourceID("Radius.Data/redisCaches", "cache");
+const databaseId = buildResourceID("Radius.Data/postgreSQLDatabases", "database");
 
 function sampleAppGraph() {
   return {
@@ -59,6 +60,30 @@ describe("applicationGraphToResources", () => {
     const cache = resources.find((r) => r.id === cacheId);
     const inbound = cache.connections.filter((c: any) => c.direction === "Inbound");
     expect(inbound).toHaveLength(1);
+  });
+
+  it("sorts outbound edges by id", () => {
+    const graph = sampleAppGraph();
+    graph.resources[0].connections = [
+      { id: cacheId, direction: "Outbound" },
+      { id: databaseId, direction: "Outbound" },
+    ];
+    graph.resources.push({
+      id: databaseId,
+      name: "database",
+      type: "Radius.Data/postgreSQLDatabases",
+      provisioningState: "NotSpecified",
+      connections: [],
+      outputResources: [],
+      diffHash: "sha256:ghi",
+    });
+
+    const resources = applicationGraphToResources(graph);
+    const frontend = resources.find((r) => r.id === frontendId);
+    expect(frontend.connections).toEqual([
+      { id: databaseId, direction: "Outbound" },
+      { id: cacheId, direction: "Outbound" },
+    ]);
   });
 
   it("accepts a bare resources array", () => {

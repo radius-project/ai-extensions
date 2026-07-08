@@ -15,10 +15,9 @@ import { addInboundConnections, computeDiffHash } from "./model.js";
  * canvas resources array.
  *
  * Accepts either an `ApplicationGraphResponse` (`{ resources: [...] }`) or a
- * bare resources array. Keeps only outbound connections from the input and
- * rebuilds the reciprocal inbound edges via `addInboundConnections`, so the
- * result is byte-for-byte consistent with the modeled-graph builder regardless
- * of how rad ordered its edges.
+ * bare resources array. Keeps only outbound connections from the input, sorts
+ * them deterministically, and rebuilds the reciprocal inbound edges via
+ * `addInboundConnections`, so rad edge ordering does not affect diffs.
  */
 export function applicationGraphToResources(
   appGraph: any,
@@ -45,7 +44,11 @@ export function applicationGraphToResources(
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
     }
-    connections.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    connections.sort((a, b) => {
+      const byID = String(a.id).localeCompare(String(b.id));
+      if (byID !== 0) return byID;
+      return String(a.direction).localeCompare(String(b.direction));
+    });
 
     resources.push({
       id,
