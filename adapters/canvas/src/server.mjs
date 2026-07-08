@@ -18,10 +18,10 @@ import {
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
 } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/shared";
+import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand, commitRadiusScaffold } from "./gh.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
@@ -562,6 +562,14 @@ function createRequestHandler(instanceId) {
                         sendDone({ error: `Could not analyze ${repo}. Ensure the repo has source code.` });
                         return;
                     }
+                    // Commit the scaffold to .radius/ on the branch, config first,
+                    // then app.bicep, before running rad. Non-fatal on failure
+                    // (e.g. no write access) — the local graph still builds.
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: sendProgress });
+                    } catch (e) {
+                        sendProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
                     sendProgress('Generated app.bicep — building graph...');
                 }
 
@@ -751,6 +759,11 @@ function createRequestHandler(instanceId) {
                         res.end(JSON.stringify({ error: `Could not analyze ${repo} on branch ${branch}. Ensure the repo has source code.` }));
                         return;
                     }
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
+                    } catch (e) {
+                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
                     addProgress('Generated app.bicep — building graph...');
                 }
 
@@ -881,6 +894,11 @@ function createRequestHandler(instanceId) {
                         return;
                     }
                     generated = true;
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
+                    } catch (e) {
+                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
                     addProgress('Generated app.bicep from repo analysis.');
                 } else {
                     addProgress('Found app.bicep — parsing resources...');
@@ -1002,10 +1020,7 @@ function createRequestHandler(instanceId) {
 
                     // Also commit bicepconfig.json for the Radius extension
                     const bicepConfigPath = '.radius/bicepconfig.json';
-                    const bicepConfigContent = JSON.stringify({
-                        experimentalFeaturesEnabled: { extensibility: true },
-                        extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                    }, null, 2);
+                    const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
                     const existingConfig = await new Promise((resolve) => {
                         cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
                             resolve(err ? '' : stdout.trim());
@@ -1734,10 +1749,7 @@ function createRequestHandler(instanceId) {
                     const bicepConfigPath = appDir + 'bicepconfig.json';
                     const existingCfgSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepConfigPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
                     if (!existingCfgSha) {
-                        const bicepConfigContent = JSON.stringify({
-                            experimentalFeaturesEnabled: { extensibility: true },
-                            extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                        }, null, 2);
+                        const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
                         const cfgCommitBody = JSON.stringify({
                             message: 'Add bicepconfig.json for Radius extension support',
                             content: Buffer.from(bicepConfigContent).toString('base64'),

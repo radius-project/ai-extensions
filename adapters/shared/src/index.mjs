@@ -7,6 +7,8 @@
 // code.
 
 export {
+  RADIUS_BICEP_CONFIG,
+  RADIUS_BICEP_CONFIG_JSON,
   resolveExistingRadBinary,
   ensureRadBinary,
   runRadAppGraph,

@@ -23,7 +23,6 @@
 //   - Windows: `.exe` suffix, no chmod.
 
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -31,12 +30,23 @@ import os from "node:os";
 import path from "node:path";
 import { applicationGraphToResources } from "@radius-project/core";
 
-const execFileAsync = promisify(execFile);
-
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
 const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
 const CACHE_ROOT = path.join(os.homedir(), ".radius", "app-graph-bin");
+
+// Bicep config that registers the Radius extension. `rad app graph` compiles
+// Bicep offline, but bicep still needs this file beside the .bicep to resolve
+// `extension radius` + `Radius.*` types — it tells bicep where to pull the
+// extension from (downloaded once from the ACR registry, like the bicep/rad
+// binaries). Without it, compilation fails with `BCP204: Extension "radius" is
+// not recognized`. This is the single source of truth reused by adapters that
+// commit the same file into a repo's `.radius/` directory.
+export const RADIUS_BICEP_CONFIG = {
+  experimentalFeaturesEnabled: { extensibility: true },
+  extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" },
+};
+export const RADIUS_BICEP_CONFIG_JSON = JSON.stringify(RADIUS_BICEP_CONFIG, null, 2);
 
 // Serializes concurrent ensureRadBinary() callers so only one download runs.
 let ensurePromise = null;
@@ -270,20 +280,42 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
   const absoluteBicep = path.resolve(bicepFilePath);
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
-    await execFileAsync(radPath, ["app", "graph", absoluteBicep], {
-      cwd,
-      // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
-      // committing to the radius-graph orphan branch.
-      env: { ...process.env, GITHUB_ACTIONS: "" },
-      timeout,
-      maxBuffer: 32 * 1024 * 1024,
+    await new Promise((resolve, reject) => {
+      const child = execFile(
+        radPath,
+        ["app", "graph", absoluteBicep],
+        {
+          cwd,
+          // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
+          // committing to the radius-graph orphan branch.
+          env: { ...process.env, GITHUB_ACTIONS: "" },
+          timeout,
+          maxBuffer: 32 * 1024 * 1024,
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            // Preserve both streams: rad prints Bicep compile errors (BCP*) to
+            // stdout, not stderr, so the error handler below needs stdout too.
+            err.stdout = stdout;
+            err.stderr = stderr;
+            reject(err);
+          } else {
+            resolve({ stdout, stderr });
+          }
+        },
+      );
+      // Signal EOF on stdin immediately so rad never blocks waiting for
+      // interactive input (which would otherwise hang until the timeout and
+      // surface as an opaque "Command failed" with no detail).
+      try { child.stdin?.end(); } catch { /* best-effort */ }
     });
     const outFile = path.join(cwd, "app-graph.json");
     const raw = fs.readFileSync(outFile, "utf8");
     return JSON.parse(raw);
   } catch (err) {
     const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
-    const detail = stderr || (err && err.message) || "unknown error";
+    const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
+    const detail = stderr || stdout || (err && err.message) || "unknown error";
     throw new Error(`rad app graph failed: ${detail}`);
   } finally {
     try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -299,8 +331,13 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
 export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop } = {}) {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
+  const configFile = path.join(dir, "bicepconfig.json");
   const bicepFile = path.join(dir, "app.bicep");
   try {
+    // Order matters: write bicepconfig.json before app.bicep so the Radius
+    // extension registry is in place when rad compiles the Bicep. bicep looks
+    // for bicepconfig.json in the same directory as the .bicep file.
+    fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log });
     return applicationGraphToResources(appGraph, definitionFile);
