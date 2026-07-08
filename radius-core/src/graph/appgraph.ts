@@ -45,6 +45,7 @@ export function applicationGraphToResources(
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
     }
+    connections.sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
     resources.push({
       id,
