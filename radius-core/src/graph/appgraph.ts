@@ -54,7 +54,7 @@ export function applicationGraphToResources(
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
       outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
-      diffHash: r.diffHash || computeDiffHash(r.properties || {}, []),
+      diffHash: r.diffHash || computeDiffHash(r.properties && typeof r.properties === "object" ? r.properties : {}, []),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
       codeReference: r.codeReference || "",
