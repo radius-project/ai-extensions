@@ -1667,8 +1667,6 @@ env:
   ENVIRONMENT: \${{ inputs.environment }}
   APP_FILE: '{{APP_FILE}}'
   APP_IMAGE: \${{ inputs.image || github.sha || 'latest' }}
-  RESOURCE_TYPES_CONTRIB_REPO: https://github.com/radius-project/resource-types-contrib.git
-  RESOURCE_TYPES_CONTRIB_REF: main
   # Azure recipe pack from resource-types-contrib. Provisions data / messaging /
   # AI types with Azure Verified Modules (Bicep), builds the app image from repo
   # source via the Kubernetes containerImages recipe, and keeps core types
@@ -1808,12 +1806,6 @@ jobs:
               --tenant-id "\${{ vars.AZURE_TENANT_ID }}"
           fi
           echo "\u2705 Cloud credentials registered with Radius."
-
-      - name: Register resource types
-        uses: radius-project/radius/.github/extension/actions/register-resource-types@{{RADIUS_REF}}
-        with:
-          resource-types-repo: \${{ env.RESOURCE_TYPES_CONTRIB_REPO }}
-          resource-types-ref: \${{ env.RESOURCE_TYPES_CONTRIB_REF }}
 
       - name: Create Radius environment and recipe pack
         run: |
@@ -2077,12 +2069,6 @@ jobs:
             rad credential register aws irsa --iam-role "\${{ vars.AWS_ROLE_ARN }}"
           fi
           echo "\u2705 Cloud credentials registered with Radius."
-
-      - name: Register resource types
-        uses: radius-project/radius/.github/extension/actions/register-resource-types@{{RADIUS_REF}}
-        with:
-          resource-types-repo: \${{ env.RESOURCE_TYPES_CONTRIB_REPO }}
-          resource-types-ref: \${{ env.RESOURCE_TYPES_CONTRIB_REF }}
 
       - name: Create Radius environment and recipe pack
         run: |

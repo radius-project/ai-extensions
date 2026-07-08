@@ -1108,11 +1108,10 @@ function createRequestHandler(instanceId) {
                     });
 
                     // NOTE: bicepconfig.json is intentionally NOT written here.
-                    // The deploy workflow handles all bicep wiring at deploy time
-                    // (working copy only): it builds the containerImages extension,
-                    // merges `radiusCompute` into the repo's bicepconfig.json, and
-                    // injects `extension radiusCompute` into app.bicep — none of which
-                    // is committed back to the repo.
+                    // Radius.Compute/containerImages ships with the published Radius
+                    // Bicep extension, so `extension radius` in app.bicep and the
+                    // user's own bicepconfig cover it — no extra bicep wiring is
+                    // committed back to the repo.
                 } catch {}
 
                 res.setHeader("Content-Type", "application/json");

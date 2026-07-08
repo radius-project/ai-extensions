@@ -4,7 +4,7 @@ import azureTemplate from "./templates/run-rad-commands-azure.yml";
 import awsTemplate from "./templates/run-rad-commands-aws.yml";
 
 // The pinned ref of radius-project/radius that hosts the shared composite
-// actions (setup-control-plane, restore-state, register-resource-types,
+// actions (setup-control-plane, restore-state,
 // run-rad-commands, teardown) referenced by the provider workflows. Bump this
 // once radius-project/radius#12250 merges to point at a stable ref (e.g. `main`
 // or a release tag).
