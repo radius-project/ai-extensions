@@ -2,7 +2,7 @@
 // (the /api/diff-branches handler, the graph-diff canvas auto-compare, the
 // radius_render_graph_diff action, and the PR-diff markdown generator).
 //
-// Both inputs must be resource arrays produced by buildGraphFromBicep() so that
+// Both inputs must be resource arrays produced by buildGraphViaRad() so that
 // ids/types are constructed identically. Resources are matched by id. A type
 // change (e.g. mongo→postgres) produces a "removed" entry for the old resource
 // and an "added" entry for the new one; any resource that connected to the old

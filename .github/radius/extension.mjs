@@ -7,18 +7,7 @@ import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 
 // radius-core/src/graph/model.ts
 import { createHash } from "node:crypto";
-var MODELED_GRAPH_DEFAULTS = {
-  plane: "local",
-  resourceGroup: "default"
-};
-var SKIP_RESOURCE_TYPES = /* @__PURE__ */ new Set([
-  "applications.core/applications",
-  "applications.core/environments",
-  "radius.core/recipepacks"
-]);
 var NON_AUTHORABLE_PROPERTIES = /* @__PURE__ */ new Set(["provisioningState", "status"]);
-var RESOURCE_ID_EXPR = /^\[resourceId\(([^)]*)\)\]$/;
-var SYMBOLIC_REFERENCE = /^\[reference\('([^']+)'\)\.[^\]]+\]$/;
 function computeDiffHash(properties, dependsOn = []) {
   const authorable = {};
   for (const [k, v] of Object.entries(properties || {})) {
@@ -39,117 +28,6 @@ function sortedReplacer(_key, value) {
   }
   return value;
 }
-function buildModeledGraph(template) {
-  const rawResources = collectARMResources(template.resources);
-  if (!rawResources || rawResources.length === 0) {
-    return { resources: [] };
-  }
-  const graphResources = [];
-  for (const entry of rawResources) {
-    const resource = buildModeledResource(entry);
-    if (resource) graphResources.push(resource);
-  }
-  const graph = { resources: graphResources };
-  addInboundConnections(graph);
-  return graph;
-}
-function collectARMResources(raw) {
-  if (!raw) return null;
-  if (Array.isArray(raw)) {
-    return raw.filter((item) => item && typeof item === "object");
-  }
-  if (typeof raw === "object") {
-    const symbols = buildSymbolTable(raw);
-    const keys = Object.keys(raw).sort();
-    return keys.map((k) => normalizeSymbolicEntry(raw[k], symbols)).filter(Boolean);
-  }
-  return null;
-}
-function buildSymbolTable(resources) {
-  const table = {};
-  for (const [symbol, item] of Object.entries(resources)) {
-    if (!item || typeof item !== "object") continue;
-    const typeWithVersion = item.type || "";
-    const wrapper = item.properties || {};
-    const name = wrapper.name || "";
-    table[symbol] = {
-      resourceType: stripAPIVersion(typeWithVersion),
-      name
-    };
-  }
-  return table;
-}
-function normalizeSymbolicEntry(entry, symbols) {
-  if (!entry || typeof entry !== "object") return null;
-  const resourceType = stripAPIVersion(entry.type || "");
-  const wrapper = entry.properties || {};
-  const name = wrapper.name || "";
-  const innerProps = wrapper.properties || {};
-  rewriteSymbolicConnections(innerProps, symbols);
-  const rawDeps = entry.dependsOn || [];
-  const newDeps = rawDeps.map((d) => {
-    if (typeof d !== "string") return d;
-    const sym = symbols[d];
-    if (sym && sym.resourceType && sym.name) {
-      return `[resourceId('${sym.resourceType}', '${sym.name}')]`;
-    }
-    return d;
-  });
-  return { type: resourceType, name, properties: innerProps, dependsOn: newDeps };
-}
-function rewriteSymbolicConnections(properties, symbols) {
-  if (!properties) return;
-  const connections = properties.connections;
-  if (!connections || typeof connections !== "object") return;
-  for (const raw of Object.values(connections)) {
-    if (!raw || typeof raw !== "object") continue;
-    const source = raw.source;
-    if (typeof source !== "string") continue;
-    const matches = SYMBOLIC_REFERENCE.exec(source);
-    if (!matches) continue;
-    const sym = symbols[matches[1]];
-    if (!sym || !sym.resourceType || !sym.name) continue;
-    raw.source = `[resourceId('${sym.resourceType}', '${sym.name}')]`;
-  }
-}
-function stripAPIVersion(t) {
-  const i = t.indexOf("@");
-  return i >= 0 ? t.slice(0, i) : t;
-}
-function buildModeledResource(entry) {
-  const resourceType = entry.type || "";
-  const name = entry.name || "";
-  if (!resourceType || !name) return null;
-  if (SKIP_RESOURCE_TYPES.has(resourceType.toLowerCase())) return null;
-  const properties = entry.properties || {};
-  const rawDeps = entry.dependsOn || [];
-  const dependsOn = resolveDependsOn(rawDeps);
-  const hash = computeDiffHash(properties, dependsOn);
-  return {
-    id: buildResourceID(resourceType, name),
-    name,
-    type: resourceType,
-    provisioningState: "NotSpecified",
-    connections: resolveOutboundConnections(properties),
-    outputResources: [],
-    diffHash: hash
-  };
-}
-function resolveOutboundConnections(properties) {
-  if (!properties) return [];
-  const connections = properties.connections;
-  if (!connections || typeof connections !== "object") return [];
-  const result = [];
-  for (const raw of Object.values(connections)) {
-    if (!raw || typeof raw !== "object") continue;
-    const source = raw.source || "";
-    const resolved = resolveResourceIDExpression(source);
-    if (resolved) {
-      result.push({ id: resolved, direction: "Outbound" });
-    }
-  }
-  return result;
-}
 function addInboundConnections(graph) {
   const byID = {};
   for (const r of graph.resources) {
@@ -166,194 +44,33 @@ function addInboundConnections(graph) {
     }
   }
 }
-function resolveDependsOn(deps) {
-  const out = [];
-  for (const v of deps) {
-    if (typeof v !== "string") continue;
-    const resolved = resolveResourceIDExpression(v);
-    if (resolved) out.push(resolved);
-  }
-  return out;
-}
-function resolveResourceIDExpression(expr) {
-  if (!expr) return "";
-  const matches = RESOURCE_ID_EXPR.exec(expr);
-  if (!matches) return "";
-  const args = splitResourceIDArgs(matches[1]);
-  if (args.length < 2) return "";
-  const resourceType = args[0].replace(/'/g, "").trim();
-  const name = args[1].replace(/'/g, "").trim();
-  if (!resourceType || !name) return "";
-  return buildResourceID(resourceType, name);
-}
-function splitResourceIDArgs(s) {
-  const parts = [];
-  let current = "";
-  let inQuote = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === "'") {
-      inQuote = !inQuote;
-      current += c;
-      continue;
-    }
-    if (c === "," && !inQuote) {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += c;
-  }
-  if (current) parts.push(current);
-  return parts;
-}
-function buildResourceID(resourceType, name) {
-  return `/planes/radius/${MODELED_GRAPH_DEFAULTS.plane}/resourcegroups/${MODELED_GRAPH_DEFAULTS.resourceGroup}/providers/${resourceType}/${name}`;
-}
 
-// radius-core/src/graph/bicep.ts
-import { execFile } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-function compileBicepToARM(bicepContent) {
-  return new Promise((resolve) => {
-    const tmpFile = join(tmpdir(), `radius-${Date.now()}.bicep`);
-    const outFile = tmpFile.replace(".bicep", ".json");
-    try {
-      writeFileSync(tmpFile, bicepContent);
-    } catch {
-      resolve(null);
-      return;
-    }
-    execFile("bicep", ["build", tmpFile, "--stdout"], { timeout: 3e4 }, (err, stdout) => {
-      if (!err && stdout) {
-        try {
-          unlinkSync(tmpFile);
-        } catch {
-        }
-        try {
-          resolve(JSON.parse(stdout));
-        } catch {
-          resolve(null);
-        }
-        return;
-      }
-      execFile("az", ["bicep", "build", "--file", tmpFile, "--stdout"], { shell: true, timeout: 3e4 }, (err2, stdout2) => {
-        try {
-          unlinkSync(tmpFile);
-        } catch {
-        }
-        try {
-          unlinkSync(outFile);
-        } catch {
-        }
-        if (!err2 && stdout2) {
-          try {
-            resolve(JSON.parse(stdout2));
-          } catch {
-            resolve(null);
-          }
-        } else {
-          resolve(null);
-        }
-      });
-    });
-  });
-}
-async function buildGraphFromBicep(bicepContent, definitionFile = ".radius/app.bicep") {
-  if (!bicepContent) return [];
-  const armTemplate = await compileBicepToARM(bicepContent);
-  if (armTemplate) {
-    const graph = buildModeledGraph(armTemplate);
-    if (graph.resources.length > 0) {
-      for (const r of graph.resources) {
-        r.definitionFile = definitionFile;
-      }
-      return graph.resources;
-    }
-  }
-  return parseBicepResources(bicepContent, definitionFile);
-}
-function parseBicepResources(content, definitionFile = ".radius/app.bicep") {
-  if (!content) return [];
+// radius-core/src/graph/appgraph.ts
+function applicationGraphToResources(appGraph, definitionFile = ".radius/app.bicep") {
+  const raw = Array.isArray(appGraph) ? appGraph : appGraph && Array.isArray(appGraph.resources) ? appGraph.resources : [];
   const resources = [];
-  const resourceNames = [];
-  const nameRegex = /resource\s+(\w+)\s+'([^']+)'/g;
-  let match;
-  while ((match = nameRegex.exec(content)) !== null) {
-    const linesBefore = content.slice(0, match.index).split("\n");
-    const defLine = linesBefore.length;
-    resourceNames.push({ symName: match[1], type: match[2], defLine });
-  }
-  const symInfo = /* @__PURE__ */ new Map();
-  for (const res of resourceNames) {
-    const blockStart = content.indexOf(`resource ${res.symName} `);
-    let block = "";
-    if (blockStart !== -1) {
-      const blockEnd = content.indexOf(`
-resource `, blockStart + 1);
-      block = blockEnd > blockStart ? content.slice(blockStart, blockEnd) : content.slice(blockStart);
-    }
-    const nameMatch = block.match(/name:\s*'([^']+)'/);
-    symInfo.set(res.symName, {
-      strippedType: stripAPIVersion(res.type),
-      displayName: nameMatch ? nameMatch[1] : res.symName,
-      block,
-      defLine: res.defLine
-    });
-  }
-  const hasAppParam = /param\s+application\s+string/i.test(content);
-  const hasAppResource = resourceNames.some((r) => r.type.includes("applications"));
-  let appNodeId = null;
-  if (hasAppParam && !hasAppResource) {
-    const firstNameMatch = content.match(/name:\s*'([^']+)'/);
-    const appName = firstNameMatch ? firstNameMatch[1].replace(/-?(app|container|db|route|gateway).*$/i, "") || "app" : "app";
-    appNodeId = buildResourceID("Radius.Core/applications", "application");
-    resources.push({
-      name: appName,
-      type: "Radius.Core/applications",
-      id: appNodeId,
-      connections: [],
-      codeReference: "",
-      definitionFile,
-      definitionLine: 0
-    });
-  }
-  for (const res of resourceNames) {
-    const info = symInfo.get(res.symName);
-    if (!info) continue;
-    const block = info.block;
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const id = r.id || "";
+    const type = r.type || "";
+    if (!id || !type) continue;
     const connections = [];
-    for (const other of resourceNames) {
-      if (other.symName === res.symName) continue;
-      const refPattern = new RegExp(`\\b${other.symName}\\.(id|name|properties)`, "g");
-      if (refPattern.test(block)) {
-        const otherInfo = symInfo.get(other.symName);
-        connections.push({
-          id: buildResourceID(otherInfo.strippedType, otherInfo.displayName),
-          name: otherInfo.displayName,
-          direction: "Outbound"
-        });
-      }
+    for (const c of r.connections || []) {
+      if (!c || !c.id) continue;
+      if ((c.direction || "Outbound") !== "Outbound") continue;
+      connections.push({ id: c.id, direction: "Outbound" });
     }
-    if (appNodeId && /application:\s*(application|app)\b/.test(block)) {
-      connections.push({
-        id: appNodeId,
-        name: "application",
-        direction: "Outbound"
-      });
-    }
-    const codeRefMatch = block.match(/codeReference:\s*'([^']+)'/);
-    const codeReference = codeRefMatch ? codeRefMatch[1] : "";
     resources.push({
-      name: info.displayName,
-      type: info.strippedType,
-      id: buildResourceID(info.strippedType, info.displayName),
+      id,
+      name: r.name || "",
+      type,
+      provisioningState: r.provisioningState || "NotSpecified",
       connections,
-      codeReference,
+      outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
+      diffHash: r.diffHash || computeDiffHash(r.properties || {}, []),
       definitionFile,
-      definitionLine: info.defLine
+      definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
+      codeReference: r.codeReference || ""
     });
   }
   addInboundConnections({ resources });
@@ -788,17 +505,17 @@ async function discoverSourceCodeRefs(gh, resources, tree, repo, branch) {
   }
   const contentCache = /* @__PURE__ */ new Map();
   let fetchBudget = 25;
-  async function getContent(path) {
-    if (contentCache.has(path)) return contentCache.get(path);
+  async function getContent(path2) {
+    if (contentCache.has(path2)) return contentCache.get(path2);
     if (fetchBudget <= 0) return null;
     fetchBudget--;
     let text = null;
     try {
-      text = await fetchFileFromRepo2(repo, path, branch);
+      text = await fetchFileFromRepo2(repo, path2, branch);
     } catch {
       text = null;
     }
-    contentCache.set(path, text);
+    contentCache.set(path2, text);
     return text;
   }
   function findInitLine(text, contentPatterns) {
@@ -837,11 +554,11 @@ async function discoverSourceCodeRefs(gh, resources, tree, repo, branch) {
     if (!bestMatch && patterns.contentPatterns && patterns.contentPatterns.length) {
       const isBarrel = (p) => /(^|\/)index\.(js|ts|mjs|cjs|py)$/i.test(p);
       const candidates = tree.filter((p) => SOURCE_EXT.test(p) && !SKIP_DIR.test(p) && !SKIP_FILE.test(p)).sort((a, b) => (isBarrel(a) ? 1 : 0) - (isBarrel(b) ? 1 : 0)).slice(0, 40);
-      for (const path of candidates) {
-        const text = await getContent(path);
+      for (const path2 of candidates) {
+        const text = await getContent(path2);
         const line = findInitLine(text, patterns.contentPatterns);
         if (line) {
-          bestMatch = path + "#L" + line;
+          bestMatch = path2 + "#L" + line;
           break;
         }
       }
@@ -1233,7 +950,6 @@ param image string
 
 // radius-core/src/platforms/azure.ts
 var AZURE_PORTAL_BASE = "https://portal.azure.com/#";
-var FORWARD_SLASH_CHAR_CODE = 47;
 function buildResourceGroupResourceListUrl(subscriptionId, resourceGroup) {
   return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
 }
@@ -1254,10 +970,14 @@ function normalizeArmResourceId(resourceRef) {
   const trimmed = (resourceRef || "").trim();
   if (!trimmed) return "";
   const noQuery = trimmed.split("?")[0].trim();
-  const stripped = noQuery.replace(/^\/+/, "");
+  let start = 0;
+  while (start < noQuery.length && noQuery[start] === "/") {
+    start += 1;
+  }
+  const stripped = noQuery.slice(start);
   if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
   let end = stripped.length;
-  while (end > 0 && stripped.charCodeAt(end - 1) === FORWARD_SLASH_CHAR_CODE) {
+  while (end > 0 && stripped[end - 1] === "/") {
     end -= 1;
   }
   const normalized = `/${stripped.slice(0, end)}`;
@@ -1313,18 +1033,19 @@ az role assignment create \\
     ];
   },
   portalUrl(resourceType, ctx) {
+    const rt = (resourceType || "").trim();
     const subscriptionId = ctx.subscriptionId;
     const resourceGroup = ctx.resourceGroup;
     const clusterName = (ctx.clusterName || "").trim();
-    const armResourceId = normalizeArmResourceId(resourceType);
+    const armResourceId = normalizeArmResourceId(rt);
     if (armResourceId) {
       return buildResourceUrl(armResourceId);
     }
-    const normalizedArmType = normalizeAzureResourceType(resourceType);
+    const normalizedArmType = normalizeAzureResourceType(rt);
     if (normalizedArmType) {
       return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
     }
-    if (isKubernetesResourceType(resourceType) || resourceType.startsWith("Radius.")) {
+    if (isKubernetesResourceType(rt) || rt.startsWith("Radius.")) {
       if (clusterName) {
         const clusterId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
         return buildResourceUrl(clusterId);
@@ -1552,8 +1273,8 @@ async function fetchRecipesFromGitHub(gh, provider) {
   const tree = await gh.treePaths("radius-project/resource-types-contrib", "main");
   const recipePattern = /^([^/]+\/[^/]+)\/recipes\//;
   const discoveredTypes = /* @__PURE__ */ new Set();
-  for (const path of tree) {
-    const match = path.match(recipePattern);
+  for (const path2 of tree) {
+    const match = path2.match(recipePattern);
     if (match) discoveredTypes.add(match[1]);
   }
   const resourceTypes = [...discoveredTypes].map((dir) => {
@@ -2180,6 +1901,187 @@ ${dbRecipeRegister}
 `;
 }
 
+// adapters/canvas/src/rad.mjs
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import https from "node:https";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+var execFileAsync = promisify(execFile);
+var IS_WIN = process.platform === "win32";
+var EXE = IS_WIN ? ".exe" : "";
+var RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
+var CACHE_ROOT = path.join(os.homedir(), ".radius-canvas", "bin");
+var ensurePromise = null;
+var cachedRadPath = null;
+function noop() {
+}
+function releaseAsset() {
+  const osName = { win32: "windows", darwin: "darwin", linux: "linux" }[process.platform];
+  const arch = { x64: "amd64", arm64: "arm64", arm: "arm" }[process.arch];
+  if (!osName || !arch) {
+    throw new Error(`Unsupported platform for rad: ${process.platform}/${process.arch}`);
+  }
+  return `rad_${osName}_${arch}${EXE}`;
+}
+function isExecutableFile(p) {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+function findOnPath() {
+  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const candidate = path.join(dir, `rad${EXE}`);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return null;
+}
+function findInCache() {
+  let entries;
+  try {
+    entries = fs.readdirSync(CACHE_ROOT);
+  } catch {
+    return null;
+  }
+  for (const tag of entries.sort().reverse()) {
+    const candidate = path.join(CACHE_ROOT, tag, `rad${EXE}`);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return null;
+}
+function resolveExistingRadBinary() {
+  const fromEnv = process.env.RADIUS_RAD_BINARY;
+  if (fromEnv && isExecutableFile(fromEnv)) return fromEnv;
+  const onPath = findOnPath();
+  if (onPath) return onPath;
+  const radHome = path.join(os.homedir(), ".rad", "bin", `rad${EXE}`);
+  if (isExecutableFile(radHome)) return radHome;
+  return findInCache();
+}
+function httpGet(url, headers) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      { headers: { "User-Agent": "radius-canvas", ...headers }, timeout: 3e4 },
+      (resp) => {
+        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+          resp.resume();
+          resolve(httpGet(resp.headers.location, headers));
+          return;
+        }
+        if (resp.statusCode !== 200) {
+          resp.resume();
+          reject(new Error(`GET ${url} failed: HTTP ${resp.statusCode}`));
+          return;
+        }
+        const chunks = [];
+        resp.on("data", (c) => chunks.push(c));
+        resp.on("end", () => resolve(Buffer.concat(chunks)));
+        resp.on("error", reject);
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error(`GET ${url} timed out`)));
+    req.on("error", reject);
+  });
+}
+async function latestReleaseTag() {
+  const body = await httpGet(RELEASES_API, { Accept: "application/vnd.github+json" });
+  const parsed = JSON.parse(body.toString("utf8"));
+  if (!parsed || !parsed.tag_name) {
+    throw new Error("Could not determine latest rad release tag");
+  }
+  return parsed.tag_name;
+}
+async function downloadRad(log) {
+  const tag = await latestReleaseTag();
+  const asset = releaseAsset();
+  const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+  const destDir = path.join(CACHE_ROOT, tag);
+  const dest = path.join(destDir, `rad${EXE}`);
+  if (isExecutableFile(dest)) return dest;
+  log(`Downloading rad ${tag} (${asset})...`);
+  fs.mkdirSync(destDir, { recursive: true });
+  const data = await httpGet(url);
+  const tmp = `${dest}.${process.pid}.download`;
+  fs.writeFileSync(tmp, data);
+  if (!IS_WIN) fs.chmodSync(tmp, 493);
+  fs.renameSync(tmp, dest);
+  log(`Installed rad to ${dest}`);
+  return dest;
+}
+function ensureRadBinary({ log = noop } = {}) {
+  if (cachedRadPath && isExecutableFile(cachedRadPath)) {
+    return Promise.resolve(cachedRadPath);
+  }
+  if (ensurePromise) return ensurePromise;
+  ensurePromise = (async () => {
+    const existing = resolveExistingRadBinary();
+    if (existing) {
+      if (!IS_WIN) {
+        try {
+          fs.chmodSync(existing, 493);
+        } catch {
+        }
+      }
+      cachedRadPath = existing;
+      return existing;
+    }
+    const downloaded = await downloadRad(log);
+    cachedRadPath = downloaded;
+    return downloaded;
+  })();
+  ensurePromise.catch(() => {
+  }).finally(() => {
+    ensurePromise = null;
+  });
+  return ensurePromise;
+}
+async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 12e4 } = {}) {
+  const radPath = await ensureRadBinary({ log });
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
+  try {
+    await execFileAsync(radPath, ["app", "graph", bicepFilePath], {
+      cwd,
+      // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
+      // committing to the radius-graph orphan branch.
+      env: { ...process.env, GITHUB_ACTIONS: "" },
+      timeout,
+      maxBuffer: 32 * 1024 * 1024
+    });
+    const outFile = path.join(cwd, "app-graph.json");
+    const raw = fs.readFileSync(outFile, "utf8");
+    return JSON.parse(raw);
+  } catch (err) {
+    const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
+    const detail = stderr || err && err.message || "unknown error";
+    throw new Error(`rad app graph failed: ${detail}`);
+  } finally {
+    try {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop } = {}) {
+  if (!content) return [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
+  const bicepFile = path.join(dir, "app.bicep");
+  try {
+    fs.writeFileSync(bicepFile, content);
+    const appGraph = await runRadAppGraph(bicepFile, { log });
+    return applicationGraphToResources(appGraph, definitionFile);
+  } finally {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+
 // adapters/canvas/src/gh.mjs
 import { execFile as execFile2, spawn } from "node:child_process";
 function cliExec(cmd, args, opts, cb) {
@@ -2239,8 +2141,8 @@ function ghApiListNames(apiPath, timeout = 15e3) {
     });
   });
 }
-function fetchFileFromRepo(repo, path, branch = "main") {
-  return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
+function fetchFileFromRepo(repo, path2, branch = "main") {
+  return ghApiGetContent(`/repos/${repo}/contents/${path2}?ref=${branch}`);
 }
 function fetchRepoTree(repo, branch = "main") {
   return new Promise((resolve) => {
@@ -2376,7 +2278,7 @@ import { createServer } from "node:http";
 import { createHash as createHash2 } from "node:crypto";
 
 // adapters/canvas/src/vendor.mjs
-import https from "node:https";
+import https2 from "node:https";
 var VENDOR_URLS = {
   "cytoscape": "https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js",
   "dagre": "https://unpkg.com/dagre@0.8.5/dist/dagre.min.js",
@@ -2385,9 +2287,9 @@ var VENDOR_URLS = {
 var vendorCache = /* @__PURE__ */ new Map();
 function fetchVendorScript(url) {
   return new Promise((resolve) => {
-    https.get(url, { timeout: 15e3 }, (resp) => {
+    https2.get(url, { timeout: 15e3 }, (resp) => {
       if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-        https.get(resp.headers.location, { timeout: 15e3 }, (resp2) => {
+        https2.get(resp.headers.location, { timeout: 15e3 }, (resp2) => {
           let data2 = "";
           resp2.on("data", (c) => data2 += c);
           resp2.on("end", () => resolve(data2));
@@ -2424,15 +2326,15 @@ function getInlineVendorScripts() {
 })();
 
 // adapters/canvas/src/shared.mjs
-import { readFileSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join2, dirname } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 function escapeHtml(str) {
   if (!str) return "";
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 var __dirname_ext = typeof import.meta.url !== "undefined" ? dirname(fileURLToPath(import.meta.url)) : ".";
-var CREDS_FILE = join2(__dirname_ext, ".radius-credentials.json");
+var CREDS_FILE = join(__dirname_ext, ".radius-credentials.json");
 var sharedCredentials = {};
 try {
   sharedCredentials = JSON.parse(readFileSync(CREDS_FILE, "utf8"));
@@ -2440,7 +2342,7 @@ try {
 }
 function saveCredentials() {
   try {
-    writeFileSync2(CREDS_FILE, JSON.stringify(sharedCredentials, null, 2));
+    writeFileSync(CREDS_FILE, JSON.stringify(sharedCredentials, null, 2));
   } catch {
   }
 }
@@ -5350,14 +5252,14 @@ function createRequestHandler(instanceId) {
           subject: `repo:${targetRepo}:environment:${envName}`,
           audiences: ["api://AzureADTokenExchange"]
         });
-        const { writeFileSync: writeFileSync3, unlinkSync: unlinkSync2 } = await import("node:fs");
-        const { tmpdir: tmpdir2 } = await import("node:os");
-        const { join: join3 } = await import("node:path");
-        const fedTmpFile = join3(tmpdir2(), "fed-cred-" + Date.now() + ".json");
-        writeFileSync3(fedTmpFile, fedParams);
+        const { writeFileSync: writeFileSync2, unlinkSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join: join2 } = await import("node:path");
+        const fedTmpFile = join2(tmpdir(), "fed-cred-" + Date.now() + ".json");
+        writeFileSync2(fedTmpFile, fedParams);
         const fedResult = await runCmd2("az", ["ad", "app", "federated-credential", "create", "--id", clientId, "--parameters", "@" + fedTmpFile]);
         try {
-          unlinkSync2(fedTmpFile);
+          unlinkSync(fedTmpFile);
         } catch {
         }
         if (fedResult.code !== 0 && !fedResult.stderr.includes("already exists")) {
@@ -5459,14 +5361,14 @@ function createRequestHandler(instanceId) {
           content: verifyContent,
           ...existingSha ? { sha: existingSha } : {}
         });
-        const { writeFileSync: writeFileSync3, unlinkSync: unlinkSync2 } = await import("node:fs");
-        const { tmpdir: tmpdir2 } = await import("node:os");
-        const { join: join3 } = await import("node:path");
-        const tmpFile = join3(tmpdir2(), "radius-verify-commit-" + Date.now() + ".json");
-        writeFileSync3(tmpFile, commitBody);
+        const { writeFileSync: writeFileSync2, unlinkSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join: join2 } = await import("node:path");
+        const tmpFile = join2(tmpdir(), "radius-verify-commit-" + Date.now() + ".json");
+        writeFileSync2(tmpFile, commitBody);
         const commitResult = await runGh2(["api", "--method", "PUT", "/repos/" + targetRepo + "/contents/" + verifyPath, "--input", tmpFile]);
         try {
-          unlinkSync2(tmpFile);
+          unlinkSync(tmpFile);
         } catch {
         }
         if (commitResult.code !== 0) {
@@ -5491,11 +5393,11 @@ function createRequestHandler(instanceId) {
           content: deployContent,
           ...deploySha ? { sha: deploySha } : {}
         });
-        const tmpFile2 = join3(tmpdir2(), "radius-deploy-commit-" + Date.now() + ".json");
-        writeFileSync3(tmpFile2, deployCommitBody);
+        const tmpFile2 = join2(tmpdir(), "radius-deploy-commit-" + Date.now() + ".json");
+        writeFileSync2(tmpFile2, deployCommitBody);
         const deployCommitResult = await runGh2(["api", "--method", "PUT", "/repos/" + targetRepo + "/contents/" + deployPath, "--input", tmpFile2]);
         try {
-          unlinkSync2(tmpFile2);
+          unlinkSync(tmpFile2);
         } catch {
         }
         if (deployCommitResult.code !== 0) {
@@ -5615,7 +5517,7 @@ data: ${JSON.stringify(data)}
           }
           sendProgress2("Generated app.bicep \u2014 building graph...");
         }
-        const resources = await buildGraphFromBicep(content);
+        const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress2 });
         const needsSourceDiscovery = resources.some((r) => !r.codeReference && !r.type.includes("applications"));
         if (needsSourceDiscovery) {
           sendProgress2("Scanning repository for source code references...");
@@ -5774,7 +5676,7 @@ data: ${JSON.stringify(data)}
           }
           addProgress2("Generated app.bicep \u2014 building graph...");
         }
-        const resources = await buildGraphFromBicep(content);
+        const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress2 });
         const needsSourceDiscovery2 = resources.some((r) => !r.codeReference && !r.type.includes("applications"));
         if (needsSourceDiscovery2) {
           addProgress2("Scanning repository for source code references...");
@@ -5916,7 +5818,7 @@ data: ${JSON.stringify(data)}
         } else {
           addProgress2("Found app.bicep \u2014 parsing resources...");
         }
-        const resources = await buildGraphFromBicep(content);
+        const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress2 });
         const needsSrcDisc = resources.some((r) => !r.codeReference && !r.type.includes("applications"));
         if (needsSrcDisc) {
           addProgress2("Scanning repository for source code references...");
@@ -6121,8 +6023,8 @@ data: ${JSON.stringify(data)}
           res.end(JSON.stringify({ error: `No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.` }));
           return;
         }
-        const baseResources = await buildGraphFromBicep(baseContent || "");
-        const headResources = await buildGraphFromBicep(headContent || "");
+        const baseResources = await buildGraphViaRad(baseContent || "");
+        const headResources = await buildGraphViaRad(headContent || "");
         const diffResources = computeGraphDiff(baseResources, headResources);
         if (entry2) {
           entry2.state.diffResources = diffResources;
@@ -6205,7 +6107,7 @@ data: ${JSON.stringify(data)}
                 if (!content) content = await fetchFileFromRepo(repo, ".radius/app.bicep", branch);
                 if (!content) content = await generateBicepFromRepo(github, repo, branch);
                 if (content) {
-                  const parsed = await buildGraphFromBicep(content);
+                  const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
                   const recipes = await fetchRecipesFromGitHub(github, provider);
                   const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                   planned.forEach((r) => {
@@ -7084,8 +6986,18 @@ var session = await joinSession({
             ]);
             if (!baseContent) baseContent = await generateBicepFromRepo(github, repo, ctx.input.baseBranch);
             if (!headContent) headContent = await generateBicepFromRepo(github, repo, ctx.input.headBranch);
-            const baseResources = await buildGraphFromBicep(baseContent || "");
-            const headResources = await buildGraphFromBicep(headContent || "");
+            const baseResources = await buildGraphViaRad(baseContent || "", ".radius/app.bicep", { log: (m) => {
+              try {
+                session.log(m);
+              } catch {
+              }
+            } });
+            const headResources = await buildGraphViaRad(headContent || "", ".radius/app.bicep", { log: (m) => {
+              try {
+                session.log(m);
+              } catch {
+              }
+            } });
             const diffResources = computeGraphDiff(baseResources, headResources);
             entry.state.diffResources = diffResources;
             const hasChanges = diffResources.some((r) => r.diffStatus !== "unchanged");
@@ -7244,8 +7156,18 @@ Recipe resolution for planned graph:
           if (!baseContent && !headContent) {
             return "No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.";
           }
-          const baseResources = await buildGraphFromBicep(baseContent || "");
-          const headResources = await buildGraphFromBicep(headContent || "");
+          const baseResources = await buildGraphViaRad(baseContent || "", ".radius/app.bicep", { log: (m) => {
+            try {
+              session.log(m);
+            } catch {
+            }
+          } });
+          const headResources = await buildGraphViaRad(headContent || "", ".radius/app.bicep", { log: (m) => {
+            try {
+              session.log(m);
+            } catch {
+            }
+          } });
           const diffResources = computeGraphDiff(baseResources, headResources);
           const added = diffResources.filter((r) => r.diffStatus === "added").length;
           const removed = diffResources.filter((r) => r.diffStatus === "removed").length;

@@ -11,7 +11,6 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
-  buildGraphFromBicep,
   computeGraphDiff,
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
@@ -19,6 +18,7 @@ import {
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
 } from "@radius-project/core";
+import { buildGraphViaRad } from "./rad.mjs";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
@@ -565,7 +565,7 @@ function createRequestHandler(instanceId) {
                     sendProgress('Generated app.bicep — building graph...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
                 // Discover source code references for resources missing codeReference
                 const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery) {
@@ -754,7 +754,7 @@ function createRequestHandler(instanceId) {
                     addProgress('Generated app.bicep — building graph...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
                 // Discover source code references
                 const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery2) {
@@ -886,7 +886,7 @@ function createRequestHandler(instanceId) {
                     addProgress('Found app.bicep — parsing resources...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
                 // Discover source code references for planned graph
                 const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSrcDisc) {
@@ -1109,8 +1109,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseResources = await buildGraphFromBicep(baseContent || '');
-                const headResources = await buildGraphFromBicep(headContent || '');
+                const baseResources = await buildGraphViaRad(baseContent || '');
+                const headResources = await buildGraphViaRad(headContent || '');
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
@@ -1213,7 +1213,7 @@ function createRequestHandler(instanceId) {
                                 if (!content) content = await fetchFileFromRepo(repo, '.radius/app.bicep', branch);
                                 if (!content) content = await generateBicepFromRepo(github, repo, branch);
                                 if (content) {
-                                    const parsed = await buildGraphFromBicep(content);
+                                    const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });

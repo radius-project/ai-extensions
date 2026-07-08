@@ -1,5 +1,5 @@
-// graph/ — pure application-graph logic: bicep/ARM compilation, regex parsing,
-// the modeled-graph builder, and the shared diff algorithm.
+// graph/ — pure application-graph logic: the modeled-graph builder, the
+// app-graph.json → canvas converter, and the shared diff algorithm.
 
 export {
   MODELED_GRAPH_DEFAULTS,
@@ -9,9 +9,5 @@ export {
   addInboundConnections,
   buildResourceID,
 } from "./model.js";
-export {
-  compileBicepToARM,
-  buildGraphFromBicep,
-  parseBicepResources,
-} from "./bicep.js";
+export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";
