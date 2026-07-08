@@ -25,6 +25,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import https from "node:https";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,19 +73,27 @@ function findOnPath() {
   return null;
 }
 
-// Parses a vX.Y.Z(-suffix) tag into comparable numeric components. Returns null
-// for tags that don't look like semver so they can be ignored during selection.
+// Parses a vX.Y.Z(-prerelease) tag into comparable components. Returns null for
+// tags that don't look like semver so they can be ignored during selection. The
+// optional prerelease suffix is captured so a stable release can be ranked above
+// a prerelease that shares the same major.minor.patch.
 function parseSemver(tag) {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(tag);
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(tag);
   if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], prerelease: m[4] || null };
 }
 
 function compareSemver(a, b) {
   for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
+    if (a.nums[i] !== b.nums[i]) return a.nums[i] - b.nums[i];
   }
-  return 0;
+  // Equal core version: a stable release outranks a prerelease (v1.0.0 beats
+  // v1.0.0-rc1). When both are prereleases, order their identifiers lexically so
+  // selection stays deterministic instead of tie-breaking arbitrarily.
+  if (!a.prerelease && b.prerelease) return 1;
+  if (a.prerelease && !b.prerelease) return -1;
+  if (!a.prerelease && !b.prerelease) return 0;
+  return a.prerelease < b.prerelease ? -1 : a.prerelease > b.prerelease ? 1 : 0;
 }
 
 // Returns the highest-versioned cached download under
@@ -178,6 +187,21 @@ async function latestReleaseTag() {
   return parsed.tag_name;
 }
 
+// Verifies a downloaded rad binary against an optional pinned SHA-256 supplied
+// via RADIUS_RAD_SHA256 (raw hex or "sha256:<hex>"). No env var means no pin, so
+// behavior is unchanged for callers that don't opt in; a mismatch aborts the
+// install so a corrupted or tampered download is never cached or executed.
+function verifyChecksum(data, tag) {
+  const pinned = (process.env.RADIUS_RAD_SHA256 || "").trim().toLowerCase().replace(/^sha256:/, "");
+  if (!pinned) return;
+  const actual = crypto.createHash("sha256").update(data).digest("hex");
+  if (actual !== pinned) {
+    throw new Error(
+      `rad ${tag} download failed SHA-256 verification: expected ${pinned}, got ${actual}`,
+    );
+  }
+}
+
 async function downloadRad(log) {
   const tag = await latestReleaseTag();
   const asset = releaseAsset();
@@ -189,6 +213,7 @@ async function downloadRad(log) {
   log(`Downloading rad ${tag} (${asset})...`);
   fs.mkdirSync(destDir, { recursive: true });
   const data = await httpGet(url);
+  verifyChecksum(data, tag);
   const tmp = `${dest}.${process.pid}.download`;
   fs.writeFileSync(tmp, data);
   if (!IS_WIN) fs.chmodSync(tmp, 0o755);

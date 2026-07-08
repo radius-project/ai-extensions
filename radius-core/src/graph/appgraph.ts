@@ -15,9 +15,10 @@ import { addInboundConnections, computeDiffHash } from "./model.js";
  * canvas resources array.
  *
  * Accepts either an `ApplicationGraphResponse` (`{ resources: [...] }`) or a
- * bare resources array. Keeps only outbound connections from the input, sorts
- * them deterministically, and rebuilds the reciprocal inbound edges via
- * `addInboundConnections`, so rad edge ordering does not affect diffs.
+ * bare resources array. Keeps only outbound connections from the input and
+ * rebuilds the reciprocal inbound edges via `addInboundConnections`, which also
+ * sorts every resource's connections deterministically, so rad edge ordering
+ * does not affect diffs.
  */
 export function applicationGraphToResources(
   appGraph: any,
@@ -36,21 +37,21 @@ export function applicationGraphToResources(
     const type = r.type || "";
     if (!id || !type) continue;
 
-    // Keep only outbound edges; inbound edges are rebuilt deterministically
-    // below so the shape matches the modeled-graph builder exactly.
+    // Keep only outbound edges; inbound edges are rebuilt below and the full
+    // connection list is sorted deterministically inside addInboundConnections,
+    // so the shape matches the modeled-graph builder exactly.
     const connections: any[] = [];
     for (const c of r.connections || []) {
       if (!c || !c.id) continue;
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
     }
-    connections.sort((a, b) => {
-      const byID = String(a.id).localeCompare(String(b.id));
-      if (byID !== 0) return byID;
-      return String(a.direction).localeCompare(String(b.direction));
-    });
     const properties =
       r.properties && typeof r.properties === "object" && !Array.isArray(r.properties) ? r.properties : {};
+    // Fall back to the modeled-builder hash inputs when rad did not supply a
+    // diffHash: include the resource's own dependsOn if present so the computed
+    // hash matches what the modeled builder would produce for the same resource.
+    const dependsOn = Array.isArray(r.dependsOn) ? r.dependsOn : [];
 
     resources.push({
       id,
@@ -59,7 +60,7 @@ export function applicationGraphToResources(
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
       outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
-      diffHash: r.diffHash || computeDiffHash(properties, []),
+      diffHash: r.diffHash || computeDiffHash(properties, dependsOn),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
       codeReference: r.codeReference || "",

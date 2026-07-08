@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { applicationGraphToResources } from "./appgraph.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID, computeDiffHash } from "./model.js";
 
 const frontendId = buildResourceID("Radius.Compute/containers", "frontend");
 const cacheId = buildResourceID("Radius.Data/redisCaches", "cache");
@@ -115,14 +115,45 @@ describe("applicationGraphToResources", () => {
     expect(resources[0].diffHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
-  it("treats non-object properties as empty when computing fallback diffHash", () => {
-    const withStringProperties = applicationGraphToResources([
-      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: "oops" },
+  it("orders synthesized inbound edges deterministically regardless of input order", () => {
+    // cache is targeted by two sources listed in reverse-sorted order; the
+    // inbound edges must come out sorted by id so computeGraphDiff is stable.
+    const resources = applicationGraphToResources([
+      {
+        id: frontendId,
+        name: "frontend",
+        type: "Radius.Compute/containers",
+        connections: [{ id: cacheId, direction: "Outbound" }],
+      },
+      {
+        id: databaseId,
+        name: "database",
+        type: "Radius.Data/postgreSQLDatabases",
+        connections: [{ id: cacheId, direction: "Outbound" }],
+      },
+      { id: cacheId, name: "cache", type: "Radius.Data/redisCaches", connections: [] },
     ]);
-    const withoutProperties = applicationGraphToResources([
-      { id: frontendId, name: "frontend", type: "Radius.Compute/containers" },
-    ]);
+    const cache = resources.find((r) => r.id === cacheId);
+    const sorted = [...cache.connections].sort((a: any, b: any) =>
+      String(a.id).localeCompare(String(b.id)),
+    );
+    expect(cache.connections).toEqual(sorted);
+  });
 
-    expect(withStringProperties[0].diffHash).toBe(withoutProperties[0].diffHash);
+  it("passes the resource's dependsOn into the fallback diffHash", () => {
+    const properties = { image: "node:18" };
+    const dependsOn = [cacheId, databaseId];
+    const resources = applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties, dependsOn },
+    ]);
+    expect(resources[0].diffHash).toBe(computeDiffHash(properties, dependsOn));
+  });
+
+  it("treats a non-array dependsOn as empty when computing fallback diffHash", () => {
+    const properties = { image: "node:18" };
+    const resources = applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties, dependsOn: "oops" },
+    ]);
+    expect(resources[0].diffHash).toBe(computeDiffHash(properties, []));
   });
 });
