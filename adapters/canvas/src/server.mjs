@@ -1107,31 +1107,12 @@ function createRequestHandler(instanceId) {
                         });
                     });
 
-                    // Also commit bicepconfig.json for the Radius extension
-                    const bicepConfigPath = '.radius/bicepconfig.json';
-                    const bicepConfigContent = JSON.stringify({
-                        experimentalFeaturesEnabled: { extensibility: true },
-                        extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                    }, null, 2);
-                    const existingConfig = await new Promise((resolve) => {
-                        cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
-                            resolve(err ? '' : stdout.trim());
-                        });
-                    });
-                    const configPayload = JSON.stringify({
-                        message: 'Add bicepconfig.json for Radius extension support',
-                        content: Buffer.from(bicepConfigContent).toString('base64'),
-                        branch: commitBranch,
-                        ...(existingConfig ? { sha: existingConfig } : {})
-                    });
-                    const tmpPath2 = jn(td(), 'radius-bicepconfig-commit-' + Date.now() + '.json');
-                    wfs(tmpPath2, configPayload);
-                    await new Promise((resolve) => {
-                        cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 30000 }, (err) => {
-                            try { uls(tmpPath2); } catch {}
-                            resolve(err ? false : true);
-                        });
-                    });
+                    // NOTE: bicepconfig.json is intentionally NOT written here.
+                    // The deploy workflow handles all bicep wiring at deploy time
+                    // (working copy only): it builds the containerImages extension,
+                    // merges `radiusCompute` into the repo's bicepconfig.json, and
+                    // injects `extension radiusCompute` into app.bicep — none of which
+                    // is committed back to the repo.
                 } catch {}
 
                 res.setHeader("Content-Type", "application/json");
@@ -1787,16 +1768,14 @@ function createRequestHandler(instanceId) {
                 await deleteLegacyDeployWorkflow(targetRepo);
                 sendEvent('stdout', 'Workflows committed to ' + targetRepo);
 
-                // Step 2b: Ensure the app definition AND its bicepconfig.json exist
-                // in the repo BEFORE triggering the deploy.
+                // Step 2b: Ensure the app definition exists in the repo BEFORE
+                // triggering the deploy.
                 //  - The workflow fails fast with "No app.bicep found" if neither
                 //    app.bicep nor .radius/app.bicep is committed, so for repos
                 //    without one we synthesize it from the repo structure.
-                //  - bicep cannot compile the app (rad deploy) without a
-                //    bicepconfig.json that registers the Radius extension types, so
-                //    we ALWAYS ensure one exists next to the app definition —
-                //    independent of whether app.bicep was just generated or already
-                //    present. (This is the "deployment json" the deploy relies on.)
+                //  - bicepconfig.json and the app's bicep extensions are handled
+                //    entirely by the deploy workflow at deploy time (working copy
+                //    only) — the canvas never writes them into the repo.
                 try {
                     // Resolve the repo's default branch (where the workflow runs).
                     const defBranchRes = await runCmd('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
@@ -1805,10 +1784,6 @@ function createRequestHandler(instanceId) {
                     // Check whether an app definition is already committed.
                     const hasRadiusBicep = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/.radius/app.bicep?ref=' + deployBranch, '--jq', '.sha'])).code === 0;
                     const hasRootBicep = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/app.bicep?ref=' + deployBranch, '--jq', '.sha'])).code === 0;
-
-                    // Directory that holds the app definition — bicepconfig.json must
-                    // sit next to it so bicep resolves the Radius extension.
-                    let appDir = hasRootBicep ? '' : '.radius/';
 
                     if (!hasRadiusBicep && !hasRootBicep) {
                         sendEvent('info', 'No app.bicep found in ' + targetRepo + ' — generating one from the repository structure...');
@@ -1822,7 +1797,6 @@ function createRequestHandler(instanceId) {
 
                         // Commit the generated app.bicep to .radius/app.bicep on the
                         // deploy branch so the workflow can find it.
-                        appDir = '.radius/';
                         const bicepPath = '.radius/app.bicep';
                         const existingBicepSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
                         const bicepCommitBody = JSON.stringify({
@@ -1842,34 +1816,8 @@ function createRequestHandler(instanceId) {
                     } else {
                         sendEvent('stdout', 'Found existing app definition (' + (hasRadiusBicep ? '.radius/app.bicep' : 'app.bicep') + ') in ' + targetRepo);
                     }
-
-                    // ALWAYS ensure bicepconfig.json exists next to the app file so
-                    // bicep can resolve the Radius extension during `rad deploy`.
-                    const bicepConfigPath = appDir + 'bicepconfig.json';
-                    const existingCfgSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepConfigPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
-                    if (!existingCfgSha) {
-                        const bicepConfigContent = JSON.stringify({
-                            experimentalFeaturesEnabled: { extensibility: true },
-                            extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                        }, null, 2);
-                        const cfgCommitBody = JSON.stringify({
-                            message: 'Add bicepconfig.json for Radius extension support',
-                            content: Buffer.from(bicepConfigContent).toString('base64'),
-                            branch: deployBranch
-                        });
-                        const cfgCommit = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + bicepConfigPath, '--input', '-'], { stdin: cfgCommitBody });
-                        if (cfgCommit.code !== 0) {
-                            sendEvent('error', 'Failed to commit ' + bicepConfigPath + ' to ' + targetRepo + '. Check repo permissions.');
-                            sendEvent('done', 'failed');
-                            res.end();
-                            return;
-                        }
-                        sendEvent('stdout', 'Committed ' + bicepConfigPath + ' to ' + targetRepo);
-                    } else {
-                        sendEvent('stdout', 'Found existing ' + bicepConfigPath + ' in ' + targetRepo);
-                    }
                 } catch (bicepErr) {
-                    sendEvent('error', 'Failed ensuring app.bicep / bicepconfig.json exists: ' + bicepErr.message);
+                    sendEvent('error', 'Failed ensuring app.bicep exists: ' + bicepErr.message);
                     sendEvent('done', 'failed');
                     res.end();
                     return;

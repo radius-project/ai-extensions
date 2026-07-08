@@ -6259,33 +6259,6 @@ data: ${JSON.stringify(data)}
               resolve(err ? false : true);
             });
           });
-          const bicepConfigPath = ".radius/bicepconfig.json";
-          const bicepConfigContent = JSON.stringify({
-            experimentalFeaturesEnabled: { extensibility: true },
-            extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-          }, null, 2);
-          const existingConfig = await new Promise((resolve) => {
-            cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 1e4 }, (err, stdout) => {
-              resolve(err ? "" : stdout.trim());
-            });
-          });
-          const configPayload = JSON.stringify({
-            message: "Add bicepconfig.json for Radius extension support",
-            content: Buffer.from(bicepConfigContent).toString("base64"),
-            branch: commitBranch,
-            ...existingConfig ? { sha: existingConfig } : {}
-          });
-          const tmpPath2 = jn(td(), "radius-bicepconfig-commit-" + Date.now() + ".json");
-          wfs(tmpPath2, configPayload);
-          await new Promise((resolve) => {
-            cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 3e4 }, (err) => {
-              try {
-                uls(tmpPath2);
-              } catch {
-              }
-              resolve(err ? false : true);
-            });
-          });
         } catch {
         }
         res.setHeader("Content-Type", "application/json");
@@ -6851,7 +6824,6 @@ data: ${JSON.stringify(data)}
           const deployBranch = defBranchRes.code === 0 && defBranchRes.output.trim() ? defBranchRes.output.trim() : params.branch || "main";
           const hasRadiusBicep = (await runCmd2("gh", ["api", "/repos/" + targetRepo + "/contents/.radius/app.bicep?ref=" + deployBranch, "--jq", ".sha"])).code === 0;
           const hasRootBicep = (await runCmd2("gh", ["api", "/repos/" + targetRepo + "/contents/app.bicep?ref=" + deployBranch, "--jq", ".sha"])).code === 0;
-          let appDir = hasRootBicep ? "" : ".radius/";
           if (!hasRadiusBicep && !hasRootBicep) {
             sendEvent2("info", "No app.bicep found in " + targetRepo + " \u2014 generating one from the repository structure...");
             const generated = await generateBicepFromRepo(github, targetRepo, deployBranch);
@@ -6861,7 +6833,6 @@ data: ${JSON.stringify(data)}
               res.end();
               return;
             }
-            appDir = ".radius/";
             const bicepPath = ".radius/app.bicep";
             const existingBicepSha = (await runCmd2("gh", ["api", "/repos/" + targetRepo + "/contents/" + bicepPath + "?ref=" + deployBranch, "--jq", ".sha"])).output.trim();
             const bicepCommitBody = JSON.stringify({
@@ -6881,31 +6852,8 @@ data: ${JSON.stringify(data)}
           } else {
             sendEvent2("stdout", "Found existing app definition (" + (hasRadiusBicep ? ".radius/app.bicep" : "app.bicep") + ") in " + targetRepo);
           }
-          const bicepConfigPath = appDir + "bicepconfig.json";
-          const existingCfgSha = (await runCmd2("gh", ["api", "/repos/" + targetRepo + "/contents/" + bicepConfigPath + "?ref=" + deployBranch, "--jq", ".sha"])).output.trim();
-          if (!existingCfgSha) {
-            const bicepConfigContent = JSON.stringify({
-              experimentalFeaturesEnabled: { extensibility: true },
-              extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-            }, null, 2);
-            const cfgCommitBody = JSON.stringify({
-              message: "Add bicepconfig.json for Radius extension support",
-              content: Buffer.from(bicepConfigContent).toString("base64"),
-              branch: deployBranch
-            });
-            const cfgCommit = await runCmd2("gh", ["api", "--method", "PUT", "/repos/" + targetRepo + "/contents/" + bicepConfigPath, "--input", "-"], { stdin: cfgCommitBody });
-            if (cfgCommit.code !== 0) {
-              sendEvent2("error", "Failed to commit " + bicepConfigPath + " to " + targetRepo + ". Check repo permissions.");
-              sendEvent2("done", "failed");
-              res.end();
-              return;
-            }
-            sendEvent2("stdout", "Committed " + bicepConfigPath + " to " + targetRepo);
-          } else {
-            sendEvent2("stdout", "Found existing " + bicepConfigPath + " in " + targetRepo);
-          }
         } catch (bicepErr) {
-          sendEvent2("error", "Failed ensuring app.bicep / bicepconfig.json exists: " + bicepErr.message);
+          sendEvent2("error", "Failed ensuring app.bicep exists: " + bicepErr.message);
           sendEvent2("done", "failed");
           res.end();
           return;
