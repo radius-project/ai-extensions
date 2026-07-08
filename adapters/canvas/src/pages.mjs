@@ -1093,13 +1093,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated Client ID appears below.
+      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated credentials are passed straight to the GitHub environment and deploy workflows.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">⚡ Auto-create credentials</button>
-    <div style="display:flex; flex-direction:column; gap:4px; flex-basis:100%;">
-      <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Client ID <span style="font-weight:400;">(auto-created)</span></label>
-      <input id="az-client-id" type="text" readonly placeholder="Auto-created when you click Auto-create credentials" value="${escapeHtml(oidcAzure?.clientId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-inset, #eff2f5);" />
-    </div>
+    <input id="az-client-id" type="hidden" value="${escapeHtml(oidcAzure?.clientId || '')}" />
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
   </div>
 </div>

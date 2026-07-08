@@ -38,13 +38,13 @@ env:
   APP_IMAGE: ${{ inputs.image || github.sha || 'latest' }}
   RESOURCE_TYPES_CONTRIB_REPO: https://github.com/radius-project/resource-types-contrib.git
   RESOURCE_TYPES_CONTRIB_REF: main
-  # Azure default recipe pack, pinned to the resource-types-contrib PR #218 commit
-  # until it merges to main. Provisions data / messaging / AI types with Azure
-  # Verified Modules (Bicep), builds the app image from repo source via the
-  # Kubernetes containerImages recipe, and keeps core types (containers,
-  # persistentVolumes, routes, secrets) on the shared Kubernetes recipes.
-  RECIPE_PACK_REF: 7a2fd8eb1cfcd4d6fcc5d933bcfdbcfdb9ee1e0c
-  RECIPE_PACK_PATH: recipepack/azure/default-recipepack.bicep
+  # Azure recipe pack from resource-types-contrib. Provisions data / messaging /
+  # AI types with Azure Verified Modules (Bicep), builds the app image from repo
+  # source via the Kubernetes containerImages recipe, and keeps core types
+  # (containers, persistentVolumes, routes, secrets) on the shared Kubernetes
+  # recipes. Tracks main; RECIPE_PACK_REF can be pinned to a commit if needed.
+  RECIPE_PACK_REF: main
+  RECIPE_PACK_PATH: recipepack/azure/aks-recipepack.bicep
 
 jobs:
   deploy:
