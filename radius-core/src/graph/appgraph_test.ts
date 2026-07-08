@@ -114,4 +114,15 @@ describe("applicationGraphToResources", () => {
     ]);
     expect(resources[0].diffHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
+
+  it("treats non-object properties as empty when computing fallback diffHash", () => {
+    const withStringProperties = applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: "oops" },
+    ]);
+    const withoutProperties = applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers" },
+    ]);
+
+    expect(withStringProperties[0].diffHash).toBe(withoutProperties[0].diffHash);
+  });
 });

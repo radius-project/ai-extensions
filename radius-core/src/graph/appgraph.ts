@@ -49,6 +49,8 @@ export function applicationGraphToResources(
       if (byID !== 0) return byID;
       return String(a.direction).localeCompare(String(b.direction));
     });
+    const properties =
+      r.properties && typeof r.properties === "object" && !Array.isArray(r.properties) ? r.properties : {};
 
     resources.push({
       id,
@@ -57,7 +59,7 @@ export function applicationGraphToResources(
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
       outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
-      diffHash: r.diffHash || computeDiffHash(r.properties && typeof r.properties === "object" ? r.properties : {}, []),
+      diffHash: r.diffHash || computeDiffHash(properties, []),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
       codeReference: r.codeReference || "",
