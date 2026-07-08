@@ -2208,7 +2208,7 @@ jobs:
 `;
 
 // radius-core/src/workflows/deploy.ts
-var RADIUS_REF = "add-deploy-workflow";
+var RADIUS_REF = "main";
 var DEPLOY_DISPATCHER_FILE = "run-rad-commands.yml";
 var DEPLOY_AZURE_FILE = "run-rad-commands-azure.yml";
 var DEPLOY_AWS_FILE = "run-rad-commands-aws.yml";

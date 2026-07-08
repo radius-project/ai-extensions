@@ -5,10 +5,9 @@ import awsTemplate from "./templates/run-rad-commands-aws.yml";
 
 // The pinned ref of radius-project/radius that hosts the shared composite
 // actions (setup-control-plane, restore-state,
-// run-rad-commands, teardown) referenced by the provider workflows. Bump this
-// once radius-project/radius#12250 merges to point at a stable ref (e.g. `main`
-// or a release tag).
-const RADIUS_REF = "add-deploy-workflow";
+// run-rad-commands, teardown) referenced by the provider workflows. Points at
+// `main` now that the deploy-workflow actions have merged there.
+const RADIUS_REF = "main";
 
 // Committed workflow file names. All three are always committed to the target
 // repo's .github/workflows/: the dispatcher references both provider workflows
