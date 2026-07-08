@@ -130,6 +130,15 @@ export function resolveExistingRadBinary() {
   return findInCache();
 }
 
+function githubAuthHeaders() {
+  // The GitHub Releases API is rate-limited hard for unauthenticated callers,
+  // which can make first-run downloads flaky on shared/CI IP addresses. If a
+  // token happens to be in the environment, use it to get the authenticated
+  // rate limit. No token is required for public release metadata.
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 function httpGet(url, headers) {
   return new Promise((resolve, reject) => {
     const req = https.get(
@@ -158,7 +167,10 @@ function httpGet(url, headers) {
 }
 
 async function latestReleaseTag() {
-  const body = await httpGet(RELEASES_API, { Accept: "application/vnd.github+json" });
+  const body = await httpGet(RELEASES_API, {
+    Accept: "application/vnd.github+json",
+    ...githubAuthHeaders(),
+  });
   const parsed = JSON.parse(body.toString("utf8"));
   if (!parsed || !parsed.tag_name) {
     throw new Error("Could not determine latest rad release tag");
