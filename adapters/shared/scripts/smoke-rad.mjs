@@ -3,12 +3,12 @@
 // Not wired into CI — run manually when a network connection is available (the
 // first run downloads the `rad` binary and rad's embedded Bicep):
 //
-//   node adapters/canvas/scripts/smoke-rad.mjs
+//   node adapters/shared/scripts/smoke-rad.mjs
 //
 // It writes a tiny app.bicep, runs buildGraphViaRad, and asserts the converter
 // returns at least one resource. Exits non-zero on failure.
 
-import { buildGraphViaRad } from "../src/rad.mjs";
+import { buildGraphViaRad } from "../src/index.mjs";
 
 const SAMPLE_BICEP = `extension radius
 

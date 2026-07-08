@@ -1,21 +1,25 @@
-// Canvas adapter — real `rad` CLI graph builder.
+// Node-runtime `rad` CLI graph builder.
 //
-// The canvas builds application graphs by running the real `rad app graph
-// <app.bicep>` command, which compiles Bicep with rad's embedded Bicep and
-// writes `app-graph.json` entirely client-side (no Radius control plane). This
-// module owns every impure step that radius-core must not: locating or
-// downloading the static `rad` binary, spawning it, and reading its output.
-// The pure conversion into the canvas resource shape lives in
-// `applicationGraphToResources` (radius-core).
+// Builds application graphs by running the real `rad app graph <app.bicep>`
+// command, which compiles Bicep with rad's embedded Bicep and writes
+// `app-graph.json` entirely client-side (no Radius control plane). This module
+// owns every impure, Node-only step that the pure `@radius-project/core`
+// package must not depend on: locating or downloading the static `rad` binary,
+// spawning it, and reading its output. The pure conversion into the canvas
+// resource shape lives in `applicationGraphToResources` (radius-core).
+//
+// It is adapter-agnostic: it takes an injected `log` and has no knowledge of
+// any specific adapter (canvas, GitHub, etc). Adapters import it from
+// `@radius-project/shared`.
 //
 // Gotchas honored here:
-//   - NEVER use console.log — stdout is the JSON-RPC channel. Use the injected
-//     `log` for any user-visible message.
+//   - NEVER use console.log — an adapter's stdout may be a JSON-RPC channel.
+//     Use the injected `log` for any user-visible message.
 //   - `rad app graph` commits to a `radius-graph` orphan branch when
 //     GITHUB_ACTIONS === "true"; we clear it in the child env so it always
 //     writes app-graph.json locally.
-//   - Binary paths resolve from os.homedir()/PATH, never import.meta (esbuild
-//     bundles this file into a single artifact).
+//   - Binary paths resolve from os.homedir()/PATH, never import.meta (adapters
+//     bundle this file into a single artifact).
 //   - Windows: `.exe` suffix, no chmod.
 
 import { execFile } from "node:child_process";
@@ -31,7 +35,7 @@ const execFileAsync = promisify(execFile);
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
 const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
-const CACHE_ROOT = path.join(os.homedir(), ".radius-canvas", "bin");
+const CACHE_ROOT = path.join(os.homedir(), ".radius", "app-graph-bin");
 
 // Serializes concurrent ensureRadBinary() callers so only one download runs.
 let ensurePromise = null;
@@ -68,7 +72,24 @@ function findOnPath() {
   return null;
 }
 
-// Returns the newest cached download under ~/.radius-canvas/bin/<tag>/rad[.exe].
+// Parses a vX.Y.Z(-suffix) tag into comparable numeric components. Returns null
+// for tags that don't look like semver so they can be ignored during selection.
+function parseSemver(tag) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(tag);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareSemver(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+// Returns the highest-versioned cached download under
+// ~/.radius/app-graph-bin/<tag>/rad[.exe], comparing tags as semver so that
+// e.g. v0.10.0 wins over v0.9.0.
 function findInCache() {
   let entries;
   try {
@@ -76,18 +97,25 @@ function findInCache() {
   } catch {
     return null;
   }
-  // Newest tag dir first (lexical is good enough for the vX.Y.Z scheme; reverse
-  // so higher versions win when several are cached).
-  for (const tag of entries.sort().reverse()) {
-    const candidate = path.join(CACHE_ROOT, tag, `rad${EXE}`);
-    if (isExecutableFile(candidate)) return candidate;
+  const candidates = [];
+  for (const tag of entries) {
+    const binary = path.join(CACHE_ROOT, tag, `rad${EXE}`);
+    if (!isExecutableFile(binary)) continue;
+    candidates.push({ tag, binary, semver: parseSemver(tag) });
   }
-  return null;
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    if (a.semver && b.semver) return compareSemver(a.semver, b.semver);
+    if (a.semver) return 1; // prefer parseable semver over junk dirs
+    if (b.semver) return -1;
+    return a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0;
+  });
+  return candidates[candidates.length - 1].binary;
 }
 
 /**
  * resolveExistingRadBinary - locate a usable `rad` without downloading.
- * Order: RADIUS_RAD_BINARY env → PATH → ~/.rad/bin → download cache.
+ * Order: RADIUS_RAD_BINARY env -> PATH -> ~/.rad/bin -> download cache.
  */
 export function resolveExistingRadBinary() {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
@@ -106,7 +134,7 @@ function httpGet(url, headers) {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
-      { headers: { "User-Agent": "radius-canvas", ...headers }, timeout: 30000 },
+      { headers: { "User-Agent": "radius-app-graph", ...headers }, timeout: 30000 },
       (resp) => {
         if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
           resp.resume();
@@ -152,7 +180,15 @@ async function downloadRad(log) {
   const tmp = `${dest}.${process.pid}.download`;
   fs.writeFileSync(tmp, data);
   if (!IS_WIN) fs.chmodSync(tmp, 0o755);
-  fs.renameSync(tmp, dest);
+  try {
+    fs.renameSync(tmp, dest);
+  } catch (err) {
+    // Another process may have won the race and created dest already. Accept
+    // the existing binary and clean up our temp copy.
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+    if (isExecutableFile(dest)) return dest;
+    throw err;
+  }
   log(`Installed rad to ${dest}`);
   return dest;
 }
@@ -192,9 +228,12 @@ export function ensureRadBinary({ log = noop } = {}) {
  */
 export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 120000 } = {}) {
   const radPath = await ensureRadBinary({ log });
+  // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
+  // would no longer point at the file.
+  const absoluteBicep = path.resolve(bicepFilePath);
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
-    await execFileAsync(radPath, ["app", "graph", bicepFilePath], {
+    await execFileAsync(radPath, ["app", "graph", absoluteBicep], {
       cwd,
       // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
       // committing to the radius-graph orphan branch.
@@ -215,8 +254,8 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
 }
 
 /**
- * buildGraphViaRad - the single graph-assembly entry the canvas uses. Writes
- * the given Bicep content to a temp file, runs `rad app graph`, and converts the
+ * buildGraphViaRad - the single graph-assembly entry adapters use. Writes the
+ * given Bicep content to a temp file, runs `rad app graph`, and converts the
  * result into the canvas resource array. Throws (surfaced to the UI) on failure
  * — there is no JS fallback.
  */

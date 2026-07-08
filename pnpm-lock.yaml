@@ -29,6 +29,15 @@ importers:
       '@radius-project/core':
         specifier: workspace:*
         version: link:../../radius-core
+      '@radius-project/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  adapters/shared:
+    dependencies:
+      '@radius-project/core':
+        specifier: workspace:*
+        version: link:../../radius-core
 
   radius-core:
     devDependencies:

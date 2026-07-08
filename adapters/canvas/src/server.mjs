@@ -18,7 +18,7 @@ import {
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
 } from "@radius-project/core";
-import { buildGraphViaRad } from "./rad.mjs";
+import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";

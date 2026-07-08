@@ -13,7 +13,7 @@ import {
   fetchBicepFromRepo,
   generateBicepFromRepo,
 } from "@radius-project/core";
-import { buildGraphViaRad } from "./rad.mjs";
+import { buildGraphViaRad } from "@radius-project/shared";
 import { runCommand, github } from "./gh.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
