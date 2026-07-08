@@ -1609,18 +1609,27 @@ var verify_azure_default = 'name: Radius - Verify Credentials\non:\n  workflow_d
 var verify_aws_default = 'name: Radius - Verify Credentials\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        description: \'Environment to verify\'\n        required: true\n        default: \'{{ENV}}\'\n\npermissions:\n  id-token: write\n  contents: read\n\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    environment: ${{ inputs.environment }}\n    steps:\n      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4\n\n      - name: Configure AWS Credentials\n        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4\n        with:\n          role-to-assume: ${{ vars.AWS_ROLE_ARN }}\n          aws-region: ${{ vars.AWS_REGION }}\n\n      - name: Verify AWS Credentials\n        run: |\n          aws sts get-caller-identity\n          echo "\u2705 AWS OIDC login successful"\n\n      - name: Verify EKS Access\n        run: |\n          aws eks update-kubeconfig --name "${{ vars.AWS_EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION }}"\n          kubectl cluster-info\n          echo "\u2705 EKS cluster accessible"\n\n      - name: Summary\n        run: |\n          echo "## \u2705 Credentials Verified" >> $GITHUB_STEP_SUMMARY\n          echo "Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY\n          echo "Provider: aws" >> $GITHUB_STEP_SUMMARY\n';
 
 // radius-core/src/workflows/verify.ts
-var VERIFY_TEMPLATES = {
+var VERIFY_AZURE_FILE = "verify-azure.yml";
+var VERIFY_AWS_FILE = "verify-aws.yml";
+var VERIFY_FILE_BY_PLATFORM = {
+  azure: VERIFY_AZURE_FILE,
+  aws: VERIFY_AWS_FILE
+};
+var BUNDLED_VERIFY_TEMPLATES = {
   azure: verify_azure_default,
   aws: verify_aws_default
 };
-function generateVerifyWorkflow(env, platform) {
-  const template = VERIFY_TEMPLATES[platform.id];
-  if (!template) {
+function verifyTemplateFile(platform) {
+  return VERIFY_FILE_BY_PLATFORM[platform.id];
+}
+function generateVerifyWorkflow(env, platform, template) {
+  const chosen = template ?? BUNDLED_VERIFY_TEMPLATES[platform.id];
+  if (!chosen) {
     throw new Error(
-      `No verify template for platform "${platform.id}". Supported platforms: ${Object.keys(VERIFY_TEMPLATES).join(", ")}.`
+      `No verify template for platform "${platform.id}". Supported platforms: ${Object.keys(BUNDLED_VERIFY_TEMPLATES).join(", ")}.`
     );
   }
-  return fillTemplate(template, {
+  return fillTemplate(chosen, {
     ENV: env
   });
 }
@@ -2209,18 +2218,26 @@ jobs:
 
 // radius-core/src/workflows/deploy.ts
 var RADIUS_REF = "main";
+var RADIUS_WORKFLOW_REPO = "radius-project/radius";
+var RADIUS_WORKFLOW_DIR = ".github/extension";
 var DEPLOY_DISPATCHER_FILE = "run-rad-commands.yml";
 var DEPLOY_AZURE_FILE = "run-rad-commands-azure.yml";
 var DEPLOY_AWS_FILE = "run-rad-commands-aws.yml";
-function generateDeployWorkflow(env, appFile) {
+var BUNDLED_DEPLOY_TEMPLATES = {
+  [DEPLOY_DISPATCHER_FILE]: run_rad_commands_default,
+  [DEPLOY_AZURE_FILE]: run_rad_commands_azure_default,
+  [DEPLOY_AWS_FILE]: run_rad_commands_aws_default
+};
+function generateDeployWorkflow(env, appFile, templates = BUNDLED_DEPLOY_TEMPLATES) {
+  const pick = (file) => templates[file] ?? BUNDLED_DEPLOY_TEMPLATES[file];
   return {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(run_rad_commands_default, { ENV: env }),
-    [DEPLOY_AZURE_FILE]: fillTemplate(run_rad_commands_azure_default, {
+    [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), { ENV: env }),
+    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), {
       ENV: env,
       APP_FILE: appFile,
       RADIUS_REF
     }),
-    [DEPLOY_AWS_FILE]: fillTemplate(run_rad_commands_aws_default, {
+    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), {
       ENV: env,
       APP_FILE: appFile,
       RADIUS_REF
@@ -2436,13 +2453,33 @@ function setSubscription(subscriptionId, tenantId, resolve) {
 function generateAWSOIDC(data) {
   return getPlatform("aws").generateOidc(data);
 }
-function generateVerifyWorkflow2(env, provider) {
+async function fetchRadiusTemplate(fileName) {
+  try {
+    const body = await fetchFileFromRepo(
+      RADIUS_WORKFLOW_REPO,
+      `${RADIUS_WORKFLOW_DIR}/${fileName}`,
+      RADIUS_REF
+    );
+    return body && body.trim() ? body : null;
+  } catch {
+    return null;
+  }
+}
+async function generateVerifyWorkflow2(env, provider) {
   const platform = getPlatform(provider);
   if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
-  return generateVerifyWorkflow(env, platform);
+  const fileName = verifyTemplateFile(platform);
+  const upstream = fileName ? await fetchRadiusTemplate(fileName) : null;
+  return generateVerifyWorkflow(env, platform, upstream ?? void 0);
 }
-function generateDeployWorkflow2(env, appFile) {
-  return generateDeployWorkflow(env, appFile);
+async function generateDeployWorkflow2(env, appFile) {
+  const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
+  const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
+  const templates = {};
+  files.forEach((f, i) => {
+    if (bodies[i]) templates[f] = bodies[i];
+  });
+  return generateDeployWorkflow(env, appFile, templates);
 }
 function generatePortalUrl2(resourceType, provider, state) {
   return generatePortalUrl(resourceType, provider, state);
@@ -5691,7 +5728,7 @@ function createRequestHandler(instanceId) {
           steps.push("\u26A0\uFE0F Could not resolve application parameters: " + paramErr.message);
         }
         steps.push("Committing verify-credentials workflow...");
-        const verifyWorkflow = generateVerifyWorkflow2(envName, provider);
+        const verifyWorkflow = await generateVerifyWorkflow2(envName, provider);
         const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
         const verifyPath = ".github/workflows/radius-verify-credentials.yml";
         const checkResult = await runGh2(["api", "/repos/" + targetRepo + "/contents/" + verifyPath, "--jq", ".sha"]);
@@ -5723,7 +5760,7 @@ function createRequestHandler(instanceId) {
         }
         steps.push("\u2705 Verify workflow committed.");
         steps.push("Committing deploy workflows...");
-        const deployWorkflows = generateDeployWorkflow2(envName, ".radius/app.bicep");
+        const deployWorkflows = await generateDeployWorkflow2(envName, ".radius/app.bicep");
         for (const [fileName, content] of Object.entries(deployWorkflows)) {
           const deployContent = Buffer.from(content).toString("base64");
           const deployPath = ".github/workflows/" + fileName;
@@ -6788,7 +6825,7 @@ data: ${JSON.stringify(data)}
       const oidc = sessionOidc || (provider === "azure" ? sharedCredentials.azure : sharedCredentials.aws) || {};
       try {
         sendEvent2("info", "Generating GitHub Actions deploy workflows...");
-        const workflows = generateDeployWorkflow2(env, appFile);
+        const workflows = await generateDeployWorkflow2(env, appFile);
         const targetRepo = params.targetRepo || "";
         if (!targetRepo) {
           sendEvent2("error", "No target repository specified.");

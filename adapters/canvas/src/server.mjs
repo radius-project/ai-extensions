@@ -477,7 +477,7 @@ function createRequestHandler(instanceId) {
 
                 // Step 3: Commit the verify-credentials workflow
                 steps.push('Committing verify-credentials workflow...');
-                const verifyWorkflow = generateVerifyWorkflow(envName, provider);
+                const verifyWorkflow = await generateVerifyWorkflow(envName, provider);
                 const verifyContent = Buffer.from(verifyWorkflow).toString('base64');
                 const verifyPath = '.github/workflows/radius-verify-credentials.yml';
 
@@ -517,7 +517,7 @@ function createRequestHandler(instanceId) {
                 // provider workflows). The dispatcher references both provider
                 // files by path, so all three must exist in the target repo.
                 steps.push('Committing deploy workflows...');
-                const deployWorkflows = generateDeployWorkflow(envName, '.radius/app.bicep');
+                const deployWorkflows = await generateDeployWorkflow(envName, '.radius/app.bicep');
 
                 for (const [fileName, content] of Object.entries(deployWorkflows)) {
                     const deployContent = Buffer.from(content).toString('base64');
@@ -1724,7 +1724,7 @@ function createRequestHandler(instanceId) {
             try {
                 // Step 1: Generate the deploy workflows (dispatcher + both providers)
                 sendEvent('info', 'Generating GitHub Actions deploy workflows...');
-                const workflows = generateDeployWorkflow(env, appFile);
+                const workflows = await generateDeployWorkflow(env, appFile);
                 const targetRepo = params.targetRepo || '';
 
                 if (!targetRepo) {
