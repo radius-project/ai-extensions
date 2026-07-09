@@ -4,6 +4,7 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile, spawn } from "node:child_process";
+import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 
 // Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
 // API paths, …) are passed verbatim as argv and can never be interpreted as
@@ -91,3 +92,48 @@ export const github = {
     listNames: (apiPath) => ghApiListNames(apiPath),
     treePaths: (repo, branch = 'main') => fetchRepoTree(repo, branch),
 };
+
+// Look up a file's blob SHA on a branch; resolves '' when the file is absent.
+function getRepoFileSha(repo, path, branch, timeout = 10000) {
+    return new Promise((resolve) => {
+        cliExec("gh", ["api", `/repos/${repo}/contents/${path}?ref=${branch}`, "--jq", ".sha"], { timeout }, (err, stdout) => {
+            resolve(err ? "" : (stdout || "").trim());
+        });
+    });
+}
+
+// Create or update a single UTF-8 text file on a repo branch via the GitHub
+// contents API. Reuses the existing blob SHA so a re-commit is an update rather
+// than a rejected create. The commit body is fed over stdin (never argv) so the
+// base64 payload can't collide with shell/CLI parsing. Rejects on failure.
+export async function commitFileToRepo(repo, path, content, branch, message, timeout = 30000) {
+    const sha = await getRepoFileSha(repo, path, branch);
+    const body = JSON.stringify({
+        message,
+        content: Buffer.from(content, "utf8").toString("base64"),
+        branch,
+        ...(sha ? { sha } : {}),
+    });
+    return new Promise((resolve, reject) => {
+        const child = cliExec(
+            "gh",
+            ["api", "--method", "PUT", `/repos/${repo}/contents/${path}`, "--input", "-"],
+            { timeout },
+            (err, stdout, stderr) => {
+                if (err) reject(new Error((stderr && stderr.trim()) || err.message));
+                else resolve(true);
+            },
+        );
+        try { child.stdin?.end(body); } catch { /* best-effort */ }
+    });
+}
+
+// Commit the Radius scaffold to `.radius/` on a branch, in the order the offline
+// graph needs it: bicepconfig.json FIRST (so the extension registry exists),
+// then app.bicep. Idempotent — safe to call when the files already exist.
+export async function commitRadiusScaffold(repo, branch, bicepContent, { log = () => {} } = {}) {
+    log(`Committing .radius/bicepconfig.json to ${branch}...`);
+    await commitFileToRepo(repo, ".radius/bicepconfig.json", RADIUS_BICEP_CONFIG_JSON, branch, "Add bicepconfig.json for Radius extension support");
+    log(`Committing .radius/app.bicep to ${branch}...`);
+    await commitFileToRepo(repo, ".radius/app.bicep", bicepContent, branch, "Generate Radius app.bicep from repository structure");
+}

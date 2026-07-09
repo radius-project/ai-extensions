@@ -205,6 +205,19 @@ export function addInboundConnections(graph: any): void {
       dest.connections.push({ id: src.id, direction: "Inbound" });
     }
   }
+  // Sort every resource's connections deterministically. Inbound edges are
+  // appended in resource-iteration order above, so without this the final
+  // ordering depends on input order and computeGraphDiff (which stringifies
+  // connections) would report spurious "modified" diffs. Sorting here keeps
+  // both the modeled builder and the rad adapter consistent.
+  for (const r of graph.resources) {
+    if (!r || !Array.isArray(r.connections)) continue;
+    r.connections.sort((a: any, b: any) => {
+      const byID2 = String(a.id).localeCompare(String(b.id));
+      if (byID2 !== 0) return byID2;
+      return String(a.direction).localeCompare(String(b.direction));
+    });
+  }
 }
 
 function resolveDependsOn(deps: any[]): string[] {

@@ -11,7 +11,6 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
-  buildGraphFromBicep,
   computeGraphDiff,
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
@@ -19,9 +18,10 @@ import {
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
 } from "@radius-project/core";
+import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand, commitRadiusScaffold } from "./gh.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
@@ -565,7 +565,17 @@ function createRequestHandler(instanceId) {
                     sendProgress('Generated app.bicep — building graph...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                // Non-fatal on failure (e.g. no write access) — the graph still renders.
+                if (generated) {
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: sendProgress });
+                    } catch (e) {
+                        sendProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
+                }
                 // Discover source code references for resources missing codeReference
                 const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery) {
@@ -754,7 +764,16 @@ function createRequestHandler(instanceId) {
                     addProgress('Generated app.bicep — building graph...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                if (generated) {
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
+                    } catch (e) {
+                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
+                }
                 // Discover source code references
                 const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery2) {
@@ -886,7 +905,16 @@ function createRequestHandler(instanceId) {
                     addProgress('Found app.bicep — parsing resources...');
                 }
 
-                const resources = await buildGraphFromBicep(content);
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                if (generated) {
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
+                    } catch (e) {
+                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
+                }
                 // Discover source code references for planned graph
                 const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSrcDisc) {
@@ -1002,10 +1030,7 @@ function createRequestHandler(instanceId) {
 
                     // Also commit bicepconfig.json for the Radius extension
                     const bicepConfigPath = '.radius/bicepconfig.json';
-                    const bicepConfigContent = JSON.stringify({
-                        experimentalFeaturesEnabled: { extensibility: true },
-                        extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                    }, null, 2);
+                    const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
                     const existingConfig = await new Promise((resolve) => {
                         cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
                             resolve(err ? '' : stdout.trim());
@@ -1109,8 +1134,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseResources = await buildGraphFromBicep(baseContent || '');
-                const headResources = await buildGraphFromBicep(headContent || '');
+                const baseResources = await buildGraphViaRad(baseContent || '');
+                const headResources = await buildGraphViaRad(headContent || '');
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
@@ -1213,7 +1238,7 @@ function createRequestHandler(instanceId) {
                                 if (!content) content = await fetchFileFromRepo(repo, '.radius/app.bicep', branch);
                                 if (!content) content = await generateBicepFromRepo(github, repo, branch);
                                 if (content) {
-                                    const parsed = await buildGraphFromBicep(content);
+                                    const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
@@ -1734,10 +1759,7 @@ function createRequestHandler(instanceId) {
                     const bicepConfigPath = appDir + 'bicepconfig.json';
                     const existingCfgSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepConfigPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
                     if (!existingCfgSha) {
-                        const bicepConfigContent = JSON.stringify({
-                            experimentalFeaturesEnabled: { extensibility: true },
-                            extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-                        }, null, 2);
+                        const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
                         const cfgCommitBody = JSON.stringify({
                             message: 'Add bicepconfig.json for Radius extension support',
                             content: Buffer.from(bicepConfigContent).toString('base64'),
