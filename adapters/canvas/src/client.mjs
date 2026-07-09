@@ -427,10 +427,12 @@ function radiusRenderGraph(containerId, resources, options) {
                 'control-point-distances': 'data(cpd)',
                 'control-point-weights': 'data(cpw)',
                 'edge-distances': 'node-position',
+                'arrow-scale': 0.8
+            }},
+            { selector: 'edge[curveStyle="taxi"]', style: {
                 'taxi-direction': 'downward',
                 'taxi-turn': '50%',
-                'taxi-turn-min-distance': 10,
-                'arrow-scale': 0.8
+                'taxi-turn-min-distance': 10
             }},
             { selector: 'edge[lineStyle="dashed"]', style: { 'line-style': 'dashed', 'line-color': '#57606a', 'target-arrow-color': '#57606a' }},
             { selector: 'node:active', style: { 'overlay-opacity': 0.1 }},
