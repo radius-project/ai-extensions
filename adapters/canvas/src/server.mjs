@@ -21,12 +21,8 @@ import {
 import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-<<<<<<< HEAD
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand } from "./gh.mjs";
-import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
-=======
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand, commitRadiusScaffold } from "./gh.mjs";
->>>>>>> origin/main
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
@@ -1139,36 +1135,11 @@ function createRequestHandler(instanceId) {
                         });
                     });
 
-<<<<<<< HEAD
                     // NOTE: bicepconfig.json is intentionally NOT written here.
                     // Radius.Compute/containerImages ships with the published Radius
                     // Bicep extension, so `extension radius` in app.bicep and the
                     // user's own bicepconfig cover it — no extra bicep wiring is
                     // committed back to the repo.
-=======
-                    // Also commit bicepconfig.json for the Radius extension
-                    const bicepConfigPath = '.radius/bicepconfig.json';
-                    const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
-                    const existingConfig = await new Promise((resolve) => {
-                        cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
-                            resolve(err ? '' : stdout.trim());
-                        });
-                    });
-                    const configPayload = JSON.stringify({
-                        message: 'Add bicepconfig.json for Radius extension support',
-                        content: Buffer.from(bicepConfigContent).toString('base64'),
-                        branch: commitBranch,
-                        ...(existingConfig ? { sha: existingConfig } : {})
-                    });
-                    const tmpPath2 = jn(td(), 'radius-bicepconfig-commit-' + Date.now() + '.json');
-                    wfs(tmpPath2, configPayload);
-                    await new Promise((resolve) => {
-                        cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 30000 }, (err) => {
-                            try { uls(tmpPath2); } catch {}
-                            resolve(err ? false : true);
-                        });
-                    });
->>>>>>> origin/main
                 } catch {}
 
                 res.setHeader("Content-Type", "application/json");
@@ -1872,32 +1843,6 @@ function createRequestHandler(instanceId) {
                     } else {
                         sendEvent('stdout', 'Found existing app definition (' + (hasRadiusBicep ? '.radius/app.bicep' : 'app.bicep') + ') in ' + targetRepo);
                     }
-<<<<<<< HEAD
-=======
-
-                    // ALWAYS ensure bicepconfig.json exists next to the app file so
-                    // bicep can resolve the Radius extension during `rad deploy`.
-                    const bicepConfigPath = appDir + 'bicepconfig.json';
-                    const existingCfgSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepConfigPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
-                    if (!existingCfgSha) {
-                        const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
-                        const cfgCommitBody = JSON.stringify({
-                            message: 'Add bicepconfig.json for Radius extension support',
-                            content: Buffer.from(bicepConfigContent).toString('base64'),
-                            branch: deployBranch
-                        });
-                        const cfgCommit = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + bicepConfigPath, '--input', '-'], { stdin: cfgCommitBody });
-                        if (cfgCommit.code !== 0) {
-                            sendEvent('error', 'Failed to commit ' + bicepConfigPath + ' to ' + targetRepo + '. Check repo permissions.');
-                            sendEvent('done', 'failed');
-                            res.end();
-                            return;
-                        }
-                        sendEvent('stdout', 'Committed ' + bicepConfigPath + ' to ' + targetRepo);
-                    } else {
-                        sendEvent('stdout', 'Found existing ' + bicepConfigPath + ' in ' + targetRepo);
-                    }
->>>>>>> origin/main
                 } catch (bicepErr) {
                     sendEvent('error', 'Failed ensuring app.bicep exists: ' + bicepErr.message);
                     sendEvent('done', 'failed');

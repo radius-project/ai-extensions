@@ -3,8 +3,8 @@
 // (`github`) injected into radius-core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
-<<<<<<< HEAD
 import { execFile, execFileSync, spawn } from "node:child_process";
+import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment.
 // gh always prefers that env token over the user's stored (keyring) login, but
@@ -54,10 +54,6 @@ function ghChildEnv(baseEnv) {
     }
     return env;
 }
-=======
-import { execFile, spawn } from "node:child_process";
-import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
->>>>>>> origin/main
 
 // Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
 // API paths, …) are passed verbatim as argv and can never be interpreted as
