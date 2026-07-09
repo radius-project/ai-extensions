@@ -7,7 +7,9 @@
 // Resources are matched by id. A type change (e.g. mongo→postgres) produces a
 // "removed" entry for the old resource and an "added" entry for the new one;
 // any resource that connected to the old resource will show as "modified"
-// because its connections reference a different id.
+// because its connections reference a different id. Property-only edits (e.g. a
+// container image or database version) keep the same id/type/connections but
+// change the resource's diffHash, so diffHash is part of the comparison below.
 
 export function computeGraphDiff(baseResources: any[], headResources: any[]): any[] {
   const base = baseResources || [];
@@ -21,8 +23,8 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
   for (const r of head) {
     if (baseMap.has(keyOf(r))) {
       const b = baseMap.get(keyOf(r));
-      const baseComp = JSON.stringify({ name: b.name, type: b.type, connections: b.connections });
-      const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections });
+      const baseComp = JSON.stringify({ name: b.name, type: b.type, connections: b.connections, diffHash: b.diffHash });
+      const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections, diffHash: r.diffHash });
       diffResources.push({ ...r, diffStatus: baseComp !== headComp ? "modified" : "unchanged" });
     } else {
       diffResources.push({ ...r, diffStatus: "added" });
