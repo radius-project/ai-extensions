@@ -41,7 +41,7 @@ export function applicationGraphToResources(
     // connection list is sorted deterministically inside addInboundConnections,
     // so the shape matches the modeled-graph builder exactly.
     const connections: any[] = [];
-    for (const c of r.connections || []) {
+    for (const c of (Array.isArray(r.connections) ? r.connections : [])) {
       if (!c || !c.id) continue;
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
