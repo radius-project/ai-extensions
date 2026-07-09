@@ -423,7 +423,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 'line-color': '#8c959f',
                 'target-arrow-color': '#8c959f',
                 'target-arrow-shape': 'triangle',
-                'curve-style': 'data(curveStyle)',
+                'curve-style': function(ele) { return ele.data('curveStyle') || 'taxi'; },
                 'control-point-distances': 'data(cpd)',
                 'control-point-weights': 'data(cpw)',
                 'edge-distances': 'node-position',
