@@ -9,6 +9,7 @@ import {
   buildGraphViaRad,
   normalizeSha256,
   expectedDigest,
+  tryAcquireLock,
 } from "./rad.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
@@ -189,5 +190,67 @@ describe("expectedDigest", () => {
       hex: pinnedHex,
       source: "RADIUS_RAD_SHA256",
     });
+  });
+});
+
+describe("tryAcquireLock", () => {
+  let tmp;
+  let lockPath;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-lock-"));
+    lockPath = path.join(tmp, "rad.download.lock");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("acquires a free lock and returns a release function that removes it", () => {
+    const release = tryAcquireLock(lockPath);
+    expect(typeof release).toBe("function");
+    expect(fs.existsSync(lockPath)).toBe(true);
+    release();
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("writes the owning pid into the lock file", () => {
+    const release = tryAcquireLock(lockPath);
+    try {
+      expect(fs.readFileSync(lockPath, "utf8")).toBe(String(process.pid));
+    } finally {
+      release();
+    }
+  });
+
+  it("returns null when a fresh lock is already held", () => {
+    const release = tryAcquireLock(lockPath);
+    try {
+      expect(tryAcquireLock(lockPath)).toBeNull();
+    } finally {
+      release();
+    }
+  });
+
+  it("reaps a stale lock and re-acquires it", () => {
+    // Simulate a lock left by a crashed peer: create it, then backdate its mtime
+    // well past the staleness threshold (5 minutes).
+    fs.writeFileSync(lockPath, "99999");
+    const stale = new Date(Date.now() - 10 * 60 * 1000);
+    fs.utimesSync(lockPath, stale, stale);
+
+    const release = tryAcquireLock(lockPath);
+    expect(typeof release).toBe("function");
+    // The reaped lock is now owned by us (our pid), not the crashed peer.
+    expect(fs.readFileSync(lockPath, "utf8")).toBe(String(process.pid));
+    release();
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("lets a lock be re-acquired after it is released", () => {
+    tryAcquireLock(lockPath)();
+    const second = tryAcquireLock(lockPath);
+    expect(typeof second).toBe("function");
+    second();
   });
 });

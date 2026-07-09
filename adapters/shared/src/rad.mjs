@@ -77,6 +77,71 @@ function isExecutableFile(p) {
   }
 }
 
+// A lock older than this is treated as abandoned (owning process crashed) and
+// reaped so a dead download can never wedge future ones.
+const LOCK_STALE_MS = 5 * 60 * 1000;
+// Longest we wait for a peer process's in-flight download to publish the binary
+// before giving up and downloading ourselves.
+const DOWNLOAD_WAIT_MS = 120000;
+
+/**
+ * tryAcquireLock - best-effort cross-process lock via an exclusive file create.
+ * Returns a release() function on success, or null if another process holds a
+ * fresh lock. A stale lock (mtime older than LOCK_STALE_MS) is reaped and the
+ * acquisition retried once. Exported for deterministic unit testing.
+ */
+export function tryAcquireLock(lockPath) {
+  const write = () => {
+    const fd = fs.openSync(lockPath, "wx");
+    try { fs.writeSync(fd, String(process.pid)); } finally { fs.closeSync(fd); }
+    return () => { try { fs.rmSync(lockPath, { force: true }); } catch { /* best-effort */ } };
+  };
+  try {
+    return write();
+  } catch (err) {
+    if (!err || err.code !== "EEXIST") throw err;
+    // Someone holds it. Reap it only if it is stale, then retry the create.
+    try {
+      const age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      if (age > LOCK_STALE_MS) {
+        fs.rmSync(lockPath, { force: true });
+        return write();
+      }
+    } catch { /* lost the reap/retry race — treat as held */ }
+    return null;
+  }
+}
+
+// Polls until `file` exists (a peer finished its download) or the timeout
+// elapses. Returns whether the file is present at the end.
+async function waitForFile(file, timeoutMs, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isExecutableFile(file)) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return isExecutableFile(file);
+}
+
+// Terminates rad and its bicep grandchild. On Windows, `taskkill /t` kills the
+// whole tree; on POSIX, rad leads its own process group (spawned detached) so a
+// negative pid signals every process in that group. Falls back to a direct kill.
+function killChildTree(child) {
+  if (!child || child.pid == null) return;
+  try {
+    if (IS_WIN) {
+      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* best-effort */ }
+  }
+}
+
 // Finds `rad[.exe]` on PATH without shelling out.
 function findOnPath() {
   const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
@@ -200,25 +265,43 @@ async function downloadRad(log) {
   // Resolve the expected digest before downloading so an unverifiable asset
   // fails fast without fetching ~70MB of binary we could never trust.
   const expected = expectedDigest(assets, asset, tag);
-
-  log(`Downloading rad ${tag} (${asset})...`);
   fs.mkdirSync(RAD_HOME_BIN, { recursive: true });
-  const data = await httpGet(url);
-  verifyChecksum(data, expected, tag, asset);
-  const tmp = `${dest}.${process.pid}.download`;
-  fs.writeFileSync(tmp, data);
-  if (!IS_WIN) fs.chmodSync(tmp, 0o755);
-  try {
-    fs.renameSync(tmp, dest);
-  } catch (err) {
-    // Another process may have won the race and created dest already. Accept
-    // the existing binary and clean up our temp copy.
-    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
-    if (isExecutableFile(dest)) return dest;
-    throw err;
+
+  // Serialize downloads across processes: if a peer is already fetching rad,
+  // wait for it to publish the binary instead of racing a second ~70MB pull.
+  const lockPath = path.join(RAD_HOME_BIN, `rad${EXE}.download.lock`);
+  const release = tryAcquireLock(lockPath);
+  if (!release) {
+    log(`Another process is downloading rad ${tag}; waiting...`);
+    if (await waitForFile(dest, DOWNLOAD_WAIT_MS)) return dest;
+    // Peer never finished within the window — fall through and download it
+    // ourselves. The atomic rename below tolerates both writers.
   }
-  log(`Installed rad to ${dest} (verified against ${expected.source})`);
-  return dest;
+
+  try {
+    // A peer may have published dest while we acquired/waited on the lock.
+    if (isExecutableFile(dest)) return dest;
+
+    log(`Downloading rad ${tag} (${asset})...`);
+    const data = await httpGet(url);
+    verifyChecksum(data, expected, tag, asset);
+    const tmp = `${dest}.${process.pid}.download`;
+    fs.writeFileSync(tmp, data);
+    if (!IS_WIN) fs.chmodSync(tmp, 0o755);
+    try {
+      fs.renameSync(tmp, dest);
+    } catch (err) {
+      // Another writer may have created dest already. Accept the existing
+      // binary and clean up our temp copy.
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+      if (isExecutableFile(dest)) return dest;
+      throw err;
+    }
+    log(`Installed rad to ${dest} (verified against ${expected.source})`);
+    return dest;
+  } finally {
+    if (release) release();
+  }
 }
 
 /**
@@ -262,14 +345,15 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
     await new Promise((resolve, reject) => {
-      // `rad app graph` shells out to bicep as a grandchild. On Windows, Node
-      // places spawned children in a Job Object by default; rad/bicep deadlock
-      // at startup inside that job (rad produces zero output and never exits,
-      // then surfaces as an opaque "Command failed" only when the timeout fires).
-      // `detached: true` gives rad its own process group outside Node's job
-      // object, which lets it (and its bicep grandchild) run to completion. We
-      // keep the child reference (no unref) and settle on the `exit` event so we
-      // still await it and read the app-graph.json it wrote.
+      // `rad app graph` shells out to bicep as a grandchild. Spawn rad detached
+      // on every platform so it leads its own process group:
+      //   - Windows: escapes Node's default Job Object, inside which rad/bicep
+      //     deadlock at startup (rad produces zero output and never exits, then
+      //     surfaces only when the timeout fires).
+      //   - POSIX: makes rad a group leader so a timeout can kill the whole
+      //     rad+bicep tree via the negative pid (see killChildTree).
+      // We keep the child reference (no unref) so Node still awaits it and reads
+      // the app-graph.json it wrote.
       const child = spawn(radPath, ["app", "graph", absoluteBicep], {
         cwd,
         // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
@@ -278,40 +362,34 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
         env: { ...process.env, GITHUB_ACTIONS: "" },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
-        // Escape Node's Windows Job Object to avoid the rad/bicep startup hang.
-        detached: process.platform === "win32",
+        detached: true,
       });
 
       const MAX = 32 * 1024 * 1024;
       let stdout = "";
       let stderr = "";
       let settled = false;
+      let graceTimer = null;
+      let exited = null;
       child.stdout?.on("data", (c) => { if (stdout.length < MAX) stdout += c.toString(); });
       child.stderr?.on("data", (c) => { if (stderr.length < MAX) stderr += c.toString(); });
 
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try { child.kill(); } catch { /* best-effort */ }
+        if (graceTimer) clearTimeout(graceTimer);
+        killChildTree(child);
         const err = new Error(`rad app graph timed out after ${timeout}ms`);
         err.stdout = stdout;
         err.stderr = stderr;
         reject(err);
       }, timeout);
 
-      child.on("error", (err) => {
+      function finalize(code, signal) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
-      });
-
-      child.on("exit", (code, signal) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
+        if (graceTimer) clearTimeout(graceTimer);
         // Detach from the (possibly grandchild-held) pipes so this process does
         // not stay alive waiting on them.
         try { child.stdout?.destroy(); } catch { /* best-effort */ }
@@ -328,6 +406,33 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
           err.stderr = stderr;
           reject(err);
         }
+      }
+
+      child.on("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (graceTimer) clearTimeout(graceTimer);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      });
+
+      // Prefer `close`: it fires once the process exited AND all stdio flushed,
+      // so stdout/stderr are complete. But rad's bicep grandchild can inherit
+      // and hold the pipes open, in which case `close` never fires. So on `exit`
+      // (process gone, code known) we start a short grace window for `close`; if
+      // it elapses we finalize with whatever output we captured, avoiding a hang.
+      child.on("exit", (code, signal) => {
+        exited = { code, signal };
+        if (settled || graceTimer) return;
+        graceTimer = setTimeout(() => finalize(code, signal), 2000);
+      });
+      child.on("close", (code, signal) => {
+        // `exit` fires before `close` and carries the authoritative code, so
+        // prefer it when present (close's args can be null if killed via pipe).
+        if (exited) finalize(exited.code, exited.signal);
+        else finalize(code, signal);
       });
     });
     const outFile = path.join(cwd, "app-graph.json");
