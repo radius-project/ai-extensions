@@ -411,8 +411,8 @@ function createRequestHandler(instanceId) {
                     if (k8s) await runGh(['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
                     if (data.location) await runGh(['variable', 'set', 'AZURE_LOCATION', '--body', data.location, '--env', envName, '--repo', targetRepo]);
 
-                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s].filter(Boolean).length;
-                    steps.push(`Set ${setCount}/5 environment values for Azure.`);
+                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location].filter(Boolean).length;
+                    steps.push(`Set ${setCount} environment value(s) for Azure.`);
                     if (!clientId || !tenantId || !subscriptionId) {
                         steps.push('⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually.');
                     }
