@@ -238,6 +238,7 @@ function radiusRenderGraph(containerId, resources, options) {
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     var bicepGenerated = options.bicepGenerated || false;
+    var lineType = options.lineType || options.curveStyle || 'taxi';
 
     function getNodeColors(r, typeStyle) {
         if (diffMode && r.diffStatus) {
@@ -364,9 +365,9 @@ function radiusRenderGraph(containerId, resources, options) {
         }
     }
 
-    // Group edges by source so sibling connectors can be fanned to opposite
-    // sides later. Actual curve amplitude and box spacing are derived at runtime
-    // from measured node dimensions and post-layout geometry (never hard-coded).
+    // Group edges by source so bezier sibling connectors can be fanned to
+    // opposite sides later. Taxi is the default line type, but the existing
+    // bezier routing remains available through options.lineType.
     var edgeEls = elements.filter(function(e) { return e.group === 'edges'; });
     var bySource = {};
     edgeEls.forEach(function(e) {
@@ -381,6 +382,7 @@ function radiusRenderGraph(containerId, resources, options) {
             fanInfo[e.data.id] = { idx: idx, n: arr.length };
             e.data.cpd = [0];
             e.data.cpw = [0.5];
+            e.data.curveStyle = lineType;
         });
     });
 
@@ -421,10 +423,13 @@ function radiusRenderGraph(containerId, resources, options) {
                 'line-color': '#8c959f',
                 'target-arrow-color': '#8c959f',
                 'target-arrow-shape': 'triangle',
-                'curve-style': 'unbundled-bezier',
+                'curve-style': 'data(curveStyle)',
                 'control-point-distances': 'data(cpd)',
                 'control-point-weights': 'data(cpw)',
                 'edge-distances': 'node-position',
+                'taxi-direction': 'downward',
+                'taxi-turn': '50%',
+                'taxi-turn-min-distance': 10,
                 'arrow-scale': 0.8
             }},
             { selector: 'edge[lineStyle="dashed"]', style: { 'line-style': 'dashed', 'line-color': '#57606a', 'target-arrow-color': '#57606a' }},
