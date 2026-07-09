@@ -38,6 +38,10 @@ importers:
       '@radius-project/core':
         specifier: workspace:*
         version: link:../../radius-core
+    devDependencies:
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@types/node@26.0.1)(@vitest/coverage-v8@4.1.9)(vite@8.1.2(@types/node@26.0.1)(esbuild@0.28.1))
 
   radius-core:
     devDependencies:
