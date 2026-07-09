@@ -17,7 +17,7 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
 } from "@radius-project/core";
-import { cliExec, fetchFileFromRepo } from "./gh.mjs";
+import { cliExec, fetchFileFromRepoResult } from "./gh.mjs";
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 
@@ -125,27 +125,23 @@ export function generateAWSOIDC(data) {
  * Fetch a workflow template from radius-project/radius `.github/extension/` at
  * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
  * so a fetch failure (offline, transient API error, or the ref/file missing) is
- * a hard error rather than a fall back to a bundled copy.
+ * a hard error rather than a fall back to a bundled copy. The underlying cause
+ * (gh stderr, 404, decode error) is surfaced in the thrown message.
  */
 async function fetchRadiusTemplate(fileName) {
-    let body;
-    try {
-        body = await fetchFileFromRepo(
-            RADIUS_WORKFLOW_REPO,
-            `${RADIUS_WORKFLOW_DIR}/${fileName}`,
-            RADIUS_REF,
-        );
-    } catch (err) {
-        throw new Error(
-            `Failed to fetch workflow template "${fileName}" from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}": ${err?.message ?? err}`,
-        );
+    const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${RADIUS_REF}"`;
+    const { content, error } = await fetchFileFromRepoResult(
+        RADIUS_WORKFLOW_REPO,
+        `${RADIUS_WORKFLOW_DIR}/${fileName}`,
+        RADIUS_REF,
+    );
+    if (error) {
+        throw new Error(`Failed to fetch workflow template ${source}: ${error}`);
     }
-    if (!body || !body.trim()) {
-        throw new Error(
-            `Workflow template "${fileName}" not found in ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`,
-        );
+    if (!content || !content.trim()) {
+        throw new Error(`Workflow template ${source} is empty.`);
     }
-    return body;
+    return content;
 }
 
 export async function generateVerifyWorkflow(env, provider) {

@@ -125,6 +125,39 @@ export function fetchFileFromRepo(repo, path, branch = 'main') {
     return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
 }
 
+/**
+ * Like ghApiGetContent, but surfaces the underlying failure instead of
+ * collapsing everything to null. Resolves `{ content, error }`: on success
+ * `content` is the decoded file body and `error` is null; on failure `content`
+ * is null and `error` is a human-readable cause (gh stderr, a decode error, or
+ * an empty-response note). Never rejects.
+ */
+export function ghApiGetContentResult(apiPath, timeout = 15000) {
+    return new Promise((resolve) => {
+        cliExec("gh", ["api", apiPath, "--jq", ".content"], { timeout }, (err, stdout, stderr) => {
+            if (err) {
+                const detail = (stderr && stderr.trim()) || err.message || String(err);
+                resolve({ content: null, error: detail.trim() });
+                return;
+            }
+            if (!stdout || !stdout.trim()) {
+                resolve({ content: null, error: "empty response from gh api" });
+                return;
+            }
+            try {
+                resolve({ content: Buffer.from(stdout.trim(), 'base64').toString('utf8'), error: null });
+            } catch (e) {
+                resolve({ content: null, error: `failed to decode response: ${e?.message ?? e}` });
+            }
+        });
+    });
+}
+
+/** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
+export function fetchFileFromRepoResult(repo, path, branch = 'main') {
+    return ghApiGetContentResult(`/repos/${repo}/contents/${path}?ref=${branch}`);
+}
+
 export function fetchRepoTree(repo, branch = 'main') {
     return new Promise((resolve) => {
         const args = ["api", `/repos/${repo}/git/trees/${branch}?recursive=1`, "--jq", `[.tree[].path]`];
