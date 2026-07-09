@@ -1239,27 +1239,11 @@ function buildResourceGroupResourceListUrl(subscriptionId, resourceGroup) {
 function buildResourceUrl(armResourceId) {
   return `${AZURE_PORTAL_BASE}@/resource${armResourceId}/overview`;
 }
-function extractTypeFromArmId(value) {
-  const providersIndex = value.toLowerCase().indexOf("/providers/");
-  if (providersIndex === -1) return "";
-  const providerPath = value.slice(providersIndex + "/providers/".length).split("?")[0];
-  const parts = providerPath.split("/").filter(Boolean);
-  if (parts.length < 2) return "";
-  const providerNamespace = parts[0];
-  const typeParts = [];
-  for (let i = 1; i < parts.length; i += 2) {
-    typeParts.push(parts[i]);
-  }
-  return `${providerNamespace}/${typeParts.join("/")}`;
-}
 function normalizeAzureResourceType(resourceType) {
   const trimmed = (resourceType || "").trim();
   if (!trimmed) return "";
   const noApiVersion = trimmed.split("@")[0].trim();
   if (!noApiVersion) return "";
-  if (noApiVersion.toLowerCase().startsWith("/subscriptions/")) {
-    return extractTypeFromArmId(noApiVersion);
-  }
   if (noApiVersion.startsWith("Microsoft.")) {
     return noApiVersion;
   }
@@ -1269,8 +1253,17 @@ function normalizeArmResourceId(resourceRef) {
   const trimmed = (resourceRef || "").trim();
   if (!trimmed) return "";
   const noQuery = trimmed.split("?")[0].trim();
-  if (!noQuery.toLowerCase().startsWith("/subscriptions/")) return "";
-  const normalized = `/${noQuery.replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  let start = 0;
+  while (start < noQuery.length && noQuery[start] === "/") {
+    start += 1;
+  }
+  const stripped = noQuery.slice(start);
+  if (!stripped.toLowerCase().startsWith("subscriptions/")) return "";
+  let end = stripped.length;
+  while (end > 0 && stripped[end - 1] === "/") {
+    end -= 1;
+  }
+  const normalized = `/${stripped.slice(0, end)}`;
   return normalized;
 }
 function isKubernetesResourceType(resourceType) {
@@ -1285,19 +1278,20 @@ var azure = {
   clusterServiceName: "AKS",
   supports: { oidc: true, portalUrl: true },
   generateOidc(data) {
+    const d = data || {};
     return {
       message: "Azure OIDC configuration generated",
       output: `# Azure Federated Identity Configuration
 # Run these commands to set up OIDC for GitHub Actions:
 
 # 1. Set repository variables (these identifiers are not secret):
-gh variable set AZURE_TENANT_ID --body "${data.tenantId || ""}"
-gh variable set AZURE_SUBSCRIPTION_ID --body "${data.subscriptionId || ""}"
-gh variable set AZURE_CLIENT_ID --body "${data.clientId || ""}"
+gh variable set AZURE_TENANT_ID --body "${d.tenantId || ""}"
+gh variable set AZURE_SUBSCRIPTION_ID --body "${d.subscriptionId || ""}"
+gh variable set AZURE_CLIENT_ID --body "${d.clientId || ""}"
 
 # 2. Create federated credential (via Azure CLI):
 az ad app federated-credential create \\
-  --id ${data.clientId || "<CLIENT_ID>"} \\
+  --id ${d.clientId || "<CLIENT_ID>"} \\
   --parameters '{
     "name": "github-actions-oidc",
     "issuer": "https://token.actions.githubusercontent.com",
@@ -1307,32 +1301,34 @@ az ad app federated-credential create \\
 
 # 3. Assign Contributor role on the subscription:
 az role assignment create \\
-  --assignee ${data.clientId || "<CLIENT_ID>"} \\
+  --assignee ${d.clientId || "<CLIENT_ID>"} \\
   --role "Contributor" \\
-  --scope "/subscriptions/${data.subscriptionId || "<SUBSCRIPTION_ID>"}"
+  --scope "/subscriptions/${d.subscriptionId || "<SUBSCRIPTION_ID>"}"
 `
     };
   },
   environmentSecrets(data) {
+    const d = data || {};
     return [
-      { kind: "variable", name: "AZURE_SUBSCRIPTION_ID", value: data.subscriptionId },
-      { kind: "variable", name: "AZURE_RESOURCE_GROUP", value: data.resourceGroup },
-      { kind: "variable", name: "AZURE_LOCATION", value: data.location }
+      { kind: "variable", name: "AZURE_SUBSCRIPTION_ID", value: d.subscriptionId },
+      { kind: "variable", name: "AZURE_RESOURCE_GROUP", value: d.resourceGroup },
+      { kind: "variable", name: "AZURE_LOCATION", value: d.location }
     ];
   },
   portalUrl(resourceType, ctx) {
+    const rt = (resourceType || "").trim();
     const subscriptionId = ctx.subscriptionId;
     const resourceGroup = ctx.resourceGroup;
     const clusterName = (ctx.clusterName || "").trim();
-    const armResourceId = normalizeArmResourceId(resourceType);
+    const armResourceId = normalizeArmResourceId(rt);
     if (armResourceId) {
       return buildResourceUrl(armResourceId);
     }
-    const normalizedArmType = normalizeAzureResourceType(resourceType);
+    const normalizedArmType = normalizeAzureResourceType(rt);
     if (normalizedArmType) {
       return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
     }
-    if (isKubernetesResourceType(resourceType) || resourceType.startsWith("Radius.")) {
+    if (isKubernetesResourceType(rt) || rt.startsWith("Radius.")) {
       if (clusterName) {
         const clusterId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
         return buildResourceUrl(clusterId);
