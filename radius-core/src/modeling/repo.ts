@@ -375,23 +375,11 @@ export async function generateBicepFromRepo(gh, repo, branch = 'main') {
         if (dbCodeRef) bicep += `    codeReference: '${dbCodeRef}'\n`;
         if (dbName) bicep += `    database: '${dbName}'\n`;
         if (dbVersion) bicep += `    version: '${dbVersion}'\n`;
-        bicep += `    secretName: dbSecret.name\n`;
-        bicep += `  }\n`;
-        bicep += `}\n\n`;
-
-        bicep += `resource dbSecret 'Radius.Security/secrets@2025-08-01-preview' = {\n`;
-        bicep += `  name: 'dbsecret'\n`;
-        bicep += `  properties: {\n`;
-        bicep += `    environment: environment\n`;
-        bicep += `    application: application\n`;
-        bicep += `    data: {\n`;
-        bicep += `      USERNAME: {\n`;
-        bicep += `        value: '${appName}_user'\n`;
-        bicep += `      }\n`;
-        bicep += `      PASSWORD: {\n`;
-        bicep += `        value: password\n`;
-        bicep += `      }\n`;
-        bicep += `    }\n`;
+        // The Radius.Data/*Databases types take credentials inline as
+        // `username` (string) and `password` (secure string). There is no
+        // separate secret resource in this schema.
+        bicep += `    username: '${appName}_user'\n`;
+        bicep += `    password: password\n`;
         bicep += `  }\n`;
         bicep += `}\n\n`;
     }

@@ -1,0 +1,21 @@
+{
+  "name": "@radius-project/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node-runtime helpers shared across Radius adapters (e.g. building application graphs via the real rad CLI). Depends on @radius-project/core; contains the impure I/O that core intentionally excludes.",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@radius-project/core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}
