@@ -18,9 +18,7 @@ export {
   stripAPIVersion,
   addInboundConnections,
   buildResourceID,
-  compileBicepToARM,
-  buildGraphFromBicep,
-  parseBicepResources,
+  applicationGraphToResources,
   computeGraphDiff,
 } from "./graph/index.js";
 export {

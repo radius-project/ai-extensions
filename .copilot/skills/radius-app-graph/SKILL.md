@@ -76,7 +76,7 @@ The canvas will:
 
 - `.github/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
 - `.github/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
-- `.github/radius/extension.mjs` — static-from-bicep graph build (`buildGraphFromBicep`, `parseBicepResources`)
+- `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `.github/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
 - `.github/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep`
 - `.github/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
