@@ -22,7 +22,7 @@
 //     bundle this file into a single artifact).
 //   - Windows: `.exe` suffix, no chmod.
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -33,7 +33,11 @@ import { applicationGraphToResources } from "@radius-project/core";
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
 const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
-const CACHE_ROOT = path.join(os.homedir(), ".radius", "app-graph-bin");
+// Single install + lookup location for rad, shared with the official rad CLI and
+// `rad bicep download` (which drops bicep.exe here too). Downloads land here so
+// there is exactly one place to look for the binary — no separate app-graph
+// cache directory to keep in sync.
+const RAD_HOME_BIN = path.join(os.homedir(), ".rad", "bin");
 
 // Bicep config that registers the Radius extension. `rad app graph` compiles
 // Bicep offline, but bicep still needs this file beside the .bicep to resolve
@@ -83,58 +87,10 @@ function findOnPath() {
   return null;
 }
 
-// Parses a vX.Y.Z(-prerelease) tag into comparable components. Returns null for
-// tags that don't look like semver so they can be ignored during selection. The
-// optional prerelease suffix is captured so a stable release can be ranked above
-// a prerelease that shares the same major.minor.patch.
-function parseSemver(tag) {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(tag);
-  if (!m) return null;
-  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], prerelease: m[4] || null };
-}
-
-function compareSemver(a, b) {
-  for (let i = 0; i < 3; i++) {
-    if (a.nums[i] !== b.nums[i]) return a.nums[i] - b.nums[i];
-  }
-  // Equal core version: a stable release outranks a prerelease (v1.0.0 beats
-  // v1.0.0-rc1). When both are prereleases, order their identifiers lexically so
-  // selection stays deterministic instead of tie-breaking arbitrarily.
-  if (!a.prerelease && b.prerelease) return 1;
-  if (a.prerelease && !b.prerelease) return -1;
-  if (!a.prerelease && !b.prerelease) return 0;
-  return a.prerelease < b.prerelease ? -1 : a.prerelease > b.prerelease ? 1 : 0;
-}
-
-// Returns the highest-versioned cached download under
-// ~/.radius/app-graph-bin/<tag>/rad[.exe], comparing tags as semver so that
-// e.g. v0.10.0 wins over v0.9.0.
-function findInCache() {
-  let entries;
-  try {
-    entries = fs.readdirSync(CACHE_ROOT);
-  } catch {
-    return null;
-  }
-  const candidates = [];
-  for (const tag of entries) {
-    const binary = path.join(CACHE_ROOT, tag, `rad${EXE}`);
-    if (!isExecutableFile(binary)) continue;
-    candidates.push({ tag, binary, semver: parseSemver(tag) });
-  }
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => {
-    if (a.semver && b.semver) return compareSemver(a.semver, b.semver);
-    if (a.semver) return 1; // prefer parseable semver over junk dirs
-    if (b.semver) return -1;
-    return a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0;
-  });
-  return candidates[candidates.length - 1].binary;
-}
-
 /**
  * resolveExistingRadBinary - locate a usable `rad` without downloading.
- * Order: RADIUS_RAD_BINARY env -> PATH -> ~/.rad/bin -> download cache.
+ * Order: RADIUS_RAD_BINARY env -> PATH -> ~/.rad/bin (the single install
+ * location, also where a first-run download lands).
  */
 export function resolveExistingRadBinary() {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
@@ -143,10 +99,10 @@ export function resolveExistingRadBinary() {
   const onPath = findOnPath();
   if (onPath) return onPath;
 
-  const radHome = path.join(os.homedir(), ".rad", "bin", `rad${EXE}`);
+  const radHome = path.join(RAD_HOME_BIN, `rad${EXE}`);
   if (isExecutableFile(radHome)) return radHome;
 
-  return findInCache();
+  return null;
 }
 
 function githubAuthHeaders() {
@@ -216,12 +172,13 @@ async function downloadRad(log) {
   const tag = await latestReleaseTag();
   const asset = releaseAsset();
   const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
-  const destDir = path.join(CACHE_ROOT, tag);
-  const dest = path.join(destDir, `rad${EXE}`);
+  // Install into the same ~/.rad/bin the official rad CLI uses, so resolution
+  // and download share one location.
+  const dest = path.join(RAD_HOME_BIN, `rad${EXE}`);
   if (isExecutableFile(dest)) return dest;
 
   log(`Downloading rad ${tag} (${asset})...`);
-  fs.mkdirSync(destDir, { recursive: true });
+  fs.mkdirSync(RAD_HOME_BIN, { recursive: true });
   const data = await httpGet(url);
   verifyChecksum(data, tag);
   const tmp = `${dest}.${process.pid}.download`;
@@ -281,33 +238,73 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
     await new Promise((resolve, reject) => {
-      const child = execFile(
-        radPath,
-        ["app", "graph", absoluteBicep],
-        {
-          cwd,
-          // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
-          // committing to the radius-graph orphan branch.
-          env: { ...process.env, GITHUB_ACTIONS: "" },
-          timeout,
-          maxBuffer: 32 * 1024 * 1024,
-        },
-        (err, stdout, stderr) => {
-          if (err) {
-            // Preserve both streams: rad prints Bicep compile errors (BCP*) to
-            // stdout, not stderr, so the error handler below needs stdout too.
-            err.stdout = stdout;
-            err.stderr = stderr;
-            reject(err);
-          } else {
-            resolve({ stdout, stderr });
-          }
-        },
-      );
-      // Signal EOF on stdin immediately so rad never blocks waiting for
-      // interactive input (which would otherwise hang until the timeout and
-      // surface as an opaque "Command failed" with no detail).
-      try { child.stdin?.end(); } catch { /* best-effort */ }
+      // `rad app graph` shells out to bicep as a grandchild. On Windows, Node
+      // places spawned children in a Job Object by default; rad/bicep deadlock
+      // at startup inside that job (rad produces zero output and never exits,
+      // then surfaces as an opaque "Command failed" only when the timeout fires).
+      // `detached: true` gives rad its own process group outside Node's job
+      // object, which lets it (and its bicep grandchild) run to completion. We
+      // keep the child reference (no unref) and settle on the `exit` event so we
+      // still await it and read the app-graph.json it wrote.
+      const child = spawn(radPath, ["app", "graph", absoluteBicep], {
+        cwd,
+        // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
+        // committing to the radius-graph orphan branch. stdin is ignored so rad
+        // never blocks waiting for interactive input.
+        env: { ...process.env, GITHUB_ACTIONS: "" },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        // Escape Node's Windows Job Object to avoid the rad/bicep startup hang.
+        detached: process.platform === "win32",
+      });
+
+      const MAX = 32 * 1024 * 1024;
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      child.stdout?.on("data", (c) => { if (stdout.length < MAX) stdout += c.toString(); });
+      child.stderr?.on("data", (c) => { if (stderr.length < MAX) stderr += c.toString(); });
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill(); } catch { /* best-effort */ }
+        const err = new Error(`rad app graph timed out after ${timeout}ms`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      }, timeout);
+
+      child.on("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      });
+
+      child.on("exit", (code, signal) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // Detach from the (possibly grandchild-held) pipes so this process does
+        // not stay alive waiting on them.
+        try { child.stdout?.destroy(); } catch { /* best-effort */ }
+        try { child.stderr?.destroy(); } catch { /* best-effort */ }
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          // Preserve both streams: rad prints Bicep compile errors (BCP*) to
+          // stdout, not stderr, so the error handler below needs stdout too.
+          const err = new Error(
+            `rad exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
+          );
+          err.stdout = stdout;
+          err.stderr = stderr;
+          reject(err);
+        }
+      });
     });
     const outFile = path.join(cwd, "app-graph.json");
     const raw = fs.readFileSync(outFile, "utf8");
