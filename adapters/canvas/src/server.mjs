@@ -562,18 +562,20 @@ function createRequestHandler(instanceId) {
                         sendDone({ error: `Could not analyze ${repo}. Ensure the repo has source code.` });
                         return;
                     }
-                    // Commit the scaffold to .radius/ on the branch, config first,
-                    // then app.bicep, before running rad. Non-fatal on failure
-                    // (e.g. no write access) — the local graph still builds.
+                    sendProgress('Generated app.bicep — building graph...');
+                }
+
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                // Non-fatal on failure (e.g. no write access) — the graph still renders.
+                if (generated) {
                     try {
                         await commitRadiusScaffold(repo, branch, content, { log: sendProgress });
                     } catch (e) {
                         sendProgress(`Could not commit .radius scaffold: ${e.message}`);
                     }
-                    sendProgress('Generated app.bicep — building graph...');
                 }
-
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
                 // Discover source code references for resources missing codeReference
                 const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery) {
@@ -759,15 +761,19 @@ function createRequestHandler(instanceId) {
                         res.end(JSON.stringify({ error: `Could not analyze ${repo} on branch ${branch}. Ensure the repo has source code.` }));
                         return;
                     }
+                    addProgress('Generated app.bicep — building graph...');
+                }
+
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                if (generated) {
                     try {
                         await commitRadiusScaffold(repo, branch, content, { log: addProgress });
                     } catch (e) {
                         addProgress(`Could not commit .radius scaffold: ${e.message}`);
                     }
-                    addProgress('Generated app.bicep — building graph...');
                 }
-
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
                 // Discover source code references
                 const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery2) {
@@ -894,17 +900,21 @@ function createRequestHandler(instanceId) {
                         return;
                     }
                     generated = true;
-                    try {
-                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
-                    } catch (e) {
-                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
-                    }
                     addProgress('Generated app.bicep from repo analysis.');
                 } else {
                     addProgress('Found app.bicep — parsing resources...');
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                // Persist the generated scaffold only after rad validated that the
+                // Bicep compiles, so an invalid app.bicep never lands on the branch.
+                if (generated) {
+                    try {
+                        await commitRadiusScaffold(repo, branch, content, { log: addProgress });
+                    } catch (e) {
+                        addProgress(`Could not commit .radius scaffold: ${e.message}`);
+                    }
+                }
                 // Discover source code references for planned graph
                 const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSrcDisc) {
