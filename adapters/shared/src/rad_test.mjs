@@ -7,6 +7,8 @@ import {
   RADIUS_BICEP_CONFIG_JSON,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  normalizeSha256,
+  expectedDigest,
 } from "./rad.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
@@ -115,5 +117,77 @@ describe("buildGraphViaRad", () => {
   it("returns an empty array for empty content without invoking rad", async () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.
     expect(await buildGraphViaRad("")).toEqual([]);
+  });
+});
+
+describe("normalizeSha256", () => {
+  it("strips the sha256: prefix and lowercases", () => {
+    expect(normalizeSha256("sha256:ABCDEF")).toBe("abcdef");
+  });
+
+  it("accepts a bare hex value", () => {
+    expect(normalizeSha256("ABCDEF")).toBe("abcdef");
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(normalizeSha256("  sha256:abc123  ")).toBe("abc123");
+  });
+
+  it("returns empty string for nullish or empty input", () => {
+    expect(normalizeSha256(undefined)).toBe("");
+    expect(normalizeSha256(null)).toBe("");
+    expect(normalizeSha256("")).toBe("");
+  });
+});
+
+describe("expectedDigest", () => {
+  const ASSET = "rad_linux_amd64";
+  const publishedHex = "a".repeat(64);
+  const pinnedHex = "b".repeat(64);
+  const assets = [{ name: ASSET, digest: `sha256:${publishedHex}` }];
+  let savedPin;
+
+  beforeEach(() => {
+    savedPin = process.env.RADIUS_RAD_SHA256;
+    delete process.env.RADIUS_RAD_SHA256;
+  });
+
+  afterEach(() => {
+    if (savedPin === undefined) delete process.env.RADIUS_RAD_SHA256;
+    else process.env.RADIUS_RAD_SHA256 = savedPin;
+  });
+
+  it("uses the GitHub-published asset digest by default", () => {
+    expect(expectedDigest(assets, ASSET, "v1.2.3")).toEqual({
+      hex: publishedHex,
+      source: "GitHub release digest",
+    });
+  });
+
+  it("prefers an explicit RADIUS_RAD_SHA256 pin over the published digest", () => {
+    process.env.RADIUS_RAD_SHA256 = `sha256:${pinnedHex.toUpperCase()}`;
+    expect(expectedDigest(assets, ASSET, "v1.2.3")).toEqual({
+      hex: pinnedHex,
+      source: "RADIUS_RAD_SHA256",
+    });
+  });
+
+  it("fails closed when no pin and no published digest are available", () => {
+    // e.g. the matched asset carries no digest field.
+    expect(() => expectedDigest([{ name: ASSET }], ASSET, "v1.2.3")).toThrow(
+      /no published SHA-256 digest/,
+    );
+  });
+
+  it("fails closed when the asset is missing from the release", () => {
+    expect(() => expectedDigest([], ASSET, "v1.2.3")).toThrow(/no published SHA-256 digest/);
+  });
+
+  it("still resolves the pin when the asset is missing entirely", () => {
+    process.env.RADIUS_RAD_SHA256 = pinnedHex;
+    expect(expectedDigest([], ASSET, "v1.2.3")).toEqual({
+      hex: pinnedHex,
+      source: "RADIUS_RAD_SHA256",
+    });
   });
 });

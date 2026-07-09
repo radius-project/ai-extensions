@@ -141,7 +141,7 @@ function httpGet(url, headers) {
   });
 }
 
-async function latestReleaseTag() {
+async function latestRelease() {
   const body = await httpGet(RELEASES_API, {
     Accept: "application/vnd.github+json",
     ...githubAuthHeaders(),
@@ -150,26 +150,46 @@ async function latestReleaseTag() {
   if (!parsed || !parsed.tag_name) {
     throw new Error("Could not determine latest rad release tag");
   }
-  return parsed.tag_name;
+  return { tag: parsed.tag_name, assets: Array.isArray(parsed.assets) ? parsed.assets : [] };
 }
 
-// Verifies a downloaded rad binary against an optional pinned SHA-256 supplied
-// via RADIUS_RAD_SHA256 (raw hex or "sha256:<hex>"). No env var means no pin, so
-// behavior is unchanged for callers that don't opt in; a mismatch aborts the
-// install so a corrupted or tampered download is never cached or executed.
-function verifyChecksum(data, tag) {
-  const pinned = (process.env.RADIUS_RAD_SHA256 || "").trim().toLowerCase().replace(/^sha256:/, "");
-  if (!pinned) return;
+// Normalizes a "sha256:<hex>" or bare-hex value to lowercase hex, or "" if none.
+export function normalizeSha256(value) {
+  return (value || "").trim().toLowerCase().replace(/^sha256:/, "");
+}
+
+// Determines the SHA-256 the download must match. An explicit RADIUS_RAD_SHA256
+// pin (raw hex or "sha256:<hex>") always wins so operators can lock to a known
+// build; otherwise the digest GitHub publishes for the release asset is used.
+// Enforced by default: if neither is available we fail closed rather than run an
+// unverified binary. Set RADIUS_RAD_SHA256 to override in that rare case.
+export function expectedDigest(assets, assetName, tag) {
+  const pinned = normalizeSha256(process.env.RADIUS_RAD_SHA256);
+  if (pinned) return { hex: pinned, source: "RADIUS_RAD_SHA256" };
+
+  const asset = assets.find((a) => a && a.name === assetName);
+  const published = normalizeSha256(asset && asset.digest);
+  if (published) return { hex: published, source: "GitHub release digest" };
+
+  throw new Error(
+    `rad ${tag} asset ${assetName} has no published SHA-256 digest; set RADIUS_RAD_SHA256 to install`,
+  );
+}
+
+// Verifies downloaded bytes against the expected SHA-256 before the binary is
+// ever cached or executed. A mismatch aborts the install so a corrupted or
+// tampered download is never trusted.
+function verifyChecksum(data, expected, tag, assetName) {
   const actual = crypto.createHash("sha256").update(data).digest("hex");
-  if (actual !== pinned) {
+  if (actual !== expected.hex) {
     throw new Error(
-      `rad ${tag} download failed SHA-256 verification: expected ${pinned}, got ${actual}`,
+      `rad ${tag} asset ${assetName} failed SHA-256 verification against ${expected.source}: expected ${expected.hex}, got ${actual}`,
     );
   }
 }
 
 async function downloadRad(log) {
-  const tag = await latestReleaseTag();
+  const { tag, assets } = await latestRelease();
   const asset = releaseAsset();
   const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
   // Install into the same ~/.rad/bin the official rad CLI uses, so resolution
@@ -177,10 +197,14 @@ async function downloadRad(log) {
   const dest = path.join(RAD_HOME_BIN, `rad${EXE}`);
   if (isExecutableFile(dest)) return dest;
 
+  // Resolve the expected digest before downloading so an unverifiable asset
+  // fails fast without fetching ~70MB of binary we could never trust.
+  const expected = expectedDigest(assets, asset, tag);
+
   log(`Downloading rad ${tag} (${asset})...`);
   fs.mkdirSync(RAD_HOME_BIN, { recursive: true });
   const data = await httpGet(url);
-  verifyChecksum(data, tag);
+  verifyChecksum(data, expected, tag, asset);
   const tmp = `${dest}.${process.pid}.download`;
   fs.writeFileSync(tmp, data);
   if (!IS_WIN) fs.chmodSync(tmp, 0o755);
@@ -193,7 +217,7 @@ async function downloadRad(log) {
     if (isExecutableFile(dest)) return dest;
     throw err;
   }
-  log(`Installed rad to ${dest}`);
+  log(`Installed rad to ${dest} (verified against ${expected.source})`);
   return dest;
 }
 
