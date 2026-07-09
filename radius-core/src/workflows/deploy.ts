@@ -1,7 +1,4 @@
 import { fillTemplate } from "./template.js";
-import dispatcherTemplate from "./templates/run-rad-commands.yml";
-import azureTemplate from "./templates/run-rad-commands-azure.yml";
-import awsTemplate from "./templates/run-rad-commands-aws.yml";
 
 // The pinned ref of radius-project/radius that hosts BOTH the shared composite
 // actions (setup-control-plane, restore-state, run-rad-commands, teardown) and
@@ -11,8 +8,8 @@ export const RADIUS_REF = "main";
 
 // The canonical home of the workflow templates in radius-project/radius. The
 // extension fetches them from here at commit time so a user repo always gets
-// the reviewed upstream version rather than a copy that can silently drift; the
-// bundled templates below are only an offline fallback.
+// the reviewed upstream version. radius-project/radius is the single source of
+// truth: the extension bundles no template copies of its own.
 export const RADIUS_WORKFLOW_REPO = "radius-project/radius";
 export const RADIUS_WORKFLOW_DIR = ".github/extension";
 
@@ -26,16 +23,6 @@ export const DEPLOY_AWS_FILE = "run-rad-commands-aws.yml";
 
 export type DeployWorkflowFiles = Record<string, string>;
 
-// Bundled copies of the upstream templates, keyed by their committed file name.
-// Used as a fallback when the extension cannot fetch the templates from
-// radius-project/radius (offline, transient API failure, or the ref not yet
-// published). Kept byte-identical to the upstream `.github/extension/` copies.
-export const BUNDLED_DEPLOY_TEMPLATES: DeployWorkflowFiles = {
-  [DEPLOY_DISPATCHER_FILE]: dispatcherTemplate,
-  [DEPLOY_AZURE_FILE]: azureTemplate,
-  [DEPLOY_AWS_FILE]: awsTemplate,
-};
-
 /**
  * Build the application-deploy GitHub Actions workflows, mirroring the
  * composite-action structure of radius-project/radius.
@@ -47,18 +34,24 @@ export const BUNDLED_DEPLOY_TEMPLATES: DeployWorkflowFiles = {
  * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Only
  * the `{{ENV}}`, `{{APP_FILE}}` and `{{RADIUS_REF}}` placeholders are filled.
  *
- * `templates` maps the committed file name to the raw template body. Callers
- * pass the templates fetched from `radius-project/radius`; any file missing
- * from the map falls back to its bundled copy. Defaults to the bundled
- * templates so callers without repo access still work offline.
+ * `templates` maps the committed file name to the raw template body fetched
+ * from `radius-project/radius`. The caller must supply all three files; there
+ * is no bundled fallback, so a missing file is a hard error.
  */
 export function generateDeployWorkflow(
   env: string,
   appFile: string,
-  templates: DeployWorkflowFiles = BUNDLED_DEPLOY_TEMPLATES,
+  templates: DeployWorkflowFiles,
 ): DeployWorkflowFiles {
-  const pick = (file: string): string =>
-    templates[file] ?? BUNDLED_DEPLOY_TEMPLATES[file];
+  const pick = (file: string): string => {
+    const body = templates[file];
+    if (!body) {
+      throw new Error(
+        `Missing deploy template "${file}". Templates must be fetched from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`,
+      );
+    }
+    return body;
+  };
   return {
     [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), { ENV: env }),
     [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), {

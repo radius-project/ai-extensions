@@ -3,7 +3,6 @@ export {
   verifyTemplateFile,
   VERIFY_AZURE_FILE,
   VERIFY_AWS_FILE,
-  BUNDLED_VERIFY_TEMPLATES,
 } from "./verify.js";
 export {
   generateDeployWorkflow,
@@ -13,6 +12,5 @@ export {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
-  BUNDLED_DEPLOY_TEMPLATES,
 } from "./deploy.js";
 export type { DeployWorkflowFiles } from "./deploy.js";

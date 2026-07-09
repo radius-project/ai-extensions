@@ -28,9 +28,6 @@ const options = {
   target: "node18",
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
-  // Static workflow templates (radius-core/src/workflows/templates/*.yml) are
-  // imported as raw text and inlined into the bundle at build time.
-  loader: { ".yml": "text" },
   legalComments: "none",
   logLevel: "info",
   banner: {

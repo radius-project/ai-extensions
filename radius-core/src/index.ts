@@ -66,7 +66,6 @@ export {
   verifyTemplateFile,
   VERIFY_AZURE_FILE,
   VERIFY_AWS_FILE,
-  BUNDLED_VERIFY_TEMPLATES,
   generateDeployWorkflow,
   RADIUS_REF,
   RADIUS_WORKFLOW_REPO,
@@ -74,7 +73,6 @@ export {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
-  BUNDLED_DEPLOY_TEMPLATES,
 } from "./workflows/index.js";
 export type { DeployWorkflowFiles } from "./workflows/index.js";
 export type {

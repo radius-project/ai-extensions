@@ -123,31 +123,39 @@ export function generateAWSOIDC(data) {
 
 /**
  * Fetch a workflow template from radius-project/radius `.github/extension/` at
- * the pinned RADIUS_REF. Returns the raw body, or null if it can't be fetched
- * (offline, transient API failure, or the ref/file not yet published) so the
- * caller can fall back to the bundled copy.
+ * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
+ * so a fetch failure (offline, transient API error, or the ref/file missing) is
+ * a hard error rather than a fall back to a bundled copy.
  */
 async function fetchRadiusTemplate(fileName) {
+    let body;
     try {
-        const body = await fetchFileFromRepo(
+        body = await fetchFileFromRepo(
             RADIUS_WORKFLOW_REPO,
             `${RADIUS_WORKFLOW_DIR}/${fileName}`,
             RADIUS_REF,
         );
-        return body && body.trim() ? body : null;
-    } catch {
-        return null;
+    } catch (err) {
+        throw new Error(
+            `Failed to fetch workflow template "${fileName}" from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}": ${err?.message ?? err}`,
+        );
     }
+    if (!body || !body.trim()) {
+        throw new Error(
+            `Workflow template "${fileName}" not found in ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`,
+        );
+    }
+    return body;
 }
 
 export async function generateVerifyWorkflow(env, provider) {
     const platform = getPlatform(provider);
     if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
-    // Prefer the upstream template from radius-project/radius; fall back to the
-    // bundled copy baked into radius-core when it can't be fetched.
+    // Always use the upstream template from radius-project/radius; no fallback.
     const fileName = verifyTemplateFile(platform);
-    const upstream = fileName ? await fetchRadiusTemplate(fileName) : null;
-    return coreGenerateVerifyWorkflow(env, platform, upstream ?? undefined);
+    if (!fileName) throw new Error(`No verify template for provider "${provider}".`);
+    const upstream = await fetchRadiusTemplate(fileName);
+    return coreGenerateVerifyWorkflow(env, platform, upstream);
 }
 
 /**
@@ -159,14 +167,14 @@ export async function generateVerifyWorkflow(env, provider) {
  *
  * The templates are fetched from radius-project/radius `.github/extension/` at
  * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
- * any template that can't be fetched falls back to the bundled copy.
+ * there is no bundled fallback, so a fetch failure surfaces as an error.
  */
 export async function generateDeployWorkflow(env, appFile) {
     const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
     const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
     const templates = {};
     files.forEach((f, i) => {
-        if (bodies[i]) templates[f] = bodies[i];
+        templates[f] = bodies[i];
     });
     return coreGenerateDeployWorkflow(env, appFile, templates);
 }
