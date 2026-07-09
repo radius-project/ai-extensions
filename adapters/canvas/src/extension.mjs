@@ -9,11 +9,11 @@ import { execFile } from "node:child_process";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   getPlatform,
-  buildGraphFromBicep,
   computeGraphDiff,
   fetchBicepFromRepo,
   generateBicepFromRepo,
 } from "@radius-project/core";
+import { buildGraphViaRad } from "@radius-project/shared";
 import { runCommand, github } from "./gh.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
@@ -235,8 +235,8 @@ const session = await joinSession({
                         if (!baseContent) baseContent = await generateBicepFromRepo(github, repo, ctx.input.baseBranch);
                         if (!headContent) headContent = await generateBicepFromRepo(github, repo, ctx.input.headBranch);
 
-                        const baseResources = await buildGraphFromBicep(baseContent || '');
-                        const headResources = await buildGraphFromBicep(headContent || '');
+                        const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
+                        const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                         // Compute diff using the shared algorithm (see computeGraphDiff).
                         const diffResources = computeGraphDiff(baseResources, headResources);
                         entry.state.diffResources = diffResources;
@@ -402,8 +402,8 @@ Recipe resolution for planned graph:
                         return "No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.";
                     }
 
-                    const baseResources = await buildGraphFromBicep(baseContent || '');
-                    const headResources = await buildGraphFromBicep(headContent || '');
+                    const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
+                    const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
 
                     // Compute diff using the shared algorithm (see computeGraphDiff).
                     const diffResources = computeGraphDiff(baseResources, headResources);

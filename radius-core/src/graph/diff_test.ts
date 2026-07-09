@@ -82,6 +82,23 @@ describe("computeGraphDiff", () => {
     expect(result[0].diffStatus).toBe("modified");
   });
 
+  it("marks a resource as modified when only its diffHash changes", () => {
+    // Same id/type/connections but a different diffHash represents a property-only
+    // edit (e.g. a container image or database version). The rad app-graph builder
+    // encodes such edits in diffHash, so the diff must treat them as modified.
+    const base = [makeResource("Radius.Compute/containers", "api", { diffHash: "hash-v1" })];
+    const head = [makeResource("Radius.Compute/containers", "api", { diffHash: "hash-v2" })];
+    const result = computeGraphDiff(base, head);
+    expect(result[0].diffStatus).toBe("modified");
+  });
+
+  it("keeps a resource unchanged when its diffHash is identical", () => {
+    const base = [makeResource("Radius.Compute/containers", "api", { diffHash: "hash-v1" })];
+    const head = [makeResource("Radius.Compute/containers", "api", { diffHash: "hash-v1" })];
+    const result = computeGraphDiff(base, head);
+    expect(result[0].diffStatus).toBe("unchanged");
+  });
+
   it("handles null/undefined inputs gracefully", () => {
     for (const [base, head] of [
       [null, null],

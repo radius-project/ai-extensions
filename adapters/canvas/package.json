@@ -9,6 +9,7 @@
     "watch": "node build.mjs --watch"
   },
   "dependencies": {
-    "@radius-project/core": "workspace:*"
+    "@radius-project/core": "workspace:*",
+    "@radius-project/shared": "workspace:*"
   }
 }
