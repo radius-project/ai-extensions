@@ -22,9 +22,11 @@ import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shar
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, cliSpawn, runCommand, commitRadiusScaffold } from "./gh.mjs";
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
+  DEPLOY_DISPATCHER_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -41,6 +43,29 @@ import {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
+
+// Bare filename of the legacy monolithic deploy workflow that the composite-
+// action model (run-rad-commands*.yml) replaces. Removed from target repos on
+// commit so it does not double-trigger alongside the new dispatcher.
+const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
+
+/**
+ * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
+ * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
+ * it can be called from any request handler regardless of its local gh runner.
+ */
+function deleteLegacyDeployWorkflow(targetRepo) {
+    const path = '.github/workflows/' + LEGACY_DEPLOY_WORKFLOW_FILE;
+    return new Promise((resolve) => {
+        cliExec('gh', ['api', '/repos/' + targetRepo + '/contents/' + path, '--jq', '.sha'], { timeout: 30000 }, (err, stdout) => {
+            const sha = err ? '' : (stdout || '').trim();
+            if (!sha) { resolve(false); return; }
+            cliExec('gh', ['api', '--method', 'DELETE', '/repos/' + targetRepo + '/contents/' + path,
+                '-f', 'message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)',
+                '-f', 'sha=' + sha], { timeout: 30000 }, () => resolve(true));
+        });
+    });
+}
 
 // Timestamp of the last request served to any canvas webview. Updated by the
 // request handler and read by the host-channel keepalive via the getter below
@@ -208,7 +233,6 @@ function createRequestHandler(instanceId) {
                 // Step 1: Get account info — use provided values or fall back to az CLI
                 let tenantId = data.tenantId || '';
                 let subscriptionId = data.subscriptionId || '';
-                let existingClientId = data.clientId || '';
 
                 if (!tenantId || !subscriptionId) {
                     steps.push('Checking Azure CLI login...');
@@ -225,23 +249,19 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 2: Create App Registration (skip if clientId already provided)
-                let clientId = existingClientId;
+                // Step 2: Create a fresh App Registration. We always auto-create
+                // new credentials rather than reusing an existing Client ID.
                 const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
-                if (!clientId) {
-                    steps.push(`Creating App Registration: ${appName}...`);
-                    const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
-                    if (appResult.code !== 0) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
-                        return;
-                    }
-                    clientId = appResult.stdout.trim();
-                    steps.push(`✅ App Registration created: ${clientId}`);
-                } else {
-                    steps.push(`✅ Using existing App Registration: ${clientId}`);
+                steps.push(`Creating App Registration: ${appName}...`);
+                const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
+                if (appResult.code !== 0) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
+                    return;
                 }
+                const clientId = appResult.stdout.trim();
+                steps.push(`✅ App Registration created: ${clientId}`);
 
                 // Step 3: Create Service Principal
                 steps.push('Creating Service Principal...');
@@ -307,6 +327,39 @@ function createRequestHandler(instanceId) {
         }
 
         // Create GitHub Environment with secrets/variables and commit verify workflow
+        if (pathname === "/api/app-params" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body);
+                const repo = data.repo || "";
+                if (!repo) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "No repository specified.", params: [] }));
+                    return;
+                }
+                // Resolve the branch the deploy will run against (the caller's
+                // selection, else the repo default) and locate the app.bicep the
+                // same way the deploy route does (.radius/app.bicep, then app.bicep).
+                let branch = data.branch || "";
+                if (!branch) {
+                    const def = await runCommand("gh", ["repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]).catch(() => "");
+                    branch = (def || "").trim() || "main";
+                }
+                let source = await fetchFileFromRepo(repo, ".radius/app.bicep", branch);
+                if (!source) source = await fetchFileFromRepo(repo, "app.bicep", branch);
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ branch, found: !!source, params: source ? appParams(source) : [] }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: e.message, params: [] }));
+            }
+            return;
+        }
+
         if (pathname === "/api/create-environment" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
@@ -355,10 +408,11 @@ function createRequestHandler(instanceId) {
                     if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
                     if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
                     if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (k8s) await runGh(['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (data.location) await runGh(['variable', 'set', 'AZURE_LOCATION', '--body', data.location, '--env', envName, '--repo', targetRepo]);
 
-                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s].filter(Boolean).length;
-                    steps.push(`Set ${setCount}/5 environment values for Azure.`);
+                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location].filter(Boolean).length;
+                    steps.push(`Set ${setCount} environment value(s) for Azure.`);
                     if (!clientId || !tenantId || !subscriptionId) {
                         steps.push('⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually.');
                     }
@@ -368,17 +422,62 @@ function createRequestHandler(instanceId) {
                     const accountId = data.accountId || awsCreds.accountId || '';
                     const k8s = data.cluster || '';
 
-                    if (roleArn) await runGh(['secret', 'set', 'AWS_IAM_ROLE_ARN', '--env', envName, '--repo', targetRepo], roleArn);
+                    if (roleArn) await runGh(['variable', 'set', 'AWS_ROLE_ARN', '--body', roleArn, '--env', envName, '--repo', targetRepo]);
                     if (region) await runGh(['variable', 'set', 'AWS_REGION', '--body', region, '--env', envName, '--repo', targetRepo]);
                     if (accountId) await runGh(['variable', 'set', 'AWS_ACCOUNT_ID', '--body', accountId, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', k8s, '--env', envName, '--repo', targetRepo]);
+                    if (k8s) await runGh(['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
                     if (data.vpcId) await runGh(['variable', 'set', 'RADIUS_VPC_ID', '--body', data.vpcId, '--env', envName, '--repo', targetRepo]);
                     if (data.subnetIds) await runGh(['variable', 'set', 'RADIUS_SUBNET_IDS', '--body', data.subnetIds, '--env', envName, '--repo', targetRepo]);
                 }
 
+                // Step 2b: Provision application parameters. Parse the app.bicep the
+                // deploy will run against and auto-generate a value for every required
+                // parameter that has no Bicep default (e.g. an @secure() password),
+                // skipping params that do have a default (Bicep applies it). Values are
+                // no longer collected from the UI. The result is stored as a single
+                // JSON secret the deploy workflow reads and expands into
+                // `--parameters name=value` pairs.
+                try {
+                    let paramBranch = data.branch || '';
+                    if (!paramBranch) {
+                        const def = await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '');
+                        paramBranch = (def || '').trim() || 'main';
+                    }
+                    let bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', paramBranch);
+                    let bicepPath = '.radius/app.bicep';
+                    if (!bicepSource) {
+                        bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', paramBranch);
+                        bicepPath = 'app.bicep';
+                    }
+                    if (bicepSource) {
+                        const parsed = appParams(bicepSource);
+                        const resolved = resolveDeployParams(parsed);
+                        // Split into secret (provisioned as a secret, appended by the
+                        // workflow) and non-secret (inlined into the rad deploy command).
+                        const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
+                        await runGh(['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo], Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}');
+
+                        // Build the rad deploy command with non-secret params inline and
+                        // store it as an environment variable. The deploy workflow reads
+                        // it via `inputs.rad_commands || vars.RADIUS_RAD_COMMANDS`, so it
+                        // applies on both explicit dispatch and the verify→deploy auto
+                        // trigger (where inputs are empty). Secret params are appended by
+                        // the workflow from RADIUS_DEPLOY_PARAMS.
+                        const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
+                        await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
+
+                        const names = Object.keys(resolved);
+                        if (names.length > 0) {
+                            steps.push(`Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(', ')}).`);
+                        }
+                    }
+                } catch (paramErr) {
+                    steps.push('⚠️ Could not resolve application parameters: ' + paramErr.message);
+                }
+
                 // Step 3: Commit the verify-credentials workflow
                 steps.push('Committing verify-credentials workflow...');
-                const verifyWorkflow = generateVerifyWorkflow(envName, provider);
+                const verifyWorkflow = await generateVerifyWorkflow(envName, provider);
                 const verifyContent = Buffer.from(verifyWorkflow).toString('base64');
                 const verifyPath = '.github/workflows/radius-verify-credentials.yml';
 
@@ -414,38 +513,46 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push('✅ Verify workflow committed.');
 
-                // Step 4: Also commit the deploy workflow
-                steps.push('Committing deploy workflow...');
-                const deployWorkflow = generateDeployWorkflow(envName, provider, '.radius/app.bicep', null);
-                const deployContent = Buffer.from(deployWorkflow).toString('base64');
-                const deployPath = '.github/workflows/radius-deploy.yml';
+                // Step 4: Also commit the deploy workflows (dispatcher + both
+                // provider workflows). The dispatcher references both provider
+                // files by path, so all three must exist in the target repo.
+                steps.push('Committing deploy workflows...');
+                const deployWorkflows = await generateDeployWorkflow(envName, '.radius/app.bicep');
 
-                const deployCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + deployPath, '--jq', '.sha']);
-                const deploySha = deployCheckResult.code === 0 ? deployCheckResult.stdout.trim() : '';
+                for (const [fileName, content] of Object.entries(deployWorkflows)) {
+                    const deployContent = Buffer.from(content).toString('base64');
+                    const deployPath = '.github/workflows/' + fileName;
 
-                const deployCommitBody = JSON.stringify({
-                    message: 'Add Radius deploy workflow for environment ' + envName,
-                    content: deployContent,
-                    ...(deploySha ? { sha: deploySha } : {})
-                });
+                    const deployCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + deployPath, '--jq', '.sha']);
+                    const deploySha = deployCheckResult.code === 0 ? deployCheckResult.stdout.trim() : '';
 
-                const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
-                writeFileSync(tmpFile2, deployCommitBody);
+                    const deployCommitBody = JSON.stringify({
+                        message: 'Add Radius deploy workflow (' + fileName + ') for environment ' + envName,
+                        content: deployContent,
+                        ...(deploySha ? { sha: deploySha } : {})
+                    });
 
-                const deployCommitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
-                try { unlinkSync(tmpFile2); } catch {}
+                    const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
+                    writeFileSync(tmpFile2, deployCommitBody);
 
-                if (deployCommitResult.code !== 0) {
-                    steps.push('❌ Failed to commit deploy workflow.');
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({
-                        error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
-                        steps
-                    }));
-                    return;
+                    const deployCommitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
+                    try { unlinkSync(tmpFile2); } catch {}
+
+                    if (deployCommitResult.code !== 0) {
+                        steps.push('❌ Failed to commit deploy workflow ' + fileName + '.');
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
+                            steps
+                        }));
+                        return;
+                    }
                 }
-                steps.push('✅ Deploy workflow committed.');
+                // Best-effort: remove the legacy monolithic deploy workflow so it
+                // does not double-trigger alongside the new dispatcher.
+                await deleteLegacyDeployWorkflow(targetRepo);
+                steps.push('✅ Deploy workflows committed.');
 
                 // Step 5: Dispatch the verify workflow
                 steps.push('Dispatching verify-credentials workflow...');
@@ -1028,28 +1135,11 @@ function createRequestHandler(instanceId) {
                         });
                     });
 
-                    // Also commit bicepconfig.json for the Radius extension
-                    const bicepConfigPath = '.radius/bicepconfig.json';
-                    const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
-                    const existingConfig = await new Promise((resolve) => {
-                        cliExec("gh", ["api", `/repos/${repo}/contents/${bicepConfigPath}?ref=${commitBranch}`, "--jq", ".sha"], { timeout: 10000 }, (err, stdout) => {
-                            resolve(err ? '' : stdout.trim());
-                        });
-                    });
-                    const configPayload = JSON.stringify({
-                        message: 'Add bicepconfig.json for Radius extension support',
-                        content: Buffer.from(bicepConfigContent).toString('base64'),
-                        branch: commitBranch,
-                        ...(existingConfig ? { sha: existingConfig } : {})
-                    });
-                    const tmpPath2 = jn(td(), 'radius-bicepconfig-commit-' + Date.now() + '.json');
-                    wfs(tmpPath2, configPayload);
-                    await new Promise((resolve) => {
-                        cliExec("gh", ["api", "--method", "PUT", `/repos/${repo}/contents/${bicepConfigPath}`, "--input", tmpPath2], { timeout: 30000 }, (err) => {
-                            try { uls(tmpPath2); } catch {}
-                            resolve(err ? false : true);
-                        });
-                    });
+                    // NOTE: bicepconfig.json is intentionally NOT written here.
+                    // Radius.Compute/containerImages ships with the published Radius
+                    // Bicep extension, so `extension radius` in app.bicep and the
+                    // user's own bicepconfig cover it — no extra bicep wiring is
+                    // committed back to the repo.
                 } catch {}
 
                 res.setHeader("Content-Type", "application/json");
@@ -1311,12 +1401,12 @@ function createRequestHandler(instanceId) {
                         addLog('Waiting for the deploy workflow to start...');
                         let dRunId = null;
                         for (let attempt = 0; attempt < 24 && !dRunId; attempt++) {
-                            dRunId = await findWorkflowRun(repo, 'radius-deploy.yml', dispatchedAt, null);
+                            dRunId = await findWorkflowRun(repo, DEPLOY_DISPATCHER_FILE, dispatchedAt, null);
                             if (!dRunId) await delay(5000);
                         }
                         if (!dRunId) {
-                            addLog('⚠ No deploy run found for radius-deploy.yml.');
-                            entry.state.deployError = 'The deploy workflow (radius-deploy.yml) did not start. Check that the workflow exists on branch ' + branch + ' and that Actions are enabled for ' + repo + '.';
+                            addLog('⚠ No deploy run found for ' + DEPLOY_DISPATCHER_FILE + '.');
+                            entry.state.deployError = 'The deploy workflow (' + DEPLOY_DISPATCHER_FILE + ') did not start. Check that the workflow exists on branch ' + branch + ' and that Actions are enabled for ' + repo + '.';
                             entry.state.deployStatus = 'failed';
                             return;
                         }
@@ -1660,9 +1750,9 @@ function createRequestHandler(instanceId) {
             }
 
             try {
-                // Step 1: Generate the deploy workflow
-                sendEvent('info', 'Generating GitHub Actions deploy workflow...');
-                const workflow = generateDeployWorkflow(env, provider, appFile, oidc);
+                // Step 1: Generate the deploy workflows (dispatcher + both providers)
+                sendEvent('info', 'Generating GitHub Actions deploy workflows...');
+                const workflows = await generateDeployWorkflow(env, appFile);
                 const targetRepo = params.targetRepo || '';
 
                 if (!targetRepo) {
@@ -1674,40 +1764,45 @@ function createRequestHandler(instanceId) {
 
                 sendEvent('stdout', 'Target repository: ' + targetRepo);
 
-                // Step 2: Commit workflow to target repo via GitHub API
-                sendEvent('info', 'Committing workflow to ' + targetRepo + '...');
-                const workflowContent = Buffer.from(workflow).toString('base64');
-                const filePath = '.github/workflows/radius-deploy.yml';
+                // Step 2: Commit workflows to target repo via GitHub API. The
+                // dispatcher references both provider workflows by path, so all
+                // three files must be committed.
+                sendEvent('info', 'Committing workflows to ' + targetRepo + '...');
+                for (const [fileName, content] of Object.entries(workflows)) {
+                    const workflowContent = Buffer.from(content).toString('base64');
+                    const filePath = '.github/workflows/' + fileName;
 
-                // Check if file already exists (to get sha for update)
-                const checkResult = await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + filePath, '--jq', '.sha']);
-                const existingSha = checkResult.code === 0 ? checkResult.output.trim() : '';
+                    // Check if file already exists (to get sha for update)
+                    const checkResult = await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + filePath, '--jq', '.sha']);
+                    const existingSha = checkResult.code === 0 ? checkResult.output.trim() : '';
 
-                const commitBody = JSON.stringify({
-                    message: 'Add Radius deploy workflow for environment ' + env,
-                    content: workflowContent,
-                    ...(existingSha ? { sha: existingSha } : {})
-                });
+                    const commitBody = JSON.stringify({
+                        message: 'Add Radius deploy workflow (' + fileName + ') for environment ' + env,
+                        content: workflowContent,
+                        ...(existingSha ? { sha: existingSha } : {})
+                    });
 
-                const commitResult = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + filePath, '--input', '-'], { stdin: commitBody });
-                if (commitResult.code !== 0) {
-                    sendEvent('error', 'Failed to commit workflow to repository. Check repo permissions.');
-                    sendEvent('done', 'failed');
-                    res.end();
-                    return;
+                    const commitResult = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + filePath, '--input', '-'], { stdin: commitBody });
+                    if (commitResult.code !== 0) {
+                        sendEvent('error', 'Failed to commit workflow ' + fileName + ' to repository. Check repo permissions.');
+                        sendEvent('done', 'failed');
+                        res.end();
+                        return;
+                    }
                 }
-                sendEvent('stdout', 'Workflow committed to ' + targetRepo);
+                // Best-effort: remove the legacy monolithic deploy workflow so it
+                // does not double-trigger alongside the new dispatcher.
+                await deleteLegacyDeployWorkflow(targetRepo);
+                sendEvent('stdout', 'Workflows committed to ' + targetRepo);
 
-                // Step 2b: Ensure the app definition AND its bicepconfig.json exist
-                // in the repo BEFORE triggering the deploy.
+                // Step 2b: Ensure the app definition exists in the repo BEFORE
+                // triggering the deploy.
                 //  - The workflow fails fast with "No app.bicep found" if neither
                 //    app.bicep nor .radius/app.bicep is committed, so for repos
                 //    without one we synthesize it from the repo structure.
-                //  - bicep cannot compile the app (rad deploy) without a
-                //    bicepconfig.json that registers the Radius extension types, so
-                //    we ALWAYS ensure one exists next to the app definition —
-                //    independent of whether app.bicep was just generated or already
-                //    present. (This is the "deployment json" the deploy relies on.)
+                //  - bicepconfig.json and the app's bicep extensions are handled
+                //    entirely by the deploy workflow at deploy time (working copy
+                //    only) — the canvas never writes them into the repo.
                 try {
                     // Resolve the repo's default branch (where the workflow runs).
                     const defBranchRes = await runCmd('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
@@ -1716,10 +1811,6 @@ function createRequestHandler(instanceId) {
                     // Check whether an app definition is already committed.
                     const hasRadiusBicep = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/.radius/app.bicep?ref=' + deployBranch, '--jq', '.sha'])).code === 0;
                     const hasRootBicep = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/app.bicep?ref=' + deployBranch, '--jq', '.sha'])).code === 0;
-
-                    // Directory that holds the app definition — bicepconfig.json must
-                    // sit next to it so bicep resolves the Radius extension.
-                    let appDir = hasRootBicep ? '' : '.radius/';
 
                     if (!hasRadiusBicep && !hasRootBicep) {
                         sendEvent('info', 'No app.bicep found in ' + targetRepo + ' — generating one from the repository structure...');
@@ -1733,7 +1824,6 @@ function createRequestHandler(instanceId) {
 
                         // Commit the generated app.bicep to .radius/app.bicep on the
                         // deploy branch so the workflow can find it.
-                        appDir = '.radius/';
                         const bicepPath = '.radius/app.bicep';
                         const existingBicepSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
                         const bicepCommitBody = JSON.stringify({
@@ -1753,31 +1843,8 @@ function createRequestHandler(instanceId) {
                     } else {
                         sendEvent('stdout', 'Found existing app definition (' + (hasRadiusBicep ? '.radius/app.bicep' : 'app.bicep') + ') in ' + targetRepo);
                     }
-
-                    // ALWAYS ensure bicepconfig.json exists next to the app file so
-                    // bicep can resolve the Radius extension during `rad deploy`.
-                    const bicepConfigPath = appDir + 'bicepconfig.json';
-                    const existingCfgSha = (await runCmd('gh', ['api', '/repos/' + targetRepo + '/contents/' + bicepConfigPath + '?ref=' + deployBranch, '--jq', '.sha'])).output.trim();
-                    if (!existingCfgSha) {
-                        const bicepConfigContent = RADIUS_BICEP_CONFIG_JSON;
-                        const cfgCommitBody = JSON.stringify({
-                            message: 'Add bicepconfig.json for Radius extension support',
-                            content: Buffer.from(bicepConfigContent).toString('base64'),
-                            branch: deployBranch
-                        });
-                        const cfgCommit = await runCmd('gh', ['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + bicepConfigPath, '--input', '-'], { stdin: cfgCommitBody });
-                        if (cfgCommit.code !== 0) {
-                            sendEvent('error', 'Failed to commit ' + bicepConfigPath + ' to ' + targetRepo + '. Check repo permissions.');
-                            sendEvent('done', 'failed');
-                            res.end();
-                            return;
-                        }
-                        sendEvent('stdout', 'Committed ' + bicepConfigPath + ' to ' + targetRepo);
-                    } else {
-                        sendEvent('stdout', 'Found existing ' + bicepConfigPath + ' in ' + targetRepo);
-                    }
                 } catch (bicepErr) {
-                    sendEvent('error', 'Failed ensuring app.bicep / bicepconfig.json exists: ' + bicepErr.message);
+                    sendEvent('error', 'Failed ensuring app.bicep exists: ' + bicepErr.message);
                     sendEvent('done', 'failed');
                     res.end();
                     return;
@@ -1789,9 +1856,9 @@ function createRequestHandler(instanceId) {
 
                 // Set variables and secrets
                 if (provider === 'azure') {
-                    if (cluster) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', cluster, '--env', env, '--repo', targetRepo]);
+                    if (cluster) await runCmd('gh', ['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', cluster, '--env', env, '--repo', targetRepo]);
                     if (resourceGroup) await runCmd('gh', ['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', resourceGroup, '--env', env, '--repo', targetRepo]);
-                    if (namespace) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
+                    if (namespace) await runCmd('gh', ['variable', 'set', 'KUBERNETES_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
                     const azSubId = oidc?.subscriptionId || oidc?.AZURE_SUBSCRIPTION_ID || '';
                     const azClientId = oidc?.clientId || oidc?.AZURE_CLIENT_ID || '';
                     const azTenantId = oidc?.tenantId || oidc?.AZURE_TENANT_ID || '';
@@ -1799,22 +1866,23 @@ function createRequestHandler(instanceId) {
                     if (azClientId) await runCmd('gh', ['variable', 'set', 'AZURE_CLIENT_ID', '--body', azClientId, '--env', env, '--repo', targetRepo]);
                     if (azTenantId) await runCmd('gh', ['variable', 'set', 'AZURE_TENANT_ID', '--body', azTenantId, '--env', env, '--repo', targetRepo]);
                 } else {
-                    if (cluster) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_CLUSTER', '--body', cluster, '--env', env, '--repo', targetRepo]);
+                    if (cluster) await runCmd('gh', ['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', cluster, '--env', env, '--repo', targetRepo]);
                     await runCmd('gh', ['variable', 'set', 'AWS_REGION', '--body', oidc?.region || 'us-east-1', '--env', env, '--repo', targetRepo]);
-                    if (namespace) await runCmd('gh', ['variable', 'set', 'RADIUS_K8S_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
+                    if (namespace) await runCmd('gh', ['variable', 'set', 'KUBERNETES_NAMESPACE', '--body', namespace, '--env', env, '--repo', targetRepo]);
                     if (oidc?.accountId) await runCmd('gh', ['variable', 'set', 'AWS_ACCOUNT_ID', '--body', oidc.accountId, '--env', env, '--repo', targetRepo]);
+                    if (oidc?.roleArn) await runCmd('gh', ['variable', 'set', 'AWS_ROLE_ARN', '--body', oidc.roleArn, '--env', env, '--repo', targetRepo]);
                 }
 
                 // Step 4: Trigger the workflow on the target repo
                 sendEvent('info', 'Triggering deployment workflow on ' + targetRepo + '...');
-                const triggerResult = await runCmd('gh', ['workflow', 'run', 'radius-deploy.yml', '-f', 'environment=' + env, '--repo', targetRepo]);
+                const triggerResult = await runCmd('gh', ['workflow', 'run', DEPLOY_DISPATCHER_FILE, '-f', 'environment=' + env, '--repo', targetRepo]);
 
                 if (triggerResult.code === 0) {
                     sendEvent('success', 'Workflow triggered! Waiting for run to start...');
 
                     // Wait a moment then get the run ID
                     await new Promise(r => setTimeout(r, 5000));
-                    const runsResult = await runCmd('gh', ['run', 'list', '--workflow=radius-deploy.yml', '--limit', '1', '--json', 'databaseId,status', '--repo', targetRepo]);
+                    const runsResult = await runCmd('gh', ['run', 'list', '--workflow=' + DEPLOY_DISPATCHER_FILE, '--limit', '1', '--json', 'databaseId,status', '--repo', targetRepo]);
 
                     try {
                         const runs = JSON.parse(runsResult.output);
