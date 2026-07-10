@@ -3,7 +3,7 @@
 // (`github`) injected into radius-core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment.
@@ -68,18 +68,6 @@ export function cliExec(cmd, args, opts, cb) {
     const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
     if (cmd === "gh") execOpts.env = ghChildEnv(execOpts.env);
     return execFile(file, finalArgs, execOpts, cb);
-}
-
-// Streaming equivalent of cliExec: spawns a CLI without a shell (argv passed
-// verbatim, Windows-safe via `cmd.exe /c`) and returns the ChildProcess so the
-// caller can stream stdout/stderr and write to stdin.
-export function cliSpawn(cmd, args, opts = {}) {
-    const isWindows = process.platform === "win32";
-    const file = isWindows ? "cmd.exe" : cmd;
-    const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
-    const spawnOpts = { windowsHide: true, ...opts };
-    if (cmd === "gh") spawnOpts.env = ghChildEnv(spawnOpts.env);
-    return spawn(file, finalArgs, spawnOpts);
 }
 
 // Runs a CLI and resolves with trimmed stdout. Pass `opts.stdin` to feed a value
