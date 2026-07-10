@@ -141,6 +141,105 @@ async function persistRadiusScaffoldForSelection(entry, repo, branch, content, o
     return await commitRadiusScaffold(repo, access.branch, content, opts);
 }
 
+// Provision (or confirm) the Azure AD identity that GitHub Actions authenticates
+// as via OIDC. Creates, in order, the four artifacts a keyless deploy needs:
+//   1. App Registration      -> yields AZURE_CLIENT_ID (the workload identity).
+//   2. Service Principal      -> what role assignments and the OIDC token
+//                                exchange resolve to; without it `azure/login`
+//                                and `az role assignment create` can't bind.
+//   3. Federated Credential   -> establishes GitHub->Azure trust, scoped to this
+//                                environment (subject repo:<repo>:environment:<env>);
+//                                without it `azure/login` fails with AADSTS70021.
+//   4. Contributor role       -> on the target resource group, so the workflow can
+//                                provision AKS/managed resources and run
+//                                `az aks get-credentials`.
+// All four are required — none can be safely dropped. Returns
+// { ok, clientId, tenantId, subscriptionId, appName, steps } on success or
+// { ok: false, error, steps } on failure. "Already exists" errors are tolerated
+// so the helper is safe to re-run.
+async function ensureAzureOidcCredentials({ targetRepo, envName, resourceGroup, subscriptionId, tenantId }) {
+    const steps = [];
+    const runCmd = (cmd, args) => new Promise((resolve) => {
+        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+            resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+        });
+    });
+
+    // Step 1: Resolve subscription + tenant (fall back to the logged-in account).
+    let tid = tenantId || '';
+    let sid = subscriptionId || '';
+    if (!tid || !sid) {
+        steps.push('Checking Azure CLI login...');
+        const acct = await runCmd('az', ['account', 'show', '--output', 'json']);
+        if (acct.code !== 0) {
+            return { ok: false, error: 'Azure CLI not logged in. Run "az login" first.', steps };
+        }
+        try {
+            const account = JSON.parse(acct.stdout);
+            tid = tid || account.tenantId;
+            sid = sid || account.id;
+        } catch {
+            return { ok: false, error: 'Could not parse Azure account info.', steps };
+        }
+    }
+    steps.push(`✅ Using subscription=${sid}, tenant=${tid}`);
+
+    // Step 2: Create a fresh App Registration -> AZURE_CLIENT_ID.
+    const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
+    steps.push(`Creating App Registration: ${appName}...`);
+    const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
+    if (appResult.code !== 0) {
+        return { ok: false, error: 'Failed to create App Registration: ' + appResult.stderr, steps };
+    }
+    const clientId = appResult.stdout.trim();
+    steps.push(`✅ App Registration created: ${clientId}`);
+
+    // Step 3: Create the Service Principal (role assignments/OIDC resolve to it).
+    steps.push('Creating Service Principal...');
+    const spResult = await runCmd('az', ['ad', 'sp', 'create', '--id', clientId]);
+    if (spResult.code !== 0 && !spResult.stderr.includes('already exists')) {
+        const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
+        if (spShow.code !== 0) steps.push('⚠️ Could not create/find Service Principal: ' + spResult.stderr);
+    }
+    steps.push('✅ Service Principal ready');
+
+    // Step 4: Federated credential — establishes GitHub OIDC trust for this env.
+    steps.push('Creating federated credential for GitHub OIDC...');
+    const fedParams = JSON.stringify({
+        name: `github-actions-${envName}`,
+        issuer: 'https://token.actions.githubusercontent.com',
+        subject: `repo:${targetRepo}:environment:${envName}`,
+        audiences: ['api://AzureADTokenExchange']
+    });
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const fedTmpFile = join(tmpdir(), 'fed-cred-' + Date.now() + '.json');
+    writeFileSync(fedTmpFile, fedParams);
+    const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
+    try { unlinkSync(fedTmpFile); } catch {}
+    if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
+        steps.push('⚠️ Federated credential warning: ' + fedResult.stderr);
+    } else {
+        steps.push('✅ Federated credential created');
+    }
+
+    // Step 5: Contributor on the resource group (deploy + AKS credential access).
+    if (resourceGroup) {
+        steps.push(`Assigning Contributor role on ${resourceGroup}...`);
+        const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${sid}/resourceGroups/${resourceGroup}`, '--output', 'none']);
+        if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
+            steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
+        } else {
+            steps.push('✅ Contributor role assigned');
+        }
+    } else {
+        steps.push('⚠️ No resource group provided; skipped Contributor role assignment.');
+    }
+
+    return { ok: true, clientId, tenantId: tid, subscriptionId: sid, appName, steps };
+}
+
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
@@ -288,103 +387,42 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                function runCmd(cmd, args) {
-                    return new Promise((resolve) => {
-                        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
-                            resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
-                        });
-                    });
-                }
+                const result = await ensureAzureOidcCredentials({
+                    targetRepo,
+                    envName,
+                    resourceGroup,
+                    subscriptionId: data.subscriptionId || '',
+                    tenantId: data.tenantId || ''
+                });
 
-                const steps = [];
-
-                // Step 1: Get account info — use provided values or fall back to az CLI
-                let tenantId = data.tenantId || '';
-                let subscriptionId = data.subscriptionId || '';
-
-                if (!tenantId || !subscriptionId) {
-                    steps.push('Checking Azure CLI login...');
-                    const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
-                    if (acctResult.code !== 0) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Azure CLI not logged in. Run "az login" first.', steps }));
-                        return;
-                    }
-                    const account = JSON.parse(acctResult.stdout);
-                    tenantId = tenantId || account.tenantId;
-                    subscriptionId = subscriptionId || account.id;
-                }
-                steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
-
-                // Step 2: Create a fresh App Registration. We always auto-create
-                // new credentials rather than reusing an existing Client ID.
-                const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
-                steps.push(`Creating App Registration: ${appName}...`);
-                const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
-                if (appResult.code !== 0) {
+                if (!result.ok) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
+                    res.end(JSON.stringify({ error: result.error, steps: result.steps }));
                     return;
                 }
-                const clientId = appResult.stdout.trim();
-                steps.push(`✅ App Registration created: ${clientId}`);
 
-                // Step 3: Create Service Principal
-                steps.push('Creating Service Principal...');
-                const spResult = await runCmd('az', ['ad', 'sp', 'create', '--id', clientId]);
-                if (spResult.code !== 0 && !spResult.stderr.includes('already exists')) {
-                    // SP might already exist, try to get it
-                    const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
-                    if (spShow.code !== 0) {
-                        steps.push('⚠️ Could not create/find Service Principal: ' + spResult.stderr);
-                    }
-                }
-                steps.push('✅ Service Principal ready');
-
-                // Step 4: Create Federated Credential for GitHub Actions OIDC
-                steps.push('Creating federated credential for GitHub OIDC...');
-                const fedParams = JSON.stringify({
-                    name: `github-actions-${envName}`,
-                    issuer: 'https://token.actions.githubusercontent.com',
-                    subject: `repo:${targetRepo}:environment:${envName}`,
-                    audiences: ['api://AzureADTokenExchange']
-                });
-                const { writeFileSync, unlinkSync } = await import("node:fs");
-                const { tmpdir } = await import("node:os");
-                const { join } = await import("node:path");
-                const fedTmpFile = join(tmpdir(), 'fed-cred-' + Date.now() + '.json');
-                writeFileSync(fedTmpFile, fedParams);
-                const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
-                try { unlinkSync(fedTmpFile); } catch {}
-                if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Federated credential warning: ' + fedResult.stderr);
-                } else {
-                    steps.push('✅ Federated credential created');
-                }
-
-                // Step 5: Assign Contributor role on the resource group
-                steps.push(`Assigning Contributor role on ${resourceGroup}...`);
-                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
-                if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
-                } else {
-                    steps.push('✅ Contributor role assigned');
-                }
+                // Cache in-session so a subsequent environment creation reuses these
+                // credentials instead of provisioning a second App Registration.
+                sharedCredentials.azure = {
+                    ...(sharedCredentials.azure || {}),
+                    clientId: result.clientId,
+                    tenantId: result.tenantId,
+                    subscriptionId: result.subscriptionId
+                };
 
                 // Return all credentials for the environment setup
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({
                     success: true,
-                    clientId,
-                    tenantId,
-                    subscriptionId,
+                    clientId: result.clientId,
+                    tenantId: result.tenantId,
+                    subscriptionId: result.subscriptionId,
                     resourceGroup,
                     cluster: clusterName,
-                    appName,
-                    steps
+                    appName: result.appName,
+                    steps: result.steps
                 }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
@@ -466,11 +504,45 @@ function createRequestHandler(instanceId) {
                 const awsCreds = sharedCredentials.aws || {};
 
                 if (provider === 'azure') {
-                    const clientId = data.clientId || azureCreds.clientId || '';
-                    const tenantId = data.tenantId || azureCreds.tenantId || '';
-                    const subscriptionId = data.subscriptionId || azureCreds.subscriptionId || '';
+                    let clientId = data.clientId || azureCreds.clientId || '';
+                    let tenantId = data.tenantId || azureCreds.tenantId || '';
+                    let subscriptionId = data.subscriptionId || azureCreds.subscriptionId || '';
                     const rg = data.resourceGroup || '';
                     const k8s = data.cluster || '';
+
+                    // If no Client ID is available, provision the Azure AD identity
+                    // (App Registration -> Service Principal -> federated credential
+                    // -> Contributor role) on the fly so the environment is deploy-
+                    // ready without a separate "Auto-create credentials" click. If a
+                    // Client ID was already supplied (manual entry or a prior auto-
+                    // setup) we reuse it and skip generation to avoid duplicate apps.
+                    if (!clientId) {
+                        steps.push('No Azure Client ID supplied — generating OIDC credentials...');
+                        const cred = await ensureAzureOidcCredentials({
+                            targetRepo,
+                            envName,
+                            resourceGroup: rg,
+                            subscriptionId,
+                            tenantId
+                        });
+                        for (const s of cred.steps) steps.push(s);
+                        if (!cred.ok) {
+                            res.setHeader("Content-Type", "application/json");
+                            res.writeHead(400);
+                            res.end(JSON.stringify({ error: cred.error || 'Failed to generate Azure credentials.', steps }));
+                            return;
+                        }
+                        clientId = cred.clientId;
+                        tenantId = cred.tenantId;
+                        subscriptionId = cred.subscriptionId;
+                        // Cache in-session so re-runs reuse the same App Registration.
+                        sharedCredentials.azure = {
+                            ...(sharedCredentials.azure || {}),
+                            clientId,
+                            tenantId,
+                            subscriptionId
+                        };
+                    }
 
                     if (clientId) await runGh(['variable', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
                     if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
