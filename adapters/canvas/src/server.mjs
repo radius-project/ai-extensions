@@ -1160,6 +1160,7 @@ function createRequestHandler(instanceId) {
                     entry.state.generatedContent = content;
                     entry.state.generateTargetRepo = repo;
                     entry.state.generateBranch = branch;
+                    entry.state.generatedWarning = "";
                 }
 
                 // Preview mode: return the generated content without committing,
@@ -1174,18 +1175,23 @@ function createRequestHandler(instanceId) {
                 // Persist generated Radius files on the selected branch. For the
                 // current Copilot session branch this writes to the local worktree;
                 // remote branches still use GitHub Contents API fallback.
+                let persistWarning = "";
                 try {
                     await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: () => {} });
                 } catch (e) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: e.message }));
-                    return;
+                    if (accessForSelection(entry, repo, branch).useWorkspace) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: e.message }));
+                        return;
+                    }
+                    persistWarning = e.message || "Could not persist generated files to the selected remote branch.";
+                    if (entry) entry.state.generatedWarning = persistWarning;
                 }
 
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
-                res.end(JSON.stringify({ reload: true }));
+                res.end(JSON.stringify({ reload: true, warning: persistWarning || undefined }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
@@ -1219,6 +1225,7 @@ function createRequestHandler(instanceId) {
                         branches.unshift({ name: entry.state.workspaceBranch, sha: "worktree" });
                     }
                     result.branches = branches;
+                    result.workspaceBranch = entry.state.workspaceBranch;
                 }
                 if (entry && result.branches) {
                     entry.state.branches = result.branches.map(b => b.name);

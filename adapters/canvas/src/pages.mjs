@@ -273,6 +273,7 @@ export function appGeneratePage(state) {
   <button id="gen-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Regenerate</button>
 </div>
 <div class="status success">Successfully generated application model for ${escapeHtml(targetRepo)}</div>
+${state.generatedWarning ? `<div class="status info">Generated content is available below, but it could not be committed to the selected remote branch: ${escapeHtml(state.generatedWarning)}</div>` : ''}
 <h2>Generated app.bicep</h2>
 <pre>${escapeHtml(state.generatedContent)}</pre>
 <script>

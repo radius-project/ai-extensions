@@ -39,6 +39,7 @@ function radiusPopulateBranches(selectIds, repo, defaults) {
         .then(function(data) {
             if (data.error) return;
             var branches = data.branches || [];
+            var workspaceBranch = data.workspaceBranch || '';
             for (var i = 0; i < selectIds.length; i++) {
                 var sel = document.getElementById(selectIds[i]);
                 if (!sel) continue;
@@ -52,7 +53,7 @@ function radiusPopulateBranches(selectIds, repo, defaults) {
                     if (branches[j].name === defaultVal) { o.selected = true; found = true; }
                     sel.appendChild(o);
                 }
-                if (!found && defaultVal) {
+                if (!found && defaultVal && defaultVal === workspaceBranch) {
                     var local = document.createElement('option');
                     local.value = defaultVal;
                     local.textContent = defaultVal + ' (worktree)';

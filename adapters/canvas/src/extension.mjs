@@ -247,6 +247,8 @@ const session = await joinSession({
                     entry.state.contextRepo = ctx.input.repo;
                     if (ctx.input.repo === workspace.workspaceRepo) {
                         entry.state.contextBranch = workspace.workspaceBranch;
+                    } else {
+                        entry.state.contextBranch = ctx.input?.branch || "";
                     }
                 } else if (!entry.state.contextRepo && session.workspacePath) {
                     // Try to detect repo from workspace git remote
@@ -257,9 +259,9 @@ const session = await joinSession({
                                 resolve(stdout.trim());
                             });
                         });
-                        const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/.]+)/);
+                        const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/]+)(?:\.git)?$/i);
                         if (match) {
-                            entry.state.contextRepo = match[1].replace(/\.git$/, '');
+                            entry.state.contextRepo = match[1].replace(/\.git$/i, '');
                         }
                     } catch (e) { /* ignore */ }
                 }
