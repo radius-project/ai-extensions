@@ -17,8 +17,8 @@ This skill supports **two execution modes**. Pick one based on where you are run
 | --- | --- | --- |
 | **Choose when** | You are operating inside the Radius Copilot canvas and want a guided per-provider wizard with live verification status. | You are running headless — automation, scripts, CI, or an agent with no canvas — and want to set the environment variables and dispatch verification directly. |
 | **How you set variables** | Fill the create-environment form; the canvas writes them as GitHub Environment variables. | `gh variable set <NAME> --env <env-name> --body <value>` for each variable below. |
-| **How you verify** | The canvas commits `.github/workflows/verify-<provider>.yml` and dispatches it, streaming status live. | Ensure `verify-<provider>.yml` is committed, then `gh workflow run verify-<provider>.yml` and follow with `gh run watch`. |
-| **Auth** | Uses the user's PAT in the extension's storage (auto-seeded from `gh auth token`); needs `workflow` scope to commit the verify workflow. | A logged-in `gh` CLI / token with `actions: write` **and** `workflow` scope to push the verify workflow. |
+| **How you verify** | The canvas commits `.github/workflows/radius-verify-credentials.yml` and dispatches it, streaming status live. | Ensure `radius-verify-credentials.yml` is committed, then `gh workflow run radius-verify-credentials.yml -f environment=<env-name>` and follow with `gh run watch`. |
+| **Auth** | Uses the user's PAT in the extension's storage (auto-seeded from `gh auth token`); needs `workflow` scope when committing workflow files via the GitHub Contents API. | A logged-in `gh` CLI / token with permission to set environment variables and trigger workflow runs; if you commit/update workflow files via API, it also needs `workflow` scope (classic PAT) or the fine-grained equivalent. |
 
 Both modes produce the **same** result: a GitHub Environment carrying the provider variables, verified end-to-end by the provider's `Radius - Verify Credentials` workflow. Only the data entry and dispatch differ.
 
