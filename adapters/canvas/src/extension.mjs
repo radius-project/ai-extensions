@@ -243,13 +243,11 @@ const session = await joinSession({
                 const workspace = await workspaceState();
                 Object.assign(entry.state, workspace);
                 // If a repo is passed in input, set it as context for all pages
-                if (ctx.input?.repo) {
-                    entry.state.contextRepo = ctx.input.repo;
-                    if (ctx.input.repo === workspace.workspaceRepo) {
-                        entry.state.contextBranch = workspace.workspaceBranch;
-                    } else {
-                        entry.state.contextBranch = ctx.input?.branch || "";
-                    }
+                if (ctx.input.repo === workspace.workspaceRepo) {
+                    entry.state.contextBranch = workspace.workspaceBranch;
+                } else {
+                    entry.state.contextBranch = ctx.input?.branch || "main";
+                }
                 } else if (!entry.state.contextRepo && session.workspacePath) {
                     // Try to detect repo from workspace git remote
                     try {
