@@ -21,6 +21,7 @@ import {
     detectWorkspaceContext,
     fetchWorkspaceBicep,
     isWorkspaceSelection,
+    parseRepoFromRemote,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
@@ -243,7 +244,7 @@ const session = await joinSession({
                 const workspace = await workspaceState();
                 Object.assign(entry.state, workspace);
                 // If a repo is passed in input, set it as context for all pages
-                if (ctx.input.repo) {
+                if (ctx.input?.repo) {
                     entry.state.contextRepo = ctx.input.repo;
                     if (ctx.input.repo === workspace.workspaceRepo) {
                         entry.state.contextBranch = workspace.workspaceBranch;
@@ -259,9 +260,9 @@ const session = await joinSession({
                                 resolve(stdout.trim());
                             });
                         });
-                        const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/]+)(?:\.git)?$/i);
-                        if (match) {
-                            entry.state.contextRepo = match[1].replace(/\.git$/i, '');
+                        const repo = parseRepoFromRemote(remoteUrl);
+                        if (repo) {
+                            entry.state.contextRepo = repo;
                         }
                     } catch (e) { /* ignore */ }
                 }
