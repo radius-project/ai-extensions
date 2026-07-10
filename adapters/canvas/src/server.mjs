@@ -105,7 +105,7 @@ async function fetchBicepForSelection(entry, repo, branch) {
     const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
         const local = await fetchWorkspaceBicep(entry.state, repo, access.branch);
-        if (local) return local;
+        if (local !== null) return local;
     }
     return await fetchBicepFromRepo(github, repo, access.branch);
 }
