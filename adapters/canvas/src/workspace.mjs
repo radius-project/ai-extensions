@@ -75,13 +75,21 @@ export async function detectWorkspaceContext(session) {
     };
 }
 
+// Returns true when the given branch matches the workspace branch.
+// Requires workspaceBranch to be set on state; returns false when no workspace
+// branch is available. A falsy branch arg means "unspecified" and matches
+// whatever workspaceBranch is set to (caller defaults to workspaceBranch).
 function branchMatches(state, branch) {
-    const workspaceBranch = state?.workspaceBranch || state?.contextBranch || "";
+    const workspaceBranch = state?.workspaceBranch || "";
     return !!workspaceBranch && (!branch || branch === workspaceBranch);
 }
 
+// Returns true when the given repo matches the workspace repo.
+// Requires workspaceRepo to be set on state; returns false when no workspace
+// repo is available. A falsy repo arg means "unspecified" and matches
+// whatever workspaceRepo is set to (caller defaults to workspaceRepo).
 function repoMatches(state, repo) {
-    const workspaceRepo = state?.workspaceRepo || state?.contextRepo || "";
+    const workspaceRepo = state?.workspaceRepo || "";
     return !!workspaceRepo && (!repo || repo === workspaceRepo);
 }
 

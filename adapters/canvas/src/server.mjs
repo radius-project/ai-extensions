@@ -93,8 +93,11 @@ function accessForSelection(entry, repo, branch) {
     };
 }
 
+// Unlike repoMatches() in workspace.mjs, this helper always receives a
+// non-empty repo string and performs strict equality only (no falsy-arg
+// shortcut), so the workspace.mjs version is not reused here.
 function repoMatchesWorkspace(state, repo) {
-    const workspaceRepo = state?.workspaceRepo || state?.contextRepo || "";
+    const workspaceRepo = state?.workspaceRepo || "";
     return !!workspaceRepo && repo === workspaceRepo;
 }
 
