@@ -42,8 +42,19 @@ Per provider: collect the environment's cloud settings as GitHub Actions variabl
 
 ### Azure
 
-1. **Inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, AKS cluster name. Written as GitHub Environment variables (canvas form, or `gh variable set`).
+1. **Inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, AKS cluster name. Written as GitHub Environment variables (canvas form, or `gh variable set`). If no App (client) ID is supplied, the canvas auto-provisions the Azure AD identity when the environment is created — see below.
 2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-azure.yml` and dispatches it. The workflow runs `azure/login` via OIDC and `az account show`, then `az aks get-credentials` + `kubelogin convert-kubeconfig` + `kubectl cluster-info` to confirm AKS access. Status is polled and shown live in the canvas (or followed with `gh run watch` in CLI mode).
+
+#### Azure credential auto-generation (canvas)
+
+When an environment is created without an existing App (client) ID, the canvas provisions the full OIDC identity automatically (equivalent to the **⚡ Auto-create credentials** button, run as part of environment creation). All four Azure AD artifacts below are required for a keyless deploy — none is optional:
+
+- **App Registration** — yields `AZURE_CLIENT_ID`, the workload identity GitHub Actions authenticates as.
+- **Service Principal** — the object that role assignments and the OIDC token exchange resolve to.
+- **Federated credential** — establishes GitHub→Azure trust; subject is exactly `repo:<owner>/<repo>:environment:<env-name>`, audience `api://AzureADTokenExchange`.
+- **Contributor role** on the resource group — lets the deploy workflow provision AKS/managed resources and run `az aks get-credentials`.
+
+If a client ID is already provided (manual entry or a prior auto-create run), generation is skipped and the existing identity is reused. In CLI mode, run the same `az` steps manually (see `radius-core/src/platforms/azure.ts`).
 
 ## How to invoke
 
