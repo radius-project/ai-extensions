@@ -253,6 +253,7 @@ document.getElementById('btn-aws').addEventListener('click', function() {
 
 export function appGeneratePage(state) {
     const targetRepo = state?.generateTargetRepo || state?.contextRepo || '';
+    const targetBranch = state?.generateBranch || state?.contextBranch || 'main';
     if (state && state.generatedContent) {
         return pageShell("Generated app.bicep", `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>✓ app.bicep Generated</h1>
@@ -276,14 +277,15 @@ export function appGeneratePage(state) {
 <pre>${escapeHtml(state.generatedContent)}</pre>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
-radiusSetupRepoBranch('gen-repo', 'gen-branch', CONTEXT_REPO, 'main');
+var CONTEXT_BRANCH = '${escapeHtml(targetBranch)}';
+radiusSetupRepoBranch('gen-repo', 'gen-branch', CONTEXT_REPO, CONTEXT_BRANCH);
 document.getElementById('gen-btn').addEventListener('click', function() {
     var repo = document.getElementById('gen-repo').value.trim();
     if (!repo) return;
     this.textContent = 'Generating...';
     this.disabled = true;
     var btn = this;
-    fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value || 'main'}) })
+    fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value || CONTEXT_BRANCH}) })
         .then(function(r) { return r.json(); })
         .then(function(d) { btn.textContent = 'Regenerate'; btn.disabled = false; if (d.reload) window.location.reload(); });
 });
@@ -336,7 +338,7 @@ document.getElementById('gen-btn').addEventListener('click', function() {
         })
         .catch(function() { btn.textContent = 'Generate app.bicep'; btn.disabled = false; });
 });
-radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', 'main');
+radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', '${escapeHtml(targetBranch)}');
 <\/script>`);
 }
 
@@ -373,7 +375,7 @@ export function graphPage(state) {
     const resources = state?.graphResources || [];
     const resourcesJson = JSON.stringify(resources);
     const targetRepo = state?.graphTargetRepo || state?.contextRepo || '';
-    const graphBranch = state?.graphBranch || 'main';
+    const graphBranch = state?.graphBranch || state?.contextBranch || 'main';
 
     if (resources.length === 0) {
         return pageShell("Application Graph", `
@@ -566,7 +568,7 @@ export function plannedGraphPage(state) {
     const targetRepo = state?.plannedRepo || state?.graphTargetRepo || state?.contextRepo || '';
     const provider = state?.plannedProvider || state?.deployProvider || 'azure';
     const plannedResources = state?.plannedResources || [];
-    const graphBranch = state?.plannedBranch || 'main';
+    const graphBranch = state?.plannedBranch || state?.contextBranch || 'main';
     const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
     const bicepGenerated = !!state?.plannedBicepGenerated;
 
@@ -1191,7 +1193,7 @@ setupCombo('aws-vpc-select', 'aws-vpc-custom');
 setupCombo('aws-subnets-select', 'aws-subnets-custom');
 
 // Deploy repo + branch selects — wired via the shared repo/branch library
-radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', 'main');
+radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(state?.contextBranch || 'main')}');
 
 // Keep the hidden target-repo input in sync for deploy submission
 (function syncTargetRepo() {
@@ -1509,7 +1511,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
 export function deployingPage(state) {
     const resources = state?.deployingResources || state?.plannedResources || [];
     const targetRepo = state?.deployingRepo || state?.deployParams?.targetRepo || state?.plannedRepo || state?.contextRepo || '';
-    const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || 'main';
+    const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || state?.contextBranch || 'main';
     const provider = state?.deployingProvider || state?.deployParams?.provider || state?.plannedProvider || 'azure';
     const logs = state?.deployLogs || [];
     const deployStatus = state?.deployStatus || 'pending';

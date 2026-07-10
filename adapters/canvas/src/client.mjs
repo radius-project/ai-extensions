@@ -48,11 +48,17 @@ function radiusPopulateBranches(selectIds, repo, defaults) {
                 for (var j = 0; j < branches.length; j++) {
                     var o = document.createElement('option');
                     o.value = branches[j].name;
-                    o.textContent = branches[j].name + ' (' + branches[j].sha.slice(0,7) + ')';
+                    o.textContent = branches[j].name + (branches[j].sha === 'worktree' ? ' (worktree)' : ' (' + branches[j].sha.slice(0,7) + ')');
                     if (branches[j].name === defaultVal) { o.selected = true; found = true; }
                     sel.appendChild(o);
                 }
-                if (!found && branches.length > 0) {
+                if (!found && defaultVal) {
+                    var local = document.createElement('option');
+                    local.value = defaultVal;
+                    local.textContent = defaultVal + ' (worktree)';
+                    local.selected = true;
+                    sel.insertBefore(local, sel.firstChild);
+                } else if (!found && branches.length > 0) {
                     sel.selectedIndex = 0;
                 }
             }
