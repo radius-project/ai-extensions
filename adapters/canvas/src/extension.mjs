@@ -375,6 +375,17 @@ Key rules:
 - Platform-agnostic: recipes handle deployment specifics
 - NEVER use Applications.Core/*, Applications.Datastores/*, or Applications.Dapr/*
 
+Radius.Compute/containerImages build.source (CRITICAL):
+- Images are built in-cluster by a BuildKit sidecar, so build.source MUST be a
+  'git::https://...' URL that BuildKit can clone. NEVER use a local filesystem
+  path (e.g. '/app', '/app/demo', '.') — the runner's filesystem is not visible
+  to the BuildKit pod and the build fails with "invalid local: ... no such file".
+- Use the application's own repository: source: 'git::https://github.com/<owner>/<repo>.git'
+- If the Dockerfile is in a subdirectory, append it as a go-getter subdir and
+  (optionally) pin a ref: 'git::https://github.com/<owner>/<repo>.git//<subdir>?ref=<branch-or-sha>'
+- Set build.dockerfile only when the Dockerfile is not named 'Dockerfile' at the
+  build context root (it defaults to 'Dockerfile').
+
 Recipe resolution for planned graph:
 1. Check radius-project/resource-types-contrib for recipes under <Category>/<typeName>/recipes/
 2. If not found for target platform, check other platforms

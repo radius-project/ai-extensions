@@ -41,7 +41,7 @@ If anything is ambiguous, ask the user before writing.
 | MySQL | `Radius.Data/mySqlDatabases` | AWS recipe (needs VPC) or Azure recipe (needs RG) — **no k8s/terraform recipe**, only bicep |
 | Volume | `Radius.Compute/persistentVolumes` | |
 | Route | `Radius.Compute/routes` | Public HTTP ingress |
-| Secret | `Radius.Security/secrets` | |
+| Secret | `Radius.Security/secrets` | App-scoped. Also used for private-registry push creds — name must match the recipe pack's `registrySecretName` (`ghcr-registry-creds`) so `containerImages` can read it |
 
 ## Template structure
 
@@ -59,6 +59,30 @@ param application string
 @description('Container image registry (set by deploy workflow vars).')
 param registry string = ''
 
+@description('Registry username for the image push (supplied by the deploy workflow).')
+param registryUsername string = ''
+@secure()
+@description('Registry password/token for the image push (supplied by the deploy workflow).')
+param registryPassword string = ''
+
+// Registry credentials for the containerImages recipe to authenticate its image
+// push. Application-scoped so the secrets recipe materializes a Kubernetes Secret
+// named 'ghcr-registry-creds' into THIS app's namespace — the same namespace the
+// containerImages recipe reads from (context.runtime.kubernetes.namespace). The
+// name MUST match the recipe pack's registrySecretName, which the deploy workflow
+// sets to 'ghcr-registry-creds'. Omit this whole resource for public/unauth registries.
+resource registryCreds 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'ghcr-registry-creds'
+  properties: {
+    environment: environment
+    application: application
+    data: {
+      username: { value: registryUsername }
+      password: { value: registryPassword }
+    }
+  }
+}
+
 // Image build
 resource appImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   name: '${appName}-image'
@@ -69,6 +93,8 @@ resource appImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
     dockerfile: 'Dockerfile'
     registry: registry
   }
+  // Ensure the credential Secret is materialized before the recipe's image push.
+  dependsOn: [ registryCreds ]
 }
 
 // Container

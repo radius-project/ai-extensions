@@ -1061,7 +1061,6 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.subscriptionId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
       </div>
     </div>
-    <input type="hidden" id="az-client-id" value="${escapeHtml(oidcAzure?.clientId || '')}" />
     <button id="btn-verify-azure" style="padding:6px 14px; background:#1f883d; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">✓ Verify Azure Login</button>
     <div id="verify-azure-status" style="margin-top:8px; font-size:12px; display:none;"></div>
   </div>
@@ -1096,9 +1095,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login.
+      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated credentials are passed straight to the GitHub environment and deploy workflows.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">⚡ Auto-create credentials</button>
+    <input id="az-client-id" type="hidden" value="${escapeHtml(oidcAzure?.clientId || '')}" />
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
   </div>
 </div>
@@ -1403,8 +1403,7 @@ document.getElementById('btn-auto-setup').addEventListener('click', function() {
             resourceGroup: resourceGroup,
             cluster: cluster,
             subscriptionId: document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '',
-            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : '',
-            clientId: document.getElementById('az-client-id') ? document.getElementById('az-client-id').value.trim() : ''
+            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : ''
         })
     }).then(function(r) { return r.json(); }).then(function(data) {
         btn.disabled = false;
@@ -1460,6 +1459,10 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
 
     // First create the GitHub environment with secrets, variables, and workflows
     var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
+    envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
+    // Application parameters are not collected from the UI. The server parses the
+    // app.bicep only to auto-generate values for required params without a Bicep
+    // default (e.g. the app's @secure() password) and inlines the rest.
     if (provider === 'azure') {
         envData.clientId = document.getElementById('az-client-id').value.trim();
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();

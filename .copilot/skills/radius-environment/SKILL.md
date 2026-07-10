@@ -18,17 +18,15 @@ Create a GitHub Environment configured with the cloud credentials (variables + s
 
 ## Flow
 
-The canvas drives a 2-step wizard per provider:
+The canvas drives a short wizard per provider: collect the environment's cloud settings as GitHub Actions variables, then commit and dispatch the provider's verification workflow to confirm they work end to end.
 
 ### AWS
-1. **Form inputs**: env name, IAM Role ARN, AWS region, account ID, EKS cluster name, optional VPC + subnet IDs (required if the app uses `Radius.Data/mySqlDatabases`).
-2. **Credential verification**: commits/updates `.github/workflows/radius-verify-credentials.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`. Status is polled and shown live.
-3. **Dependency discovery**: same workflow then runs `aws eks describe-cluster` etc. and writes the kubeconfig + discovered values back as env vars/secrets.
+1. **Form inputs**: env name, IAM Role ARN, AWS region, account ID, EKS cluster name, optional VPC + subnet IDs (required if the app uses `Radius.Data/mySqlDatabases`). These are written as GitHub Environment variables.
+2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`, then runs `aws eks update-kubeconfig` for the EKS cluster and `kubectl cluster-info` to confirm cluster access. Status is polled and shown live in the canvas.
 
 ### Azure
-1. **Form inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, optional AKS cluster name.
-2. **Credential verification**: dispatches the same verify workflow which runs `az login` via OIDC and `az account show`.
-3. **Dependency discovery**: writes `RADIUS_K8S_CLUSTER`, `AZURE_RESOURCE_GROUP`, etc. into the env.
+1. **Form inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, AKS cluster name. These are written as GitHub Environment variables.
+2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-azure.yml` and dispatches it. The workflow runs `azure/login` via OIDC and `az account show`, then `az aks get-credentials` + `kubelogin convert-kubeconfig` + `kubectl cluster-info` to confirm AKS access. Status is polled and shown live in the canvas.
 
 ## How to invoke
 
@@ -54,16 +52,35 @@ open_canvas({
 
 The popup lands directly on the create-environment form for the chosen provider. No navigation needed.
 
-## Required secrets / variables on the GitHub Environment
+## Required variables on the GitHub Environment
 
-**AWS**:
-- secrets: `AWS_IAM_ROLE_ARN`; vars: `AWS_REGION`, `AWS_ACCOUNT_ID`, `RADIUS_K8S_CLUSTER`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
+The verification workflow reads only GitHub Actions **variables** (`vars`), never secrets. OIDC eliminates the need to store long-lived cloud credentials.
 
-- secrets: _(none — Azure auth uses OIDC workload identity)_; vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `RADIUS_K8S_CLUSTER`
+**AWS** — read by `verify-aws.yml`:
+- `AWS_ROLE_ARN` — ARN of the IAM role the runner assumes via OIDC
+- `AWS_REGION` — AWS region (e.g. `us-west-2`)
+- `AWS_EKS_CLUSTER_NAME` — name of the EKS cluster the workflow verifies access to
+
+**AWS** — also set from the form for deploys (not read by verification):
+- `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
+
+**Azure** — read by `verify-azure.yml`:
+- `AZURE_CLIENT_ID` — AAD application (client) ID
+- `AZURE_TENANT_ID` — Azure tenant ID
+- `AZURE_SUBSCRIPTION_ID` — Azure subscription ID
+- `AZURE_RESOURCE_GROUP` — resource group holding the AKS cluster
+- `AZURE_AKS_CLUSTER_NAME` — name of the AKS cluster the workflow verifies access to
+
+The OIDC trust must already exist on the cloud side before the workflow can authenticate (see Prerequisites below).
+
+## Prerequisites on the cloud side
+
+- **Azure:** a federated credential on the AAD app whose subject is exactly `repo:<owner>/<repo>:environment:<environment-name>`, audience `api://AzureADTokenExchange`.
+- **AWS:** an IAM role trust policy that allows `sts:AssumeRoleWithWebIdentity` from `token.actions.githubusercontent.com` with audience `sts.amazonaws.com` and subject `repo:<owner>/<repo>:environment:<environment-name>`.
 
 ## Common errors and fixes
 
-- **`refusing to allow an OAuth App to create or update workflow .github/workflows/radius-verify-credentials.yml without 'workflow' scope`** — the PAT lacks `workflow` scope. Run `gh auth refresh -s workflow` (the extension auto-prefers a `gh auth token` over `$GITHUB_TOKEN`).
+- **`refusing to allow an OAuth App to create or update workflow .github/workflows/verify-<provider>.yml without 'workflow' scope`** — the PAT lacks `workflow` scope. Run `gh auth refresh -s workflow` (the extension auto-prefers a `gh auth token` over `$GITHUB_TOKEN`).
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
 - **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`.
@@ -74,5 +91,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `.github/radius/extension.mjs` — environment creation (`/api/create-environment`) and workflow generation (`generateVerifyWorkflow`, `generateDeployWorkflow`)
-- `.github/radius/extension.mjs` — environment secret/variable writes via `gh secret set ... --env` / `gh variable set ... --env`
+- `.github/radius/extension.mjs` — environment creation (`/api/create-environment`), verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`.
+- The verification workflow templates are the canonical `verify-aws.yml` / `verify-azure.yml` (both named `Radius - Verify Credentials`) hosted in `radius-project/radius` at `.github/extension/`. The extension fetches the matching provider template from there at commit time (with a bundled fallback) and commits it into the target user repo at `.github/workflows/verify-<provider>.yml`, then dispatches it.
