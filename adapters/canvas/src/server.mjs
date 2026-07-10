@@ -444,13 +444,39 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                function runGh(args, stdin) {
+                function runGh(args, stdin, extraOpts) {
                     return new Promise((resolve) => {
-                        const child = cliExec("gh", args, { timeout: 30000 }, (err, stdout, stderr) => {
+                        const child = cliExec("gh", args, { timeout: 30000, ...(extraOpts || {}) }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
                         if (stdin !== undefined) child.stdin?.end(stdin);
                     });
+                }
+
+                // The host often injects GH_TOKEN (an OAuth app token) that lacks the
+                // `workflow` scope, which is required to create/update files under
+                // .github/workflows/ or to dispatch workflows. The user's stored gh
+                // credential (keyring) usually has that scope. For workflow-scoped
+                // commands, run normally first; if it fails while an injected token is
+                // present, retry with GH_TOKEN/GITHUB_TOKEN stripped so gh falls back
+                // to the keyring credential. (A missing `workflow` scope surfaces as
+                // either a 403 "without workflow scope" on updates or a bare 404 on
+                // creates, so we retry on any failure rather than pattern-matching.)
+                function needsWorkflowScope(stderr) {
+                    return /workflow.{0,20}scope/i.test(stderr || '') || /without .?workflow.? scope/i.test(stderr || '');
+                }
+                async function runGhWorkflow(args, stdin) {
+                    const first = await runGh(args, stdin);
+                    if (first.code === 0) return first;
+                    const hasInjectedToken = !!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN);
+                    if (!hasInjectedToken) return first;
+                    const fallbackEnv = { ...process.env };
+                    delete fallbackEnv.GH_TOKEN;
+                    delete fallbackEnv.GITHUB_TOKEN;
+                    const retry = await runGh(args, stdin, { env: fallbackEnv });
+                    // Prefer the retry only if it actually succeeded; otherwise keep the
+                    // original error, which is usually the more meaningful one.
+                    return retry.code === 0 ? retry : first;
                 }
 
                 const steps = [];
@@ -566,15 +592,18 @@ function createRequestHandler(instanceId) {
                 const tmpFile = join(tmpdir(), 'radius-verify-commit-' + Date.now() + '.json');
                 writeFileSync(tmpFile, commitBody);
 
-                const commitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + verifyPath, '--input', tmpFile]);
+                const commitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + verifyPath, '--input', tmpFile]);
                 try { unlinkSync(tmpFile); } catch {}
 
                 if (commitResult.code !== 0) {
                     steps.push('❌ Failed to commit verify-credentials workflow.');
+                    const scopeHint = needsWorkflowScope(commitResult.stderr)
+                        ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+                        : ' Check that you have write access to the repository and that GitHub Actions is enabled.';
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
                     res.end(JSON.stringify({
-                        error: 'Failed to commit the verify-credentials workflow (' + verifyPath + ') to ' + targetRepo + '. ' + ((commitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
+                        error: 'Failed to commit the verify-credentials workflow (' + verifyPath + ') to ' + targetRepo + '. ' + ((commitResult.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint,
                         steps
                     }));
                     return;
@@ -603,15 +632,18 @@ function createRequestHandler(instanceId) {
                     const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
                     writeFileSync(tmpFile2, deployCommitBody);
 
-                    const deployCommitResult = await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
+                    const deployCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
                     try { unlinkSync(tmpFile2); } catch {}
 
                     if (deployCommitResult.code !== 0) {
                         steps.push('❌ Failed to commit deploy workflow ' + fileName + '.');
+                        const scopeHint2 = needsWorkflowScope(deployCommitResult.stderr)
+                            ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+                            : ' Check that you have write access to the repository and that GitHub Actions is enabled.';
                         res.setHeader("Content-Type", "application/json");
                         res.writeHead(200);
                         res.end(JSON.stringify({
-                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + ' Check that you have write access to the repository and that GitHub Actions is enabled.',
+                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint2,
                             steps
                         }));
                         return;
@@ -627,7 +659,7 @@ function createRequestHandler(instanceId) {
                 // Wait briefly for GitHub to index the workflow
                 await new Promise(r => setTimeout(r, 3000));
                 const dispatchedAt = Date.now();
-                const dispatchResult = await runGh(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                const dispatchResult = await runGhWorkflow(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
 
                 let verifyRunUrl = '';
                 let verifyRunId = null;
@@ -643,7 +675,7 @@ function createRequestHandler(instanceId) {
                             steps.push('Verify run: ' + verifyRunUrl);
                         }
                     } catch {}
-                    steps.push('Deploy workflow will auto-trigger after verify-credentials succeeds.');
+                    steps.push('Credentials verification dispatched. Deploy your application from the Environments list when ready.');
                 } else {
                     steps.push('⚠️ Could not dispatch verify workflow (may need to retry): ' + dispatchResult.stderr);
                 }
@@ -975,6 +1007,230 @@ function createRequestHandler(instanceId) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: e.message }));
+            }
+            return;
+        }
+
+        if (pathname === "/api/list-environments" && req.method === "GET") {
+            const repo = url.searchParams.get("repo") || "";
+            const respond = (payload) => {
+                res.setHeader("Content-Type", "application/json");
+                res.setHeader("Cache-Control", "no-store");
+                res.writeHead(200);
+                res.end(JSON.stringify(payload));
+            };
+            if (!repo) { respond({ environments: [] }); return; }
+
+            const gh = (args, timeout = 12000) => new Promise((resolve) => {
+                cliExec("gh", args, { timeout }, (err, stdout) => {
+                    if (err) { resolve(""); return; }
+                    resolve((stdout || "").trim());
+                });
+            });
+
+            try {
+                // 1) List environment names + ids for the repo.
+                const namesRaw = await gh(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[] | (.id|tostring) + \"\\t\" + .name"]);
+                const rows = namesRaw ? namesRaw.split("\n").filter(Boolean).map((l) => {
+                    const tab = l.indexOf("\t");
+                    return tab === -1 ? { id: "", name: l } : { id: l.slice(0, tab), name: l.slice(tab + 1) };
+                }) : [];
+                if (rows.length === 0) { respond({ environments: [] }); return; }
+
+                // 2) For each environment, derive provider (from stored variables)
+                //    and a best-effort status (from the latest deployment state).
+                const environments = await Promise.all(rows.map(async ({ id, name }) => {
+                    const [varsRaw, deployId] = await Promise.all([
+                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]),
+                        gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=1`, "--jq", ".[0].id"]),
+                    ]);
+                    let provider = "";
+                    if (/AZURE_/.test(varsRaw)) provider = "azure";
+                    else if (/AWS_/.test(varsRaw)) provider = "aws";
+
+                    let status = "pending";
+                    if (deployId) {
+                        const state = await gh(["api", `/repos/${repo}/deployments/${deployId}/statuses?per_page=1`, "--jq", ".[0].state"]);
+                        if (state === "success") status = "success";
+                        else if (state === "failure" || state === "error") status = "failed";
+                        else if (state) status = "pending";
+                    }
+                    const webUrl = id
+                        ? `https://github.com/${repo}/settings/environments/${id}/edit`
+                        : `https://github.com/${repo}/settings/environments`;
+                    return { name, provider, status, webUrl };
+                }));
+
+                respond({ environments });
+            } catch (e) {
+                respond({ environments: [], error: e.message });
+            }
+            return;
+        }
+
+        if (pathname === "/api/list-applications" && req.method === "GET") {
+            const repo = url.searchParams.get("repo") || "";
+            const respond = (payload) => {
+                res.setHeader("Content-Type", "application/json");
+                res.setHeader("Cache-Control", "no-store");
+                res.writeHead(200);
+                res.end(JSON.stringify(payload));
+            };
+            if (!repo) { respond({ applications: [] }); return; }
+            const gh = (args, timeout = 12000) => new Promise((resolve) => {
+                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
+            });
+            try {
+                // The application name is defined in the repo's app.bicep. Try to
+                // read it; otherwise fall back to the repo's short name. A repo
+                // hosts a single Radius application in this model.
+                let appName = repo.split("/").pop() || repo;
+                const entry = servers.get(instanceId);
+                const branch = entry?.state?.contextBranch || entry?.state?.plannedBranch || entry?.state?.graphBranch || "main";
+                for (const p of [".radius/app.bicep", "app.bicep"]) {
+                    const raw = await gh(["api", `/repos/${repo}/contents/${p}?ref=${branch}`, "--jq", ".content"]);
+                    if (!raw) continue;
+                    let decoded = "";
+                    try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
+                    const m = decoded.match(/application\s+['"]([^'"]+)['"]/) || decoded.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
+                    if (m) { appName = m[1]; break; }
+                }
+                respond({ applications: [{ name: appName }] });
+            } catch (e) {
+                respond({ applications: [{ name: repo.split("/").pop() || repo }], error: e.message });
+            }
+            return;
+        }
+
+        if (pathname === "/api/list-deployments" && req.method === "GET") {
+            const repo = url.searchParams.get("repo") || "";
+            const respond = (payload) => {
+                res.setHeader("Content-Type", "application/json");
+                res.setHeader("Cache-Control", "no-store");
+                res.writeHead(200);
+                res.end(JSON.stringify(payload));
+            };
+            if (!repo) { respond({ deployments: [] }); return; }
+            const gh = (args, timeout = 12000) => new Promise((resolve) => {
+                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
+            });
+            const appName = repo.split("/").pop() || repo;
+            try {
+                // A "deployment" is the application deployed into a GitHub
+                // Environment. List every deployment record for the repo and
+                // collapse to the latest per environment, mapping its GitHub
+                // deployment-status state to our success/pending/failed model.
+                const raw = await gh(["api", "--paginate", `/repos/${repo}/deployments?per_page=100`, "--jq", ".[] | (.id|tostring) + \"\\t\" + (.environment // \"\")"]);
+                const rows = raw ? raw.split("\n").filter(Boolean).map((l) => {
+                    const t = l.indexOf("\t");
+                    return t === -1 ? { id: l, environment: "" } : { id: l.slice(0, t), environment: l.slice(t + 1) };
+                }) : [];
+                // Latest deployment id per environment (list is newest-first).
+                const latestByEnv = new Map();
+                for (const r of rows) {
+                    if (!r.environment) continue;
+                    if (!latestByEnv.has(r.environment)) latestByEnv.set(r.environment, r.id);
+                }
+                const deployments = await Promise.all(Array.from(latestByEnv.entries()).map(async ([environment, id]) => {
+                    const [state, varsRaw] = await Promise.all([
+                        gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", ".[0].state"]),
+                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]),
+                    ]);
+                    let status = "pending";
+                    if (state === "success") status = "success";
+                    else if (state === "failure" || state === "error") status = "failed";
+                    let provider = "";
+                    if (/AZURE_/.test(varsRaw)) provider = "azure";
+                    else if (/AWS_/.test(varsRaw)) provider = "aws";
+                    return { app: appName, environment, provider, status, deploymentId: id };
+                }));
+                respond({ deployments });
+            } catch (e) {
+                respond({ deployments: [], error: e.message });
+            }
+            return;
+        }
+
+        if (pathname === "/api/delete-deployment" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            const respond = (code, payload) => {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(code);
+                res.end(JSON.stringify(payload));
+            };
+            try {
+                const data = JSON.parse(body || "{}");
+                const repo = data.repo || "";
+                const environment = data.environment || "";
+                if (!repo || !environment) { respond(400, { error: "repo and environment are required." }); return; }
+
+                const gh = (args, timeout = 20000) => new Promise((resolve) => {
+                    cliExec("gh", args, { timeout }, (err, stdout, stderr) => {
+                        resolve({ code: err ? err.code || 1 : 0, stdout: (stdout || "").trim(), stderr: stderr || "" });
+                    });
+                });
+                // GitHub requires a deployment to be marked inactive before it can
+                // be deleted. Delete every deployment record for this environment
+                // so the row disappears from the deployments list.
+                const listRes = await gh(["api", "--paginate", `/repos/${repo}/deployments?environment=${encodeURIComponent(environment)}&per_page=100`, "--jq", ".[].id"]);
+                const ids = listRes.code === 0 && listRes.stdout ? listRes.stdout.split("\n").filter(Boolean) : [];
+                let deleted = 0;
+                for (const id of ids) {
+                    await gh(["api", "--method", "POST", `/repos/${repo}/deployments/${id}/statuses`, "-f", "state=inactive", "-H", "Accept: application/vnd.github.ant-man-preview+json"]);
+                    const del = await gh(["api", "--method", "DELETE", `/repos/${repo}/deployments/${id}`]);
+                    if (del.code === 0) deleted++;
+                }
+                respond(200, { success: true, deleted });
+            } catch (e) {
+                respond(400, { error: e.message });
+            }
+            return;
+        }
+
+        if (pathname === "/api/verify-status" && req.method === "GET") {
+            const repo = url.searchParams.get("repo") || "";
+            const envName = url.searchParams.get("environment") || "";
+            const respond = (payload) => {
+                res.setHeader("Content-Type", "application/json");
+                res.setHeader("Cache-Control", "no-store");
+                res.writeHead(200);
+                res.end(JSON.stringify(payload));
+            };
+            if (!repo) { respond({ state: "unknown", error: "No repository specified." }); return; }
+
+            try {
+                const entry = servers.get(instanceId);
+                const dispatchedAt = entry?.state?.deployDispatchedAt || 0;
+                let runId = entry?.state?.verifyRunId || null;
+                if (!runId) {
+                    runId = await findWorkflowRun(repo, 'radius-verify-credentials.yml', dispatchedAt, null);
+                    if (runId && entry) entry.state.verifyRunId = runId;
+                }
+                if (!runId) { respond({ state: "pending", runId: null }); return; }
+
+                const detail = await getRunDetail(repo, runId);
+                const runUrl = 'https://github.com/' + repo + '/actions/runs/' + runId;
+                if (!detail) { respond({ state: "pending", runId, runUrl }); return; }
+
+                if (detail.status !== "completed") {
+                    respond({ state: "in_progress", runId, runUrl });
+                    return;
+                }
+                if (detail.conclusion === "success") {
+                    respond({ state: "success", runId, runUrl });
+                    return;
+                }
+                // Failed — surface the failing step + a few error lines.
+                const failed = (detail.steps || []).filter(s => s.conclusion && s.conclusion !== 'success' && s.conclusion !== 'skipped');
+                let errMsg = 'Credential verification failed' + (detail.conclusion ? ' (' + detail.conclusion + ')' : '') + '.';
+                if (failed.length) errMsg += ' Failed step: ' + failed.map(s => s.name).join(', ') + '.';
+                const log = await fetchRunLog(repo, runId);
+                const lines = extractErrorLines(log, 8);
+                if (lines.length) errMsg += '\n' + lines.join('\n');
+                respond({ state: "failed", runId, runUrl, error: errMsg });
+            } catch (e) {
+                respond({ state: "unknown", error: e.message });
             }
             return;
         }
@@ -1335,8 +1591,6 @@ function createRequestHandler(instanceId) {
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
                     const branch = data.branch || entry.state.deployingBranch || 'main';
                     const provider = data.provider || 'azure';
-                    const verifyRunId = entry.state.verifyRunId || null;
-                    const dispatchedAt = entry.state.deployDispatchedAt || Date.now();
                     // Bounded ring buffer: a verbose deploy can stream tens of
                     // thousands of recipe/terraform log lines. Keeping them all in
                     // memory (and re-serializing the whole array to every 1.5s
@@ -1399,72 +1653,55 @@ function createRequestHandler(instanceId) {
                             } catch (e) { addLog('⚠ Could not resolve planned graph: ' + e.message); }
                         }
 
-                        // ── Phase 1: Verify credentials ─────────────────────────
-                        addLog('━━ Verifying credentials ━━');
-                        addLog('📡 Monitoring credential verification for ' + repo + '...');
-                        let vRunId = verifyRunId;
-                        for (let attempt = 0; attempt < 10 && !vRunId; attempt++) {
-                            vRunId = await findWorkflowRun(repo, 'radius-verify-credentials.yml', dispatchedAt, null);
-                            if (!vRunId) await delay(3000);
-                        }
-                        if (!vRunId) {
-                            addLog('⚠ No verify-credentials run found. Proceeding to deploy monitoring...');
-                        } else {
-                            addLog('Tracking verify run: https://github.com/' + repo + '/actions/runs/' + vRunId);
-                            const seenV = new Set();
-                            const startedV = new Set();
-                            let verifyOk = false;
-                            for (let p = 0; p < 60; p++) {
-                                const detail = await getRunDetail(repo, vRunId);
-                                if (detail) {
-                                    for (const s of detail.steps) {
-                                        if (s.status === 'in_progress' && !startedV.has(s.name)) {
-                                            startedV.add(s.name);
-                                            addLog('  ▶ ' + s.name + '…');
-                                        }
-                                        if (s.status === 'completed' && !seenV.has(s.name)) {
-                                            seenV.add(s.name);
-                                            addLog('  ' + (s.conclusion === 'success' ? '✓' : '✗') + ' ' + s.name);
-                                        }
-                                    }
-                                    if (detail.status === 'completed') {
-                                        verifyOk = detail.conclusion === 'success';
-                                        addLog(verifyOk ? '✅ Credentials verified.' : '❌ Credential verification failed: ' + detail.conclusion);
-                                        break;
-                                    }
-                                }
-                                await delay(5000);
-                            }
-                            if (!verifyOk) {
-                                addLog('Deployment aborted — credential verification did not succeed.');
-                                // Surface the actual failure detail from the verify run log.
-                                const vDetail = await getRunDetail(repo, vRunId);
-                                const failedV = (vDetail?.steps || []).filter(s => s.conclusion && s.conclusion !== 'success' && s.conclusion !== 'skipped');
-                                let vErr = 'Credential verification failed' + (vDetail?.conclusion ? ' (' + vDetail.conclusion + ')' : '') + '.';
-                                if (failedV.length) vErr += ' Failed step: ' + failedV.map(s => s.name).join(', ') + '.';
-                                const vLog = await fetchRunLog(repo, vRunId);
-                                const vLines = extractErrorLines(vLog, 10);
-                                if (vLines.length) vErr += '\n' + vLines.join('\n');
-                                vErr += '\nView the full run: https://github.com/' + repo + '/actions/runs/' + vRunId;
-                                vLines.forEach(l => addLog('  ! ' + l));
-                                entry.state.deployError = vErr;
-                                entry.state.deployStatus = 'failed';
-                                return;
-                            }
-                        }
-
-                        // ── Phase 2: Deploy Radius application ──────────────────
-                        addLog('');
+                        // ── Phase 1: Dispatch the run-rad-commands workflow ─────
+                        // Credentials are verified separately when the environment
+                        // is created, so deploying is now an explicit action: we
+                        // dispatch the unified run-rad-commands workflow here (the
+                        // "Repo Radius" entry point that runs `rad deploy` by
+                        // default) rather than relying on a verify → deploy chain.
                         addLog('━━ Deploying Radius application ━━');
+                        const envForDeploy = entry.state.envName || data.environment || 'dev';
+                        const deployWorkflowFile = 'run-rad-commands.yml';
+                        const runGhDeploy = (args, envOverride) => new Promise((resolve) => {
+                            cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
+                                resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                            });
+                        });
+                        const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '-f', 'environment=' + envForDeploy, '--repo', repo];
+                        const deployDispatchedAt = Date.now();
+                        addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') for environment "' + envForDeploy + '"...');
+                        let dispatchDeployRes = await runGhDeploy(dispatchArgs);
+                        if (dispatchDeployRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
+                            // The injected OAuth token may lack the `workflow` scope; retry
+                            // with it stripped so gh falls back to the keyring credential.
+                            const fallbackEnv = { ...process.env };
+                            delete fallbackEnv.GH_TOKEN;
+                            delete fallbackEnv.GITHUB_TOKEN;
+                            const retry = await runGhDeploy(dispatchArgs, fallbackEnv);
+                            if (retry.code === 0) dispatchDeployRes = retry;
+                        }
+                        if (dispatchDeployRes.code !== 0) {
+                            const de = (dispatchDeployRes.stderr || '').trim();
+                            addLog('❌ Failed to dispatch the run rad commands workflow: ' + de);
+                            const scopeHint = /workflow.{0,20}scope/i.test(de)
+                                ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+                                : ' Ensure ' + deployWorkflowFile + ' exists on the default branch and that GitHub Actions are enabled for ' + repo + '.';
+                            entry.state.deployError = 'Failed to start the run rad commands workflow (' + deployWorkflowFile + ') on ' + repo + '. ' + (de || 'The dispatch request failed.') + scopeHint;
+                            entry.state.deployStatus = 'failed';
+                            return;
+                        }
+                        addLog('✅ Run rad commands workflow dispatched.');
+
+                        // ── Phase 2: Monitor the deploy run ─────────────────────
                         addLog('Waiting for the deploy workflow to start...');
                         let dRunId = null;
                         for (let attempt = 0; attempt < 24 && !dRunId; attempt++) {
-                            dRunId = await findWorkflowRun(repo, DEPLOY_DISPATCHER_FILE, dispatchedAt, null);
+                            dRunId = await findWorkflowRun(repo, deployWorkflowFile, deployDispatchedAt, null);
                             if (!dRunId) await delay(5000);
                         }
                         if (!dRunId) {
-                            addLog('⚠ No deploy run found for ' + DEPLOY_DISPATCHER_FILE + '.');
-                            entry.state.deployError = 'The deploy workflow (' + DEPLOY_DISPATCHER_FILE + ') did not start. Check that the workflow exists on branch ' + branch + ' and that Actions are enabled for ' + repo + '.';
+                            addLog('⚠ No deploy run found for ' + deployWorkflowFile + '.');
+                            entry.state.deployError = 'The run rad commands workflow (' + deployWorkflowFile + ') did not start. Check that the workflow exists on the default branch and that Actions are enabled for ' + repo + '.';
                             entry.state.deployStatus = 'failed';
                             return;
                         }
