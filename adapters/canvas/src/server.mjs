@@ -1174,13 +1174,12 @@ function createRequestHandler(instanceId) {
                 // Persist generated Radius files on the selected branch. For the
                 // current Copilot session branch this writes to the local worktree;
                 // remote branches still use GitHub Contents API fallback.
+                // Non-fatal on failure (e.g. branch protection/no write access) so
+                // the generated content can still be displayed.
                 try {
                     await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: () => {} });
                 } catch (e) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: e.message }));
-                    return;
+                    // persist failure is non-fatal; fall through to return the content
                 }
 
                 res.setHeader("Content-Type", "application/json");

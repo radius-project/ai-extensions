@@ -247,6 +247,8 @@ const session = await joinSession({
                     entry.state.contextRepo = ctx.input.repo;
                     if (ctx.input.repo === workspace.workspaceRepo) {
                         entry.state.contextBranch = workspace.workspaceBranch;
+                    } else {
+                        entry.state.contextBranch = "";
                     }
                 } else if (!entry.state.contextRepo && session.workspacePath) {
                     // Try to detect repo from workspace git remote

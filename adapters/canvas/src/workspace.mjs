@@ -76,12 +76,12 @@ export async function detectWorkspaceContext(session) {
 }
 
 function branchMatches(state, branch) {
-    const workspaceBranch = state?.workspaceBranch || state?.contextBranch || "";
+    const workspaceBranch = state?.workspaceBranch || "";
     return !!workspaceBranch && (!branch || branch === workspaceBranch);
 }
 
 function repoMatches(state, repo) {
-    const workspaceRepo = state?.workspaceRepo || state?.contextRepo || "";
+    const workspaceRepo = state?.workspaceRepo || "";
     return !!workspaceRepo && (!repo || repo === workspaceRepo);
 }
 
