@@ -31,7 +31,7 @@ function runGit(workspacePath, args) {
 
 export function parseRepoFromRemote(remoteUrl) {
     if (!remoteUrl) return "";
-    const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/.]+)(?:\.git)?$/i);
+    const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/]+)(?:\.git)?$/i);
     return match ? match[1].replace(/\.git$/i, "") : "";
 }
 
