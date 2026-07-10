@@ -246,7 +246,7 @@ const session = await joinSession({
                 // If a repo is passed in input, set it as context for all pages
                 if (ctx.input?.repo) {
                     entry.state.contextRepo = ctx.input.repo;
-                    if (ctx.input?.repo === workspace.workspaceRepo) {
+                    if (ctx.input.repo === workspace.workspaceRepo) {
                         entry.state.contextBranch = workspace.workspaceBranch;
                     } else {
                         entry.state.contextBranch = ctx.input?.branch || "main";
