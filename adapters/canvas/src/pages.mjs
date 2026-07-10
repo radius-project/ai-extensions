@@ -983,6 +983,15 @@ export function environmentPage(state) {
     const envName = state?.envName || 'dev';
     const appFile = state?.appFile || 'app.bicep';
     const existingEnvs = state?.existingEnvs || ['dev', 'staging', 'production'];
+    // Deployment reads files and dispatches workflows via GitHub, so an unpushed
+    // worktree-only branch cannot be deployed. Default to 'main' in that case so
+    // the branch dropdown does not silently mislead the user.
+    const deployContextBranch = state?.contextBranch || 'main';
+    const deployWorkspaceBranch = state?.workspaceBranch || '';
+    const deployBranchShas = state?.branchShas || {};
+    const deployDefaultBranch = (deployWorkspaceBranch && deployContextBranch === deployWorkspaceBranch && deployBranchShas[deployWorkspaceBranch] === 'worktree')
+        ? 'main'
+        : deployContextBranch;
 
     // If deployment result exists, show it
     if (state?.deployResult) {
@@ -1194,7 +1203,7 @@ setupCombo('aws-vpc-select', 'aws-vpc-custom');
 setupCombo('aws-subnets-select', 'aws-subnets-custom');
 
 // Deploy repo + branch selects — wired via the shared repo/branch library
-radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(state?.contextBranch || 'main')}');
+radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(deployDefaultBranch)}');
 
 // Keep the hidden target-repo input in sync for deploy submission
 (function syncTargetRepo() {
