@@ -111,6 +111,7 @@ async function fetchBicepForSelection(entry, repo, branch) {
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
+    const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
         const local = await fetchWorkspaceFile(entry.state, repo, access.branch, repoPath);
         if (local !== null) return local;
@@ -119,6 +120,7 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
 }
 
 async function fetchTreeForSelection(entry, repo, branch) {
+    const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
         const localTree = await fetchWorkspaceTree(entry.state, repo, access.branch);
         if (localTree !== null) return localTree;
