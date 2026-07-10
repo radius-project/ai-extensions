@@ -75,11 +75,17 @@ export async function detectWorkspaceContext(session) {
     };
 }
 
+// Returns true when the given branch matches the workspace branch.
+// A falsy branch means "no specific branch requested", which is treated as
+// matching the workspace branch (caller should then default to workspaceBranch).
 function branchMatches(state, branch) {
     const workspaceBranch = state?.workspaceBranch || "";
     return !!workspaceBranch && (!branch || branch === workspaceBranch);
 }
 
+// Returns true when the given repo matches the workspace repo.
+// A falsy repo means "no specific repo requested", which is treated as
+// matching the workspace repo (caller should then default to workspaceRepo).
 function repoMatches(state, repo) {
     const workspaceRepo = state?.workspaceRepo || "";
     return !!workspaceRepo && (!repo || repo === workspaceRepo);

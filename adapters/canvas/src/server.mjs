@@ -94,7 +94,7 @@ function accessForSelection(entry, repo, branch) {
 }
 
 function repoMatchesWorkspace(state, repo) {
-    const workspaceRepo = state?.workspaceRepo || state?.contextRepo || "";
+    const workspaceRepo = state?.workspaceRepo || "";
     return !!workspaceRepo && repo === workspaceRepo;
 }
 
