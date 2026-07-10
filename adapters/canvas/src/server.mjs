@@ -840,7 +840,7 @@ function createRequestHandler(instanceId) {
             // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
             res.writeHead(200);
-            res.end(JSON.stringify({ resources, repo, branch: entry?.state?.contextBranch || "main" }));
+            res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
             return;
         }
 
