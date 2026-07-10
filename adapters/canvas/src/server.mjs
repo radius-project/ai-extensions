@@ -119,10 +119,9 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
 }
 
 async function fetchTreeForSelection(entry, repo, branch) {
-    const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
         const localTree = await fetchWorkspaceTree(entry.state, repo, access.branch);
-        if (localTree) return localTree;
+        if (localTree !== null) return localTree;
     }
     return await fetchRepoTree(repo, access.branch);
 }
