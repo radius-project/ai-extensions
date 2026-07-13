@@ -27,6 +27,7 @@ export function parseComposeServices(content: string): any[] {
     // Top-level key at same or lower indent as "services:" means we've left
     if (indent <= serviceIndent && trimmed && !trimmed.startsWith("#")) {
       if (currentService) services.push(currentService);
+      currentService = null;
       break;
     }
 
