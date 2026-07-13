@@ -174,4 +174,4 @@ Before returning the Bicep, verify:
 
 ## Example
 
-See [todo-list-app-example.md](references/todo-list-app-example.md) for a complete worked example; the generated Bicep there is the **expected correct output** for `dockersamples/todo-list-app`.
+See [todo-list-app-example.md](references/todo-list-app-example.md) for a worked example of the modeling decisions (source analysis, resource mapping, and key choices) for `dockersamples/todo-list-app`.
