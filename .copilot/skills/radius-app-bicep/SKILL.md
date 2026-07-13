@@ -1,145 +1,177 @@
 ---
 name: radius-app-bicep
-description: Generate a Radius app.bicep manifest from the contents of a repository. Use when the user asks to create, generate, scaffold, or update the .radius/app.bicep file that describes a Radius application's containers, databases, secrets, volumes, and routes.
+description: >
+  Analyze a source code repository and generate a Radius application
+  definition (.radius/app.bicep). Use when asked to create an application
+  definition, model an application for Radius, or generate a Radius Bicep
+  file. Resolves resource types from radius-project/resource-types-contrib
+  and follows deterministic rules for validated output.
 ---
 
-# Radius — Generate app.bicep
+# Radius Application Modeling
 
-Create or update the `.radius/app.bicep` file that describes a Radius application. The file uses the `Radius.*` resource types from `radius-project/resource-types-contrib` and is what `rad deploy` consumes.
+Use this skill to generate a Radius application definition (`app.bicep`) from a source code repository.
 
-## When to use this skill
+## Response
 
-- "Generate a Radius app.bicep for this repo"
-- "Add a postgres database to my Radius app"
-- "Scaffold the Radius manifest"
-- "Update app.bicep to add a new container"
-- "Create the Radius app file"
+When asked to model a repository, your chat reply should contain:
 
-## Inputs you need
+1. A one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`.").
+2. A short, natural summary of the application resources you identified — a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis.
+3. The `.radius/app.bicep` in a single code block.
+4. An offer to open a pull request.
 
-Before writing the file, gather:
-1. **Application name** — usually the repo name in kebab-case.
-2. **Containers** — one per service. Inspect the repo for `Dockerfile`(s), `package.json` scripts, `pyproject.toml`, etc. Each container needs:
-   - a logical name
-   - source build context (path to Dockerfile) OR an image reference
-   - exposed port(s)
-   - env vars (often from secrets or connection strings)
-3. **Databases** — look for `DATABASE_URL`, ORMs (`prisma`, `sqlalchemy`, `mongoose`), or compose files. Map to `Radius.Data/postgreSqlDatabases` or `Radius.Data/mySqlDatabases`.
-4. **Secrets** — anything sensitive (API keys, DB passwords). Use `Radius.Security/secrets`.
-5. **Routes** — public-facing HTTP routes. Use `Radius.Compute/routes`.
-6. **Volumes** — persistent storage needs. Use `Radius.Compute/persistentVolumes`.
+Don't create the pull request automatically — wait for the user to confirm. If they confirm, open a PR adding `.radius/app.bicep` with title `Add Radius application definition` and body `Add .radius/app.bicep for <app-name>.`
 
-If anything is ambiguous, ask the user before writing.
+## Workflow
 
-## Resource type cheat sheet
+Before writing the Bicep:
 
-| Need | Resource type | Notes |
+1. Analyze the source (package manifest, Dockerfile/compose, entry point, persistence layer, env vars) and detect the app's components — the compute runtime and each backing service. Map each to a Radius type using [component-catalog.md](references/component-catalog.md).
+2. Note the primary architecture pattern for context — see [architecture-patterns.md](references/architecture-patterns.md). Composition is driven by the detected components, not the pattern label, and an app may combine patterns. If a detected component has no Radius type yet, report the gap rather than substituting an unrelated type.
+3. Resolve the resource types the app needs from `radius-project/resource-types-contrib`. Derive each schema path from the type name (see [Resource Type Resolution](#resource-type-resolution)) and read only those files. If a needed type's schema isn't at the derived path, search the repo for `<typeName>.yaml`; if it still can't be resolved, stop and report the missing type rather than guessing. Types the app doesn't use don't need to resolve.
+4. Apply the naming, structure, and secrets rules below (and in [bicep-structure-rules.md](references/bicep-structure-rules.md), [naming-conventions.md](references/naming-conventions.md), [secrets-handling.md](references/secrets-handling.md)).
+5. Generate the Bicep and check it against the [validation checklist](#validation-checklist).
+
+## Deterministic Naming Rules
+
+These rules eliminate ambiguity. Apply them exactly.
+
+### Symbolic names (left side of `=` in Bicep)
+
+| Resource | Symbolic name |
+|---|---|
+| Application | `<shortName>App` where `<shortName>` is the app name without hyphens, camelCase (e.g., `todo-list-app` → `todoApp`) |
+| Container | `<serviceName>Container` — service short name camelCase; single-container apps use `<shortName>Container` (e.g., `todoContainer`) |
+| Container image | `<serviceName>Image` (e.g., `todoImage`) |
+| Data store (database/cache/queue) | `<engine>` + role suffix, camelCase: `mysqlDb`, `postgresDb`, `neo4jDb`, `redisCache`. Multiple of the same engine: prefix with the source store name (e.g., `ordersPostgresDb`) |
+| Data store secret | `<engine>Secret` — only when the type's schema defines `secretName`; app secrets use `appSecrets` |
+| Route | `<serviceName>Route` (e.g., `todoRoute`) |
+
+### Resource `name` properties (string values in Bicep)
+
+| Resource | Name value |
+|---|---|
+| Application | Repository name in kebab-case (e.g., `'todo-list-app'`) |
+| Container | Service name in kebab-case; single-container apps use the app name (e.g., `'todo-list-app'`) |
+| Container image | `'<service-name>-image'` (e.g., `'todo-list-app-image'`) |
+| Data store | Engine short name in kebab-case (`'mysql'`, `'postgres'`, `'neo4j'`, `'redis'`); multiple of the same engine use the source store name |
+| Data store secret | `'<engine>-secret'`; app secrets `'app-secrets'` |
+
+### Connection keys
+
+| Connection | Key |
+|---|---|
+| Data store | Engine + role, lowercase: `mysqldb`, `postgresdb`, `neo4jdb`, `rediscache`. Multiple of the same engine: prefix with the source store name |
+
+### Other fixed values
+
+| Field | Value |
+|---|---|
+| Data store admin username | The administrator username you author for the provisioned database. Set it wherever the schema puts credentials — `username` on the resource, or `USERNAME` in the secret when the schema uses `secretName`. Use a simple admin name (e.g., `myadmin`); it is NOT derived from the source |
+| Data store `database` name | Derived from source (e.g., `MYSQL_DATABASE`/`POSTGRES_DB`, or the database segment of a connection string) |
+| Data store `version` | Derived from source (e.g., the image tag `mysql:8.0` → `'8.0'`) |
+| Container key in `containers` map | Service short name camelCase (single-container: derived from app, e.g., `todo`) |
+| Port key in `ports` map | `web` for the primary HTTP port; additional ports derive from protocol/use (`http`, `grpc`) |
+| `build.source` for containerImages | Repo git URL: `git::https://github.com/<org>/<repo>.git//<subdir>?ref=<sha-or-tag>` (`//<subdir>` only when the Dockerfile isn't at the repo root) |
+
+## Resource Type Resolution
+
+### Built-in types (from `radius-project/radius`)
+
+| Need | Resource Type | API Version |
 |---|---|---|
-| Container | `Radius.Compute/containers` | Built from Dockerfile by the `containerImages` recipe |
-| Built image | `Radius.Compute/containerImages` | Required if you want the workflow to build & push |
-| Postgres | `Radius.Data/postgreSqlDatabases` | k8s recipe always available |
-| MySQL | `Radius.Data/mySqlDatabases` | AWS recipe (needs VPC) or Azure recipe (needs RG) — **no k8s/terraform recipe**, only bicep |
-| Volume | `Radius.Compute/persistentVolumes` | |
-| Route | `Radius.Compute/routes` | Public HTTP ingress |
-| Secret | `Radius.Security/secrets` | App-scoped. Also used for private-registry push creds — name must match the recipe pack's `registrySecretName` (`ghcr-registry-creds`) so `containerImages` can read it |
+| Application grouping | `Radius.Core/applications` | `2025-08-01-preview` |
 
-## Template structure
+`Radius.Core/applications` is built into the `radius` extension — there is no schema file for it in `resource-types-contrib`. Do NOT use `Applications.Core/applications` — the model has moved to `Radius.Core/applications`.
 
-Write the file at `.radius/app.bicep`. Skeleton:
+### Extensible types (from `radius-project/resource-types-contrib`)
 
-```bicep
-extension radius
+Resolve each type's schema at runtime from the `radius-project/resource-types-contrib` repository. Do NOT hardcode a file path — derive it from the resource type name using the repo convention:
 
-@description('Radius environment to deploy into.')
-param environment string
+- Category = the segment after `Radius.` in the namespace (`Radius.Compute` → `Compute`, `Radius.Data` → `Data`, `Radius.Messaging` → `Messaging`, `Radius.AI` → `AI`, `Radius.Storage` → `Storage`, `Radius.Security` → `Security`)
+- Schema path = `<Category>/<typeName>/<typeName>.yaml` (e.g., `Radius.Data/mySqlDatabases` → `Data/mySqlDatabases/mySqlDatabases.yaml`)
 
-@description('Radius application resource.')
-param application string
+Read the schema file to get the exact property names, types, and API version. Use the API version declared in the schema (currently `2025-08-01-preview` for these types) rather than assuming a fixed value.
 
-@description('Container image registry (set by deploy workflow vars).')
-param registry string = ''
+The following is the COMPLETE allow-list of types this skill may emit:
 
-@description('Registry username for the image push (supplied by the deploy workflow).')
-param registryUsername string = ''
-@secure()
-@description('Registry password/token for the image push (supplied by the deploy workflow).')
-param registryPassword string = ''
+| Need | Resource Type |
+|---|---|
+| Container images (build from Dockerfile) | `Radius.Compute/containerImages` |
+| Containers | `Radius.Compute/containers` |
+| MySQL | `Radius.Data/mySqlDatabases` |
+| PostgreSQL | `Radius.Data/postgreSqlDatabases` |
+| Neo4j | `Radius.Data/neo4jDatabases` |
+| MongoDB | `Radius.Data/mongoDatabases` |
+| Redis (cache) | `Radius.Data/redisCaches` |
+| SQL Server | `Radius.Data/sqlServerDatabases` |
+| Kafka (event streaming) | `Radius.Messaging/kafka` |
+| RabbitMQ (message queue) | `Radius.Messaging/rabbitMQ` |
+| AI model endpoint | `Radius.AI/models` |
+| AI search | `Radius.AI/search` |
+| Object storage | `Radius.Storage/objectStorage` |
+| Persistent storage | `Radius.Compute/persistentVolumes` |
+| External ingress | `Radius.Compute/routes` |
+| Secrets | `Radius.Security/secrets` |
 
-// Registry credentials for the containerImages recipe to authenticate its image
-// push. Application-scoped so the secrets recipe materializes a Kubernetes Secret
-// named 'ghcr-registry-creds' into THIS app's namespace — the same namespace the
-// containerImages recipe reads from (context.runtime.kubernetes.namespace). The
-// name MUST match the recipe pack's registrySecretName, which the deploy workflow
-// sets to 'ghcr-registry-creds'. Omit this whole resource for public/unauth registries.
-resource registryCreds 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: 'ghcr-registry-creds'
-  properties: {
-    environment: environment
-    application: application
-    data: {
-      username: { value: registryUsername }
-      password: { value: registryPassword }
-    }
-  }
-}
+Do NOT use any type not listed above. Do NOT invent properties.
 
-// Image build
-resource appImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
-  name: '${appName}-image'
-  properties: {
-    environment: environment
-    application: application
-    source: '.'              // path relative to repo root
-    dockerfile: 'Dockerfile'
-    registry: registry
-  }
-  // Ensure the credential Secret is materialized before the recipe's image push.
-  dependsOn: [ registryCreds ]
-}
+## Extension
 
-// Container
-resource appContainer 'Radius.Compute/containers@2025-08-01-preview' = {
-  name: '${appName}-web'
-  properties: {
-    environment: environment
-    application: application
-    container: {
-      image: appImage.properties.image
-      ports: {
-        web: { containerPort: 3000 }
-      }
-      env: {
-        DATABASE_URL: { value: db.properties.connectionString }
-      }
-    }
-  }
-}
+Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.).
 
-// Database (pick ONE based on provider)
-resource db 'Radius.Data/postgreSqlDatabases@2025-08-01-preview' = {
-  name: '${appName}-db'
-  properties: {
-    environment: environment
-    application: application
-    databaseName: appName
-  }
-}
-```
+## app.bicep Structure (mandatory order)
 
-## Process
+Declare resources in this order (do NOT output this as code — it is only for your reference):
 
-1. **Read the repo**: list top-level files, look for `Dockerfile`, `package.json`, language manifests, env file templates (`.env.example`). Run a quick grep for `DATABASE_URL` or common ORM imports to detect data deps.
-2. **Confirm with the user** if any resource type or value is ambiguous (port number, db engine, etc.).
-3. **Write `.radius/app.bicep`** using the skeleton above, filling in real values. Use `view`/`create` tools — don't shell out to `cat <<EOF`.
-4. **Tell the user the next step**: open the `radius` canvas, pick the app, choose an env, click Deploy (or invoke the `radius-deploy` skill).
+1. Extension: `extension radius` (single, covers all Radius types)
+2. Params: `environment`; add a `@secure() param` for each secret value needed (DB password, API key)
+3. Application resource (`Radius.Core/applications@2025-08-01-preview`) — always exactly one
+4. Data / infrastructure resources (databases, caches, message brokers, object storage, AI services)
+5. Secret resources (app API keys, or DB credentials when a schema uses `secretName`)
+6. Container image resources (if building from Dockerfile)
+7. Container resources (with connections to images and infra)
+8. Routes (only if external ingress needed)
 
-## Validation
+Rules:
+- One `Radius.Compute/containers` per container service; one `Radius.Data/*` per backing data store (engine/instance-derived symbolic name).
+- Building from a Dockerfile: add a `Radius.Compute/containerImages` resource with `build.source` set to the repo git URL (`git::https://github.com/<org>/<repo>.git//<subdir>?ref=<sha-or-tag>`); the container references the built image via `<serviceName>Image.properties.imageReference` (no separate connection needed).
+- Database credentials follow the type's schema: if it defines `username`/`password`, set them on the resource; if it defines `secretName`, create a `Radius.Security/secrets` and reference it; if it defines neither, the type takes no credentials. Always use a `@secure() param` for the password.
+- Add `Radius.Compute/routes` only for external ingress.
 
-- `rad bicep build .radius/app.bicep` locally if `rad` CLI is on `$PATH`. Otherwise the GitHub Actions deploy run will catch any syntax errors.
-- The mySql recipe needs provider-matching environment — use postgres if the env is plain k8s.
+## Connections
 
-## Related files
+Wire containers to infrastructure via `connections`. Read [connection-conventions.md](references/connection-conventions.md) for the correct env var format.
 
-- `.github/radius/extension.mjs` — repo analysis → bicep generation (`generateBicepFromRepo`)
-- `.github/radius/extension.mjs` — commit/update `.radius/app.bicep` via GitHub Contents API (`/api/commit-app-bicep`)
-- Upstream contrib repo: https://github.com/radius-project/resource-types-contrib (browse `Compute/`, `Data/`, `Security/` for available resource types)
+Rules:
+- NEVER duplicate auto-injected env vars with manual `env` entries.
+- Only add explicit `env` entries for app-specific variables NOT covered by connection auto-injection.
+- A sensitive recipe output (connection string, URL with an access key, API key) is NOT in the connection blob — bind it with `valueFrom.secretKeyRef` from `<resource>.properties.secrets.name`. Keep the `connection` for the non-secret discovery vars (host, port).
+
+## Secrets
+
+See [secrets-handling.md](references/secrets-handling.md). Secrets flow in two directions:
+
+- **Inputs** (credentials you supply): read the type's schema for the shape — `username` + `password` directly on the resource; a `Radius.Security/secrets` referenced via `secretName`; or none. Do not assume by engine. The password is always a `@secure() param`, and the username is the database administrator you author (e.g. `myadmin`). Use `Radius.Security/secrets` for app secrets (API keys) too.
+- **Outputs** (sensitive values the recipe generates — connection strings, URLs with access keys, API keys): when the schema defines a read-only `secrets` block, Radius redacts these from the resource's properties and materializes them into a managed secret. Consume them in a container with `valueFrom.secretKeyRef`, using `<resource>.properties.secrets.name` and a key from that block. Do NOT author a secret for these and do NOT read them from the connection blob.
+
+## Bicep Structure Rules
+
+Read [bicep-structure-rules.md](references/bicep-structure-rules.md) for all structural rules.
+
+## Validation Checklist
+
+Before returning the Bicep, verify:
+- [ ] Exactly one `Radius.Core/applications@2025-08-01-preview`, and one `extension radius` (no per-namespace or per-type extensions).
+- [ ] Every `Radius.*` type is on the allow-list and matches its schema; use the API version from the schema.
+- [ ] `param environment string` is declared; add a `@secure() param` for each secret (DB password, API key).
+- [ ] `connections` is a top-level object map under `properties` (not inside `containers`, not an array).
+- [ ] Ports use `containerPort`; a built image uses `build.source` (repo git URL) and the container references `.imageReference`.
+- [ ] Credentials match the type's schema: `username`+`password` on the resource, or `secretName`+secret, or none — whichever the schema defines. Password via `@secure() param`; `database`/`topic`/`queue`/etc. derived from source.
+- [ ] Secret outputs (schema has a read-only `secrets` block) are consumed via `valueFrom.secretKeyRef` using `<resource>.properties.secrets.name` and a key from that block — never read as plain properties or from the connection blob, and never re-authored as a `Radius.Security/secrets`.
+- [ ] No hardcoded passwords, no readOnly properties **set**, no comments in the Bicep, and no `bicepconfig.json`. (Referencing `.properties.imageReference` and `.properties.secrets.name` is allowed — those are the only sanctioned read-only references.)
+
+## Example
+
+See [todo-list-app-example.md](references/todo-list-app-example.md) for a worked example of the modeling decisions (source analysis, resource mapping, and key choices) for `dockersamples/todo-list-app`.
