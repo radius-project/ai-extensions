@@ -81,6 +81,120 @@ function radiusSetupRepoBranch(repoSelectId, branchSelectIds, defaultRepo, defau
         });
     }
 }
+
+// Populate the Application / Branch / Environment selectors on the Planned
+// Graph pane. The repository is assumed from the workspace, so it is not a
+// selectable field. Fills the passed envProviders map so the caller can derive
+// the cloud provider from the chosen environment. When defaultBranch is given
+// (loaded state) it is pre-selected; otherwise no branch is pre-selected.
+function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
+    var appSel = document.getElementById('planned-app');
+    var branchSel = document.getElementById('planned-branch');
+    var envSel = document.getElementById('planned-env');
+    if (!repo) {
+        if (appSel) appSel.innerHTML = '<option value="">No repository</option>';
+        if (branchSel) branchSel.innerHTML = '<option value="">No repository</option>';
+        if (envSel) envSel.innerHTML = '<option value="">No repository</option>';
+        return;
+    }
+    if (appSel) {
+        fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var apps = (d && d.applications) || [];
+                appSel.innerHTML = '';
+                if (!apps.length) {
+                    var fallback = repo.split('/').pop() || repo;
+                    var o = document.createElement('option'); o.value = fallback; o.textContent = fallback; appSel.appendChild(o);
+                    return;
+                }
+                apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+            })
+            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+    }
+    if (branchSel) {
+        fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var branches = (d && d.branches) || [];
+                branchSel.innerHTML = '<option value="">— Select a branch —</option>';
+                branches.forEach(function(b) {
+                    var o = document.createElement('option');
+                    o.value = b.name;
+                    o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                    if (defaultBranch && b.name === defaultBranch) o.selected = true;
+                    branchSel.appendChild(o);
+                });
+            })
+            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
+    }
+    if (envSel) {
+        fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var envs = (d && d.environments) || [];
+                if (!envs.length) { envSel.innerHTML = '<option value="">No environments</option>'; return; }
+                envSel.innerHTML = '';
+                envs.forEach(function(e) {
+                    if (envProviders) envProviders[e.name] = e.provider || 'azure';
+                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
+                });
+            })
+            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
+    }
+}
+
+// Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
+// "main" and Head defaults to the current worktree branch when it has been
+// pushed; if the worktree branch is not pushed (or there is none), Head is left
+// unselected so the user can pick a branch. Only pushed branches are offered
+// (a diff is computed from GitHub refs). When autoCompare is not false and a
+// head resolves, the Compare button is clicked automatically.
+function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
+    var baseSel = document.getElementById('base-branch');
+    var headSel = document.getElementById('head-branch');
+    var statusEl = document.getElementById('diff-status');
+    var compareBtn = document.getElementById('compare-btn');
+    if (!repo) { if (statusEl) statusEl.textContent = 'No repository context.'; return; }
+    if (statusEl) statusEl.textContent = 'Loading branches…';
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.error) { if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
+            var branches = d.branches || [];
+            var workspaceBranch = d.workspaceBranch || '';
+            // Only pushed branches (real sha) can be compared via GitHub.
+            var pushed = branches.filter(function(b) { return b.sha && b.sha !== 'worktree'; });
+            var worktreePushed = pushed.some(function(b) { return b.name === workspaceBranch; });
+
+            var desiredBase = preferBase || 'main';
+            var desiredHead = preferHead || (worktreePushed ? workspaceBranch : '');
+
+            baseSel.innerHTML = '';
+            headSel.innerHTML = '<option value="">— Select a branch —</option>';
+            pushed.forEach(function(b) {
+                var label = b.name + ' (' + b.sha.slice(0,7) + ')';
+                var ob = document.createElement('option'); ob.value = b.name; ob.textContent = label;
+                if (b.name === desiredBase) ob.selected = true;
+                baseSel.appendChild(ob);
+                var oh = document.createElement('option'); oh.value = b.name; oh.textContent = label;
+                if (desiredHead && b.name === desiredHead) oh.selected = true;
+                headSel.appendChild(oh);
+            });
+            if (!baseSel.value && baseSel.options.length) baseSel.selectedIndex = 0;
+
+            if (headSel.value) {
+                if (statusEl) { statusEl.className = 'status info'; statusEl.textContent = 'Comparing ' + baseSel.value + ' → ' + headSel.value + '…'; }
+                if (autoCompare !== false && compareBtn) compareBtn.click();
+            } else if (statusEl) {
+                statusEl.className = 'status info';
+                statusEl.textContent = workspaceBranch
+                    ? ('The current branch "' + workspaceBranch + '" has not been pushed. Select a head branch to compare against ' + (baseSel.value || 'main') + '.')
+                    : ('Select a head branch to compare against ' + (baseSel.value || 'main') + '.');
+            }
+        })
+        .catch(function() { if (statusEl) { statusEl.textContent = 'Failed to load branches.'; statusEl.className = 'status error'; } });
+}
 `;
 
 export const CLIENT_GRAPH_JS = `

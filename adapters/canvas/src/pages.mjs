@@ -177,6 +177,9 @@ export function pageShell(title, bodyContent, activeNav) {
   @keyframes rad-spin { to { transform: rotate(360deg); } }
   .rad-btn--info:hover { background: #388bfd; }
   button:disabled, .rad-btn:disabled { opacity: 0.6; cursor: default; }
+  .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
+  .rad-status-link { text-decoration: none; color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .rad-status-link:hover .rad-status-label { text-decoration: underline; }
   .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
 
   /* ─── Cards, sections, tables (Environments/Deployments) ──────────────── */
@@ -506,7 +509,7 @@ ${graphHeader('graph')}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="load-graph-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Generate Graph</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Deploy Application</button>
 </div>
 <div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
 <div id="graph-container-wrapper"></div>
@@ -556,25 +559,35 @@ var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
         .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
 })();
 
-// Auto-generate the graph as soon as a branch is chosen.
+// Auto-generate the graph as soon as a branch is chosen, and enable the
+// Deploy Application button (greyed out until a branch is selected).
 document.getElementById('graph-branch').addEventListener('change', function() {
-    if (this.value) generateGraph();
+    var deployBtn = document.getElementById('deploy-app-btn');
+    if (this.value) {
+        if (deployBtn) deployBtn.disabled = false;
+        generateGraph();
+    } else if (deployBtn) {
+        deployBtn.disabled = true;
+    }
 });
 
-document.getElementById('load-graph-btn').addEventListener('click', generateGraph);
+// Deploy Application → go to the Deployments page with the app preselected.
+document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
+    if (this.disabled) return;
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+});
 
 function generateGraph() {
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('graph-branch').value.trim();
     if (!repo) return;
-    var btn = document.getElementById('load-graph-btn');
     var statusEl0 = document.getElementById('graph-status');
     if (!branch) {
         if (statusEl0) { statusEl0.textContent = 'Select a branch to generate the application graph.'; statusEl0.className = 'status info'; statusEl0.style.display = ''; }
         return;
     }
-    btn.textContent = '⏳ Generating...';
-    btn.disabled = true;
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
@@ -614,8 +627,6 @@ function generateGraph() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
-            btn.textContent = 'Generate Graph';
-            btn.disabled = false;
             if (d.reload) {
                 // Final progress update
                 var prev = stepsEl.querySelector('.step-active');
@@ -630,7 +641,7 @@ function generateGraph() {
                 if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
             }
         })
-        .catch(function() { clearInterval(pollInterval); btn.textContent = 'Generate Graph'; btn.disabled = false; container.innerHTML = ''; });
+        .catch(function() { clearInterval(pollInterval); container.innerHTML = ''; });
 }
 <\/script>
 ${graphHeaderClose()}`);
@@ -720,9 +731,11 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
 });
 
-// Deploy Application → move to the planned deployment flow.
+// Deploy Application → go to the Deployments page with the app preselected.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
-    radiusNavTo(e, 'planned');
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
 });
 
 var resources = ${resourcesJson};
@@ -751,39 +764,42 @@ export function plannedGraphPage(state) {
         return pageShell("Planned Graph", `
 ${graphHeader('planned')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="planned-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="planned-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="planned-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px;">
-      <option value="">Select repo first</option>
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="planned-branch" class="rad-select" style="min-width:200px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cloud Provider</label>
-    <select id="planned-provider" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:140px;">
-      <option value="azure"${provider === 'azure' ? ' selected' : ''}>Azure</option>
-      <option value="aws"${provider === 'aws' ? ' selected' : ''}>AWS</option>
+  <div class="rad-field">
+    <label>Environment</label>
+    <select id="planned-env" class="rad-select" style="min-width:180px;">
+      <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
 </div>
-<div id="plan-status" class="status info">Configure your target environment and click "Plan Deployment" to see what resources will be created.</div>
+<div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('planned-repo', 'planned-branch', CONTEXT_REPO, CONTEXT_BRANCH);
+var ENV_PROVIDERS = {};
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    var repo = document.getElementById('planned-repo').value.trim();
-    var branch = document.getElementById('planned-branch').value.trim() || 'main';
-    var provider = document.getElementById('planned-provider').value;
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('planned-branch').value.trim();
+    var env = document.getElementById('planned-env').value;
+    var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
+    var statusEl0 = document.getElementById('plan-status');
+    if (!branch) { if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to plan the deployment.'; statusEl0.className='status info'; } return; }
     this.textContent = '⏳ Planning...';
     this.disabled = true;
     var btn = this;
@@ -816,7 +832,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             shownSteps = msgs.length;
         }).catch(function() {});
     }, 800);
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider}) })
+    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
@@ -846,26 +862,25 @@ ${graphHeaderClose()}`);
     return pageShell("Planned Graph", `
 ${graphHeader('planned')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="planned-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="planned-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="planned-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px;">
-      <option value="">Select repo first</option>
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="planned-branch" class="rad-select" style="min-width:200px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cloud Provider</label>
-    <select id="planned-provider" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:140px;">
-      <option value="azure"${provider === 'azure' ? ' selected' : ''}>Azure</option>
-      <option value="aws"${provider === 'aws' ? ' selected' : ''}>AWS</option>
+  <div class="rad-field">
+    <label>Environment</label>
+    <select id="planned-env" class="rad-select" style="min-width:180px;">
+      <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Re-Plan</button>
 </div>
 <div class="legend" style="margin-bottom:12px;">
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/></svg> Compute</div>
@@ -881,12 +896,14 @@ ${graphHeader('planned')}
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('planned-repo', 'planned-branch', CONTEXT_REPO, CONTEXT_BRANCH);
+var ENV_PROVIDERS = {};
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    var repo = document.getElementById('planned-repo').value.trim();
-    var branch = document.getElementById('planned-branch').value.trim() || 'main';
-    var provider = document.getElementById('planned-provider').value;
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
+    var env = document.getElementById('planned-env').value;
+    var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
     this.textContent = 'Planning...';
     this.disabled = true;
@@ -894,7 +911,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     // Clear existing graph
     var container = document.getElementById('graph-container');
     container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text-color-muted,#656d76);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke,#e1e4e8);border-top-color:var(--rad-primary,#1a7f37);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider}) })
+    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
             btn.textContent = 'Re-Plan';
@@ -934,55 +951,30 @@ export function graphDiffPage(state) {
         const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
         return pageShell("Graph Diff", `
 ${graphHeader('graph-diff')}
-<div style="display:flex; gap:16px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="diff-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
-    </select>
-  </div>
-</div>
+<input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
-      <option value="">Select repo first</option>
+      <option value="">Loading branches...</option>
     </select>
   </div>
   <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
-      <option value="">Select repo first</option>
+      <option value="">Loading branches...</option>
     </select>
   </div>
   <button id="compare-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Compare</button>
 </div>
-<div id="diff-status" class="status info">Select a repository to load branches.</div>
+<div id="diff-status" class="status info">Loading branches…</div>
 <script>
 var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
-var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
+var CONTEXT_REPO = document.getElementById('diff-repo-select').value;
 
-// Load repos and auto-select context repo
-radiusPopulateRepos('diff-repo-select', CONTEXT_REPO).then(function() {
-    var sel = document.getElementById('diff-repo-select');
-    if (sel.value) loadBranches(sel.value);
-});
-
-document.getElementById('diff-repo-select').addEventListener('change', function() {
-    if (this.value) loadBranches(this.value);
-});
-
-function loadBranches(repo) {
-    document.getElementById('diff-status').textContent = 'Loading branches...';
-    radiusPopulateBranches(['base-branch', 'head-branch'], repo, [STATE_BASE || 'main', STATE_HEAD || '']).then(function() {
-        document.getElementById('diff-status').textContent = 'Ready — select base and head branches, then click Compare.';
-        if (STATE_BASE && STATE_HEAD) {
-            document.getElementById('compare-btn').click();
-        }
-    });
-}
+radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD);
 
 document.getElementById('compare-btn').addEventListener('click', function() {
     var base = document.getElementById('base-branch').value;
@@ -1014,14 +1006,7 @@ ${graphHeaderClose()}`);
     const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
     return pageShell("Graph Diff", `
 ${graphHeader('graph-diff')}
-<div style="display:flex; gap:16px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="diff-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="${escapeHtml(targetRepo)}" selected>${escapeHtml(targetRepo)}</option>
-    </select>
-  </div>
-</div>
+<input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
@@ -1055,19 +1040,10 @@ radiusRenderGraph('graph-container', resources, { diffMode: true });
 var DIFF_BASE = '${escapeHtml(baseBranch)}';
 var DIFF_HEAD = '${escapeHtml(headBranch)}';
 
-// Auto-populate repos dropdown
-radiusPopulateRepos('diff-repo-select', document.getElementById('diff-repo-select').value);
-
-// Refresh the branch lists from GitHub on load so newly-created branches (e.g. a
-// PR branch pushed after this diff was last cached) appear in the dropdowns,
-// while preserving the currently-compared base/head selection.
-radiusPopulateBranches(['base-branch', 'head-branch'], document.getElementById('diff-repo-select').value, [DIFF_BASE || 'main', DIFF_HEAD || '']);
-
-document.getElementById('diff-repo-select').addEventListener('change', function() {
-    if (this.value) {
-        radiusPopulateBranches(['base-branch', 'head-branch'], this.value, [document.getElementById('base-branch').value || 'main', document.getElementById('head-branch').value || '']);
-    }
-});
+// Refresh the branch lists from GitHub on load (so newly-pushed branches
+// appear) while preserving the currently-compared base/head selection. Do not
+// auto-compare — the diff is already rendered.
+radiusPopulateDiffBranches(document.getElementById('diff-repo-select').value, DIFF_BASE || 'main', DIFF_HEAD, false);
 
 document.getElementById('compare-btn').addEventListener('click', function() {
     var base = document.getElementById('base-branch').value;
@@ -1507,6 +1483,7 @@ function statusCell(status) {
     var m = map[status] || map.pending;
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
+var envPollTimer = null;
 function loadEnvTable() {
     var body = document.getElementById('env-table-body');
     if (!CTX_REPO) {
@@ -1540,6 +1517,13 @@ function loadEnvTable() {
                 '</tr>';
             }).join('');
             wireRowActions();
+            // Keep polling while any environment is still pending (its
+            // verify-credentials workflow hasn't finished) so the status flips
+            // to Success/Failed on its own without a manual refresh.
+            if (envPollTimer) { clearTimeout(envPollTimer); envPollTimer = null; }
+            if (envs.some(function(e) { return e.status === 'pending'; })) {
+                envPollTimer = setTimeout(loadEnvTable, 10000);
+            }
         })
         .catch(function() {
             body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
@@ -2059,6 +2043,20 @@ function loadApplications() {
             var apps = (d && d.applications) || [];
             if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; return; }
             appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
+            // Pre-select the application passed via ?app= (e.g. from the
+            // "Deploy Application" button on the Application Graph page).
+            try {
+                var preApp = new URLSearchParams(window.location.search).get('app');
+                if (preApp) {
+                    var hasApp = apps.some(function(a) { return a.name === preApp; });
+                    if (!hasApp) {
+                        var o = document.createElement('option');
+                        o.value = preApp; o.textContent = preApp;
+                        appSelect.insertBefore(o, appSelect.firstChild);
+                    }
+                    appSelect.value = preApp;
+                }
+            } catch (e) {}
             refreshDeployBtn();
         })
         .catch(function() { appSelect.innerHTML = '<option value="">Could not load</option>'; });
@@ -2102,10 +2100,14 @@ function loadDeployments() {
             if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
             var appHref = 'https://github.com/' + CTX_REPO;
             body.innerHTML = deps.map(function(dep) {
+                var statusHtml = statusCell(dep.status);
+                if (dep.runUrl) {
+                    statusHtml = '<a class="rad-status-link" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + statusHtml + '</a>';
+                }
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(appHref) + '" target="_blank" rel="noopener noreferrer">↗ ' + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
-                    '<td>' + statusCell(dep.status) + '</td>' +
+                    '<td>' + statusHtml + '</td>' +
                     '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
                 '</tr>';
             }).join('');

@@ -1072,8 +1072,9 @@ function createRequestHandler(instanceId) {
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
 
-                    // The environment exists (we just listed it) → creation done.
-                    // Default to "pending" until we confirm a passing verify run.
+                    // Status reflects the verify-credentials workflow only:
+                    // pending while it runs, success when it passes, failed if it
+                    // fails. Default to "pending" until we find a matching run.
                     let status = "pending";
                     if (verifyRuns.size > 0) {
                         const depIdsRaw = await gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"]);
@@ -1086,6 +1087,7 @@ function createRequestHandler(instanceId) {
                             if (run) { status = verifyStatusOf(run) || status; break; }
                         }
                     }
+
                     const webUrl = id
                         ? `https://github.com/${repo}/settings/environments/${id}/edit`
                         : `https://github.com/${repo}/settings/environments`;
@@ -1163,17 +1165,25 @@ function createRequestHandler(instanceId) {
                     if (!latestByEnv.has(r.environment)) latestByEnv.set(r.environment, r.id);
                 }
                 const deployments = await Promise.all(Array.from(latestByEnv.entries()).map(async ([environment, id]) => {
-                    const [state, varsRaw] = await Promise.all([
-                        gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", ".[0].state"]),
+                    const [stateRaw, varsRaw] = await Promise.all([
+                        gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]),
                         gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]),
                     ]);
+                    const tab = stateRaw.indexOf("\t");
+                    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
+                    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+                    // Link the status to the GitHub Actions run that produced it.
+                    let runUrl = "";
+                    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+                    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
+                    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
                     let status = "pending";
                     if (state === "success") status = "success";
                     else if (state === "failure" || state === "error") status = "failed";
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
-                    return { app: appName, environment, provider, status, deploymentId: id };
+                    return { app: appName, environment, provider, status, deploymentId: id, runUrl };
                 }));
                 respond({ deployments });
             } catch (e) {
