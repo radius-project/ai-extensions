@@ -14,3 +14,8 @@ export {
   DEPLOY_AWS_FILE,
 } from "./deploy.js";
 export type { DeployWorkflowFiles } from "./deploy.js";
+export {
+  DEFAULT_STATE_ARCHIVE,
+  OCI_STATE_BACKEND,
+  stateRegistryForEnvironment,
+} from "./state.js";

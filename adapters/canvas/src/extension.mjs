@@ -8,13 +8,12 @@
 import { execFile } from "node:child_process";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
-  getPlatform,
   computeGraphDiff,
   fetchBicepFromRepo,
   generateBicepFromRepo,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
-import { runCommand, github } from "./gh.mjs";
+import { github } from "./gh.mjs";
 import {
     createWorkspaceGitHub,
     defaultBranchForState,
@@ -192,47 +191,54 @@ const session = await joinSession({
                 },
                 {
                     name: "create_environment",
-                    description: "Create a GitHub environment and configure cloud provider secrets",
+                    description: "Create a GitHub environment, private GHCR state package, cloud settings, and verification/deploy workflows",
                     inputSchema: {
                         type: "object",
                         properties: {
                             name: { type: "string", description: "Environment name (e.g. production)" },
                             provider: { type: "string", enum: ["azure", "aws"], description: "Cloud provider" },
                             repo: { type: "string", description: "Repository in owner/repo format" },
+                            clientId: { type: "string", description: "Azure application (client) ID" },
+                            tenantId: { type: "string", description: "Azure tenant ID" },
                             subscriptionId: { type: "string", description: "Azure Subscription ID" },
                             resourceGroup: { type: "string", description: "Azure Resource Group" },
                             location: { type: "string", description: "Azure Location" },
+                            roleArn: { type: "string", description: "AWS IAM role ARN used by GitHub OIDC" },
                             accountId: { type: "string", description: "AWS Account ID" },
                             region: { type: "string", description: "AWS Region" },
+                            cluster: { type: "string", description: "AKS or EKS cluster name" },
+                            vpcId: { type: "string", description: "Optional AWS VPC ID" },
+                            subnetIds: { type: "string", description: "Optional comma-separated AWS subnet IDs" },
                         },
                         required: ["name", "provider", "repo"],
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId, "environment");
                         const data = ctx.input;
-                        let output = "";
-                        let error = null;
                         try {
-                            const repo = data.repo;
-                            output += await runCommand("gh", ["api", "--method", "PUT", `/repos/${repo}/environments/${data.name}`]);
-                            output += "\nEnvironment created successfully.\n";
-                            const envPlatform = getPlatform(data.provider) || getPlatform("aws");
-                            for (const spec of envPlatform.environmentSecrets(data)) {
-                                if (!spec.value) continue;
-                                const verb = spec.kind === "variable" ? "variable" : "secret";
-                                // Variables can be passed on argv; secret values are fed over
-                                // stdin so they never appear in the process argument list.
-                                if (verb === "variable") {
-                                    await runCommand("gh", ["variable", "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
-                                } else {
-                                    await runCommand("gh", ["secret", "set", spec.name, "--repo", repo, "--env", data.name], { stdin: spec.value });
-                                }
-                                output += `Secret ${spec.name} set.\n`;
+                            const required = data.provider === "azure"
+                                ? ["clientId", "tenantId", "subscriptionId", "resourceGroup", "cluster"]
+                                : ["roleArn", "accountId", "region", "cluster"];
+                            const missing = required.filter((name) => !data[name]);
+                            if (missing.length > 0) {
+                                throw new Error(`Missing required ${data.provider} environment inputs: ${missing.join(", ")}.`);
                             }
-                        } catch (e) { error = e.message; }
-                        entry.state.envResult = error
-                            ? { error, output }
-                            : { message: `Environment '${data.name}' created and configured for ${data.repo}`, output };
+                            const response = await fetch(`${entry.baseUrl}/api/create-environment`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    ...data,
+                                    environment: data.name,
+                                }),
+                            });
+                            const result = await response.json();
+                            if (!response.ok || result.error) {
+                                throw new Error(result.error || `Environment setup failed with HTTP ${response.status}.`);
+                            }
+                            entry.state.envResult = result;
+                        } catch (e) {
+                            entry.state.envResult = { error: e.message };
+                        }
                         entry.url = `${entry.baseUrl}/?page=environment`;
                         return entry.state.envResult;
                     },

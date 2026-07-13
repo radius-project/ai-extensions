@@ -5,7 +5,7 @@ description: Create and verify a Radius deploy environment (AWS or Azure) for a 
 
 # Radius — Environment Setup
 
-Create a GitHub Environment configured with the cloud credentials (variables + secrets) Radius needs to deploy applications. Supports AWS (OIDC via IAM Role) and Azure (OIDC via Workload Identity).
+Create a GitHub Environment configured with the cloud credentials and private GHCR state package Radius needs to deploy applications across ephemeral workflow runs. Supports AWS (OIDC via IAM Role) and Azure (OIDC via Workload Identity).
 
 ## When to use this skill
 
@@ -18,7 +18,7 @@ Create a GitHub Environment configured with the cloud credentials (variables + s
 
 ## Flow
 
-The canvas drives a short wizard per provider: collect the environment's cloud settings as GitHub Actions variables, then commit and dispatch the provider's verification workflow to confirm they work end to end.
+The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification or automatic deployment.
 
 ### AWS
 1. **Form inputs**: env name, IAM Role ARN, AWS region, account ID, EKS cluster name, optional VPC + subnet IDs (required if the app uses `Radius.Data/mySqlDatabases`). These are written as GitHub Environment variables.
@@ -56,6 +56,11 @@ The popup lands directly on the create-environment form for the chosen provider.
 
 The verification workflow reads only GitHub Actions **variables** (`vars`), never secrets. OIDC eliminates the need to store long-lived cloud credentials.
 
+**Common**
+- `RADIUS_STATE_BACKEND` — explicitly set to `oci`.
+- `RADIUS_STATE_REGISTRY` — package-only, per-environment GHCR path used by `rad startup` and `rad shutdown`, for example `ghcr.io/example/my-app-radius-state-production-1a2b3c4d5e6f`. It does not include `:radius-state`; the extension derives this value and each GitHub Environment receives a different package.
+- `RADIUS_STATE_ARCHIVE` — the separate OCI state tag, set to `radius-state`.
+
 **AWS** — read by `verify-aws.yml`:
 - `AWS_ROLE_ARN` — ARN of the IAM role the runner assumes via OIDC
 - `AWS_REGION` — AWS region (e.g. `us-west-2`)
@@ -75,6 +80,7 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 
 ## Prerequisites on the cloud side
 
+- **Local GitHub authentication:** `gh` must have a stored keyring login with `read:packages` and `write:packages`. The extension deliberately ignores ambient `GH_TOKEN` / `GITHUB_TOKEN` for package creation. If needed, run `gh auth refresh -s read:packages -s write:packages`.
 - **Azure:** a federated credential on the AAD app whose subject is exactly `repo:<owner>/<repo>:environment:<environment-name>`, audience `api://AzureADTokenExchange`.
 - **AWS:** an IAM role trust policy that allows `sts:AssumeRoleWithWebIdentity` from `token.actions.githubusercontent.com` with audience `sts.amazonaws.com` and subject `repo:<owner>/<repo>:environment:<environment-name>`.
 
@@ -84,10 +90,11 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
 - **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`.
+- **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
 
 ## Verifying after creation
 
-After the canvas reports success, the new env appears in the **Envs ▾** dropdown tagged with its provider (AWS/AZURE). The hub's deploy button enables once both an Application and Environment are selected.
+After the canvas reports success, the new env appears in the **Envs ▾** dropdown tagged with its provider (AWS/AZURE). Its three state variables select OCI, point to a private/internal GHCR package isolated from every other GitHub Environment, and select that package's `radius-state` tag. The package retains the harmless `bootstrap` tag so later workflow runs can add and remove `radius-state` versions without deleting the configured package. The hub's deploy button enables once both an Application and Environment are selected.
 
 ## Related files
 

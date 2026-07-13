@@ -17,11 +17,15 @@ import {
   generateBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
+  DEFAULT_STATE_ARCHIVE,
+  OCI_STATE_BACKEND,
+  stateRegistryForEnvironment,
 } from "@radius-project/core";
 import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold } from "./gh.mjs";
+import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
@@ -453,11 +457,46 @@ function createRequestHandler(instanceId) {
                     });
                 }
 
+                async function runGhOrThrow(args, message, stdin) {
+                    const result = await runGh(args, stdin);
+                    if (result.code !== 0) {
+                        const detail = (result.stderr || result.stdout || '').trim();
+                        throw new Error(detail ? `${message}: ${detail}` : message);
+                    }
+                    return result;
+                }
+
+                async function setEnvironmentVariable(name, value) {
+                    if (!value) return false;
+                    await runGhOrThrow(
+                        ['variable', 'set', name, '--body', value, '--env', envName, '--repo', targetRepo],
+                        `Failed to set ${name} on GitHub environment "${envName}"`
+                    );
+                    return true;
+                }
+
                 const steps = [];
+                const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
+
+                steps.push('Creating private GHCR state package "' + stateRegistry + '"...');
+                const statePackage = await bootstrapGHCRStatePackage({
+                    targetRepository: targetRepo,
+                    registry: stateRegistry,
+                });
+                steps.push(`✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`);
 
                 // Step 1: Create the GitHub environment
                 steps.push('Creating GitHub environment "' + envName + '"...');
-                await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName]);
+                await runGhOrThrow(
+                    ['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName],
+                    'Failed to create GitHub environment "' + envName + '"'
+                );
+
+                steps.push('Configuring Radius state package "' + stateRegistry + '"...');
+                await setEnvironmentVariable('RADIUS_STATE_BACKEND', OCI_STATE_BACKEND);
+                await setEnvironmentVariable('RADIUS_STATE_REGISTRY', stateRegistry);
+                await setEnvironmentVariable('RADIUS_STATE_ARCHIVE', DEFAULT_STATE_ARCHIVE);
+                steps.push(`✅ Radius state package configured with archive tag "${DEFAULT_STATE_ARCHIVE}".`);
 
                 // Step 2: Set environment variables and secrets based on provider
                 steps.push('Setting environment variables and secrets...');
@@ -472,12 +511,12 @@ function createRequestHandler(instanceId) {
                     const rg = data.resourceGroup || '';
                     const k8s = data.cluster || '';
 
-                    if (clientId) await runGh(['variable', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
-                    if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
-                    if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
-                    if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
-                    if (data.location) await runGh(['variable', 'set', 'AZURE_LOCATION', '--body', data.location, '--env', envName, '--repo', targetRepo]);
+                    await setEnvironmentVariable('AZURE_CLIENT_ID', clientId);
+                    await setEnvironmentVariable('AZURE_TENANT_ID', tenantId);
+                    await setEnvironmentVariable('AZURE_SUBSCRIPTION_ID', subscriptionId);
+                    await setEnvironmentVariable('AZURE_RESOURCE_GROUP', rg);
+                    await setEnvironmentVariable('AZURE_AKS_CLUSTER_NAME', k8s);
+                    await setEnvironmentVariable('AZURE_LOCATION', data.location);
 
                     const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location].filter(Boolean).length;
                     steps.push(`Set ${setCount} environment value(s) for Azure.`);
@@ -490,12 +529,12 @@ function createRequestHandler(instanceId) {
                     const accountId = data.accountId || awsCreds.accountId || '';
                     const k8s = data.cluster || '';
 
-                    if (roleArn) await runGh(['variable', 'set', 'AWS_ROLE_ARN', '--body', roleArn, '--env', envName, '--repo', targetRepo]);
-                    if (region) await runGh(['variable', 'set', 'AWS_REGION', '--body', region, '--env', envName, '--repo', targetRepo]);
-                    if (accountId) await runGh(['variable', 'set', 'AWS_ACCOUNT_ID', '--body', accountId, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
-                    if (data.vpcId) await runGh(['variable', 'set', 'RADIUS_VPC_ID', '--body', data.vpcId, '--env', envName, '--repo', targetRepo]);
-                    if (data.subnetIds) await runGh(['variable', 'set', 'RADIUS_SUBNET_IDS', '--body', data.subnetIds, '--env', envName, '--repo', targetRepo]);
+                    await setEnvironmentVariable('AWS_ROLE_ARN', roleArn);
+                    await setEnvironmentVariable('AWS_REGION', region);
+                    await setEnvironmentVariable('AWS_ACCOUNT_ID', accountId);
+                    await setEnvironmentVariable('AWS_EKS_CLUSTER_NAME', k8s);
+                    await setEnvironmentVariable('RADIUS_VPC_ID', data.vpcId);
+                    await setEnvironmentVariable('RADIUS_SUBNET_IDS', data.subnetIds);
                 }
 
                 // Step 2b: Provision application parameters. Parse the app.bicep the
@@ -523,7 +562,11 @@ function createRequestHandler(instanceId) {
                         // Split into secret (provisioned as a secret, appended by the
                         // workflow) and non-secret (inlined into the rad deploy command).
                         const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
-                        await runGh(['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo], Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}');
+                        await runGhOrThrow(
+                            ['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo],
+                            `Failed to set RADIUS_DEPLOY_PARAMS on GitHub environment "${envName}"`,
+                            Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}'
+                        );
 
                         // Build the rad deploy command with non-secret params inline and
                         // store it as an environment variable. The deploy workflow reads
@@ -532,7 +575,7 @@ function createRequestHandler(instanceId) {
                         // trigger (where inputs are empty). Secret params are appended by
                         // the workflow from RADIUS_DEPLOY_PARAMS.
                         const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
-                        await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
+                        await setEnvironmentVariable('RADIUS_RAD_COMMANDS', radCommand);
 
                         const names = Object.keys(resolved);
                         if (names.length > 0) {
@@ -627,7 +670,13 @@ function createRequestHandler(instanceId) {
                 // Wait briefly for GitHub to index the workflow
                 await new Promise(r => setTimeout(r, 3000));
                 const dispatchedAt = Date.now();
-                const dispatchResult = await runGh(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                const dispatchDelays = [0, 2000, 5000];
+                let dispatchResult = { code: 1, stdout: '', stderr: '' };
+                for (const delay of dispatchDelays) {
+                    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+                    dispatchResult = await runGh(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                    if (dispatchResult.code === 0) break;
+                }
 
                 let verifyRunUrl = '';
                 let verifyRunId = null;
@@ -645,7 +694,21 @@ function createRequestHandler(instanceId) {
                     } catch {}
                     steps.push('Deploy workflow will auto-trigger after verify-credentials succeeds.');
                 } else {
-                    steps.push('⚠️ Could not dispatch verify workflow (may need to retry): ' + dispatchResult.stderr);
+                    const detail = (dispatchResult.stderr || dispatchResult.stdout || '').trim() || 'The GitHub CLI request failed.';
+                    steps.push('❌ Could not dispatch verify workflow: ' + detail);
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({
+                        error: 'Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. ' + detail,
+                        environment: envName,
+                        provider,
+                        repo: targetRepo,
+                        stateBackend: OCI_STATE_BACKEND,
+                        stateRegistry,
+                        stateArchive: DEFAULT_STATE_ARCHIVE,
+                        steps
+                    }));
+                    return;
                 }
 
                 // Record dispatch markers so the deploy monitor can track the
@@ -666,6 +729,9 @@ function createRequestHandler(instanceId) {
                     environment: envName,
                     provider,
                     repo: targetRepo,
+                    stateBackend: OCI_STATE_BACKEND,
+                    stateRegistry,
+                    stateArchive: DEFAULT_STATE_ARCHIVE,
                     verifyRunUrl,
                     steps
                 }));

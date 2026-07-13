@@ -83,6 +83,17 @@ export function runCommand(cmd, args, opts = {}) {
     });
 }
 
+// Run gh with only its stored keyring credential. This is intentionally stricter
+// than cliExec's normal fallback because package bootstrap must never inherit an
+// ambient workflow/app token whose package visibility semantics may differ.
+export function runGhKeyringCommand(args, opts = {}) {
+    const env = { ...(opts.env || process.env) };
+    delete env.GH_TOKEN;
+    delete env.GITHUB_TOKEN;
+    delete env.GH_HOST;
+    return runCommand("gh", args, { ...opts, env });
+}
+
 export const AWS_REGIONS = [
     "us-east-1", "us-east-2", "us-west-1", "us-west-2",
     "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
