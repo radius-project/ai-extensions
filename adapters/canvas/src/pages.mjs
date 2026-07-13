@@ -495,33 +495,86 @@ export function graphPage(state) {
 ${graphHeader('graph')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div class="rad-field">
-    <label>Repository</label>
-    <select id="graph-repo" class="rad-select" style="min-width:280px;">
-      <option value="">Loading repos...</option>
+    <label>Application</label>
+    <select id="graph-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
     <label>Branch</label>
-    <select id="graph-branch" class="rad-select">
-      <option value="">Select repo first</option>
+    <select id="graph-branch" class="rad-select" style="min-width:220px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
   <button id="load-graph-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Generate Graph</button>
 </div>
-<div id="graph-status" class="status info">Select a repository and click Generate Graph. If no app.bicep exists, one will be generated from the repo structure.</div>
+<div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('graph-repo', 'graph-branch', CONTEXT_REPO, CONTEXT_BRANCH);
 
-document.getElementById('load-graph-btn').addEventListener('click', function() {
-    var repo = document.getElementById('graph-repo').value.trim();
-    var branch = document.getElementById('graph-branch').value.trim() || 'main';
+// Populate the Application dropdown for the current repository.
+(function() {
+    var appSel = document.getElementById('graph-app');
+    if (!CONTEXT_REPO) { appSel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = d.applications || [];
+            appSel.innerHTML = '';
+            if (apps.length === 0) {
+                var fallback = CONTEXT_REPO.split('/').pop() || CONTEXT_REPO;
+                var o = document.createElement('option');
+                o.value = fallback; o.textContent = fallback; appSel.appendChild(o);
+                return;
+            }
+            apps.forEach(function(a) {
+                var o = document.createElement('option');
+                o.value = a.name; o.textContent = a.name; appSel.appendChild(o);
+            });
+        })
+        .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+})();
+
+// Populate the Branch dropdown with NO branch pre-selected.
+(function() {
+    var branchSel = document.getElementById('graph-branch');
+    if (!CONTEXT_REPO) { branchSel.innerHTML = '<option value="">No repository context</option>'; return; }
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: CONTEXT_REPO}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            branchSel.innerHTML = '<option value="">— Select a branch —</option>';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                branchSel.appendChild(o);
+            });
+        })
+        .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
+})();
+
+// Auto-generate the graph as soon as a branch is chosen.
+document.getElementById('graph-branch').addEventListener('change', function() {
+    if (this.value) generateGraph();
+});
+
+document.getElementById('load-graph-btn').addEventListener('click', generateGraph);
+
+function generateGraph() {
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('graph-branch').value.trim();
     if (!repo) return;
-    this.textContent = '⏳ Generating...';
-    this.disabled = true;
-    var btn = this;
+    var btn = document.getElementById('load-graph-btn');
+    var statusEl0 = document.getElementById('graph-status');
+    if (!branch) {
+        if (statusEl0) { statusEl0.textContent = 'Select a branch to generate the application graph.'; statusEl0.className = 'status info'; statusEl0.style.display = ''; }
+        return;
+    }
+    btn.textContent = '⏳ Generating...';
+    btn.disabled = true;
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
@@ -578,7 +631,7 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
             }
         })
         .catch(function() { clearInterval(pollInterval); btn.textContent = 'Generate Graph'; btn.disabled = false; container.innerHTML = ''; });
-});
+}
 <\/script>
 ${graphHeaderClose()}`);
     }
@@ -587,10 +640,11 @@ ${graphHeaderClose()}`);
 ${graphHeader('graph')}
 ${''/* bicepGenerated note moved below graph container */}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
+  <input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
   <div class="rad-field">
-    <label>Repository</label>
-    <select id="graph-repo" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
-      <option value="${escapeHtml(targetRepo)}" selected>${escapeHtml(targetRepo)}</option>
+    <label>Application</label>
+    <select id="graph-app" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
@@ -607,8 +661,64 @@ ${state.bicepGenerated ? 'Generated from repo analysis — no existing app.bicep
 </div>
 
 <script>
-// Auto-populate repos dropdown
-radiusSetupRepoBranch('graph-repo', 'graph-branch', document.getElementById('graph-repo').value, document.getElementById('graph-branch').value);
+var CONTEXT_REPO = document.getElementById('graph-repo').value;
+var CURRENT_BRANCH = '${escapeHtml(graphBranch || 'main')}';
+
+// Populate the Application dropdown for the current repository.
+(function() {
+    var appSel = document.getElementById('graph-app');
+    if (!CONTEXT_REPO) { appSel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = d.applications || [];
+            appSel.innerHTML = '';
+            if (apps.length === 0) {
+                var f = CONTEXT_REPO.split('/').pop() || CONTEXT_REPO;
+                var o = document.createElement('option'); o.value = f; o.textContent = f; appSel.appendChild(o);
+                return;
+            }
+            apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+        })
+        .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+})();
+
+// Populate the Branch dropdown, keeping the current branch selected.
+(function() {
+    var branchSel = document.getElementById('graph-branch');
+    if (!CONTEXT_REPO) return;
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: CONTEXT_REPO}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            if (!branches.length) return;
+            branchSel.innerHTML = '';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                if (b.name === CURRENT_BRANCH) o.selected = true;
+                branchSel.appendChild(o);
+            });
+        })
+        .catch(function() {});
+})();
+
+// Regenerate the graph when a different branch is selected.
+document.getElementById('graph-branch').addEventListener('change', function() {
+    var repo = CONTEXT_REPO;
+    var branch = this.value.trim();
+    if (!repo || !branch) return;
+    var container = document.getElementById('graph-container');
+    container.innerHTML = '<div style="padding:20px; color:var(--text-color-muted,#656d76);">⏳ Regenerating graph for ' + branch + '…</div>';
+    fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.reload) { window.location.reload(); }
+            else if (d.error) { container.innerHTML = '<div class="status error">Error: ' + d.error + '</div>'; }
+        })
+        .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
+});
 
 // Deploy Application → move to the planned deployment flow.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
@@ -1240,22 +1350,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
           <option value="azure" selected>Azure</option>
         </select>
       </div>
-      <div class="rad-field" style="margin-top:12px;"><label>Environment Name</label>
+      <div class="rad-field" style="margin-top:12px; margin-bottom:20px;"><label>Environment Name</label>
         <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" style="max-width:280px;" />
       </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; max-width:580px;">
-        <div class="rad-field"><label>Target Repository</label>
-          <select id="deploy-repo-select" class="rad-select">
-            <option value="${escapeHtml(ctxRepo)}" selected>${escapeHtml(ctxRepo || 'Loading...')}</option>
-          </select>
-          <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
-        </div>
-        <div class="rad-field"><label>Branch</label>
-          <select id="deploy-branch-select" class="rad-select">
-            <option value="" disabled selected>Loading...</option>
-          </select>
-        </div>
-      </div>
+      <!-- Repository and branch are assumed from the current workspace. -->
+      <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
+      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
     </div>
 
 <!-- Azure Panel -->
@@ -1457,29 +1557,10 @@ function wireEmptyState() {
 function wireRowActions() {
     document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
         btn.addEventListener('click', function() {
-            var b = this;
-            var envName = b.dataset.env;
-            var provider = b.dataset.provider || 'azure';
-            b.disabled = true;
-            var prevLabel = b.textContent;
-            b.textContent = 'Deploying…';
-            fetch('/api/deploy', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    environment: envName,
-                    provider: provider,
-                    targetRepo: CTX_REPO,
-                    branch: CTX_BRANCH,
-                    appFile: '.radius/app.bicep'
-                })
-            }).then(function(r) { return r.json().catch(function() { return {}; }); })
-              .then(function() { window.location.href = '/?page=deploying'; })
-              .catch(function() {
-                  b.disabled = false;
-                  b.textContent = prevLabel;
-                  alert('Could not start the deployment. Please try again.');
-              });
+            var envName = this.dataset.env || '';
+            // Go to the Deployments page with this environment pre-selected —
+            // do NOT start a deployment here.
+            window.location.href = '/?page=deploying' + (envName ? '&env=' + encodeURIComponent(envName) : '');
         });
     });
 }
@@ -1512,18 +1593,8 @@ setupCombo('aws-namespace-select', 'aws-namespace-custom');
 setupCombo('aws-vpc-select', 'aws-vpc-custom');
 setupCombo('aws-subnets-select', 'aws-subnets-custom');
 
-// Deploy repo + branch selects — wired via the shared repo/branch library
-radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(deployDefaultBranch)}');
-
-// Keep the hidden target-repo input in sync for deploy submission
-(function syncTargetRepo() {
-    var sel = document.getElementById('deploy-repo-select');
-    var inp = document.getElementById('target-repo');
-    if (!sel || !inp) { setTimeout(syncTargetRepo, 100); return; }
-    var sync = function() { inp.value = sel.value; };
-    sel.addEventListener('change', sync);
-    sync();
-})();
+// Repository and branch are assumed from the current workspace and provided as
+// hidden inputs (#target-repo, #deploy-branch-select) — no picker needed.
 
 // Populate a select element with discovered items
 function populateSelect(selectId, items, placeholder) {
@@ -1902,7 +1973,7 @@ function deployLandingView(state) {
     <div class="rad-spinner-lg" aria-hidden="true"></div>
     <div>
       <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
-      <div style="font-size:13px; color:var(--rad-text-secondary);">This may take a few moments, redirecting to deployment status view…</div>
+      <div style="font-size:13px; color:var(--rad-text-secondary);">Your deployment has started. Redirecting you to the deployed application graph…</div>
     </div>
   </div>
 </div>
@@ -2003,6 +2074,12 @@ function loadEnvironmentsDropdown() {
             ENV_PROVIDERS = {};
             envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || 'azure'; });
             envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
+            // Pre-select the environment passed via ?env= (e.g. from the
+            // "Deploy Apps" button on the environments list).
+            try {
+                var preEnv = new URLSearchParams(window.location.search).get('env');
+                if (preEnv && ENV_PROVIDERS.hasOwnProperty(preEnv)) { envSelect.value = preEnv; }
+            } catch (e) {}
             refreshDeployBtn();
         })
         .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
@@ -2088,13 +2165,24 @@ deployBtn.addEventListener('click', function() {
     var progTitle = document.getElementById('deploy-progress-title');
     progTitle.innerHTML = 'Deploying <strong>' + escapeHtmlClient(app) + '</strong> to environment <strong>' + escapeHtmlClient(env) + '</strong>';
     document.getElementById('deploy-progress-modal').style.display = 'flex';
+
+    // Show the "deployment started" dialog for ~3 seconds, then route to the
+    // Applications → Deployed tab. The deploy request is fired in parallel; the
+    // deployed view polls for live status once we land there.
+    var failed = false;
+    var routeTimer = setTimeout(function() {
+        if (failed) return;
+        window.location.href = '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app);
+    }, 3000);
+
     fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: CTX_BRANCH, appFile: '.radius/app.bicep' })
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
-      .then(function() { window.location.href = '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app); })
       .catch(function() {
+          failed = true;
+          clearTimeout(routeTimer);
           document.getElementById('deploy-progress-modal').style.display = 'none';
           deployBtn.disabled = false;
           deployBtn.textContent = 'Deploy';

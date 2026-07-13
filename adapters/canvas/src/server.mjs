@@ -1037,23 +1037,54 @@ function createRequestHandler(instanceId) {
                 }) : [];
                 if (rows.length === 0) { respond({ environments: [] }); return; }
 
+                // Pre-fetch the credential-verification workflow's recent runs once
+                // and index them by run id. The environment status is derived from
+                // these (not from app deployments): an environment is "Success" only
+                // once it exists AND its verify-credentials workflow has passed.
+                const verifyRunsRaw = await gh([
+                    "api",
+                    `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
+                    "--jq", ".workflow_runs[] | (.id|tostring) + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")",
+                ]);
+                const verifyRuns = new Map();
+                if (verifyRunsRaw) {
+                    for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
+                        const [rid, rstatus, rconclusion] = line.split("\t");
+                        verifyRuns.set(rid, { status: rstatus, conclusion: rconclusion });
+                    }
+                }
+                // Map a verify run's outcome to an environment status.
+                const verifyStatusOf = (run) => {
+                    if (!run) return null;
+                    if (run.status !== "completed") return "pending"; // queued / in_progress
+                    if (run.conclusion === "success") return "success";
+                    return "failed"; // failure / cancelled / timed_out / etc.
+                };
+
                 // 2) For each environment, derive provider (from stored variables)
-                //    and a best-effort status (from the latest deployment state).
+                //    and a status from the verify-credentials workflow. Both the
+                //    verify and deploy workflows create deployments to the same
+                //    environment, so we walk this env's deployments newest-first
+                //    until we find one created by a verify-credentials run.
                 const environments = await Promise.all(rows.map(async ({ id, name }) => {
-                    const [varsRaw, deployId] = await Promise.all([
-                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]),
-                        gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=1`, "--jq", ".[0].id"]),
-                    ]);
+                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]);
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
 
+                    // The environment exists (we just listed it) → creation done.
+                    // Default to "pending" until we confirm a passing verify run.
                     let status = "pending";
-                    if (deployId) {
-                        const state = await gh(["api", `/repos/${repo}/deployments/${deployId}/statuses?per_page=1`, "--jq", ".[0].state"]);
-                        if (state === "success") status = "success";
-                        else if (state === "failure" || state === "error") status = "failed";
-                        else if (state) status = "pending";
+                    if (verifyRuns.size > 0) {
+                        const depIdsRaw = await gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"]);
+                        const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
+                        for (const depId of depIds) {
+                            const logUrl = await gh(["api", `/repos/${repo}/deployments/${depId}/statuses?per_page=1`, "--jq", ".[0].log_url // .[0].target_url // \"\""]);
+                            const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+                            if (!m) continue;
+                            const run = verifyRuns.get(m[1]);
+                            if (run) { status = verifyStatusOf(run) || status; break; }
+                        }
                     }
                     const webUrl = id
                         ? `https://github.com/${repo}/settings/environments/${id}/edit`
@@ -1668,6 +1699,39 @@ function createRequestHandler(instanceId) {
                             });
                         });
                         const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '-f', 'environment=' + envForDeploy, '--repo', repo];
+
+                        // Recompute the rad commands from the CURRENT app.bicep at
+                        // dispatch time (rather than relying on the RADIUS_RAD_COMMANDS
+                        // variable captured when the environment was created) so the
+                        // deploy always reflects the latest bicep. Also append
+                        // `rad app graph` so the deployed application graph is rendered
+                        // as part of the run. Secret params are still appended by the
+                        // workflow from the RADIUS_DEPLOY_PARAMS secret.
+                        try {
+                            let bicepPath = '.radius/app.bicep';
+                            let bicepSource = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
+                            if (!bicepSource) {
+                                bicepSource = await fetchFileForSelection(entry, repo, branch, 'app.bicep');
+                                if (bicepSource) bicepPath = 'app.bicep';
+                            }
+                            if (bicepSource) {
+                                const parsed = appParams(bicepSource);
+                                const resolved = resolveDeployParams(parsed);
+                                const { public: publicParams } = partitionParams(parsed, resolved);
+                                const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
+                                const appMatch = bicepSource.match(/application\s+['"]([^'"]+)['"]/) || bicepSource.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
+                                const appName = appMatch ? appMatch[1] : '';
+                                const commands = [deployCmd];
+                                if (appName) commands.push('app graph --application ' + appName);
+                                const radCommandsInput = JSON.stringify(commands);
+                                dispatchArgs.push('-f', 'rad_commands=' + radCommandsInput);
+                                addLog('Deploying with rad commands: ' + commands.join('  |  '));
+                            } else {
+                                addLog('⚠ Could not read app.bicep at dispatch; falling back to the environment\'s RADIUS_RAD_COMMANDS / default deploy.');
+                            }
+                        } catch (e) {
+                            addLog('⚠ Could not compute rad commands from bicep (' + e.message + '); falling back to the environment default.');
+                        }
                         const deployDispatchedAt = Date.now();
                         addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') for environment "' + envForDeploy + '"...');
                         let dispatchDeployRes = await runGhDeploy(dispatchArgs);
