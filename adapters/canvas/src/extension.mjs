@@ -232,8 +232,8 @@ const session = await joinSession({
                                 }),
                             });
                             const result = await response.json();
-                            if (!response.ok || result.error) {
-                                throw new Error(result.error || `Environment setup failed with HTTP ${response.status}.`);
+                            if (!response.ok && !result.error) {
+                                result.error = `Environment setup failed with HTTP ${response.status}.`;
                             }
                             entry.state.envResult = result;
                         } catch (e) {
