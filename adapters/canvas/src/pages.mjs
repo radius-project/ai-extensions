@@ -954,6 +954,12 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
+    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
+    </select>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
@@ -966,7 +972,6 @@ ${graphHeader('graph-diff')}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="compare-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Compare</button>
 </div>
 <div id="diff-status" class="status info">Loading branches…</div>
 <script>
@@ -974,26 +979,32 @@ var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
 var CONTEXT_REPO = document.getElementById('diff-repo-select').value;
 
+radiusPopulateApplications(CONTEXT_REPO, 'diff-app');
 radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD);
 
-document.getElementById('compare-btn').addEventListener('click', function() {
+// Auto-load the diff graph whenever the head (or base, once head is set)
+// branch changes — no Compare button.
+function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
     var repo = document.getElementById('diff-repo-select').value;
     if (!repo || !base || !head) return;
-    this.textContent = 'Comparing...';
-    this.disabled = true;
-    var btn = this;
-    document.getElementById('diff-status').textContent = 'Fetching app.bicep (or generating from repo structure if not found)...';
+    var statusEl = document.getElementById('diff-status');
+    statusEl.className = 'status info';
+    statusEl.textContent = 'Comparing ' + base + ' → ' + head + ' (fetching app.bicep, generating if not found)…';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Compare';
-            btn.disabled = false;
-            if (d.error) { document.getElementById('diff-status').textContent = d.error; document.getElementById('diff-status').className = 'status error'; }
+            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
-            else if (d.message) { document.getElementById('diff-status').textContent = d.message; }
-        });
+            else if (d.message) { statusEl.textContent = d.message; }
+        })
+        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+}
+
+document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('base-branch').addEventListener('change', function() {
+    if (document.getElementById('head-branch').value) runDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -1009,6 +1020,12 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
+    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
+    </select>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsBase}
@@ -1021,8 +1038,8 @@ ${graphHeader('graph-diff')}
       ${branchOptionsHead}
     </select>
   </div>
-  <button id="compare-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Compare</button>
 </div>
+<div id="diff-status" class="status info" style="display:none;"></div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
@@ -1040,27 +1057,37 @@ radiusRenderGraph('graph-container', resources, { diffMode: true });
 var DIFF_BASE = '${escapeHtml(baseBranch)}';
 var DIFF_HEAD = '${escapeHtml(headBranch)}';
 
+radiusPopulateApplications(document.getElementById('diff-repo-select').value, 'diff-app');
+
 // Refresh the branch lists from GitHub on load (so newly-pushed branches
 // appear) while preserving the currently-compared base/head selection. Do not
 // auto-compare — the diff is already rendered.
 radiusPopulateDiffBranches(document.getElementById('diff-repo-select').value, DIFF_BASE || 'main', DIFF_HEAD, false);
 
-document.getElementById('compare-btn').addEventListener('click', function() {
+// Auto-load the diff graph whenever the head (or base, once head is set)
+// branch changes — no Compare button.
+function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
     var repo = document.getElementById('diff-repo-select').value;
     if (!repo || !base || !head) return;
-    this.textContent = 'Comparing...';
-    this.disabled = true;
-    var btn = this;
+    var statusEl = document.getElementById('diff-status');
+    statusEl.style.display = '';
+    statusEl.className = 'status info';
+    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Compare';
-            btn.disabled = false;
-            if (d.error) { alert(d.error); }
+            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
-        });
+            else if (d.message) { statusEl.textContent = d.message; }
+        })
+        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+}
+
+document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('base-branch').addEventListener('change', function() {
+    if (document.getElementById('head-branch').value) runDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -1088,6 +1115,11 @@ ${graphHeader('deployed')}
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
   <div id="deployed-status" class="status info">Loading deployed application graph…</div>
   <div id="graph-container"></div>
+</div>
+
+<div id="deployed-log-section" class="rad-card" style="margin:16px 0 0; display:none;">
+  <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:10px;">Deployment Logs</div>
+  <div id="deployed-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
 <!-- Delete confirmation modal -->
@@ -1140,6 +1172,42 @@ function escapeHtmlClient(s) {
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
 
+    // --- Deployment log streaming (shown under the graph while a deploy runs) ---
+    var logSection = document.getElementById('deployed-log-section');
+    var logOutput = document.getElementById('deployed-log-output');
+    var logTimer = null;
+    var LOG_TOTAL = 0;
+    var logStreamStarted = false;
+
+    function stopLogStream() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
+
+    function pollLogs() {
+        fetch('/api/deploy-status?since=' + LOG_TOTAL).then(function(r) { return r.json(); }).then(function(d) {
+            if (d.logsNew && d.logsNew.length) {
+                for (var i = 0; i < d.logsNew.length; i++) { logOutput.textContent += d.logsNew[i] + '\\n'; }
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
+            if (typeof d.logTotal === 'number') { LOG_TOTAL = d.logTotal; }
+            if (d.status === 'complete' || d.status === 'success' || d.status === 'failed') { stopLogStream(); }
+        }).catch(function() {});
+    }
+
+    function startLogStream() {
+        if (logStreamStarted) return;
+        logStreamStarted = true;
+        logSection.style.display = 'block';
+        // Pull the full buffer once (since=0), then stream incrementally.
+        fetch('/api/deploy-status?since=0').then(function(r) { return r.json(); }).then(function(d) {
+            var lines = (d && d.logs) || (d && d.logsNew) || [];
+            for (var i = 0; i < lines.length; i++) { logOutput.textContent += lines[i] + '\\n'; }
+            logOutput.scrollTop = logOutput.scrollHeight;
+            if (typeof d.logTotal === 'number') { LOG_TOTAL = d.logTotal; }
+            else { LOG_TOTAL = lines.length; }
+            if (d && (d.status === 'complete' || d.status === 'success' || d.status === 'failed')) return;
+            logTimer = setInterval(pollLogs, 1500);
+        }).catch(function() {});
+    }
+
     function showInline(kind, msg) {
         inlineStatus.style.display = 'block';
         inlineStatus.textContent = msg;
@@ -1177,6 +1245,11 @@ function escapeHtmlClient(s) {
         fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
             var liveRes = (s && s.resources) || [];
             var st = s && s.status;
+            // Stream deployment logs under the graph whenever a deploy is running
+            // or has produced log output.
+            if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
+                startLogStream();
+            }
             if (liveRes.length && (st === 'in_progress' || st === 'success')) {
                 renderGraph(liveRes);
                 if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
@@ -1513,6 +1586,7 @@ function loadEnvTable() {
                     '<td class="rad-table__actions">' +
                         '<a class="rad-link" href="' + escapeHtmlClient(editHref) + '" target="_blank" rel="noopener noreferrer">edit</a>' +
                         '<button class="rad-btn rad-btn--info js-deploy-apps" data-env="' + escapeHtmlClient(e.name) + '" data-provider="' + escapeHtmlClient(e.provider || '') + '" style="margin:0;">Deploy Apps</button>' +
+                        '<button class="rad-btn rad-btn--danger" style="margin:0;" onclick="return false;">Delete Env</button>' +
                     '</td>' +
                 '</tr>';
             }).join('');
@@ -1909,12 +1983,10 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
 }
 
 export function deployingPage(state) {
-    // The Deployments tab is a landing page (application + environment
-    // selectors, a Deploy button, and a table of existing deployments). While a
-    // deployment is actively running we swap in the live progress view instead.
-    if (state?.deployStatus === 'in_progress') {
-        return deployProgressView(state);
-    }
+    // The Deployments tab is always the landing page (application + environment
+    // selectors, a Deploy button, and a table of existing deployments). Live
+    // deployment progress (graph + logs) is shown on the Applications → Deployed
+    // tab instead, so navigating back here always shows the listing view.
     return deployLandingView(state);
 }
 
@@ -2023,6 +2095,8 @@ var appSelect = document.getElementById('deploy-app-select');
 var envSelect = document.getElementById('deploy-env-select');
 var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
+var HAS_APPS = false;
+var HAS_ENVS = false;
 
 function showInline(kind, msg) {
     inlineStatus.style.display = 'block';
@@ -2032,7 +2106,23 @@ function showInline(kind, msg) {
 }
 
 function refreshDeployBtn() {
-    deployBtn.disabled = !(CTX_REPO && appSelect.value && envSelect.value);
+    // The primary button adapts to what's missing:
+    //   • no application options  → "Create Application" (go model an app)
+    //   • app but no environments → "Create Environment"
+    //   • otherwise               → "Deploy" (enabled once app+env chosen)
+    if (!HAS_APPS) {
+        deployBtn.dataset.mode = 'create-app';
+        deployBtn.textContent = 'Create Application';
+        deployBtn.disabled = false;
+    } else if (!HAS_ENVS) {
+        deployBtn.dataset.mode = 'create-env';
+        deployBtn.textContent = 'Create Environment';
+        deployBtn.disabled = false;
+    } else {
+        deployBtn.dataset.mode = 'deploy';
+        deployBtn.textContent = 'Deploy';
+        deployBtn.disabled = !(CTX_REPO && appSelect.value && envSelect.value);
+    }
 }
 
 function loadApplications() {
@@ -2041,7 +2131,8 @@ function loadApplications() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var apps = (d && d.applications) || [];
-            if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; return; }
+            HAS_APPS = apps.length > 0;
+            if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; refreshDeployBtn(); return; }
             appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
             // Pre-select the application passed via ?app= (e.g. from the
             // "Deploy Application" button on the Application Graph page).
@@ -2068,7 +2159,8 @@ function loadEnvironmentsDropdown() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var envs = (d && d.environments) || [];
-            if (envs.length === 0) { envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+            HAS_ENVS = envs.length > 0;
+            if (envs.length === 0) { envSelect.innerHTML = '<option value="">No environments</option>'; refreshDeployBtn(); return; }
             ENV_PROVIDERS = {};
             envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || 'azure'; });
             envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
@@ -2158,6 +2250,9 @@ appSelect.addEventListener('change', refreshDeployBtn);
 envSelect.addEventListener('change', refreshDeployBtn);
 
 deployBtn.addEventListener('click', function() {
+    var mode = deployBtn.dataset.mode || 'deploy';
+    if (mode === 'create-app') { window.location.href = '/?page=graph'; return; }
+    if (mode === 'create-env') { window.location.href = '/?page=environment'; return; }
     var env = envSelect.value;
     var app = appSelect.value;
     if (!CTX_REPO || !env || !app) return;

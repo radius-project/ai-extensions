@@ -35,7 +35,7 @@ import {
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
-  DEPLOY_DISPATCHER_FILE,
+  DEPLOY_DISPATCHER_FILE, DEPLOY_AWS_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -617,6 +617,13 @@ function createRequestHandler(instanceId) {
                 const deployWorkflows = await generateDeployWorkflow(envName, '.radius/app.bicep');
 
                 for (const [fileName, content] of Object.entries(deployWorkflows)) {
+                    // Only Azure workflows are pushed to the target repo for now.
+                    // The AWS deploy workflow is still generated (code retained)
+                    // but intentionally skipped so it never lands on the branch.
+                    if (fileName === DEPLOY_AWS_FILE) {
+                        steps.push('Skipping AWS deploy workflow (' + fileName + ').');
+                        continue;
+                    }
                     const deployContent = Buffer.from(content).toString('base64');
                     const deployPath = '.github/workflows/' + fileName;
 

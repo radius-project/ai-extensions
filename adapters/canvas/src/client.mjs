@@ -154,7 +154,6 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
     var baseSel = document.getElementById('base-branch');
     var headSel = document.getElementById('head-branch');
     var statusEl = document.getElementById('diff-status');
-    var compareBtn = document.getElementById('compare-btn');
     if (!repo) { if (statusEl) statusEl.textContent = 'No repository context.'; return; }
     if (statusEl) statusEl.textContent = 'Loading branches…';
     fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
@@ -185,7 +184,8 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
 
             if (headSel.value) {
                 if (statusEl) { statusEl.className = 'status info'; statusEl.textContent = 'Comparing ' + baseSel.value + ' → ' + headSel.value + '…'; }
-                if (autoCompare !== false && compareBtn) compareBtn.click();
+                // Auto-load the diff for the resolved head branch.
+                if (autoCompare !== false) headSel.dispatchEvent(new Event('change'));
             } else if (statusEl) {
                 statusEl.className = 'status info';
                 statusEl.textContent = workspaceBranch
@@ -194,6 +194,27 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
             }
         })
         .catch(function() { if (statusEl) { statusEl.textContent = 'Failed to load branches.'; statusEl.className = 'status error'; } });
+}
+
+// Populate an Application <select> for the given repository. A repo hosts a
+// single Radius application in this model; falls back to the repo short name.
+function radiusPopulateApplications(repo, selectId) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return;
+    if (!repo) { sel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = (d && d.applications) || [];
+            sel.innerHTML = '';
+            if (!apps.length) {
+                var f = repo.split('/').pop() || repo;
+                var o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o);
+                return;
+            }
+            apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; sel.appendChild(o); });
+        })
+        .catch(function() { sel.innerHTML = '<option value="">Unable to load applications</option>'; });
 }
 `;
 
