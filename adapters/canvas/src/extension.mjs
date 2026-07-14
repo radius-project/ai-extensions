@@ -322,7 +322,7 @@ const session = await joinSession({
         },
         {
             name: "radius_generate_app",
-            description: "Generates a Radius app.bicep file by analyzing the repository structure using the extensibility app-modeling skill. Returns instructions for the agent to produce the bicep file with correct Radius.* namespace types.",
+            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns instructions for the agent to produce the bicep file with correct Radius.* namespace types.",
             parameters: {
                 type: "object",
                 properties: {
@@ -330,7 +330,7 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                return `To generate app.bicep, follow the Radius Extensibility App Modeling skill (https://github.com/nicolejms/radius/blob/nicolejms/extensibility-app-modeling-skill/.github/skills/radius-extensibility-app-modeling/SKILL.md):
+                return `To generate app.bicep, follow the radius-app-bicep skill:
 
 1. Analyze the repository at ${args.repoPath || "the current workspace"}:
    - Find Dockerfiles, docker-compose files, config files, source code
@@ -587,7 +587,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When a recipe is not found for a resource type during planned graph resolution, use the radius-extensibility-app-modeling skill (https://github.com/nicolejms/radius/blob/nicolejms/extensibility-app-modeling-skill/.github/skills/radius-extensibility-app-modeling/SKILL.md) to generate a custom resource type and recipe on-demand.`
+When a recipe is not found for a resource type during planned graph resolution, use the radius-app-bicep skill to resolve the resource type and generate a custom resource type and recipe on-demand.`
             };
         },
     },
