@@ -15,8 +15,42 @@ import {
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { runCommand, github } from "./gh.mjs";
+import {
+    createWorkspaceGitHub,
+    defaultBranchForState,
+    detectWorkspaceContext,
+    fetchWorkspaceBicep,
+    isWorkspaceSelection,
+    parseRepoFromRemote,
+} from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
+
+async function workspaceState() {
+    const workspace = await detectWorkspaceContext(session);
+    return {
+        workspacePath: workspace.workspacePath,
+        workspaceRepo: workspace.repo,
+        workspaceBranch: workspace.branch,
+        contextRepo: workspace.repo,
+        contextBranch: workspace.branch,
+    };
+}
+
+async function fetchBicepForBranch(repo, branch, state) {
+    if (isWorkspaceSelection(state, repo, branch)) {
+        const local = await fetchWorkspaceBicep(state, repo, branch);
+        if (local) return local;
+    }
+    return await fetchBicepFromRepo(github, repo, branch);
+}
+
+async function generateBicepForBranch(repo, branch, state) {
+    const source = isWorkspaceSelection(state, repo, branch)
+        ? createWorkspaceGitHub(state, repo, branch)
+        : github;
+    return await generateBicepFromRepo(source, repo, branch);
+}
 
 // ─── Canvas + Tools ───────────────────────────────────────────────────────────
 const session = await joinSession({
@@ -93,12 +127,14 @@ const session = await joinSession({
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId, "generate");
+                        Object.assign(entry.state, await workspaceState());
                         if (ctx.input?.content) {
                             entry.state.generatedContent = ctx.input.content;
                         } else {
                             const repo = entry.state.generateTargetRepo || entry.state.contextRepo || '';
+                            const branch = defaultBranchForState(entry.state);
                             entry.state.generatedContent = repo
-                                ? (await generateBicepFromRepo(github, repo) || '')
+                                ? (await generateBicepForBranch(repo, branch, entry.state) || '')
                                 : '';
                         }
                         entry.url = `${entry.baseUrl}/?page=generate`;
@@ -120,6 +156,10 @@ const session = await joinSession({
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId, "graph");
+                        // Populate the active worktree context (repo/branch/path) so the
+                        // graph page defaults to the session branch and reads the worktree
+                        // app.bicep — matching generate_app and the open() handler.
+                        Object.assign(entry.state, await workspaceState());
                         if (ctx.input?.resources) {
                             entry.state.graphResources = ctx.input.resources;
                             entry.state.plannedResources = ctx.input.resources;
@@ -201,9 +241,16 @@ const session = await joinSession({
             open: async (ctx) => {
                 const page = ctx.input?.page || "environment";
                 const entry = await getOrCreateServer(ctx.instanceId, page);
+                const workspace = await workspaceState();
+                Object.assign(entry.state, workspace);
                 // If a repo is passed in input, set it as context for all pages
                 if (ctx.input?.repo) {
                     entry.state.contextRepo = ctx.input.repo;
+                    if (ctx.input.repo === workspace.workspaceRepo) {
+                        entry.state.contextBranch = workspace.workspaceBranch;
+                    } else {
+                        entry.state.contextBranch = ctx.input?.branch || "main";
+                    }
                 } else if (!entry.state.contextRepo && session.workspacePath) {
                     // Try to detect repo from workspace git remote
                     try {
@@ -213,9 +260,9 @@ const session = await joinSession({
                                 resolve(stdout.trim());
                             });
                         });
-                        const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/.]+)/);
-                        if (match) {
-                            entry.state.contextRepo = match[1].replace(/\.git$/, '');
+                        const repo = parseRepoFromRemote(remoteUrl);
+                        if (repo) {
+                            entry.state.contextRepo = repo;
                         }
                     } catch (e) { /* ignore */ }
                 }
@@ -229,11 +276,11 @@ const session = await joinSession({
                     try {
                         // Fetch existing app.bicep, or generate from repo analysis if not found
                         let [baseContent, headContent] = await Promise.all([
-                            fetchBicepFromRepo(github, repo, ctx.input.baseBranch),
-                            fetchBicepFromRepo(github, repo, ctx.input.headBranch)
+                            fetchBicepForBranch(repo, ctx.input.baseBranch, entry.state),
+                            fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
                         ]);
-                        if (!baseContent) baseContent = await generateBicepFromRepo(github, repo, ctx.input.baseBranch);
-                        if (!headContent) headContent = await generateBicepFromRepo(github, repo, ctx.input.headBranch);
+                        if (!baseContent) baseContent = await generateBicepForBranch(repo, ctx.input.baseBranch, entry.state);
+                        if (!headContent) headContent = await generateBicepForBranch(repo, ctx.input.headBranch, entry.state);
 
                         const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                         const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -331,6 +378,17 @@ Key rules:
 - Platform-agnostic: recipes handle deployment specifics
 - NEVER use Applications.Core/*, Applications.Datastores/*, or Applications.Dapr/*
 
+Radius.Compute/containerImages build.source (CRITICAL):
+- Images are built in-cluster by a BuildKit sidecar, so build.source MUST be a
+  'git::https://...' URL that BuildKit can clone. NEVER use a local filesystem
+  path (e.g. '/app', '/app/demo', '.') — the runner's filesystem is not visible
+  to the BuildKit pod and the build fails with "invalid local: ... no such file".
+- Use the application's own repository: source: 'git::https://github.com/<owner>/<repo>.git'
+- If the Dockerfile is in a subdirectory, append it as a go-getter subdir and
+  (optionally) pin a ref: 'git::https://github.com/<owner>/<repo>.git//<subdir>?ref=<branch-or-sha>'
+- Set build.dockerfile only when the Dockerfile is not named 'Dockerfile' at the
+  build context root (it defaults to 'Dockerfile').
+
 Recipe resolution for planned graph:
 1. Check radius-project/resource-types-contrib for recipes under <Category>/<typeName>/recipes/
 2. If not found for target platform, check other platforms
@@ -391,12 +449,13 @@ Recipe resolution for planned graph:
             handler: async (args) => {
                 const { repo, baseBranch, headBranch } = args;
                 try {
+                    const state = await workspaceState();
                     let [baseContent, headContent] = await Promise.all([
-                        fetchBicepFromRepo(github, repo, baseBranch),
-                        fetchBicepFromRepo(github, repo, headBranch)
+                        fetchBicepForBranch(repo, baseBranch, state),
+                        fetchBicepForBranch(repo, headBranch, state)
                     ]);
-                    if (!baseContent) baseContent = await generateBicepFromRepo(github, repo, baseBranch);
-                    if (!headContent) headContent = await generateBicepFromRepo(github, repo, headBranch);
+                    if (!baseContent) baseContent = await generateBicepForBranch(repo, baseBranch, state);
+                    if (!headContent) headContent = await generateBicepForBranch(repo, headBranch, state);
 
                     if (!baseContent && !headContent) {
                         return "No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.";
@@ -504,6 +563,7 @@ Recipe resolution for planned graph:
                 additionalContext: `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
 1. Use instanceId "radius-panel" — this ensures only ONE Radius Canvas panel is ever open (reusing the same panel for all views).
 2. Pass the current session's repository as the "repo" input in owner/repo format.
+                3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 
 IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via create_pull_request tool or any PR creation action):
 1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch. This returns a Mermaid application graph diff diagram and summary.
@@ -515,7 +575,7 @@ The PR description will show the app graph diff inline on GitHub, and the canvas
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check if .radius/app.bicep (or app.bicep) exists in the repository.
 2. If app.bicep does NOT exist, generate it using the radius_generate_app tool. IMPORTANT: Use ONLY Radius.* namespaces (e.g., Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets). NEVER use Applications.* namespaces.
-3. Only AFTER app.bicep exists, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
+3. Only AFTER app.bicep exists in the session worktree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
 

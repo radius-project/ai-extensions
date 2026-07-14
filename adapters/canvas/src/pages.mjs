@@ -253,6 +253,7 @@ document.getElementById('btn-aws').addEventListener('click', function() {
 
 export function appGeneratePage(state) {
     const targetRepo = state?.generateTargetRepo || state?.contextRepo || '';
+    const targetBranch = state?.generateBranch || state?.contextBranch || 'main';
     if (state && state.generatedContent) {
         return pageShell("Generated app.bicep", `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>✓ app.bicep Generated</h1>
@@ -272,18 +273,20 @@ export function appGeneratePage(state) {
   <button id="gen-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Regenerate</button>
 </div>
 <div class="status success">Successfully generated application model for ${escapeHtml(targetRepo)}</div>
+${state.generatedWarning ? `<div class="status info">Generated content is available below, but it could not be committed to the selected remote branch: ${escapeHtml(state.generatedWarning)}</div>` : ''}
 <h2>Generated app.bicep</h2>
 <pre>${escapeHtml(state.generatedContent)}</pre>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
-radiusSetupRepoBranch('gen-repo', 'gen-branch', CONTEXT_REPO, 'main');
+var CONTEXT_BRANCH = '${escapeHtml(targetBranch)}';
+radiusSetupRepoBranch('gen-repo', 'gen-branch', CONTEXT_REPO, CONTEXT_BRANCH);
 document.getElementById('gen-btn').addEventListener('click', function() {
     var repo = document.getElementById('gen-repo').value.trim();
     if (!repo) return;
     this.textContent = 'Generating...';
     this.disabled = true;
     var btn = this;
-    fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value || 'main'}) })
+    fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value || CONTEXT_BRANCH}) })
         .then(function(r) { return r.json(); })
         .then(function(d) { btn.textContent = 'Regenerate'; btn.disabled = false; if (d.reload) window.location.reload(); });
 });
@@ -336,7 +339,7 @@ document.getElementById('gen-btn').addEventListener('click', function() {
         })
         .catch(function() { btn.textContent = 'Generate app.bicep'; btn.disabled = false; });
 });
-radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', 'main');
+radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', '${escapeHtml(targetBranch)}');
 <\/script>`);
 }
 
@@ -373,7 +376,7 @@ export function graphPage(state) {
     const resources = state?.graphResources || [];
     const resourcesJson = JSON.stringify(resources);
     const targetRepo = state?.graphTargetRepo || state?.contextRepo || '';
-    const graphBranch = state?.graphBranch || 'main';
+    const graphBranch = state?.graphBranch || state?.contextBranch || 'main';
 
     if (resources.length === 0) {
         return pageShell("Application Graph", `
@@ -566,7 +569,7 @@ export function plannedGraphPage(state) {
     const targetRepo = state?.plannedRepo || state?.graphTargetRepo || state?.contextRepo || '';
     const provider = state?.plannedProvider || state?.deployProvider || 'azure';
     const plannedResources = state?.plannedResources || [];
-    const graphBranch = state?.plannedBranch || 'main';
+    const graphBranch = state?.plannedBranch || state?.contextBranch || 'main';
     const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
     const bicepGenerated = !!state?.plannedBicepGenerated;
 
@@ -980,6 +983,15 @@ export function environmentPage(state) {
     const envName = state?.envName || 'dev';
     const appFile = state?.appFile || 'app.bicep';
     const existingEnvs = state?.existingEnvs || ['dev', 'staging', 'production'];
+    // Deployment reads files and dispatches workflows via GitHub, so an unpushed
+    // worktree-only branch cannot be deployed. Default to 'main' in that case so
+    // the branch dropdown does not silently mislead the user.
+    const deployContextBranch = state?.contextBranch || 'main';
+    const deployWorkspaceBranch = state?.workspaceBranch || '';
+    const deployBranchShas = state?.branchShas || {};
+    const deployDefaultBranch = (deployWorkspaceBranch && deployContextBranch === deployWorkspaceBranch && deployBranchShas[deployWorkspaceBranch] === 'worktree')
+        ? 'main'
+        : deployContextBranch;
 
     // If deployment result exists, show it
     if (state?.deployResult) {
@@ -1059,7 +1071,6 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.subscriptionId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
       </div>
     </div>
-    <input type="hidden" id="az-client-id" value="${escapeHtml(oidcAzure?.clientId || '')}" />
     <button id="btn-verify-azure" style="padding:6px 14px; background:#1f883d; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">✓ Verify Azure Login</button>
     <div id="verify-azure-status" style="margin-top:8px; font-size:12px; display:none;"></div>
   </div>
@@ -1094,9 +1105,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
   <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
     <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>No App Registration?</strong> Auto-create one (App Registration, federated credential for GitHub OIDC, Contributor role) using your <code>az</code> CLI login.
+      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated credentials are passed straight to the GitHub environment and deploy workflows.
     </p>
     <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">⚡ Auto-create credentials</button>
+    <input id="az-client-id" type="hidden" value="${escapeHtml(oidcAzure?.clientId || '')}" />
     <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
   </div>
 </div>
@@ -1191,7 +1203,7 @@ setupCombo('aws-vpc-select', 'aws-vpc-custom');
 setupCombo('aws-subnets-select', 'aws-subnets-custom');
 
 // Deploy repo + branch selects — wired via the shared repo/branch library
-radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', 'main');
+radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(deployDefaultBranch)}');
 
 // Keep the hidden target-repo input in sync for deploy submission
 (function syncTargetRepo() {
@@ -1401,8 +1413,7 @@ document.getElementById('btn-auto-setup').addEventListener('click', function() {
             resourceGroup: resourceGroup,
             cluster: cluster,
             subscriptionId: document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '',
-            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : '',
-            clientId: document.getElementById('az-client-id') ? document.getElementById('az-client-id').value.trim() : ''
+            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : ''
         })
     }).then(function(r) { return r.json(); }).then(function(data) {
         btn.disabled = false;
@@ -1458,6 +1469,10 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
 
     // First create the GitHub environment with secrets, variables, and workflows
     var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
+    envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
+    // Application parameters are not collected from the UI. The server parses the
+    // app.bicep only to auto-generate values for required params without a Bicep
+    // default (e.g. the app's @secure() password) and inlines the rest.
     if (provider === 'azure') {
         envData.clientId = document.getElementById('az-client-id').value.trim();
         envData.tenantId = document.getElementById('az-tenant-id').value.trim();
@@ -1509,7 +1524,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
 export function deployingPage(state) {
     const resources = state?.deployingResources || state?.plannedResources || [];
     const targetRepo = state?.deployingRepo || state?.deployParams?.targetRepo || state?.plannedRepo || state?.contextRepo || '';
-    const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || 'main';
+    const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || state?.contextBranch || 'main';
     const provider = state?.deployingProvider || state?.deployParams?.provider || state?.plannedProvider || 'azure';
     const logs = state?.deployLogs || [];
     const deployStatus = state?.deployStatus || 'pending';

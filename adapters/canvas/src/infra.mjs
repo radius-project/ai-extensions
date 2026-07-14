@@ -9,8 +9,17 @@ import {
   generatePortalUrl as coreGeneratePortalUrl,
   generateVerifyWorkflow as coreGenerateVerifyWorkflow,
   generateDeployWorkflow as coreGenerateDeployWorkflow,
+  verifyTemplateFile,
+  RADIUS_REF,
+  RADIUS_WORKFLOW_REPO,
+  RADIUS_WORKFLOW_DIR,
+  DEPLOY_DISPATCHER_FILE,
+  DEPLOY_AZURE_FILE,
+  DEPLOY_AWS_FILE,
 } from "@radius-project/core";
-import { cliExec } from "./gh.mjs";
+import { cliExec, fetchFileFromRepoResult } from "./gh.mjs";
+
+export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 
 export function generateAzureOIDC(data) {
     return getPlatform('azure').generateOidc(data);
@@ -112,16 +121,58 @@ export function generateAWSOIDC(data) {
     return getPlatform('aws').generateOidc(data);
 }
 
-export function generateVerifyWorkflow(env, provider) {
-    const platform = getPlatform(provider);
-    if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
-    return coreGenerateVerifyWorkflow(env, platform);
+/**
+ * Fetch a workflow template from radius-project/radius `.github/extension/` at
+ * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
+ * so a fetch failure (offline, transient API error, or the ref/file missing) is
+ * a hard error rather than a fall back to a bundled copy. The underlying cause
+ * (gh stderr, 404, decode error) is surfaced in the thrown message.
+ */
+async function fetchRadiusTemplate(fileName) {
+    const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${RADIUS_REF}"`;
+    const { content, error } = await fetchFileFromRepoResult(
+        RADIUS_WORKFLOW_REPO,
+        `${RADIUS_WORKFLOW_DIR}/${fileName}`,
+        RADIUS_REF,
+    );
+    if (error) {
+        throw new Error(`Failed to fetch workflow template ${source}: ${error}`);
+    }
+    if (!content || !content.trim()) {
+        throw new Error(`Workflow template ${source} is empty.`);
+    }
+    return content;
 }
 
-export function generateDeployWorkflow(env, provider, appFile, creds) {
+export async function generateVerifyWorkflow(env, provider) {
     const platform = getPlatform(provider);
     if (!platform) throw new Error(`Unknown provider "${provider}". Supported providers: azure, aws.`);
-    return coreGenerateDeployWorkflow(env, platform, appFile);
+    // Always use the upstream template from radius-project/radius; no fallback.
+    const fileName = verifyTemplateFile(platform);
+    if (!fileName) throw new Error(`No verify template for provider "${provider}".`);
+    const upstream = await fetchRadiusTemplate(fileName);
+    return coreGenerateVerifyWorkflow(env, platform, upstream);
+}
+
+/**
+ * Generate the deploy workflow files (dispatcher + both provider workflows).
+ * Returns an object mapping bare workflow filename -> YAML content; the caller
+ * commits each under `.github/workflows/`. The provider is auto-detected at
+ * runtime by the dispatcher, so all three files are emitted regardless of the
+ * environment's cloud.
+ *
+ * The templates are fetched from radius-project/radius `.github/extension/` at
+ * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
+ * there is no bundled fallback, so a fetch failure surfaces as an error.
+ */
+export async function generateDeployWorkflow(env, appFile) {
+    const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
+    const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
+    const templates = {};
+    files.forEach((f, i) => {
+        templates[f] = bodies[i];
+    });
+    return coreGenerateDeployWorkflow(env, appFile, templates);
 }
 export function generatePortalUrl(resourceType, provider, state) {
     return coreGeneratePortalUrl(resourceType, provider, state);

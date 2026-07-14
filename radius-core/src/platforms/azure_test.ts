@@ -29,35 +29,6 @@ describe("azure platform", () => {
       expect(azure.supports.portalUrl).toBe(true);
     });
 
-    it("has non-empty verifyWorkflowSteps", () => {
-      expect(azure.verifyWorkflowSteps).toContain("azure/login@v2");
-      expect(azure.verifyWorkflowSteps).toContain("AZURE_CLIENT_ID");
-      expect(azure.verifyWorkflowSteps).toContain("kubelogin");
-    });
-
-    it("has non-empty deployClusterAuthSteps", () => {
-      expect(azure.deployClusterAuthSteps).toContain("azure/login@v2");
-      expect(azure.deployClusterAuthSteps).toContain("az aks get-credentials");
-      expect(azure.deployClusterAuthSteps).toContain("TARGET_KUBECONFIG");
-    });
-
-    it("has non-empty radCredentialRegister", () => {
-      expect(azure.radCredentialRegister).toContain("rad credential register azure wi");
-      expect(azure.radCredentialRegister).toContain("AZURE_CLIENT_ID");
-    });
-
-    it("has non-empty recipeAuthEnv", () => {
-      expect(azure.recipeAuthEnv).toContain("ARM_CLIENT_ID");
-      expect(azure.recipeAuthEnv).toContain("ARM_TENANT_ID");
-      expect(azure.recipeAuthEnv).toContain("ARM_SUBSCRIPTION_ID");
-      expect(azure.recipeAuthEnv).toContain("ARM_USE_OIDC");
-    });
-
-    it("has non-empty dbRecipeRegister", () => {
-      expect(azure.dbRecipeRegister).toContain("rad recipe register default");
-      expect(azure.dbRecipeRegister).toContain("Radius.Data/mySqlDatabases");
-      expect(azure.dbRecipeRegister).toContain("azure/terraform");
-    });
   });
 
   // ─── generateOidc ────────────────────────────────────────────────────────────
