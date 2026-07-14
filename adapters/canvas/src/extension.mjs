@@ -11,12 +11,10 @@ import {
   getPlatform,
   computeGraphDiff,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { runCommand, github } from "./gh.mjs";
 import {
-    createWorkspaceGitHub,
     defaultBranchForState,
     detectWorkspaceContext,
     fetchWorkspaceBicep,
@@ -43,13 +41,6 @@ async function fetchBicepForBranch(repo, branch, state) {
         if (local) return local;
     }
     return await fetchBicepFromRepo(github, repo, branch);
-}
-
-async function generateBicepForBranch(repo, branch, state) {
-    const source = isWorkspaceSelection(state, repo, branch)
-        ? createWorkspaceGitHub(state, repo, branch)
-        : github;
-    return await generateBicepFromRepo(source, repo, branch);
 }
 
 // ─── Canvas + Tools ───────────────────────────────────────────────────────────
@@ -133,8 +124,12 @@ const session = await joinSession({
                         } else {
                             const repo = entry.state.generateTargetRepo || entry.state.contextRepo || '';
                             const branch = defaultBranchForState(entry.state);
+                            // app.bicep generation is owned by the radius-app-bicep
+                            // skill. Only surface a committed/persisted app.bicep here;
+                            // when absent, leave empty so the page prompts the user to
+                            // have Copilot run the skill.
                             entry.state.generatedContent = repo
-                                ? (await generateBicepForBranch(repo, branch, entry.state) || '')
+                                ? (await fetchBicepForBranch(repo, branch, entry.state) || '')
                                 : '';
                         }
                         entry.url = `${entry.baseUrl}/?page=generate`;
@@ -274,13 +269,12 @@ const session = await joinSession({
                     entry.state.diffHead = ctx.input.headBranch;
                     entry.state.diffTargetRepo = repo;
                     try {
-                        // Fetch existing app.bicep, or generate from repo analysis if not found
+                        // Fetch the committed/persisted app.bicep on each branch.
+                        // Generation is owned by the radius-app-bicep skill.
                         let [baseContent, headContent] = await Promise.all([
                             fetchBicepForBranch(repo, ctx.input.baseBranch, entry.state),
                             fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
                         ]);
-                        if (!baseContent) baseContent = await generateBicepForBranch(repo, ctx.input.baseBranch, entry.state);
-                        if (!headContent) headContent = await generateBicepForBranch(repo, ctx.input.headBranch, entry.state);
 
                         const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                         const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -339,7 +333,8 @@ const session = await joinSession({
 
 2. Resolve resource types from radius-project/resource-types-contrib:
    - Check known types table below
-   - If not found, generate a custom resource type YAML schema and recipe at runtime
+   - If not found, define a custom resource type YAML schema for it
+   - If a needed type cannot be resolved, stop and report the missing type
 
 3. Generate .radius/app.bicep with the correct structure
 
@@ -389,10 +384,9 @@ Radius.Compute/containerImages build.source (CRITICAL):
 - Set build.dockerfile only when the Dockerfile is not named 'Dockerfile' at the
   build context root (it defaults to 'Dockerfile').
 
-Recipe resolution for planned graph:
-1. Check radius-project/resource-types-contrib for recipes under <Category>/<typeName>/recipes/
-2. If not found for target platform, check other platforms
-3. If no recipe exists anywhere, generate one at runtime based on the resource type schema`;
+Recipes are provided by recipe packs registered on the environment at deploy
+time — NOT authored per type in app.bicep. app.bicep models resource types
+only; do not generate or reference singleton recipes for custom types.`;
             },
         },
         {
@@ -454,11 +448,9 @@ Recipe resolution for planned graph:
                         fetchBicepForBranch(repo, baseBranch, state),
                         fetchBicepForBranch(repo, headBranch, state)
                     ]);
-                    if (!baseContent) baseContent = await generateBicepForBranch(repo, baseBranch, state);
-                    if (!headContent) headContent = await generateBicepForBranch(repo, headBranch, state);
 
                     if (!baseContent && !headContent) {
-                        return "No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.";
+                        return `No app.bicep found on either ${baseBranch} or ${headBranch}. app.bicep is generated by the Radius app-bicep skill — generate it first, then re-run the diff.`;
                     }
 
                     const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -587,7 +579,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When a recipe is not found for a resource type during planned graph resolution, use the radius-app-bicep skill to resolve the resource type and generate a custom resource type and recipe on-demand.`
+When a recipe is not found for a resource type during planned graph resolution, report the unresolved resource type to the user and explain that a recipe pack providing that type must be registered to the target environment. Do NOT attempt to generate a singleton custom resource type or recipe on-demand — with Radius extensibility, recipes are supplied via recipe packs, not per-type singleton recipes.`
             };
         },
     },

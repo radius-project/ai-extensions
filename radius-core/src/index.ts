@@ -22,7 +22,6 @@ export {
   computeGraphDiff,
 } from "./graph/index.js";
 export {
-  parseComposeServices,
   parseTerraformResources,
   formatTerraformType,
   formatTerraformModule,
@@ -30,20 +29,11 @@ export {
   parseRecipeResources,
   formatResourceType,
   radiusTypeToContribDir,
-  CANONICAL_RESOURCE_MAP,
-  categorizeToCanonicalType,
-  resolveCanonicalResources,
-  inferResourcesFromSchema,
-  generateRecipeFromStaticMappings,
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
   loadRecipeResources,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
-  fetchResourceTypeSchema,
-  fetchRecipeFromAnyPlatform,
-  generateRecipeFromContrib,
 } from "./modeling/index.js";
 export {
   getPlatform,

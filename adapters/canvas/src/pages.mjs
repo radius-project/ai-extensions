@@ -270,11 +270,10 @@ export function appGeneratePage(state) {
       <option value="">Select repo first</option>
     </select>
   </div>
-  <button id="gen-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Regenerate</button>
+  <button id="gen-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Refresh</button>
 </div>
-<div class="status success">Successfully generated application model for ${escapeHtml(targetRepo)}</div>
-${state.generatedWarning ? `<div class="status info">Generated content is available below, but it could not be committed to the selected remote branch: ${escapeHtml(state.generatedWarning)}</div>` : ''}
-<h2>Generated app.bicep</h2>
+<div class="status success">Application model loaded for ${escapeHtml(targetRepo)}</div>
+<h2>app.bicep</h2>
 <pre>${escapeHtml(state.generatedContent)}</pre>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
@@ -283,19 +282,21 @@ radiusSetupRepoBranch('gen-repo', 'gen-branch', CONTEXT_REPO, CONTEXT_BRANCH);
 document.getElementById('gen-btn').addEventListener('click', function() {
     var repo = document.getElementById('gen-repo').value.trim();
     if (!repo) return;
-    this.textContent = 'Generating...';
+    this.textContent = 'Loading...';
     this.disabled = true;
     var btn = this;
     fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value || CONTEXT_BRANCH}) })
         .then(function(r) { return r.json(); })
-        .then(function(d) { btn.textContent = 'Regenerate'; btn.disabled = false; if (d.reload) window.location.reload(); });
+        .then(function(d) { btn.textContent = 'Refresh'; btn.disabled = false; if (d.reload) window.location.reload(); });
 });
 <\/script>`);
     }
-    return pageShell("Generate app.bicep", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Generate Application Model</h1>
+    return pageShell("app.bicep", `
+<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Application Model</h1>
 <p style="margin-bottom:16px; color: var(--text-color-muted, #656d76);">
-  Analyze your repository and generate a Radius <code>app.bicep</code> file using the app-modeling skill.
+  Your Radius <code>app.bicep</code> is authored by the <strong>Radius app-bicep skill</strong>. Ask Copilot to
+  &ldquo;generate the app.bicep&rdquo; and it will inspect the repository, produce <code>.radius/app.bicep</code>,
+  and open it here. Select a repository and branch below to load an existing model.
 </p>
 <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -308,36 +309,34 @@ document.getElementById('gen-btn').addEventListener('click', function() {
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
     <select id="gen-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; min-width:180px; background:var(--background-color-default, #fff);"><option value="">Select repo first</option></select>
   </div>
-  <button id="gen-btn" style="margin-top:18px; padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Generate app.bicep</button>
+  <button id="gen-btn" style="margin-top:18px; padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Load app.bicep</button>
 </div>
 <div id="gen-status" class="status info">
-  Enter a repository to analyze. The Radius skill will inspect the repo structure and generate an <code>app.bicep</code> that models the application.
-</div>
-<div id="gen-log" style="display:none; margin-top:12px;">
-  <h2>Generation Log</h2>
-  <pre id="gen-output" style="max-height:300px; overflow-y:auto;"></pre>
+  Select a repository to load its committed <code>.radius/app.bicep</code>. If none exists yet, ask Copilot to generate one with the Radius app-bicep skill.
 </div>
 <script>
 document.getElementById('gen-btn').addEventListener('click', function() {
     var repo = document.getElementById('gen-repo').value.trim();
     if (!repo) return;
-    this.textContent = 'Generating...';
+    this.textContent = 'Loading...';
     this.disabled = true;
     var btn = this;
-    document.getElementById('gen-log').style.display = 'block';
-    document.getElementById('gen-output').textContent = 'Analyzing repository ' + repo + '...\\n';
     fetch('/api/generate-bicep', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: document.getElementById('gen-branch').value}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Generate app.bicep';
+            btn.textContent = 'Load app.bicep';
             btn.disabled = false;
             if (d.reload) { window.location.reload(); }
+            else if (d.needsAppBicep) {
+                document.getElementById('gen-status').innerHTML = 'No <code>app.bicep</code> found for this repository. Ask Copilot to generate one with the Radius app-bicep skill.';
+                document.getElementById('gen-status').className = 'status info';
+            }
             else if (d.error) {
                 document.getElementById('gen-status').textContent = 'Error: ' + d.error;
                 document.getElementById('gen-status').className = 'status error';
             }
         })
-        .catch(function() { btn.textContent = 'Generate app.bicep'; btn.disabled = false; });
+        .catch(function() { btn.textContent = 'Load app.bicep'; btn.disabled = false; });
 });
 radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', '${escapeHtml(targetBranch)}');
 <\/script>`);
@@ -485,7 +484,6 @@ ${graphHeaderClose()}`);
 
     return pageShell("Application Graph", `
 ${graphHeader('graph')}
-${''/* bicepGenerated note moved below graph container */}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
@@ -503,7 +501,7 @@ ${''/* bicepGenerated note moved below graph container */}
 </div>
 <div id="graph-container"></div>
 <div style="margin-top:8px; font-size:12px; color:var(--text-color-muted, #656d76);">
-${state.bicepGenerated ? 'Generated from repo analysis — no existing app.bicep was found. ' : ''}Click a node to view source code links.
+Click a node to view source code links.
 </div>
 
 <script>
@@ -548,6 +546,18 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
                 doneDiv.textContent = 'Graph ready!';
                 stepsEl.appendChild(doneDiv);
                 setTimeout(function() { window.location.reload(); }, 600);
+            } else if (d.needsAppBicep || d.error) {
+                var prev = stepsEl.querySelector('.step-active');
+                if (prev) prev.className = 'step-done';
+                var msg = d.needsAppBicep
+                    ? 'No app.bicep found for ' + repo + '. Ask Copilot to generate one with the Radius app-bicep skill.'
+                    : ('Error: ' + (d.error || 'Failed to load graph.'));
+                var gc = document.getElementById('graph-container');
+                gc.innerHTML = '';
+                var sdiv = document.createElement('div');
+                sdiv.className = 'status ' + (d.needsAppBicep ? 'info' : 'error');
+                sdiv.textContent = msg;
+                gc.appendChild(sdiv);
             }
         })
         .catch(function() { clearInterval(pollInterval); btn.textContent = 'Reload'; btn.disabled = false; });
@@ -558,8 +568,7 @@ var repoUrl = 'https://github.com/' + document.getElementById('graph-repo').valu
 var branch = document.getElementById('graph-branch').value.trim() || 'main';
 radiusRenderGraph('graph-container', resources, {
     repoUrl: repoUrl,
-    branch: branch,
-    bicepGenerated: ${state.bicepGenerated ? 'true' : 'false'}
+    branch: branch
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -571,7 +580,6 @@ export function plannedGraphPage(state) {
     const plannedResources = state?.plannedResources || [];
     const graphBranch = state?.plannedBranch || state?.contextBranch || 'main';
     const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
-    const bicepGenerated = !!state?.plannedBicepGenerated;
 
     const resourcesJson = JSON.stringify(plannedResources);
 
@@ -735,8 +743,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
 var resources = ${resourcesJson};
 radiusRenderGraph('graph-container', resources, {
     repoUrl: 'https://github.com/' + CONTEXT_REPO,
-    branch: CONTEXT_BRANCH,
-    bicepGenerated: ${bicepGenerated ? 'true' : 'false'}
+    branch: CONTEXT_BRANCH
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -820,7 +827,7 @@ document.getElementById('compare-btn').addEventListener('click', function() {
     this.textContent = 'Comparing...';
     this.disabled = true;
     var btn = this;
-    document.getElementById('diff-status').textContent = 'Fetching app.bicep (or generating from repo structure if not found)...';
+    document.getElementById('diff-status').textContent = 'Fetching app.bicep from each branch...';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {

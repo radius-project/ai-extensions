@@ -6,7 +6,6 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 
 const IGNORED_DIRS = new Set([
     ".git",
@@ -158,29 +157,6 @@ export async function fetchWorkspaceTree(state, repo, branch) {
     } catch {
         return null;
     }
-}
-
-export async function writeWorkspaceRadiusScaffold(state, repo, branch, bicepContent, { log = () => {} } = {}) {
-    if (!isWorkspaceSelection(state, repo, branch)) return false;
-
-    const radiusDir = safeWorkspacePath(state.workspacePath, ".radius");
-    await fs.mkdir(radiusDir, { recursive: true });
-
-    log(`Writing .radius/bicepconfig.json to worktree branch ${state.workspaceBranch}...`);
-    await fs.writeFile(
-        safeWorkspacePath(state.workspacePath, ".radius/bicepconfig.json"),
-        RADIUS_BICEP_CONFIG_JSON,
-        "utf8",
-    );
-
-    log(`Writing .radius/app.bicep to worktree branch ${state.workspaceBranch}...`);
-    await fs.writeFile(
-        safeWorkspacePath(state.workspacePath, ".radius/app.bicep"),
-        bicepContent,
-        "utf8",
-    );
-
-    return true;
 }
 
 function contentPathFromApiPath(apiPath, repo) {

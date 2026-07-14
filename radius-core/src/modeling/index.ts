@@ -1,9 +1,8 @@
-// modeling/ — pure repository-modeling helpers: docker-compose + Terraform
-// parsing, recipe parsing, resource-type mapping, and the canonical
-// Radius-type → concrete-resource map, plus the GitHub-fetching orchestration
-// (behind the GitHub port) that composes them into app.bicep / recipe outputs.
+// modeling/ — pure repository-modeling helpers: Terraform parsing, recipe
+// parsing, and resource-type mapping, plus the GitHub-fetching orchestration
+// (behind the GitHub port) that fetches the skill-generated app.bicep and
+// resolves recipe outputs for the planned graph.
 
-export { parseComposeServices } from "./compose.js";
 export {
   parseTerraformResources,
   formatTerraformType,
@@ -14,23 +13,14 @@ export {
   parseRecipeResources,
   formatResourceType,
   radiusTypeToContribDir,
-  CANONICAL_RESOURCE_MAP,
-  categorizeToCanonicalType,
-  resolveCanonicalResources,
-  inferResourcesFromSchema,
-  generateRecipeFromStaticMappings,
 } from "./recipes.js";
 
 export {
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
 } from "./repo.js";
 export {
   loadRecipeResources,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
-  fetchResourceTypeSchema,
-  fetchRecipeFromAnyPlatform,
-  generateRecipeFromContrib,
 } from "./recipe-resolver.js";

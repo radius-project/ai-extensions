@@ -244,7 +244,6 @@ function radiusRenderGraph(containerId, resources, options) {
     var diffMode = options.diffMode || false;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
-    var bicepGenerated = options.bicepGenerated || false;
     var lineType = options.lineType || options.curveStyle || 'taxi';
 
     function getNodeColors(r, typeStyle) {
@@ -307,7 +306,6 @@ function radiusRenderGraph(containerId, resources, options) {
                 codeRef: r.codeReference || '',
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
-                defGenerated: bicepGenerated,
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
                 cloudResources: JSON.stringify(cloudOutputs)
@@ -606,12 +604,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 var searchUrl = repoUrl + '/search?q=' + encodeURIComponent(term) + '&type=code';
                 links.push('<a href="' + searchUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔎 Search code</a>');
             }
-            if (d.defGenerated && d.defFile) {
-                // No committed app.bicep in the repo — link to a local viewer that
-                // renders the generated bicep (with the resource's line highlighted).
-                var genUrl = '/generated-bicep' + (d.defLine ? '?line=' + d.defLine : '');
-                links.push('<a href="' + genUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
-            } else if (repoUrl && d.defFile) {
+            if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
                 links.push('<a href="' + defUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
             }
