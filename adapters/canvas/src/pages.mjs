@@ -1309,11 +1309,15 @@ function escapeHtmlClient(s) {
         var app = appSelect.value, env = envSelect.value;
         if (!app || !env) return;
         delModal.style.display = 'none';
-        document.getElementById('deployed-deleting-text').innerHTML = 'Removing <strong>' + escapeHtmlClient(app) + '</strong> from <strong>' + escapeHtmlClient(env) + '</strong>. This may take a moment.';
+        document.getElementById('deployed-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(app) + '</strong> from <strong>' + escapeHtmlClient(env) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
         document.getElementById('deployed-deleting-modal').style.display = 'flex';
-        fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CONTEXT_REPO, environment: env }) })
-            .then(function(r) { return r.json(); })
-            .then(function() { window.location.href = '/?page=deploying'; })
+        fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CONTEXT_REPO, environment: env, application: app }) })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(res) {
+                document.getElementById('deployed-deleting-modal').style.display = 'none';
+                if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
+                window.location.href = '/?page=deploying';
+            })
             .catch(function() {
                 document.getElementById('deployed-deleting-modal').style.display = 'none';
                 showInline('error', 'Could not delete the deployment. Please try again.');
@@ -1519,7 +1523,21 @@ document.getElementById('back-btn').addEventListener('click', function() {
     </div>
   </div>
 </div>
-<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+
+<div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+    <div style="min-width:0;">
+      <div id="env-verify-title" style="font-size:14px; font-weight:600; line-height:1.4;">Verifying authentication to Azure…</div>
+      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+    </div>
+  </div>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}
+/* Match Figma: the environments table's ACTIONS column is left-aligned. */
+#env-landing .rad-table thead th:last-child { text-align: left; }
+#env-landing .rad-table__actions { justify-content: flex-start; }
+</style>
 
 <script>
 var CTX_REPO = '${escapeHtml(ctxRepo)}';
@@ -1774,9 +1792,11 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
     var statusEl = document.getElementById('verify-azure-status');
     var tenantId = document.getElementById('az-tenant-id').value.trim();
     var subId = document.getElementById('az-sub-id').value.trim();
+    var verifyModal = document.getElementById('env-verify-modal');
 
     btn.disabled = true;
     btn.textContent = '⏳ Verifying...';
+    verifyModal.style.display = 'flex';
     statusEl.style.display = 'block';
     statusEl.innerHTML = '<span style="color:var(--text-color-muted, #656d76);">Logging into Azure CLI...</span>';
 
@@ -1785,6 +1805,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId })
     }).then(function(r) { return r.json(); }).then(function(data) {
+        verifyModal.style.display = 'none';
         btn.disabled = false;
         btn.textContent = 'Verify Credentials';
         if (data.error) {
@@ -1798,6 +1819,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
             discoverResources('azure');
         }
     }).catch(function(err) {
+        verifyModal.style.display = 'none';
         btn.disabled = false;
         btn.textContent = 'Verify Credentials';
         statusEl.innerHTML = '<span style="color:#cf222e;">❌ Error: ' + err.message + '</span>';
@@ -2025,11 +2047,15 @@ function deployLandingView(state) {
 
 <!-- Deploying (transition) modal -->
 <div id="deploy-progress-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
+  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:flex-start; gap:18px;">
     <div class="rad-spinner-lg" aria-hidden="true"></div>
-    <div>
+    <div style="min-width:0;">
       <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
-      <div style="font-size:13px; color:var(--rad-text-secondary);">Your deployment has started. Redirecting you to the deployed application graph…</div>
+      <div style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
+      <div style="margin-top:12px; display:flex; flex-direction:column; gap:6px;">
+        <a id="deploy-view-graph" href="#" style="font-size:13px; color:var(--rad-link,#0969da); text-decoration:none; font-weight:500;">View App Graph</a>
+        <a id="deploy-view-workflow" href="#" target="_blank" rel="noopener noreferrer" style="font-size:13px; color:var(--rad-text-tertiary); text-decoration:none; font-weight:500; pointer-events:none;">Resolving workflow run…</a>
+      </div>
     </div>
   </div>
 </div>
@@ -2100,7 +2126,7 @@ var HAS_ENVS = false;
 
 function showInline(kind, msg) {
     inlineStatus.style.display = 'block';
-    inlineStatus.textContent = msg;
+    inlineStatus.innerHTML = msg;
     if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
     else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
 }
@@ -2176,7 +2202,7 @@ function loadEnvironmentsDropdown() {
 }
 
 function statusCell(status) {
-    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'] };
+    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'], deleting: ['pending','Deleting…'] };
     var m = map[status] || map.pending;
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
@@ -2230,13 +2256,15 @@ delConfirm.addEventListener('click', function() {
     if (!pendingDelete) return;
     var dep = pendingDelete;
     delModal.style.display = 'none';
-    document.getElementById('deploy-deleting-text').innerHTML = 'Removing <strong>' + escapeHtmlClient(dep.app) + '</strong> from <strong>' + escapeHtmlClient(dep.environment) + '</strong>. This may take a moment.';
+    document.getElementById('deploy-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(dep.app) + '</strong> from <strong>' + escapeHtmlClient(dep.environment) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
     document.getElementById('deploy-deleting-modal').style.display = 'flex';
-    fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment }) })
-        .then(function(r) { return r.json(); })
-        .then(function() {
+    fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        .then(function(res) {
             document.getElementById('deploy-deleting-modal').style.display = 'none';
             pendingDelete = null;
+            if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
+            showInline('success', 'Delete workflow started' + (res.d && res.d.runUrl ? ' — <a href="' + res.d.runUrl + '" target="_blank" rel="noopener noreferrer">view run ↗</a>' : '') + '.');
             loadDeployments();
         })
         .catch(function() {
@@ -2261,16 +2289,40 @@ deployBtn.addEventListener('click', function() {
     deployBtn.textContent = 'Deploying…';
     var progTitle = document.getElementById('deploy-progress-title');
     progTitle.innerHTML = 'Deploying <strong>' + escapeHtmlClient(app) + '</strong> to environment <strong>' + escapeHtmlClient(env) + '</strong>';
+    // "View App Graph" routes to the Applications → Deployed tab (graph + logs).
+    var graphLink = document.getElementById('deploy-view-graph');
+    graphLink.setAttribute('href', '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app));
+    // "View Workflow in GitHub" resolves once the dispatched run is detected.
+    var wfLink = document.getElementById('deploy-view-workflow');
+    wfLink.textContent = 'Resolving workflow run…';
+    wfLink.removeAttribute('href');
+    wfLink.style.pointerEvents = 'none';
+    wfLink.style.color = 'var(--rad-text-tertiary)';
     document.getElementById('deploy-progress-modal').style.display = 'flex';
 
-    // Show the "deployment started" dialog for ~3 seconds, then route to the
-    // Applications → Deployed tab. The deploy request is fired in parallel; the
-    // deployed view polls for live status once we land there.
-    var failed = false;
-    var routeTimer = setTimeout(function() {
-        if (failed) return;
-        window.location.href = '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app);
-    }, 3000);
+    // Poll deploy-status until the workflow run URL is available, then wire the
+    // "View Workflow in GitHub" link. We stay on the Deployments page; the dialog
+    // persists so the user can open either link at their convenience.
+    var wfResolved = false;
+    var wfPoll = setInterval(function() {
+        fetch('/api/deploy-status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (!wfResolved && d && d.deployRunUrl) {
+                    wfResolved = true;
+                    wfLink.textContent = 'View Workflow in GitHub ↗';
+                    wfLink.setAttribute('href', d.deployRunUrl);
+                    wfLink.style.pointerEvents = '';
+                    wfLink.style.color = 'var(--rad-link,#0969da)';
+                    loadDeployments();
+                }
+                if (d && (d.status === 'success' || d.status === 'failed')) {
+                    clearInterval(wfPoll);
+                    loadDeployments();
+                }
+            })
+            .catch(function() {});
+    }, 2500);
 
     fetch('/api/deploy', {
         method: 'POST',
@@ -2278,14 +2330,27 @@ deployBtn.addEventListener('click', function() {
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: CTX_BRANCH, appFile: '.radius/app.bicep' })
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .catch(function() {
-          failed = true;
-          clearTimeout(routeTimer);
+          clearInterval(wfPoll);
           document.getElementById('deploy-progress-modal').style.display = 'none';
           deployBtn.disabled = false;
-          deployBtn.textContent = 'Deploy';
+          refreshDeployBtn();
           showInline('error', 'Could not start the deployment. Please try again.');
       });
 });
+
+// Dismiss the deploy dialog by clicking the backdrop; the deployment keeps
+// running in the background and shows up in the deployments table.
+(function() {
+    var pm = document.getElementById('deploy-progress-modal');
+    if (pm) pm.addEventListener('click', function(e) {
+        if (e.target === pm) {
+            pm.style.display = 'none';
+            deployBtn.disabled = false;
+            refreshDeployBtn();
+            loadDeployments();
+        }
+    });
+})();
 
 loadApplications();
 loadEnvironmentsDropdown();

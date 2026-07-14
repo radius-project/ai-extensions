@@ -34,8 +34,9 @@ import {
 } from "./workspace.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
-  generateVerifyWorkflow, generateDeployWorkflow, generatePortalUrl,
+  generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
   DEPLOY_DISPATCHER_FILE, DEPLOY_AWS_FILE,
+  DELETE_APP_DISPATCHER_FILE, DELETE_AWS_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -52,6 +53,14 @@ import {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
+
+// Short-lived cache for the (comparatively expensive) environment listing. The
+// dropdown load and the page render both hit /api/list-environments back-to-back,
+// and each environment resolves its status via several GitHub API round-trips.
+// Caching the result for a few seconds keeps repeated loads effectively instant.
+const ENV_LIST_TTL_MS = 15000;
+const envListCache = new Map(); // repo -> { at, payload }
+
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
 // action model (run-rad-commands*.yml) replaces. Removed from target repos on
@@ -484,6 +493,8 @@ function createRequestHandler(instanceId) {
                 // Step 1: Create the GitHub environment
                 steps.push('Creating GitHub environment "' + envName + '"...');
                 await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName]);
+                // A new environment invalidates the cached listing for this repo.
+                envListCache.delete(targetRepo);
 
                 // Step 2: Set environment variables and secrets based on provider
                 steps.push('Setting environment variables and secrets...');
@@ -660,6 +671,46 @@ function createRequestHandler(instanceId) {
                 // does not double-trigger alongside the new dispatcher.
                 await deleteLegacyDeployWorkflow(targetRepo);
                 steps.push('✅ Deploy workflows committed.');
+
+                // Step 4b: Commit the application-delete workflows (dispatcher +
+                // provider workflows) so the Delete Deployment button can dispatch
+                // `rad app delete`. As with deploy, only the Azure workflows are
+                // pushed for now; the AWS provider file is skipped.
+                steps.push('Committing delete workflows...');
+                try {
+                    const deleteWorkflows = await generateDeleteWorkflow(envName);
+                    for (const [fileName, content] of Object.entries(deleteWorkflows)) {
+                        if (fileName === DELETE_AWS_FILE) {
+                            steps.push('Skipping AWS delete workflow (' + fileName + ').');
+                            continue;
+                        }
+                        const delContent = Buffer.from(content).toString('base64');
+                        const delPath = '.github/workflows/' + fileName;
+
+                        const delCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + delPath, '--jq', '.sha']);
+                        const delFileSha = delCheckResult.code === 0 ? delCheckResult.stdout.trim() : '';
+
+                        const delCommitBody = JSON.stringify({
+                            message: 'Add Radius delete workflow (' + fileName + ') for environment ' + envName,
+                            content: delContent,
+                            ...(delFileSha ? { sha: delFileSha } : {})
+                        });
+
+                        const tmpFile3 = join(tmpdir(), 'radius-delete-commit-' + Date.now() + '.json');
+                        writeFileSync(tmpFile3, delCommitBody);
+                        const delCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + delPath, '--input', tmpFile3]);
+                        try { unlinkSync(tmpFile3); } catch {}
+
+                        if (delCommitResult.code !== 0) {
+                            steps.push('⚠️ Could not commit delete workflow ' + fileName + ': ' + ((delCommitResult.stderr || '').trim() || 'GitHub API request failed.'));
+                        }
+                    }
+                    steps.push('✅ Delete workflows committed.');
+                } catch (delErr) {
+                    // Delete workflows are non-critical to environment creation, so
+                    // surface the failure but don't abort the whole flow.
+                    steps.push('⚠️ Could not generate/commit delete workflows: ' + delErr.message);
+                }
 
                 // Step 5: Dispatch the verify workflow
                 steps.push('Dispatching verify-credentials workflow...');
@@ -894,6 +945,7 @@ function createRequestHandler(instanceId) {
             const startedAt = entry?.state?.deployStartedAt || null;
             const finishedAt = entry?.state?.deployFinishedAt || null;
             const deployedGraph = entry?.state?.deployedGraph || null;
+            const deployRunUrl = entry?.state?.deployRunUrl || null;
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             // Incremental log delivery: when the client passes ?since=<absolute
@@ -906,9 +958,9 @@ function createRequestHandler(instanceId) {
             if (Number.isFinite(since)) {
                 const startIdx = Math.max(0, since - logBase);
                 const logsNew = logs.slice(startIdx);
-                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph }));
+                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph, deployRunUrl }));
             } else {
-                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph }));
+                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph, deployRunUrl }));
             }
             return;
         }
@@ -1028,6 +1080,9 @@ function createRequestHandler(instanceId) {
             };
             if (!repo) { respond({ environments: [] }); return; }
 
+            const cached = envListCache.get(repo);
+            if (cached && Date.now() - cached.at < ENV_LIST_TTL_MS) { respond(cached.payload); return; }
+
             const gh = (args, timeout = 12000) => new Promise((resolve) => {
                 cliExec("gh", args, { timeout }, (err, stdout) => {
                     if (err) { resolve(""); return; }
@@ -1036,23 +1091,31 @@ function createRequestHandler(instanceId) {
             });
 
             try {
-                // 1) List environment names + ids for the repo.
+                // 1) List environment names + ids for the repo. Kick off the
+                //    verify-credentials workflow-runs fetch in parallel — it's
+                //    independent of the names, so there's no reason to wait.
+                const verifyRunsPromise = gh([
+                    "api",
+                    `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
+                    "--jq", ".workflow_runs[] | (.id|tostring) + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")",
+                ]);
                 const namesRaw = await gh(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[] | (.id|tostring) + \"\\t\" + .name"]);
                 const rows = namesRaw ? namesRaw.split("\n").filter(Boolean).map((l) => {
                     const tab = l.indexOf("\t");
                     return tab === -1 ? { id: "", name: l } : { id: l.slice(0, tab), name: l.slice(tab + 1) };
                 }) : [];
-                if (rows.length === 0) { respond({ environments: [] }); return; }
+                if (rows.length === 0) {
+                    const payload = { environments: [] };
+                    respond(payload);
+                    envListCache.set(repo, { at: Date.now(), payload });
+                    return;
+                }
 
-                // Pre-fetch the credential-verification workflow's recent runs once
-                // and index them by run id. The environment status is derived from
-                // these (not from app deployments): an environment is "Success" only
-                // once it exists AND its verify-credentials workflow has passed.
-                const verifyRunsRaw = await gh([
-                    "api",
-                    `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
-                    "--jq", ".workflow_runs[] | (.id|tostring) + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")",
-                ]);
+                // Index the pre-fetched verify runs by run id. The environment
+                // status is derived from these (not from app deployments): an
+                // environment is "Success" only once it exists AND its
+                // verify-credentials workflow has passed.
+                const verifyRunsRaw = await verifyRunsPromise;
                 const verifyRuns = new Map();
                 if (verifyRunsRaw) {
                     for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
@@ -1074,7 +1137,14 @@ function createRequestHandler(instanceId) {
                 //    environment, so we walk this env's deployments newest-first
                 //    until we find one created by a verify-credentials run.
                 const environments = await Promise.all(rows.map(async ({ id, name }) => {
-                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]);
+                    // The variables (provider) and deployments (status) lookups are
+                    // independent, so fire them together.
+                    const [varsRaw, depIdsRaw] = await Promise.all([
+                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]),
+                        verifyRuns.size > 0
+                            ? gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"])
+                            : Promise.resolve(""),
+                    ]);
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
@@ -1084,10 +1154,15 @@ function createRequestHandler(instanceId) {
                     // fails. Default to "pending" until we find a matching run.
                     let status = "pending";
                     if (verifyRuns.size > 0) {
-                        const depIdsRaw = await gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"]);
                         const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
-                        for (const depId of depIds) {
-                            const logUrl = await gh(["api", `/repos/${repo}/deployments/${depId}/statuses?per_page=1`, "--jq", ".[0].log_url // .[0].target_url // \"\""]);
+                        // Resolve every deployment's originating-run URL in parallel
+                        // (deployments come back newest-first), then pick the newest
+                        // one created by a verify-credentials run. Doing this serially
+                        // was the main source of latency for this endpoint.
+                        const logUrls = await Promise.all(depIds.map((depId) =>
+                            gh(["api", `/repos/${repo}/deployments/${depId}/statuses?per_page=1`, "--jq", ".[0].log_url // .[0].target_url // \"\""])
+                        ));
+                        for (const logUrl of logUrls) {
                             const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
                             if (!m) continue;
                             const run = verifyRuns.get(m[1]);
@@ -1102,6 +1177,7 @@ function createRequestHandler(instanceId) {
                 }));
 
                 respond({ environments });
+                envListCache.set(repo, { at: Date.now(), payload: { environments } });
             } catch (e) {
                 respond({ environments: [], error: e.message });
             }
@@ -1184,15 +1260,38 @@ function createRequestHandler(instanceId) {
                     const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
                     if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
                     else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
+
+                    // Deleting an application dispatches delete-application.yml,
+                    // which (via its environment-bound job) creates a fresh
+                    // deployment record for this environment. So the latest record
+                    // may belong to a delete run, not a deploy. Inspect the run: if
+                    // the app's most recent run is a SUCCESSFUL delete, the app no
+                    // longer exists in that environment, so drop it from the list.
+                    let isDelete = false;
+                    let deleteConclusion = "";
+                    if (m) {
+                        const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+                        const rt = runInfo.indexOf("\t");
+                        const runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
+                        deleteConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+                        isDelete = /(^|\/)delete-application\.yml$/.test(runPath);
+                    }
+                    if (isDelete && deleteConclusion === "success") return null;
+
                     let status = "pending";
-                    if (state === "success") status = "success";
+                    if (isDelete) {
+                        // A delete run that hasn't succeeded (in progress or failed):
+                        // surface it as "deleting" so the row reflects the pending
+                        // teardown rather than a misleading deploy status.
+                        status = "deleting";
+                    } else if (state === "success") status = "success";
                     else if (state === "failure" || state === "error") status = "failed";
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
                     return { app: appName, environment, provider, status, deploymentId: id, runUrl };
                 }));
-                respond({ deployments });
+                respond({ deployments: deployments.filter(Boolean) });
             } catch (e) {
                 respond({ deployments: [], error: e.message });
             }
@@ -1211,25 +1310,56 @@ function createRequestHandler(instanceId) {
                 const data = JSON.parse(body || "{}");
                 const repo = data.repo || "";
                 const environment = data.environment || "";
-                if (!repo || !environment) { respond(400, { error: "repo and environment are required." }); return; }
+                const application = data.application || "";
+                if (!repo || !environment || !application) { respond(400, { error: "repo, environment, and application are required." }); return; }
 
-                const gh = (args, timeout = 20000) => new Promise((resolve) => {
-                    cliExec("gh", args, { timeout }, (err, stdout, stderr) => {
+                const gh = (args, timeout = 20000, extraEnv) => new Promise((resolve) => {
+                    const opts = { timeout };
+                    if (extraEnv) opts.env = extraEnv;
+                    cliExec("gh", args, opts, (err, stdout, stderr) => {
                         resolve({ code: err ? err.code || 1 : 0, stdout: (stdout || "").trim(), stderr: stderr || "" });
                     });
                 });
-                // GitHub requires a deployment to be marked inactive before it can
-                // be deleted. Delete every deployment record for this environment
-                // so the row disappears from the deployments list.
-                const listRes = await gh(["api", "--paginate", `/repos/${repo}/deployments?environment=${encodeURIComponent(environment)}&per_page=100`, "--jq", ".[].id"]);
-                const ids = listRes.code === 0 && listRes.stdout ? listRes.stdout.split("\n").filter(Boolean) : [];
-                let deleted = 0;
-                for (const id of ids) {
-                    await gh(["api", "--method", "POST", `/repos/${repo}/deployments/${id}/statuses`, "-f", "state=inactive", "-H", "Accept: application/vnd.github.ant-man-preview+json"]);
-                    const del = await gh(["api", "--method", "DELETE", `/repos/${repo}/deployments/${id}`]);
-                    if (del.code === 0) deleted++;
+                // Dispatching a workflow requires the `workflow` scope, which an
+                // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
+                // back to the keyring credential.
+                const ghWorkflow = async (args) => {
+                    const first = await gh(args);
+                    if (first.code === 0) return first;
+                    if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
+                    const fallbackEnv = { ...process.env };
+                    delete fallbackEnv.GH_TOKEN;
+                    delete fallbackEnv.GITHUB_TOKEN;
+                    const retry = await gh(args, 20000, fallbackEnv);
+                    return retry.code === 0 ? retry : first;
+                };
+
+                // Deleting a deployment now runs `rad app delete` via the committed
+                // delete-application.yml workflow. This tears down the Radius
+                // application on the ephemeral control plane while leaving the
+                // GitHub Environment (and its credentials) intact.
+                const dispatchedAt = Date.now();
+                const dispatch = await ghWorkflow([
+                    'workflow', 'run', DELETE_APP_DISPATCHER_FILE,
+                    '-f', 'environment=' + environment,
+                    '-f', 'application=' + application,
+                    '--repo', repo,
+                ]);
+                if (dispatch.code !== 0) {
+                    const de = (dispatch.stderr || '').trim();
+                    const hint = /workflow.{0,20}scope/i.test(de)
+                        ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+                        : ' Ensure ' + DELETE_APP_DISPATCHER_FILE + ' exists on the default branch (recreate the environment to commit it) and that Actions are enabled for ' + repo + '.';
+                    respond(400, { error: 'Failed to start the delete workflow (' + DELETE_APP_DISPATCHER_FILE + ') on ' + repo + '. ' + (de || 'The dispatch request failed.') + hint });
+                    return;
                 }
-                respond(200, { success: true, deleted });
+
+                // Best-effort: resolve the dispatched run's URL so the client can
+                // link to it in GitHub.
+                let runUrl = "";
+                const runId = await findWorkflowRun(repo, DELETE_APP_DISPATCHER_FILE, dispatchedAt, null);
+                if (runId) runUrl = 'https://github.com/' + repo + '/actions/runs/' + runId;
+                respond(200, { success: true, runUrl });
             } catch (e) {
                 respond(400, { error: e.message });
             }
@@ -1635,6 +1765,8 @@ function createRequestHandler(instanceId) {
                     entry.state.deployLogBase = 0;
                     entry.state.deployStatus = 'in_progress';
                     entry.state.deployError = null;
+                    entry.state.deployRunUrl = null;
+                    entry.state.deployRunId = null;
 
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
                     const branch = data.branch || entry.state.deployingBranch || 'main';
@@ -1786,6 +1918,8 @@ function createRequestHandler(instanceId) {
                             entry.state.deployStatus = 'failed';
                             return;
                         }
+                        entry.state.deployRunId = dRunId;
+                        entry.state.deployRunUrl = 'https://github.com/' + repo + '/actions/runs/' + dRunId;
                         addLog('Tracking deploy run: https://github.com/' + repo + '/actions/runs/' + dRunId);
                         if (resources.length > 0 && resources[0].deployStatus === 'pending') setStatus(resources[0], 'in_progress');
 
