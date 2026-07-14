@@ -149,12 +149,15 @@ export interface AppIntent {
 ### 5.2 Validation (`validateIntent`)
 
 - JSON-schema validate the whole `AppIntent`.
-- Every `resources[].type` must be on the skill allow-list **and** resolve to a contrib schema at the
-  pinned commit (or to a covered type in the live default pack).
-- Every `properties` key must exist in the resolved schema; unknown keys are rejected (no invented
-  properties — matches skill rule "Do NOT invent properties").
-- Every `connections[]` entry must reference an existing `logicalName`.
+- `platform` must be a known value (`azure`, `aws`, `kubernetes`).
 - `repo.ref` must look like a 40-char SHA (determinism: no floating tags/branches).
+- Every `connections[]` entry must reference an existing `logicalName`.
+- If a `resources[].type` **resolves** to a contrib schema at the pinned commit, every `properties`
+  key must exist in that schema; unknown keys are rejected (no invented properties — matches skill
+  rule "Do NOT invent properties").
+- If a `resources[].type` has **no contrib schema** (will be classified `no-schema` by §6), the
+  intent passes validation and proceeds to coverage/extensibility — a type is never rejected merely
+  because it is new or has no schema yet.
 - On any failure → return structured errors; caller fails closed.
 
 ### 5.3 Example IR (todo-list-app, target = azure)
