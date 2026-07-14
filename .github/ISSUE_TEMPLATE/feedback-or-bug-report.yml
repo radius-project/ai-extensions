@@ -1,13 +1,13 @@
-name: Feedback or bug report
-description: Share feedback or report a bug for this repository.
-title: "[Feedback/Bug]: "
+name: Feedback, bug report, or feature request
+description: Share feedback, report a bug, or request a feature for this repository.
+title: "[Feedback/Bug/Feature]: "
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for taking the time to share feedback or report a bug. Please
-        provide enough detail for the maintainers to understand, reproduce, and
-        prioritize the issue.
+        Thank you for taking the time to share feedback, report a bug, or request
+        a feature. Please provide enough detail for the maintainers to understand,
+        reproduce, and prioritize the issue.
   - type: dropdown
     id: report-type
     attributes:
@@ -16,14 +16,14 @@ body:
       options:
         - Feedback
         - Bug report
-        - Feature request
+        - Feature Request
     validations:
       required: true
   - type: textarea
     id: summary
     attributes:
       label: Summary
-      description: Briefly describe the feedback or bug.
+      description: Briefly describe the feedback, bug, or feature request.
       placeholder: Tell us what happened or what you would like to improve.
     validations:
       required: true
