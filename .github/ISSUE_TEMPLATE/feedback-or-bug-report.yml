@@ -16,6 +16,7 @@ body:
       options:
         - Feedback
         - Bug report
+        - Feature request
     validations:
       required: true
   - type: textarea
