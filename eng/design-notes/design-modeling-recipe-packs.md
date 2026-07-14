@@ -536,7 +536,7 @@ deleted. `graph/model.ts` already skips `radius.core/recipepacks` nodes.
 
 ---
 
-## 15. Phasing (maps to SQL todos)
+## 15. Phasing (maps to implementation work items)
 
 0. Foundation: pin tooling + `coverage.ts` (`resolveDefaultPack` live parse + `classify`).
 1. `resource-intent.ts` IR + schema + validator.
