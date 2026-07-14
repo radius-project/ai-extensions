@@ -2,10 +2,12 @@
 name: radius-app-bicep
 description: >
   Analyze a source code repository and generate a Radius application
-  definition (.radius/app.bicep). Use when asked to create an application
-  definition, model an application for Radius, or generate a Radius Bicep
-  file. Resolves resource types from radius-project/resource-types-contrib
-  and follows deterministic rules for validated output.
+  definition (.radius/app.bicep) that models the app's compute and backing
+  services as Radius resource types. Use for: creating, generating, or
+  updating a Radius application definition or app.bicep; modeling or
+  onboarding an app or repo to Radius; determining which Radius resource
+  types an app needs. Do not use for: authoring generic or Azure Bicep
+  unrelated to Radius, or deploying or running an already-modeled app.
 ---
 
 # Radius Application Modeling
