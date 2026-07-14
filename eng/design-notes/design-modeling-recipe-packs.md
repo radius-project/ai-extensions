@@ -71,7 +71,7 @@ and full Radius extensibility (custom UDT + recipe + pack) where it does not.
    resource list in our repo.
 3. **Uncovered resources get full extensibility — always.** For any type the default pack doesn't
    cover, generate a custom UDT + recipe + recipe pack **on-demand** via the
-   `radius-extensibility-app-modeling` skill. We do **not** gate this on a pre-reviewed template
+   `radius-app-bicep` skill. We do **not** gate this on a pre-reviewed template
    library. "Fail closed" narrows to only the cases where the target itself is unresolvable (unknown
    platform, no resolvable environment/pack reference) — never merely because a resource type is new.
    The custom recipe body is the one probabilistic artifact; we contain that risk by compiling it and
@@ -240,8 +240,8 @@ export async function classify(
 ## 7. Extensibility — `modeling/extensibility.ts`
 
 Handles the two non-default states. For anything the default pack doesn't cover we **always** produce
-the artifacts needed to deploy it — using the `radius-extensibility-app-modeling` skill
-([SKILL.md](https://github.com/nicolejms/radius/blob/nicolejms/extensibility-app-modeling-skill/.github/skills/radius-extensibility-app-modeling/SKILL.md))
+the artifacts needed to deploy it — using the `radius-app-bicep` skill
+([SKILL.md](../../.copilot/skills/radius-app-bicep/SKILL.md))
 to generate the custom type + recipe on-demand.
 
 ### 7.1 `schema-only` (official schema, no default recipe)
@@ -465,7 +465,7 @@ deleted. `graph/model.ts` already skips `radius.core/recipepacks` nodes.
 | `resource-intent.ts` | `AppIntent`/`ResourceIntent` types, JSON schema, `validateIntent()`. Agent output contract (§5). |
 | `coverage.ts` | `resolveDefaultPack()` (live parse) + `classify()` 3-state (§6). No hardcoded type list. |
 | `render.ts` | `renderAppBicep()` deterministic app.bicep from IR + resolved schemas (§8). |
-| `extensibility.ts` | `schema-only`/`no-schema` → supplemental/custom UDT+recipe+pack generated on-demand via the `radius-extensibility-app-modeling` skill; compile-gated + flagged in diagnostics (§7). |
+| `extensibility.ts` | `schema-only`/`no-schema` → supplemental/custom UDT+recipe+pack generated on-demand via the `radius-app-bicep` skill; compile-gated + flagged in diagnostics (§7). |
 | `recipe-templates/` | Optional reviewed recipe seed examples the extensibility skill may reuse; absence never blocks generation. |
 | `artifacts.ts` | `buildArtifacts()` → `ArtifactBundle` (app.bicep + supplemental pack + UDT manifest + versionLock + diagnostics) (§9). |
 
@@ -526,7 +526,7 @@ deleted. `graph/model.ts` already skips `radius.core/recipepacks` nodes.
 1. **K8s default pack source.** Assumption: resolve it the same way (live parse); if no committed pack
    reference resolves, fail closed and request one. Confirm the canonical K8s pack location/ref.
 2. **Extensibility skill invocation** — how `extensibility.ts` calls the
-   `radius-extensibility-app-modeling` skill from within generation (vendor the skill locally vs fetch
+   `radius-app-bicep` skill from within generation (vendor the skill locally vs fetch
    at runtime), and how it passes platform + IR context to get a compilable recipe body back.
 3. **Pack reference input** — does the deploy environment pass the default pack ref to ai-extensions,
    or do we always resolve the published default? Affects `resolveDefaultPack` priority order.
