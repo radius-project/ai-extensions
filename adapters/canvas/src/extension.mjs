@@ -368,69 +368,13 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                return `To generate app.bicep, follow the radius-app-bicep skill:
+                return `Author .radius/app.bicep for the repository at ${args.repoPath || "the current workspace"} by following the radius-app-bicep skill, then SAVE the file to disk.
 
-1. Analyze the repository at ${args.repoPath || "the current workspace"}:
-   - Find Dockerfiles, docker-compose files, config files, source code
-   - Identify containers, databases, caches, message queues, secrets, routes
-   - Check package.json/requirements.txt/go.mod for infrastructure client dependencies
+The radius-app-bicep skill is the single source of truth for the model — resource types and API versions, extensions, structure, naming, secrets, and containerImages build.source. Analyze the repo (Dockerfiles, compose/config files, source, and dependency manifests) to identify the resources, then produce and SAVE .radius/app.bicep exactly as the skill instructs.
 
-2. Resolve resource types from radius-project/resource-types-contrib:
-   - Check known types table below
-   - If not found, define a custom resource type YAML schema for it
-   - If a needed type cannot be resolved, stop and report the missing type
-
-3. Generate .radius/app.bicep with the correct structure
-
-CRITICAL — Use ONLY Radius.* namespaces (NEVER Applications.*):
-
-| Resource | Full Type |
-|---|---|
-| Containers | Radius.Compute/containers@2025-08-01-preview |
-| Container Images | Radius.Compute/containerImages@2025-08-01-preview |
-| Routes/Ingress | Radius.Compute/routes@2025-05-01-preview |
-| Persistent Volumes | Radius.Compute/persistentVolumes@2025-05-01-preview |
-| MySQL | Radius.Data/mySqlDatabases@2025-08-01-preview |
-| PostgreSQL | Radius.Data/postgreSqlDatabases@2025-08-01-preview |
-| Neo4j | Radius.Data/neo4jDatabases@2025-08-01-preview |
-| Redis | Radius.Data/redisCaches@2025-08-01-preview |
-| MongoDB | Radius.Data/mongoDatabases@2025-08-01-preview |
-| Secrets | Radius.Security/secrets@2025-05-01-preview |
-| RabbitMQ | Radius.Messaging/rabbitMQQueues@2025-08-01-preview |
-| Dapr State | Radius.Dapr/stateStores@2025-08-01-preview |
-
-Extensions:
-- extension radius
-
-The single published 'radius' Bicep extension provides ALL Radius.* namespaces
-(Compute, Data, Security, Messaging, Dapr, ...). Declare only 'extension radius'.
-Do NOT use split aliases like radiusCompute/radiusSecurity/radiusData — they are
-not published extensions and cause BCP204 "Extension not recognized" at build time.
-
-Structure: extension radius > params (environment, application, @secure password, image) > resources
-
-Key rules:
-- Always parameterize environment and application (injected by rad CLI)
-- Use connections to express dependencies between resources (source: <resource>.id)
-- Symbolic names: camelCase (e.g., webApp, redisCache)
-- Resource names: kebab-case (e.g., 'web-app', 'redis-cache')
-- Platform-agnostic: recipes handle deployment specifics
-- NEVER use Applications.Core/*, Applications.Datastores/*, or Applications.Dapr/*
-
-Radius.Compute/containerImages build.source (CRITICAL):
-- Images are built in-cluster by a BuildKit sidecar, so build.source MUST be a
-  'git::https://...' URL that BuildKit can clone. NEVER use a local filesystem
-  path (e.g. '/app', '/app/demo', '.') — the runner's filesystem is not visible
-  to the BuildKit pod and the build fails with "invalid local: ... no such file".
-- Use the application's own repository: source: 'git::https://github.com/<owner>/<repo>.git'
-- If the Dockerfile is in a subdirectory, append it as a go-getter subdir and
-  (optionally) pin a ref: 'git::https://github.com/<owner>/<repo>.git//<subdir>?ref=<branch-or-sha>'
-- Set build.dockerfile only when the Dockerfile is not named 'Dockerfile' at the
-  build context root (it defaults to 'Dockerfile').
-
-Recipes are provided by recipe packs registered on the environment at deploy
-time — NOT authored per type in app.bicep. app.bicep models resource types
-only; do not generate or reference singleton recipes for custom types.`;
+Guardrails:
+- Use ONLY Radius.* namespaces — never Applications.*.
+- Recipes come from recipe packs registered on the environment at deploy time; do not author singleton recipes for custom types. If a required type has no recipe, stop and report it.`;
             },
         },
         {
@@ -625,10 +569,10 @@ The PR description will show the app graph diff inline on GitHub, and the canvas
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check if .radius/app.bicep (or app.bicep) exists in the repository.
-2. If app.bicep does NOT exist, generate it using the radius_generate_app tool. IMPORTANT: Use ONLY Radius.* namespaces (e.g., Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets). NEVER use Applications.* namespaces.
+2. If app.bicep does NOT exist, generate AND SAVE it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure).
 3. Only AFTER app.bicep exists in the session worktree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
 
-The same rule applies to the "planned" and "graph-diff" pages: they render from .radius/app.bicep, so if it does not exist, first create AND SAVE it with the radius_generate_app tool (radius-app-bicep skill) using ONLY Radius.* namespaces before opening those pages.
+The same rule applies to the "planned" and "graph-diff" pages: they render from .radius/app.bicep, so if it does not exist, first create AND SAVE it with the radius_generate_app tool (radius-app-bicep skill) before opening those pages.
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
 

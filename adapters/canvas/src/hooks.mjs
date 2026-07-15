@@ -16,6 +16,16 @@
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
+// Shared instruction lines for the two handoff prompts below (kept in one place
+// so the guidance is not restated). The radius-app-bicep skill holds the full
+// authoring reference — these are only the pointers the hooks need to inject.
+const SKILL_STEP_ANALYZE =
+    "1. Call the radius_generate_app tool (or follow the radius-app-bicep skill) to analyze the repository and author the application model.";
+const SKILL_STEP_NAMESPACES =
+    "2. Use ONLY Radius.* namespaces (e.g. Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets) — never Applications.*.";
+const RECIPE_PACK_NOTE =
+    "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
+
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
 // to SAVE the file — never to fabricate a graph or singleton recipes.
@@ -25,12 +35,12 @@ export function appBicepReminder(repo) {
         `No .radius/app.bicep exists${where}, so the application graph cannot be generated yet.`,
         "",
         "Create it now with the radius-app-bicep skill before retrying:",
-        "1. Call the radius_generate_app tool (or follow the radius-app-bicep skill) to analyze the repository and author the model.",
-        "2. Use ONLY Radius.* namespaces (e.g. Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets) — never Applications.*.",
+        SKILL_STEP_ANALYZE,
+        SKILL_STEP_NAMESPACES,
         "3. SAVE the result to .radius/app.bicep in the repository (write the file to disk; commit it if the user wants it persisted).",
         "4. Then retry the original action — the graph renders from the saved app.bicep.",
         "",
-        "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.",
+        RECIPE_PACK_NOTE,
     ].join("\n");
 }
 
@@ -106,11 +116,11 @@ export function appBicepHandoffPrompt(repo, page = "graph") {
         `The Radius ${page} canvas was opened but no .radius/app.bicep exists${where}, so the application graph cannot render yet. Generate it now — do not tell the user to do it manually.`,
         "",
         "Steps:",
-        "1. Call the radius_generate_app tool (or follow the radius-app-bicep skill) to analyze the repository and author the application model.",
-        "2. Use ONLY Radius.* namespaces (e.g. Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets) — never Applications.*.",
+        SKILL_STEP_ANALYZE,
+        SKILL_STEP_NAMESPACES,
         "3. SAVE the result to .radius/app.bicep in the repository.",
         "4. Re-open the Radius canvas (open_canvas with canvasId \"radius\", instanceId \"radius-panel\") so the graph renders from the saved app.bicep.",
         "",
-        "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.",
+        RECIPE_PACK_NOTE,
     ].join("\n");
 }
