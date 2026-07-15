@@ -4,7 +4,7 @@
 
 For help and questions about using this project, please join and post to the [Radius Discord server](https://aka.ms/radius/discord).
 
-This project uses GitHub Issues to track bugs and feature requests. Please search the existing issues before filing new issues to avoid duplicates. For new issues, file your bug or feature request as a new Issue.
+This project uses GitHub Issues to track bugs and feature requests. Please search existing issues before filing a new issue to avoid duplicates.
 
 ## Support Policy
 
