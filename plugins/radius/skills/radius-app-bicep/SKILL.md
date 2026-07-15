@@ -19,14 +19,14 @@ Use this skill to generate a Radius application definition (`app.bicep`) from a 
 
 ## Response
 
-When asked to model a repository, your chat reply should contain:
+When asked to model a repository:
 
-1. A one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`.").
-2. A short, natural summary of the application resources you identified — a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis.
-3. The `.radius/app.bicep` in a single code block.
-4. An offer to open a pull request.
+1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) to the current working branch of the target repository.
+2. Commit both files to that branch, and push the branch when a remote is configured.
+3. In your chat reply, give a one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`."), then a short, natural summary of the resources you identified — a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis or the full file contents.
+4. Then ask whether to open a pull request against the default branch.
 
-Don't create the pull request automatically — wait for the user to confirm. If they confirm, open a PR adding `.radius/app.bicep` with title `Add Radius application definition` and body `Add .radius/app.bicep for <app-name>.`
+Don't open the pull request automatically — wait for the user to confirm. If they confirm, open a PR from the working branch against the default branch with title `Add Radius application definition` and body `Add .radius/app.bicep and .radius/bicepconfig.json for <app-name>.`
 
 ## Workflow
 
@@ -37,7 +37,7 @@ Before writing the Bicep:
 3. Inventory every executable workload and backing service in the selected profile from manifests, Dockerfiles, compose/Helm files, entrypoints, source configuration reads, client initialization, and referenced config files. Treat web, worker, producer, consumer, migration, scheduler, and sidecar roles separately.
 4. Extract each workload's runtime contract: image/build context, entrypoint and arguments, listener and ports, required environment/configuration, secrets, writable storage, dependencies, wire protocols, and feature-critical configuration.
 5. Map every selected backing service to a Radius type with [component-catalog.md](references/component-catalog.md), using [architecture-patterns.md](references/architecture-patterns.md) only as context. Report unsupported essential components instead of substituting unrelated types.
-6. Inspect the repository's `bicepconfig.json` and resolve every emitted type and planned property read/write against the exact configured Radius extension. Record the verbatim property path and schema proof in the ledger; for recipe outputs, also prove the output mapping and any managed-secret key. Reject an absent path before generation instead of guessing an alias, convenience property, or wrapper. Use the matching `resource-types-contrib` schema revision and target Environment recipe/output contract; do not copy shapes from another version.
+6. Inspect the repository's `bicepconfig.json` and resolve every emitted type and planned property read/write against the exact configured Radius extension. If the repository has no `bicepconfig.json` that resolves the `radius` extension, plan to generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) and resolve against the extension reference it declares. Record the verbatim property path and schema proof in the ledger; for recipe outputs, also prove the output mapping and any managed-secret key. Reject an absent path before generation instead of guessing an alias, convenience property, or wrapper. Use the matching `resource-types-contrib` schema revision and target Environment recipe/output contract; do not copy shapes from another version.
 7. Choose a source build only when the repository has a complete, practical build context. Otherwise use a pinned published image. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
 8. Generate the Bicep using [naming-conventions.md](references/naming-conventions.md), then compile it with the exact configured extension. Treat unknown type/property warnings as unresolved schema mismatches.
 9. Perform the [validation checklist](#validation-checklist) and close every item in the requirement ledger. Compilation or process startup alone is not success.
@@ -151,7 +151,28 @@ Do NOT use any type not listed above. Do NOT invent properties.
 
 ## Extension
 
-Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The alias must resolve through the target repository's existing configuration; do not silently add or replace `bicepconfig.json`. Prefer an immutable extension reference when configuration is in scope.
+Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Never overwrite an existing config — merge into it. Prefer an immutable extension reference when a specific schema revision is required.
+
+## bicepconfig.json
+
+`app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Ensure one is in place at `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`).
+
+If a `bicepconfig.json` that applies to `.radius/app.bicep` already exists (in `.radius/` or a parent directory), merge the entries `app.bicep` needs into it rather than overwriting: keep every existing key and reference, and add only what is missing. An already-correct file produces an empty diff.
+
+When none applies, create `.radius/bicepconfig.json` with:
+
+```json
+{
+  "experimentalFeaturesEnabled": {
+    "extensibility": true
+  },
+  "extensions": {
+    "radius": "br:biceptypes.azurecr.io/radius:latest"
+  }
+}
+```
+
+Add an `"aws": "br:biceptypes.azurecr.io/aws:latest"` extension entry only when `app.bicep` declares AWS-native resources; omit it otherwise. The `radius:latest` tag is mutable and can drift; pin an immutable reference instead when a specific schema revision is required.
 
 ## app.bicep Structure (mandatory order)
 
@@ -214,7 +235,7 @@ Before returning the Bicep, verify:
 - [ ] Every dependency has a complete client tuple: subresource name, endpoint/FQDN transformation, port, protocol/version, TLS mode, auth mechanism/identity, secret source, and final client syntax. Provider modules, SKUs, regions, and firewall configuration remain outside `app.bicep`.
 - [ ] Primary-feature readiness is proven: required model aliases, storage backends, database clients, and messaging inputs/outputs are configured and reference the selected resources. A health endpoint or idle/placeholder process is not sufficient.
 - [ ] Perform the static consistency pass in [runtime-contract.md](references/runtime-contract.md); no unresolved runtime caveat remains.
-- [ ] The generated Bicep contains no explanatory comments and does not add `bicepconfig.json`.
+- [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: generated when the repo lacked one, or merged into an existing config (never overwritten).
 
 ## Example
 
