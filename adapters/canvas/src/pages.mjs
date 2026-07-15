@@ -2238,14 +2238,16 @@ function loadDeployments() {
         .then(function(d) {
             var deps = (d && d.deployments) || [];
             if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
-            var appHref = 'https://github.com/' + CTX_REPO;
             body.innerHTML = deps.map(function(dep) {
                 var statusHtml = statusCell(dep.status);
                 if (dep.runUrl) {
                     statusHtml = '<a class="rad-status-link" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + statusHtml + '</a>';
                 }
+                // The app name routes to the Applications → Deployed tab (the live
+                // deployed app graph) for this environment/application.
+                var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
                 return '<tr>' +
-                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(appHref) + '" target="_blank" rel="noopener noreferrer">↗ ' + escapeHtmlClient(dep.app) + '</a></td>' +
+                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
                     '<td>' + statusHtml + '</td>' +
                     '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
