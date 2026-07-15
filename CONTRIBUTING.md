@@ -12,9 +12,9 @@ covers how to build, test, and contribute to it.
 We welcome pull request contributions from anyone (docs improvements, bug
 fixes, features) as long as they follow a few guidelines:
 
-- For very minor changes like correcting a typo feel free to send a pull
-  request. Otherwise ...
-- Please start by [choosing an existing issue](https://github.com/radius-project/ai-extensions/issues),
+- For very minor changes like correcting a typo, feel free to send a pull
+  request.
+- For larger changes, please start by [choosing an existing issue](https://github.com/radius-project/ai-extensions/issues),
   or [opening an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
   to work on.
 - The maintainers will respond to your issue. Please work with the maintainers

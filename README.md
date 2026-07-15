@@ -94,7 +94,7 @@ adapters.
 
 ## Getting help
 
-- ❓ **Have a question?** - Visit our [Discord server](https://discord.gg/SRG3ePMKNy) to post your question and we'll get back to you ASAP
+- ❓ **Have a question?** - Visit our [Discord server](https://aka.ms/radius/discord) to post your question and we'll get back to you.
 - ⚠️ **Found an issue?** - [Open a bug report](https://github.com/radius-project/ai-extensions/issues/new/choose)
 - 💡 **Have a proposal?** - [Open a feature request](https://github.com/radius-project/ai-extensions/issues/new/choose)
 
@@ -107,7 +107,7 @@ test, and contribute to this repository.
 
 We welcome your contributions and suggestions! One of the easiest ways to
 contribute is to participate in Issue discussions, chat on our
-[Discord server](https://discord.gg/SRG3ePMKNy). For more information on community engagement, developer and contributing
+[Discord server](https://aka.ms/radius/discord). For more information on community engagement, developer and contributing
 guidelines and more, head over to the
 [Radius community repo](https://github.com/radius-project/community).
 
