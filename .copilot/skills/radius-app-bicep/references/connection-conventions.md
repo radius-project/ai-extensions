@@ -1,106 +1,85 @@
 # Connection Conventions
 
-## Overview
+## What a connection does
 
-When a Radius container has a `connection` to a resource, Radius injects environment variables into the container so your application code can discover the resource's connection details at runtime.
+A `Radius.Compute/containers` connection declares a generic Radius relationship to another resource. It can project resource properties into the workload, but it does **not** translate them into arbitrary names or formats expected by an application.
 
-`Radius.Compute/containers` injects all of a connection's **non-secret** properties as a single JSON blob (see below). Sensitive recipe outputs (connection strings, URLs that embed access keys, API keys) are **not** in this blob — they are delivered through a managed secret and consumed with `secretKeyRef` (see [Secret outputs](#secret-outputs-not-in-the-connection-blob) below and [secrets-handling.md](secrets-handling.md)).
+Connection projection is version-specific. Depending on the Radius/container schema and recipe, a connection may provide:
 
-## Radius.Compute/containers — JSON Properties Blob
+- a `CONNECTION_<NAME>_PROPERTIES` JSON value;
+- individual `CONNECTION_<NAME>_<PROPERTY>` values;
+- relationship metadata; and/or
+- no sensitive outputs.
 
-All properties are packed into a single JSON environment variable:
+Inspect the exact configured extension, registered resource schema, recipe output mapping, and Radius runtime before relying on any projection shape. Do not infer it from a different version's documentation.
 
-```
-CONNECTION_<NAME>_PROPERTIES={"host":"...","port":"...","database":"...","username":"...","password":"..."}
-CONNECTION_<NAME>_ID=<resource-id>
-CONNECTION_<NAME>_NAME=<connection-name>
-CONNECTION_<NAME>_TYPE=<resource-type>
-```
+## Decide wiring from source
 
-> Property names in the JSON blob are **lowercase** (matching the resource type schema). The connection name in the env var prefix is **UPPERCASE**.
+For every dependency:
 
-### Example
+1. Inspect source, entrypoint, compose, and configuration files for the exact values the workload reads.
+2. Record the selected profile's required names, casing, defaults, types, literal values, URL/config syntax, endpoint transformations, and secret handling.
+3. Inspect the exact resource outputs and connection projection supplied by the target schema and recipe.
+4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format.
+5. Select the wiring for each app-native value:
+   - explicit `env.value` from a verified nonsecret output or literal;
+   - `valueFrom.secretKeyRef` from an exact secret/key;
+   - runtime composition; or
+   - generic connection projection only when the source explicitly consumes that applicable contract.
 
-Connection named `mysqldb` to `Radius.Data/mySqlDatabases`:
+An unmodified third-party image usually expects its own native variables or configuration. A connection alone does not configure it unless its source already understands the projected `CONNECTION_*` contract. A provider-specific `host` output may also require a documented suffix, port, TLS mode, or auth block before it is a usable client endpoint.
 
-| Variable | Example Value |
-|----------|---------------|
-| `CONNECTION_MYSQLDB_PROPERTIES` | `{"database":"todos","username":"myadmin","password":"abc123","version":"8.0","host":"mysql-svc.default.svc.cluster.local","port":"3306"}` |
-| `CONNECTION_MYSQLDB_ID` | `/planes/radius/local/.../Radius.Data/mySqlDatabases/mysql` |
-| `CONNECTION_MYSQLDB_NAME` | `mysqldb` |
-| `CONNECTION_MYSQLDB_TYPE` | `Radius.Data/mySqlDatabases` |
+## Source consumes the generic contract
 
-## Reading Connection Properties
+When the application explicitly parses the exact projection supplied by the target Radius version, or the selected profile explicitly requires Radius relationship metadata, declare the relationship with the required key:
 
-Parse the `CONNECTION_<NAME>_PROPERTIES` JSON blob to read a property (Node.js example):
-
-```javascript
-function getConnProp(connName, prop) {
-  const propsJson = process.env[`CONNECTION_${connName}_PROPERTIES`];
-  if (!propsJson) return '';
-  try {
-    const props = JSON.parse(propsJson);
-    return props[prop.toLowerCase()] || '';
-  } catch (e) {
-    return '';
+```bicep
+connections: {
+  database: {
+    source: database.id
   }
 }
 ```
 
-The same pattern applies in any language: read `CONNECTION_<NAME>_PROPERTIES`, JSON-parse it, and look up the lowercase property key.
+`connections` is a top-level object map under container resource `properties`, not inside an individual container.
 
-## Secret outputs (not in the connection blob)
+## Source expects native configuration
 
-When the connected resource's schema defines a read-only `secrets` block, its sensitive recipe outputs (connection string, URL with an embedded access key, API key) are **redacted from the resource's properties and omitted from `CONNECTION_<NAME>_PROPERTIES`**. Radius materializes them into a managed secret instead. Read them with `secretKeyRef`, not from the connection blob:
+Map every required input to the exact name the source consumes:
 
 ```bicep
 containers: {
-  todo: {
-    image: todoImage.properties.imageReference
+  api: {
+    image: apiImage.properties.imageReference
     env: {
-      REDIS_URL: {
+      APP_DB_HOST: {
+        value: database.properties.host
+      }
+      APP_DB_PASSWORD: {
         valueFrom: {
           secretKeyRef: {
-            secretName: redisCache.properties.secrets.name   // reserved read-only reference
-            key: 'url'                                        // key from the schema's secrets block
+            secretName: databaseRuntimeSecret.name
+            key: 'password'
           }
         }
       }
     }
   }
 }
-connections: {
-  // Keep the connection for the NON-secret discovery vars (host, port).
-  rediscache: {
-    source: redisCache.id
-  }
-}
 ```
 
-See [secrets-handling.md](secrets-handling.md) for the full pattern and the per-type secret keys.
+This is a representative pattern, not a required variable naming scheme. Confirm that `host`, the secret resource, and its key exist in the exact schemas. Direct resource and secret references create dependency ordering, so a connection is not required merely to order deployment.
 
-## Valid Bicep structure
-
-```bicep
-connections: {
-  mysqldb: {
-    source: mysqlDb.id
-  }
-}
-```
+Keep a connection alongside native variables when the source consumes generic values or the selected profile explicitly requires Radius relationship metadata. Explicit native variables are not categorically forbidden just because generic projection exists. Ensure duplicate names do not carry conflicting values.
 
 ## Rules
 
-1. NEVER add manual `env` entries that duplicate auto-injected vars.
-2. The app must parse `CONNECTION_<NAME>_PROPERTIES` as JSON to read connection details.
-3. Do NOT reference readOnly properties of other resources in Bicep — with two sanctioned exceptions: `<image>.properties.imageReference` (wiring a built image) and `<resource>.properties.secrets.name` (wiring a `secretKeyRef` to a secret output).
-4. `connections` is a top-level property under `properties` — NOT inside `containers`.
-5. `connections` is an object map, NOT an array.
-6. `disableDefaultEnvVars` goes on the individual connection entry, NOT on the container.
-
-## Common Gotchas
-
-- **Case sensitivity:** JSON keys in `_PROPERTIES` are lowercase (`host`, `port`). Connection name in env var prefix is UPPERCASE (`MYSQLDB`).
-- **Number types:** JSON may parse `port` as a number. Always convert to string when needed.
-- **Multiple connections:** Each connection gets its own set of env vars.
-- **Secrets are not in the blob:** sensitive recipe outputs are redacted from `CONNECTION_<NAME>_PROPERTIES`; read them via `secretKeyRef` from `<resource>.properties.secrets.name` (see above).
+1. Never assume a connection invents app-specific variables, URLs, credentials, database names, or protocol settings.
+2. Never assume one universal JSON or scalar `CONNECTION_*` projection. Verify the target version.
+3. Sensitive outputs may be omitted from generic projection. Resolve and bind them through the exact secret contract described in [secrets-handling.md](secrets-handling.md).
+   A sensitive app-native key must use an explicit `secretKeyRef` even when its name looks exactly like `CONNECTION_<NAME>_<PROPERTY>`; the matching connection does not project the secret. Bind a recipe-generated value directly from schema-declared managed-secret metadata, never through an authored wrapper or guessed resource property.
+4. Reference a nonsecret read-only output only when the exact schema exposes it and the configured recipe populates it. Do not **set** read-only properties.
+5. Use `disableDefaultEnvVars` only on the connection entry, only when the exact container schema supports it, and only when generic projection would conflict with the application.
+6. Treat case, number-to-string conversion, URL encoding, TLS mode, and protocol-specific formatting as part of the app's runtime contract.
+7. Preserve exact relationship names and provider/runtime values supplied by an explicit compatible profile; do not normalize them to generic defaults.
+8. Do not count a connected resource as used unless the selected feature path consumes its projection or explicit native wiring.

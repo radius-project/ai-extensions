@@ -6,9 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "watch": "node build.mjs --watch",
-    "test": "vitest run",
-    "coverage": "vitest run --coverage --coverage.provider=v8"
+    "test": "node --test src/*_test.mjs",
+    "watch": "node build.mjs --watch"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*",
