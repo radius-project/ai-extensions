@@ -1932,6 +1932,13 @@ function createRequestHandler(instanceId) {
                         // `rad app graph` so the deployed application graph is rendered
                         // as part of the run. Secret params are still appended by the
                         // workflow from the RADIUS_DEPLOY_PARAMS secret.
+                        //
+                        // A fatal secret-provisioning problem (the deployed bicep needs a
+                        // secret param the environment can't be made to carry) is recorded
+                        // here and short-circuits the dispatch below, so we never start a
+                        // run that is guaranteed to fail `rad deploy` for a missing
+                        // required parameter.
+                        let deploySecretError = null;
                         try {
                             let bicepPath = '.radius/app.bicep';
                             let bicepSource = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
@@ -1946,28 +1953,43 @@ function createRequestHandler(instanceId) {
 
                                 // Ensure the environment carries the secret params the
                                 // deployed app.bicep needs (e.g. an @secure() password).
-                                // These are appended by the workflow from the
-                                // RADIUS_DEPLOY_PARAMS secret at runtime. If env-creation
-                                // never wrote it (its provisioning can silently skip when
-                                // the app.bicep isn't found), the deploy would fail for a
-                                // missing required parameter. Provision it here from the
-                                // SAME branch bicep when the environment has no such secret
-                                // yet. If one already exists, leave it untouched so the
-                                // value stays stable across redeploys (we can't read it
-                                // back to compare).
+                                // The workflow can ONLY read these from the
+                                // RADIUS_DEPLOY_PARAMS secret — unlike the public rad
+                                // commands, they can't be passed inline as a dispatch input
+                                // — so if the secret is absent the deploy fails for a
+                                // missing required parameter. Env creation seeds it, but
+                                // that step is skipped when app.bicep isn't present yet, so
+                                // reconcile here: provision the secret from the SAME branch
+                                // bicep when the environment has none. If one already
+                                // exists, leave it untouched so an auto-generated value
+                                // stays stable across redeploys (we can't read it back to
+                                // compare).
                                 if (Object.keys(secretParams).length > 0) {
-                                    const secretsList = await runGhDeploy(['api', `/repos/${repo}/environments/${encodeURIComponent(envForDeploy)}/secrets`, '--jq', '.secrets[].name']);
-                                    const hasDeployParams = (secretsList.stdout || '').split('\n').map(s => s.trim()).includes('RADIUS_DEPLOY_PARAMS');
-                                    if (!hasDeployParams) {
+                                    const deployParamsPresent = async () => {
+                                        const r = await runGhDeploy(['api', `/repos/${repo}/environments/${encodeURIComponent(envForDeploy)}/secrets`, '--jq', '.secrets[].name']);
+                                        return (r.stdout || '').split('\n').map(s => s.trim()).includes('RADIUS_DEPLOY_PARAMS');
+                                    };
+                                    if (!(await deployParamsPresent())) {
                                         addLog('Provisioning RADIUS_DEPLOY_PARAMS for "' + envForDeploy + '" (' + Object.keys(secretParams).join(', ') + ')...');
                                         const setArgs = ['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envForDeploy, '--repo', repo];
                                         let setRes = await runGhDeployStdin(setArgs, JSON.stringify(secretParams));
                                         if (setRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
+                                            // The injected OAuth token may lack the scope to
+                                            // write environment secrets; retry with it
+                                            // stripped so gh falls back to the keyring cred.
                                             const fe = { ...process.env }; delete fe.GH_TOKEN; delete fe.GITHUB_TOKEN;
                                             const retry = await runGhDeployStdin(setArgs, JSON.stringify(secretParams), fe);
                                             if (retry.code === 0) setRes = retry;
                                         }
-                                        if (setRes.code !== 0) addLog('⚠ Could not set RADIUS_DEPLOY_PARAMS: ' + ((setRes.stderr || '').trim() || 'unknown error') + ' — the deploy may fail for a missing required parameter.');
+                                        if (setRes.code !== 0) {
+                                            deploySecretError = 'Could not provision RADIUS_DEPLOY_PARAMS on environment "' + envForDeploy + '": ' + ((setRes.stderr || '').trim() || 'unknown error') + '. The deploy would fail for a missing required parameter (' + Object.keys(secretParams).join(', ') + '), so it was not started.';
+                                            addLog('❌ ' + deploySecretError);
+                                        } else if (!(await deployParamsPresent())) {
+                                            deploySecretError = 'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' + envForDeploy + '". The deploy would fail for a missing required parameter (' + Object.keys(secretParams).join(', ') + '), so it was not started.';
+                                            addLog('❌ ' + deploySecretError);
+                                        } else {
+                                            addLog('✅ RADIUS_DEPLOY_PARAMS is set on "' + envForDeploy + '".');
+                                        }
                                     }
                                 }
 
@@ -1984,6 +2006,14 @@ function createRequestHandler(instanceId) {
                             }
                         } catch (e) {
                             addLog('⚠ Could not compute rad commands from bicep (' + e.message + '); falling back to the environment default.');
+                        }
+                        // Fail fast: a required secret param couldn't be provisioned, so
+                        // starting the run would only produce a guaranteed `rad deploy`
+                        // failure. Surface the reason and stop before dispatching.
+                        if (deploySecretError) {
+                            entry.state.deployError = deploySecretError;
+                            entry.state.deployStatus = 'failed';
+                            return;
                         }
                         // Make sure the workflow files exist on the branch we're
                         // about to dispatch on. The env-creation flow only commits
