@@ -605,6 +605,9 @@ function createRequestHandler(instanceId) {
                 // Step 1: Create the GitHub environment
                 steps.push('Creating GitHub environment "' + envName + '"...');
                 await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName]);
+                // Tag the environment as Radius-managed so the listing can filter
+                // out environments created outside this extension.
+                await runGh(['variable', 'set', 'RADIUS_MANAGED', '--body', 'true', '--env', envName, '--repo', targetRepo]);
                 // A new environment invalidates the cached listing for this repo.
                 envListCache.delete(targetRepo);
 
@@ -1284,6 +1287,12 @@ function createRequestHandler(instanceId) {
                             ? gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"])
                             : Promise.resolve(""),
                     ]);
+                    // Only surface environments created by this extension. They are
+                    // tagged with a RADIUS_MANAGED variable at creation time; any
+                    // environment without it was created outside Radius and is
+                    // filtered out below.
+                    if (!/^RADIUS_MANAGED$/m.test(varsRaw)) return null;
+
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
@@ -1315,8 +1324,9 @@ function createRequestHandler(instanceId) {
                     return { name, provider, status, webUrl };
                 }));
 
-                respond({ environments });
-                envListCache.set(repo, { at: Date.now(), payload: { environments } });
+                const managedEnvironments = environments.filter(Boolean);
+                respond({ environments: managedEnvironments });
+                envListCache.set(repo, { at: Date.now(), payload: { environments: managedEnvironments } });
             } catch (e) {
                 respond({ environments: [], error: e.message });
             }
