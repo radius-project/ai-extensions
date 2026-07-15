@@ -60,7 +60,10 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
         let branches;
         if (page === "graph-diff") {
             branches = [ctx.input?.baseBranch, ctx.input?.headBranch].filter(Boolean);
-            if (!branches.length) branches = [state.contextBranch];
+            // Match the onPreToolUse hook's graphTriggerTargets: when no branches
+            // are supplied, use [undefined] so both paths resolve to the default
+            // branch below and compute the same dedupe key.
+            if (!branches.length) branches = [undefined];
         } else {
             branches = [state.contextBranch];
         }
@@ -68,6 +71,11 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
 
         const key = `${repo}::${branches.join(",")}`;
         if (state.appBicepHandoffKey === key) return; // already handed off for this target
+        // Claim the key before the async fetch so a concurrent canvas-open and
+        // server-route trigger for the same target cannot both pass the guard
+        // and double-handoff (TOCTOU). If bicep turns out to exist we simply
+        // skip the send below; the claimed key is harmless.
+        state.appBicepHandoffKey = key;
 
         const found = await Promise.all(branches.map(async (branch) => {
             try {
@@ -78,7 +86,6 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
         }));
         if (found.some(Boolean)) return; // at least one branch has it → nothing to do
 
-        state.appBicepHandoffKey = key;
         try {
             Promise.resolve(session.send(appBicepHandoffPrompt(repo, page))).catch(() => {});
         } catch { /* session.send unavailable → ignore */ }

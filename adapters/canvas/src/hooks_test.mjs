@@ -131,7 +131,7 @@ describe("graphTriggerTargets", () => {
     });
 });
 
-function makeDeps({ state = { workspaceRepo: "" }, fetchBicep = vi.fn(), defaultBranch = "main" } = {}) {
+function makeDeps({ state = { contextRepo: "" }, fetchBicep = vi.fn(), defaultBranch = "main" } = {}) {
     return {
         workspaceState: vi.fn(async () => state),
         fetchBicep,
@@ -148,7 +148,7 @@ describe("evaluateAppBicepHook", () => {
     });
 
     it("fails open when no repo can be resolved", async () => {
-        const deps = makeDeps({ state: { workspaceRepo: "" }, fetchBicep: vi.fn(async () => "x") });
+        const deps = makeDeps({ state: { contextRepo: "" }, fetchBicep: vi.fn(async () => "x") });
         const out = await evaluateAppBicepHook(
             { toolName: "open_canvas", toolArgs: { canvasId: "radius", input: { page: "graph" } } },
             deps,
@@ -159,27 +159,27 @@ describe("evaluateAppBicepHook", () => {
 
     it("falls back to the workspace repo when the tool arg omits it", async () => {
         const fetchBicep = vi.fn(async () => "content");
-        const deps = makeDeps({ state: { workspaceRepo: "ws/repo" }, fetchBicep });
+        const deps = makeDeps({ state: { contextRepo: "ws/repo" }, fetchBicep });
         const out = await evaluateAppBicepHook(
             { toolName: "open_canvas", toolArgs: { canvasId: "radius", input: { page: "graph", branch: "feat" } } },
             deps,
         );
         expect(out).toBeUndefined();
-        expect(fetchBicep).toHaveBeenCalledWith("ws/repo", "feat", { workspaceRepo: "ws/repo" });
+        expect(fetchBicep).toHaveBeenCalledWith("ws/repo", "feat", { contextRepo: "ws/repo" });
     });
 
     it("uses the default branch when the graph page omits the branch", async () => {
         const fetchBicep = vi.fn(async () => "content");
-        const deps = makeDeps({ state: { workspaceRepo: "ws/repo" }, fetchBicep, defaultBranch: "trunk" });
+        const deps = makeDeps({ state: { contextRepo: "ws/repo" }, fetchBicep, defaultBranch: "trunk" });
         await evaluateAppBicepHook(
             { toolName: "open_canvas", toolArgs: { canvasId: "radius", input: { page: "graph", repo: "a/b" } } },
             deps,
         );
-        expect(fetchBicep).toHaveBeenCalledWith("a/b", "trunk", { workspaceRepo: "ws/repo" });
+        expect(fetchBicep).toHaveBeenCalledWith("a/b", "trunk", { contextRepo: "ws/repo" });
     });
 
     it("allows when app.bicep exists on the branch", async () => {
-        const deps = makeDeps({ state: { workspaceRepo: "a/b" }, fetchBicep: vi.fn(async () => "resource ...") });
+        const deps = makeDeps({ state: { contextRepo: "a/b" }, fetchBicep: vi.fn(async () => "resource ...") });
         const out = await evaluateAppBicepHook(
             { toolName: "open_canvas", toolArgs: { canvasId: "radius", input: { page: "graph", repo: "a/b", branch: "feat" } } },
             deps,
@@ -188,7 +188,7 @@ describe("evaluateAppBicepHook", () => {
     });
 
     it("denies with skill guidance when app.bicep is missing", async () => {
-        const deps = makeDeps({ state: { workspaceRepo: "a/b" }, fetchBicep: vi.fn(async () => null) });
+        const deps = makeDeps({ state: { contextRepo: "a/b" }, fetchBicep: vi.fn(async () => null) });
         const out = await evaluateAppBicepHook(
             { toolName: "open_canvas", toolArgs: { canvasId: "radius", input: { page: "graph", repo: "a/b", branch: "feat" } } },
             deps,
@@ -201,7 +201,7 @@ describe("evaluateAppBicepHook", () => {
 
     it("treats a fetch error as a missing file (deny)", async () => {
         const deps = makeDeps({
-            state: { workspaceRepo: "a/b" },
+            state: { contextRepo: "a/b" },
             fetchBicep: vi.fn(async () => {
                 throw new Error("boom");
             }),
@@ -215,7 +215,7 @@ describe("evaluateAppBicepHook", () => {
 
     it("allows a graph-diff when only one branch has app.bicep", async () => {
         const fetchBicep = vi.fn(async (_repo, branch) => (branch === "main" ? "content" : null));
-        const deps = makeDeps({ state: { workspaceRepo: "a/b" }, fetchBicep });
+        const deps = makeDeps({ state: { contextRepo: "a/b" }, fetchBicep });
         const out = await evaluateAppBicepHook(
             {
                 toolName: "radius_generate_pr_diff_markdown",
@@ -227,7 +227,7 @@ describe("evaluateAppBicepHook", () => {
     });
 
     it("denies a graph-diff when both branches are missing app.bicep", async () => {
-        const deps = makeDeps({ state: { workspaceRepo: "a/b" }, fetchBicep: vi.fn(async () => null) });
+        const deps = makeDeps({ state: { contextRepo: "a/b" }, fetchBicep: vi.fn(async () => null) });
         const out = await evaluateAppBicepHook(
             {
                 toolName: "radius_generate_pr_diff_markdown",

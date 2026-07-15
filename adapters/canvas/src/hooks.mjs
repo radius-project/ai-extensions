@@ -84,7 +84,7 @@ export async function evaluateAppBicepHook(input, deps) {
     if (!targets) return undefined;
 
     const state = await deps.workspaceState();
-    const repo = targets.repo || state?.workspaceRepo || "";
+    const repo = targets.repo || state?.contextRepo || "";
     if (!repo) return undefined; // no repo context to check against → fail open
 
     const found = await Promise.all(targets.branches.map(async (candidate) => {
