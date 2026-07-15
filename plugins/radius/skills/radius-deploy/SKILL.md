@@ -49,6 +49,17 @@ POST /repos/{owner}/{repo}/actions/workflows/run-rad-commands.yml/dispatches
 8. Deploys a `Radius.Core/environments` resource and recipe pack from the app file's directory (e.g. `.radius/`) so the repo's own `bicepconfig.json` resolves the `radius` extension. **Azure** downloads the `azure-avm` pack from `radius-project/resource-types-contrib`; **AWS** generates an inline pack bundling the Kubernetes recipes (`containers`, `containerImages`, `persistentVolumes`, `routes`, `postgreSqlDatabases`, `secrets`) plus a provider-gated `mySqlDatabases` recipe (AWS RDS).
 9. Creates registry credentials for image builds, then runs `rad deploy` on `.radius/app.bicep` (passing the `image` parameter, and any application parameters from the `RADIUS_DEPLOY_PARAMS` secret when set). Afterwards `rad shutdown` (`if: always()`) backs the control-plane databases and Terraform recipe-state Secrets up to the `radius-state` git orphan branch. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
 
+## When a deploy fails
+
+`RETRY_CAP` = 5 — the maximum number of automatic repair-and-redeploy attempts before handing back to the user (used in the modeling-failure handling below).
+
+Before troubleshooting, classify the failure, because the fix lives in different places:
+
+- **Infrastructure or environment failures** — recipe download or execution, provider mismatch, cluster or credential or connectivity issues, or a pod that never becomes ready (the cases in [Common failure modes](#common-failure-modes)). These are not caused by the app model; handle them here.
+- **Modeling or schema failures** — the error points at `.radius/app.bicep`: unknown resource type or API version, unknown or missing property, invalid reference between resources, wrong credential shape, or a Bicep parse or compile error. These are fixed by editing the app definition, not the deploy pipeline.
+
+For a modeling or schema failure, hand the deploy error and the relevant logs to the `radius-app-bicep` skill to repair `.radius/app.bicep` in place, then redeploy. The `radius-app-bicep` skill owns choosing the fix (including trying a different fix when the same error recurs); the deploy loop only passes it the latest error, redeploys, and counts attempts. Make at most `RETRY_CAP` repair-and-redeploy attempts automatically, stopping early if the deploy succeeds or `radius-app-bicep` reports it has no different fix to try. Once those automatic attempts are used up (or you stop early), do not keep retrying on your own: surface the result to the user and make further attempts only if they explicitly ask you to.
+
 ## Common failure modes
 
 - **`RecipeDeploymentFailed` with `the resource with id '/planes/aws/aws/providers/System.AWS/credentials/default' was not found`**
