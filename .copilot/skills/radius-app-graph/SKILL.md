@@ -17,10 +17,10 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Data flow
 
-1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, it generates a Radius-native app model from the repo structure using only `Radius.*` resource namespaces.
+1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one — it returns `needsAppBicep` and prompts the user to author the definition with the `radius-app-bicep` skill. App model generation is owned solely by that skill; the canvas only consumes a committed `app.bicep`.
 2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
-4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
+4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares the committed base- and head-branch `app.bicep` models and tags resources `added | removed | modified | unchanged`. Both branches must have a committed `app.bicep`; a branch without one is reported as missing rather than generated.
 5. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
 
 ## Rendering features
@@ -59,23 +59,22 @@ open_canvas({
 ```
 
 The canvas will:
-- Build the graph from committed `.radius/app.bicep` or `app.bicep` on the selected branch.
-- Generate an app model from repository structure when no app definition exists, using only `Radius.*` namespaces.
+- Build the graph from the committed `.radius/app.bicep` or `app.bicep` on the selected branch.
 - Use `rad app graph <app.bicep>` as the graph assembly source of truth, matching the CLI model instead of maintaining a separate parser.
-- Show "no graph available" only if no app definition exists and generation cannot infer one from the repo; in that case, prompt the user to create a bicep file (`radius-app-bicep` skill) or run a deploy (`radius-deploy` skill).
+- Show "no app.bicep found" (`needsAppBicep`) when no committed app definition exists on the branch. It does not infer one from the repo — prompt the user to create the definition with the `radius-app-bicep` skill, then refresh the graph.
 
 ## Prerequisites
 
-- For the **modeled graph**: `.radius/app.bicep` or `app.bicep` on the selected branch, or a repo structure the generator can model.
+- For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, author one with the `radius-app-bicep` skill first — the canvas will not generate it.
 - For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json`.
 - The first graph build may download `rad` into `~/.rad/bin`. Set `RADIUS_RAD_BINARY` to force a specific binary, or `RADIUS_RAD_SHA256` to pin the downloaded binary checksum.
 
 ## Troubleshooting
 
-- **Empty graph**: no committed app definition and repo modeling could not infer one. Generate or commit `.radius/app.bicep`, then refresh.
+- **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
 - **Graph build fails**: verify `rad app graph <app.bicep>` succeeds locally, or check that the cached/downloaded `rad` binary is executable. On Windows, the runner starts `rad` detached so the embedded Bicep child process does not hang in Node's default job object.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
-- **PR diff doesn't appear**: verify both base and head branch app definitions can be fetched or generated. The diff no longer requires both branches to have deployed first.
+- **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.
 
 ## Related files
 
@@ -83,6 +82,7 @@ The canvas will:
 - `.github/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`)
+- `radius-core/src/modeling/repo.ts` — fetches the committed app definition (`fetchBicepFromRepo`), trying `.radius/app.bicep` then `app.bicep`; returns null (→ `needsAppBicep`) when neither exists. There is no repo-structure generation fallback.
 - `.github/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
-- `.github/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
+- `.github/radius/extension.mjs` — repo file fetch helper (`fetchFileFromRepo`) used by routes to read `.radius/app.bicep` and `app.bicep`
 - `.github/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
