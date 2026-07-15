@@ -6,8 +6,10 @@ description: >
   services as Radius resource types. Use for: creating, generating, or
   updating a Radius application definition or app.bicep; modeling or
   onboarding an app or repo to Radius; determining which Radius resource
-  types an app needs. Do not use for: authoring generic or Azure Bicep
-  unrelated to Radius, or deploying or running an already-modeled app.
+  types an app needs; repairing or fixing an app.bicep that failed to
+  deploy because of a modeling or schema error. Do not use for: authoring
+  generic or Azure Bicep unrelated to Radius, or deploying or running an
+  already-modeled app.
 ---
 
 # Radius Application Modeling
@@ -34,6 +36,16 @@ Before writing the Bicep:
 3. Resolve the resource types the app needs from `radius-project/resource-types-contrib`. Derive each schema path from the type name (see [Resource Type Resolution](#resource-type-resolution)) and read only those files. If a needed type's schema isn't at the derived path, search the repo for `<typeName>.yaml`; if it still can't be resolved, stop and report the missing type rather than guessing. Types the app doesn't use don't need to resolve.
 4. Apply the naming, structure, and secrets rules below (and in [bicep-structure-rules.md](references/bicep-structure-rules.md), [naming-conventions.md](references/naming-conventions.md), [secrets-handling.md](references/secrets-handling.md)).
 5. Generate the Bicep and check it against the [validation checklist](#validation-checklist).
+
+### Repairing an existing app.bicep
+
+When a deploy fails because of a modeling or schema error in an existing `.radius/app.bicep` (unknown type or API version, unknown or missing property, invalid reference between resources, wrong credential shape, or a Bicep parse or compile error), repair the file in place instead of regenerating it. This assumes the deploy error and any relevant logs have been provided (by the `radius-deploy` skill or the user); if they haven't, ask for them before attempting a fix.
+
+1. Confirm the failure is a modeling error. If it is an infrastructure, recipe, environment, or cluster failure (recipe download or execution, provider mismatch, credential or connectivity issues, a pod that never becomes ready), stop and hand it back to the `radius-deploy` skill; editing `app.bicep` will not fix it.
+2. Locate the resource and property the error implicates, then re-resolve that type's schema (see [Resource Type Resolution](#resource-type-resolution)) to confirm the correct property names, required fields, credential shape, and API version.
+3. Apply the fix using the same naming, structure, and secrets rules as authoring so the repaired resource stays consistent with the rest of the file. While you are in the file, also correct any other clear schema or rule violations you notice, and report each collateral fix you made.
+4. Re-run the [validation checklist](#validation-checklist) against the whole file; a change in one resource can ripple to connections or references elsewhere.
+5. Return the corrected file with a short note of what changed and why. If the same error recurs, treat the previous fix as insufficient and try a different fix rather than reapplying the one that just failed. Hand the corrected file back to `radius-deploy` to redeploy. If you have no different fix left to try, report that to `radius-deploy` and let it own the retry cap and the hand-off to the user - do not surface to the user yourself.
 
 ## Deterministic Naming Rules
 
