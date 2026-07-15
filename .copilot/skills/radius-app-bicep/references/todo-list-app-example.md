@@ -1,35 +1,62 @@
 # Example: Todo-List-App (dockersamples/todo-list-app)
 
+This example records the reasoning and acceptance checks rather than a complete
+`app.bicep`, so its resource names and values are not copied into unrelated
+applications.
+
+## Selected profile
+
+The requested profile runs the application with MySQL instead of its default
+SQLite path. The source supports that profile when `MYSQL_HOST` is present, so
+the SQLite default does not override the explicit selection.
+
+| Acceptance criterion | Source/schema-backed decision |
+|---|---|
+| MySQL backing service | Emit the exact configured `Radius.Data/mySqlDatabases` type |
+| Source-built workload | Use the complete Dockerfile context at an immutable source ref |
+| Native database contract | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB` |
+| Runtime secret | Bind `MYSQL_PASSWORD` through an authored secret and `secretKeyRef` |
+| Listener | Expose the source-configured port 3000 |
+
 ## Source analysis
 
-- **Framework**: Node.js + Express.js
-- **Port**: 3000
-- **Persistence**: Swappable — SQLite (default) or MySQL (when `MYSQL_HOST` is set)
-- **Env vars read by app**: `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB`
-- **Compose**: MySQL 8.0 with persistent volume
-- **Dockerfile**: Yes — builds from `node:22-alpine`, runs `node src/index.js`
-- **Published image**: No — must be built from Dockerfile
-- **Pattern**: B — Stateful / Database-Backed Application
+- **Role**: long-running Node.js/Express web service
+- **Listener**: port 3000, configured by the application
+- **Persistence**: SQLite by default; MySQL when `MYSQL_HOST` is present
+- **Native configuration read by source**: `MYSQL_HOST`, `MYSQL_USER`,
+  `MYSQL_PASSWORD`, `MYSQL_DB`
+- **Backing service**: MySQL 8.0 with database `todos`
+- **Image**: complete Dockerfile/build context, pinned to an immutable source commit
+- **Storage**: the modeled MySQL service owns persistence; no application
+  filesystem volume is required
+- **Primary pattern**: Web App
 
-## Resource mapping
+## Modeling decisions
 
-| Source component | Radius Resource Type | API Version |
-|---|---|---|
-| Application grouping | `Radius.Core/applications` | `2025-08-01-preview` |
-| Dockerfile (build image) | `Radius.Compute/containerImages` | `2025-08-01-preview` |
-| Node.js container | `Radius.Compute/containers` | `2025-08-01-preview` |
-| MySQL 8.0 | `Radius.Data/mySqlDatabases` | `2025-08-01-preview` |
+1. The explicit MySQL profile selects the optional source-supported MySQL path;
+   do not fall back to SQLite merely because it is the application default.
+2. Resolve the MySQL type, API version, credential inputs, and `host` output
+   against the exact configured extension and recipe.
+3. Map all four native variables. A generic connection does not invent these
+   application-specific names.
+4. Pass the developer-supplied password to the schema's sensitive resource
+   property from `@secure()`, and separately expose it to the workload through a
+   supported `Radius.Security/secrets` resource and `secretKeyRef`.
+5. Referencing the image, MySQL host, and runtime secret creates dependency
+   ordering. Omit a generic connection unless the request explicitly requires
+   Radius relationship metadata or the source consumes its exact projection.
+6. Consume the source build through the image resource's verified
+   `properties.imageReference`.
+7. Match `containerPort` to the inspected process listener. Do not add a route
+   unless external ingress is requested.
 
-## Key decisions explained
+## Completion checks
 
-1. **`Radius.Core/applications@2025-08-01-preview`** — the application resource is a built-in Radius type (provided by the `radius` extension), NOT from `resource-types-contrib`.
-2. **`containerImages` resource** — the app has a Dockerfile but no published image. The `containerImages` resource builds and pushes it.
-3. **`build.source`** — the `containerImages` resource builds from the repo's git URL (e.g. `git::https://github.com/dockersamples/todo-list-app.git?ref=<sha>`); there is no `image` property or `param image`.
-4. **`imageReference`** — the container sets `image: todoImage.properties.imageReference`, which creates the build-ordering dependency (no explicit connection to the image).
-5. **Database credentials** — `mySqlDatabases` takes `username` (an admin you author, e.g. `myadmin`) and `password` directly on the resource; no separate secret. The `password` comes from a `@secure() param`.
-6. **`@secure() param password string`** — password is passed at deploy time, never hardcoded.
-7. **`database: 'todos'`** — derived from the `MYSQL_DATABASE: todos` in compose.yaml, not hardcoded.
-8. **`version: '8.0'`** — derived from the `mysql:8.0` image tag in compose.yaml, not hardcoded.
-9. **One connection on the container** — `mysqldb` for database auto-injection. Build ordering comes from referencing `todoImage.properties.imageReference`, not a connection.
-10. **No routes** — not added unless external ingress is explicitly required.
-11. **App code change required** — `Radius.Compute/containers` injects a JSON blob via `CONNECTION_MYSQLDB_PROPERTIES`, not individual vars. The app's `src/persistence/index.js` must be updated to parse this JSON. See [connection-conventions.md](connection-conventions.md) for helper code.
+- The selected MySQL type and source-built workload are both emitted.
+- Every required native variable appears with exact spelling and format.
+- The workload password uses `secretKeyRef`; no password is hardcoded or placed
+  in a plain environment value.
+- The process listener, image entrypoint, and database name/version agree with
+  the pinned source.
+- The definition compiles against the exact configured extension and has no
+  unresolved runtime caveat.
