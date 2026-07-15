@@ -1,19 +1,16 @@
 # Contributing to Radius AI Extension
 
-Radius is in an early phase of development right now. We welcome feedback in the
-form of issues that comes from usage and is aligned with the current scope and
-goals of the project, as well as code contributions that follow the guidelines
-below.
+Radius AI Extension is in preview and under active development. We welcome
+feedback in the form of issues along with code contributions that
+follow the guidelines below.
 
-This repository contains the **Radius Canvas** extension, a GitHub Copilot
-canvas extension for modeling and deploying applications with Radius. The
-product logic is UI-agnostic and lives in a shared core (`radius-core`); the
-canvas adapter (`adapters/canvas`) wires it into the Copilot canvas surface.
+For what this repository is and does, see the [README](./README.md). This guide
+covers how to build, test, and contribute to it.
 
 ## Current status
 
-We welcome small pull request contributions from anyone (docs improvements, bug
-fixes, minor features) as long as they follow a few guidelines:
+We welcome pull request contributions from anyone (docs improvements, bug
+fixes, features) as long as they follow a few guidelines:
 
 - For very minor changes like correcting a typo feel free to send a pull
   request. Otherwise ...
@@ -52,7 +49,7 @@ UI/transport concerns. This keeps the product logic testable in isolation and
 makes adding a second UI a thin layer rather than a fork.
 
 See [`radius-core/README.md`](./radius-core/README.md) for the architecture and
-step-by-step recipes for the three most common changes: **adding a compute
+step-by-step guides for the three most common changes: **adding a compute
 platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
 ### Agentic skills

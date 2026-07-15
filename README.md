@@ -62,31 +62,23 @@ actions and tools:
 
 | Skill                                                              | What it does                                                                                              |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`radius-app-bicep`](./.copilot/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition (`.radius/app.bicep`) using `Radius.*` resource types. |
+| [`radius-app-bicep`](./.copilot/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
 | [`radius-app-graph`](./.copilot/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
 | [`radius-environment`](./.copilot/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
 | [`radius-deploy`](./.copilot/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
 
-The `radius-app-bicep` skill also includes a set of
-[reference documents](./.copilot/skills/radius-app-bicep/references) (component
-catalog, naming and connection conventions, secrets handling, architecture
-patterns, and a worked example) that guide how applications are modeled.
-
 ## Architecture
 
-This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
-`@radius-project` scope.
+This is a [pnpm](https://pnpm.io/) workspace monorepo. UI-agnostic product logic
+lives in a shared core (`radius-core`), and the Copilot canvas adapter
+(`adapters/canvas`) wires it into the GitHub Copilot app. The core never depends
+on an adapter, the Copilot SDK, HTTP, or the DOM; anything that touches the
+outside world goes through a **port**, which keeps the same logic reusable
+across future UI surfaces.
 
-| Path               | Responsibility                                                                  |
-| ------------------ | ------------------------------------------------------------------------------- |
-| `radius-core/`     | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
-| `adapters/shared/` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
-| `adapters/canvas/` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
-
-The core never depends on an adapter, the Copilot SDK, HTTP, or the DOM;
-anything that touches the outside world goes through a **port**. See
-[`radius-core/README.md`](./radius-core/README.md) for the full architecture and
-extension recipes.
+See [`radius-core/README.md`](./radius-core/README.md) for the full architecture
+and extension guides, and [Contributing](./CONTRIBUTING.md) for the repository
+layout and development workflow.
 
 ## Getting started
 
