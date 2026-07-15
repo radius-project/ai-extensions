@@ -151,15 +151,15 @@ Do NOT use any type not listed above. Do NOT invent properties.
 
 ## Extension
 
-Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Never overwrite an existing config — merge into it. Prefer an immutable extension reference when a specific schema revision is required.
+Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Only ever create or update `.radius/bicepconfig.json`, never a config outside `.radius/`. Prefer an immutable extension reference when a specific schema revision is required.
 
 ## bicepconfig.json
 
-`app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Ensure one is in place at `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`).
+`app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Always create or update `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`); only ever write that file, never a `bicepconfig.json` outside `.radius/`.
 
-If a `bicepconfig.json` that applies to `.radius/app.bicep` already exists (in `.radius/` or a parent directory), merge the entries `app.bicep` needs into it rather than overwriting: keep every existing key and reference, and add only what is missing. An already-correct file produces an empty diff.
-
-When none applies, create `.radius/bicepconfig.json` with:
+- If `.radius/bicepconfig.json` already exists, update it in place: keep every existing key and reference, and add only what `app.bicep` needs that is missing. An already-correct file produces an empty diff.
+- If it does not exist, create it. When a `bicepconfig.json` in a parent directory already applies to `.radius/app.bicep`, use it as the starting point — carry its `radius` extension reference and settings into the new `.radius/bicepconfig.json` rather than overriding them — but do not modify the parent file.
+- When there is nothing to carry forward, create `.radius/bicepconfig.json` with:
 
 ```json
 {
@@ -235,7 +235,7 @@ Before returning the Bicep, verify:
 - [ ] Every dependency has a complete client tuple: subresource name, endpoint/FQDN transformation, port, protocol/version, TLS mode, auth mechanism/identity, secret source, and final client syntax. Provider modules, SKUs, regions, and firewall configuration remain outside `app.bicep`.
 - [ ] Primary-feature readiness is proven: required model aliases, storage backends, database clients, and messaging inputs/outputs are configured and reference the selected resources. A health endpoint or idle/placeholder process is not sufficient.
 - [ ] Perform the static consistency pass in [runtime-contract.md](references/runtime-contract.md); no unresolved runtime caveat remains.
-- [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: generated when the repo lacked one, or merged into an existing config (never overwritten).
+- [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: created or updated in place (a parent `bicepconfig.json` is used only as input, never modified).
 
 ## Example
 
