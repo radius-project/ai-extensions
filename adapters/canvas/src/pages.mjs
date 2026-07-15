@@ -733,7 +733,7 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             if (d.reload) { window.location.reload(); }
-            else if (d.error) { container.innerHTML = '<div class="status error">Error: ' + d.error + '</div>'; }
+            else if (d.needsAppBicep || d.error) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved.</div>'; }
         })
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
 });
@@ -999,7 +999,8 @@ function runDiff() {
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
@@ -1082,7 +1083,8 @@ function runDiff() {
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
