@@ -1,161 +1,141 @@
 # Secrets and Credentials
 
-Secrets flow in two directions, and an app can involve both:
+Secret behavior is part of the exact resource type, extension, recipe, and container contract. Do not copy a secret path or key from another type or version.
 
-- **Secret inputs** — credentials the *developer supplies* to a resource (a DB admin password, an app API key). How they are supplied is **type-specific** — read the type's schema.
-- **Secret outputs** — sensitive values the *recipe generates* while provisioning (a connection string, a URL that embeds an access key, an API key). Radius redacts these from the resource's normal properties and materializes them into a **managed `Radius.Security/secrets` resource**, which the container consumes **by reference** via `secretKeyRef`.
+## Resolve the contract first
 
-## Rules
+For every secret, inspect:
 
-- NEVER hardcode passwords, tokens, or keys in `app.bicep`. Use a `@secure() param` and pass it at deploy time (`rad deploy -p password=...`).
-- **Determine behavior from the type's schema — do not assume by engine.** Secret inputs key off which credential properties the schema defines; secret outputs key off the read-only `secrets` block the schema defines.
-- The username is the **administrator** account you author for the database Radius provisions. Use a simple admin name (e.g. `myadmin`); it is not derived from the source.
-- `Radius.Security/secrets` is authored by you for (a) a data type whose schema requires `secretName` and (b) genuine app secrets (API keys, tokens). For secret **outputs** Radius creates the managed secret itself — you never author it, you only reference `<resource>.properties.secrets.name`.
+1. the exact registered resource schema for sensitive input properties, secret references, read-only outputs, and key names;
+2. the configured recipe's parameters and output mapping;
+3. the exact `Radius.Security/secrets` and `Radius.Compute/containers` schemas for authored-secret and `secretKeyRef` support; and
+4. the application source for the final native variable/configuration name and required format.
 
----
+Also preserve any explicit profile requirement that a particular native key use `secretKeyRef`. Binding the same value under a helper name does not satisfy a workload that reads the required key directly.
 
-# Secret inputs
+Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs, but do not mistake that decorator for end-to-end secret handling: it protects parameter treatment and display, not every downstream resource property or container `env.value`.
 
-How database credentials are supplied is **type-specific** — read the type's schema. There are three shapes, keyed on which credential properties the schema defines.
+## Developer-supplied secret inputs
 
-## Shape 1 — schema defines `username` + `password`
+Follow the exact resource schema:
 
-Set them directly on the data resource; `password` is `x-radius-sensitive`. (Today: postgres, mysql, sqlserver, neo4j.)
+- If it defines an `x-radius-sensitive` property such as `password`, set that property from a `@secure()` parameter.
+- If it defines a secret reference such as `secretName`, author the supported secret resource and reference it exactly as the schema requires.
+- If it defines no credential input, do not invent one.
+
+When the application also needs a developer-supplied credential, author a supported `Radius.Security/secrets` binding and consume it through `secretKeyRef` rather than assigning the secure parameter to plain `env.value`. A sensitive property used to provision a resource is not automatically available to the workload:
 
 ```bicep
 @secure()
 param password string
 
-resource postgresql 'Radius.Data/postgreSqlDatabases@2025-08-01-preview' = {
-  name: 'postgresql'
+resource databaseRuntimeSecret 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'database-runtime-secret'
   properties: {
     environment: environment
     application: app.id
-    database: 'appdb'      // derived from source
-    username: 'myadmin'
-    password: password
-  }
-}
-```
-
-## Shape 2 — schema defines `secretName`
-
-Create a `Radius.Security/secrets` holding `USERNAME` and `PASSWORD` (see the app-secrets example below for the resource shape) and reference it from the data resource via `secretName`. (Today: neo4j when authored with an explicit secret.)
-
-## Shape 3 — schema defines no credential inputs
-
-The type takes no credentials in the app definition; the recipe provisions the resource and generates its connection details. A container `connection` to the resource injects the **non-secret** `CONNECTION_*` env vars (host / port / database). See [connection-conventions.md](connection-conventions.md). (Today: redis, mongo, kafka, rabbitmq, objectStorage, AI models, AI search.)
-
-> If the schema also defines a read-only `secrets` block, the connection string / URL / API key is a **secret output** (below), not a connection env var.
-
----
-
-# Secret outputs
-
-Some recipes produce sensitive outputs (a connection string, a TLS URL that embeds an access key, an API key). Instead of leaking these onto the resource's readable properties, Radius:
-
-1. Redacts them from the resource's normal properties (they read back as `null`), and leaves them **out of** the connection's `CONNECTION_<NAME>_PROPERTIES` blob.
-2. Materializes them into a **managed `Radius.Security/secrets` resource** that Radius owns.
-3. Surfaces a read-only reference to that managed secret on the resource as `properties.secrets`, with a reserved `properties.secrets.name` key.
-
-You detect this by reading the type's schema: a **read-only `secrets` block** (a `name` sub-property plus one or more read-only value keys) means the type has secret outputs.
-
-## How to consume a secret output
-
-Bind it into the container's `env` with `valueFrom.secretKeyRef`, using the managed secret's name and the schema's secret key:
-
-```bicep
-resource redisCache 'Radius.Data/redisCaches@2025-08-01-preview' = {
-  name: 'redis'
-  properties: {
-    environment: environment
-    application: app.id
-    size: 'S'
+    data: {
+      password: {
+        value: password
+      }
+    }
   }
 }
 
-resource todoContainer 'Radius.Compute/containers@2025-08-01-preview' = {
-  name: 'todo-list-app'
+resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
+  name: 'api'
   properties: {
     environment: environment
     application: app.id
     containers: {
-      todo: {
-        image: todoImage.properties.imageReference
+      api: {
+        image: apiImage.properties.imageReference
         env: {
-          // Bind the secret OUTPUT by reference — the value never lands on the
-          // redisCache resource's readable properties or in the connection blob.
-          REDIS_URL: {
+          APP_PASSWORD: {
             valueFrom: {
               secretKeyRef: {
-                secretName: redisCache.properties.secrets.name   // reserved read-only reference
-                key: 'url'                                        // a key from the schema's secrets block
+                secretName: databaseRuntimeSecret.name
+                key: 'password'
               }
             }
           }
         }
       }
     }
-    connections: {
-      // Still declare the connection: it injects the NON-secret props (host, port).
-      rediscache: {
-        source: redisCache.id
+  }
+}
+```
+
+The names above are illustrative. Confirm the secret resource shape, `secretName` expression, key, and app-native variable against the target version and source.
+
+## Recipe-generated secret outputs
+
+Some recipes generate sensitive values such as access keys, URLs, or connection strings. Their contract varies:
+
+- a schema version may expose a managed-secret reference and declared secret keys;
+- another version may use a different output shape or key names; or
+- the configured recipe may not expose the value in a form containers can bind.
+
+When the exact schema and recipe declare managed-secret metadata, that is the only supported projection path:
+
+```bicep
+APP_API_KEY: {
+  valueFrom: {
+    secretKeyRef: {
+      secretName: service.properties.secrets.name
+      key: 'apiKey'
+    }
+  }
+}
+```
+
+The names are illustrative. `properties.secrets.name` identifies the managed `Radius.Security/secrets` resource, while other fields declared under `properties.secrets` name keys stored in that resource. They are metadata, not secret values readable from `service.properties.apiKey` or `service.properties.secrets.apiKey`.
+
+Bind a complete managed URL/connection string directly to the app-native key when its format matches the pinned source. Never create an authored `Radius.Security/secrets` wrapper whose `data` copies a recipe-generated value from a resource property. An authored secret is not an adapter for a missing or different output shape.
+
+Do not assume one universal `properties.secrets` path or guess a key. If the exact schema/recipe does not expose the required managed-secret reference and key, report the gap. If a mutable compiled extension disagrees with that exact contract, report version drift rather than inventing a convenience property or wrapper.
+
+If the exact contract cannot deliver a required secret by reference, report the schema/recipe gap rather than placing it in plain state.
+
+## Runtime composition
+
+Applications often require one URL or config value that embeds a secret. Bicep interpolation would materialize the combined value before the container starts, so prefer runtime composition:
+
+1. Bind the secret into a helper environment variable with `secretKeyRef`.
+2. Bind nonsecret host, port, database, and username values from verified outputs or literals.
+3. Declare the helper before dependent values when the runtime requires ordering.
+4. Compose the final app-native value in the container runtime or let the application construct it. The final key and syntax must exactly match the selected pinned-source contract.
+
+For a non-URL format, the pattern can look like:
+
+```bicep
+env: {
+  DB_PASSWORD: {
+    valueFrom: {
+      secretKeyRef: {
+        secretName: databaseRuntimeSecret.name
+        key: 'password'
       }
     }
   }
-}
-```
-
-Key points:
-
-- `secretName` is always `<dataResourceSymbol>.properties.secrets.name` — the reserved read-only reference to the managed secret. This is the one sanctioned exception to "do not reference readOnly properties".
-- `key` must be one of the read-only value keys the schema's `secrets` block defines (never `name`).
-- Name the `env` variable after whatever your application reads for that credential (e.g. the URL / connection string / API key it expects). Do not also inject the same value via a manual plaintext `env` or expect it in `CONNECTION_*`.
-- Keep the `connection` to the resource for the non-secret discovery vars (host, port, database).
-
-## Secret-output keys by type
-
-Read the schema's `secrets` block to confirm, but currently:
-
-| Type | Secret output key(s) |
-|---|---|
-| `Radius.Data/redisCaches` | `url` |
-| `Radius.Data/mongoDatabases` | `connectionString` |
-| `Radius.Messaging/kafka` | `connectionString` |
-| `Radius.Messaging/rabbitMQ` | `connectionString` |
-| `Radius.Storage/objectStorage` | `connectionString`, `accountKey` |
-| `Radius.AI/models` | `apiKey` |
-| `Radius.AI/search` | `apiKey` |
-
----
-
-# App-specific secrets
-
-Use `Radius.Security/secrets` for API keys and tokens the app itself needs (not produced by a recipe), referenced by the container via a connection or env.
-
-```bicep
-@secure()
-param apiKey string
-
-resource appSecrets 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: 'app-secrets'
-  properties: {
-    environment: environment
-    application: app.id
-    data: {
-      API_KEY: { value: apiKey }
-    }
+  APP_DATABASE_OPTIONS: {
+    value: 'host=${database.properties.host};password=$(DB_PASSWORD)'
   }
 }
 ```
 
-## Common mistakes to avoid
+Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list. Confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper.
 
-- Do NOT write `password: 'mysecretpassword'` — always use a `@secure() param`.
-- Do NOT assume a credential model by engine — read the schema and follow the properties it defines.
-- Do NOT create a `Radius.Security/secrets` when the schema defines `username`/`password` — set them directly on the resource.
-- Do NOT add a `secretName` input property unless the schema defines one.
-- Do NOT add credentials when the schema defines no credential inputs.
-- Do NOT try to read a secret **output** (connection string, URL, API key) from `CONNECTION_*_PROPERTIES` or from the resource's plain properties — it is redacted there. Bind it with `secretKeyRef` from `<resource>.properties.secrets.name`.
-- Do NOT author a `Radius.Security/secrets` for a secret output — Radius creates and owns the managed secret; you only reference it.
-- Keys you author in a secret's `data` are UPPERCASE (`USERNAME`, `PASSWORD`, `API_KEY`); secret-output keys you reference come from the schema's `secrets` block (e.g. `url`, `connectionString`, `apiKey`).
+Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion does not encode them; use application logic or a verified runtime helper. If safe encoding cannot be guaranteed, do not generate a fragile connection string.
+
+## Checklist
+
+- The input property, secret resource, managed-secret path, and key all exist in the exact configured schemas and recipe.
+- Every container variable uses the exact native name and format read by source.
+- Every profile-required secret environment key uses `valueFrom.secretKeyRef` on that exact key.
+- Recipe-generated secrets bind directly from the exact declared managed-secret name and key.
+- No authored secret `data.value` references a recipe resource output or guessed convenience property.
+- No secret is hardcoded, interpolated into a plain Bicep value, or assumed to appear in generic connection variables.
+- `@secure()` values flow only through properties marked sensitive or supported secret resources.
+- Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
+- A final credential-bearing URL/config is either bound directly from a matching managed secret or composed at runtime from secret references; it is never reconstructed in Bicep plain state.
