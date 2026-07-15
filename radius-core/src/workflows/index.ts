@@ -14,3 +14,11 @@ export {
   DEPLOY_AWS_FILE,
 } from "./deploy.js";
 export type { DeployWorkflowFiles } from "./deploy.js";
+export {
+  generateDeleteWorkflow,
+  DELETE_RADIUS_REF,
+  DELETE_APP_DISPATCHER_FILE,
+  DELETE_AZURE_FILE,
+  DELETE_AWS_FILE,
+} from "./delete.js";
+export type { DeleteWorkflowFiles } from "./delete.js";

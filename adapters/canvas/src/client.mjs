@@ -81,6 +81,141 @@ function radiusSetupRepoBranch(repoSelectId, branchSelectIds, defaultRepo, defau
         });
     }
 }
+
+// Populate the Application / Branch / Environment selectors on the Planned
+// Graph pane. The repository is assumed from the workspace, so it is not a
+// selectable field. Fills the passed envProviders map so the caller can derive
+// the cloud provider from the chosen environment. When defaultBranch is given
+// (loaded state) it is pre-selected; otherwise no branch is pre-selected.
+function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
+    var appSel = document.getElementById('planned-app');
+    var branchSel = document.getElementById('planned-branch');
+    var envSel = document.getElementById('planned-env');
+    if (!repo) {
+        if (appSel) appSel.innerHTML = '<option value="">No repository</option>';
+        if (branchSel) branchSel.innerHTML = '<option value="">No repository</option>';
+        if (envSel) envSel.innerHTML = '<option value="">No repository</option>';
+        return;
+    }
+    if (appSel) {
+        fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var apps = (d && d.applications) || [];
+                appSel.innerHTML = '';
+                if (!apps.length) {
+                    var fallback = repo.split('/').pop() || repo;
+                    var o = document.createElement('option'); o.value = fallback; o.textContent = fallback; appSel.appendChild(o);
+                    return;
+                }
+                apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+            })
+            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+    }
+    if (branchSel) {
+        fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var branches = (d && d.branches) || [];
+                branchSel.innerHTML = '<option value="">— Select a branch —</option>';
+                branches.forEach(function(b) {
+                    var o = document.createElement('option');
+                    o.value = b.name;
+                    o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                    if (defaultBranch && b.name === defaultBranch) o.selected = true;
+                    branchSel.appendChild(o);
+                });
+            })
+            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
+    }
+    if (envSel) {
+        fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var envs = (d && d.environments) || [];
+                if (!envs.length) { envSel.innerHTML = '<option value="">No environments</option>'; return; }
+                envSel.innerHTML = '';
+                envs.forEach(function(e) {
+                    if (envProviders) envProviders[e.name] = e.provider || 'azure';
+                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
+                });
+            })
+            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
+    }
+}
+
+// Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
+// "main" and Head defaults to the current worktree branch when it has been
+// pushed; if the worktree branch is not pushed (or there is none), Head is left
+// unselected so the user can pick a branch. Only pushed branches are offered
+// (a diff is computed from GitHub refs). When autoCompare is not false and a
+// head resolves, the Compare button is clicked automatically.
+function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
+    var baseSel = document.getElementById('base-branch');
+    var headSel = document.getElementById('head-branch');
+    var statusEl = document.getElementById('diff-status');
+    if (!repo) { if (statusEl) statusEl.textContent = 'No repository context.'; return; }
+    if (statusEl) statusEl.textContent = 'Loading branches…';
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.error) { if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
+            var branches = d.branches || [];
+            var workspaceBranch = d.workspaceBranch || '';
+            // Only pushed branches (real sha) can be compared via GitHub.
+            var pushed = branches.filter(function(b) { return b.sha && b.sha !== 'worktree'; });
+            var worktreePushed = pushed.some(function(b) { return b.name === workspaceBranch; });
+
+            var desiredBase = preferBase || 'main';
+            var desiredHead = preferHead || (worktreePushed ? workspaceBranch : '');
+
+            baseSel.innerHTML = '';
+            headSel.innerHTML = '<option value="">— Select a branch —</option>';
+            pushed.forEach(function(b) {
+                var label = b.name + ' (' + b.sha.slice(0,7) + ')';
+                var ob = document.createElement('option'); ob.value = b.name; ob.textContent = label;
+                if (b.name === desiredBase) ob.selected = true;
+                baseSel.appendChild(ob);
+                var oh = document.createElement('option'); oh.value = b.name; oh.textContent = label;
+                if (desiredHead && b.name === desiredHead) oh.selected = true;
+                headSel.appendChild(oh);
+            });
+            if (!baseSel.value && baseSel.options.length) baseSel.selectedIndex = 0;
+
+            if (headSel.value) {
+                if (statusEl) { statusEl.className = 'status info'; statusEl.textContent = 'Comparing ' + baseSel.value + ' → ' + headSel.value + '…'; }
+                // Auto-load the diff for the resolved head branch.
+                if (autoCompare !== false) headSel.dispatchEvent(new Event('change'));
+            } else if (statusEl) {
+                statusEl.className = 'status info';
+                statusEl.textContent = workspaceBranch
+                    ? ('The current branch "' + workspaceBranch + '" has not been pushed. Select a head branch to compare against ' + (baseSel.value || 'main') + '.')
+                    : ('Select a head branch to compare against ' + (baseSel.value || 'main') + '.');
+            }
+        })
+        .catch(function() { if (statusEl) { statusEl.textContent = 'Failed to load branches.'; statusEl.className = 'status error'; } });
+}
+
+// Populate an Application <select> for the given repository. A repo hosts a
+// single Radius application in this model; falls back to the repo short name.
+function radiusPopulateApplications(repo, selectId) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return;
+    if (!repo) { sel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = (d && d.applications) || [];
+            sel.innerHTML = '';
+            if (!apps.length) {
+                var f = repo.split('/').pop() || repo;
+                var o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o);
+                return;
+            }
+            apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; sel.appendChild(o); });
+        })
+        .catch(function() { sel.innerHTML = '<option value="">Unable to load applications</option>'; });
+}
 `;
 
 export const CLIENT_GRAPH_JS = `
@@ -101,7 +236,7 @@ function radiusGetIconSvg(type) {
     } else if (t.includes('image') || t.includes('registry') || /(^|[^a-z])ecr([^a-z]|$)/.test(t)) {
         // Container Registry (ACR / ECR). 'ecr' matched as a delimited token so
         // it does not match words like "secrets".
-        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#0969da"><path d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 010-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9zm10.5-1h-6a1 1 0 00-1 1v6.708A2.486 2.486 0 017.5 9h5V1.5zM5 12.25v3.25a.25.25 0 00.4.2l1.45-1.087a.25.25 0 01.3 0L8.6 15.7a.25.25 0 00.4-.2v-3.25a.25.25 0 00-.25-.25h-3.5a.25.25 0 00-.25.25z"/></svg>';
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="var(--rad-brand, #da4c2a)"><path d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 010-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9zm10.5-1h-6a1 1 0 00-1 1v6.708A2.486 2.486 0 017.5 9h5V1.5zM5 12.25v3.25a.25.25 0 00.4.2l1.45-1.087a.25.25 0 01.3 0L8.6 15.7a.25.25 0 00.4-.2v-3.25a.25.25 0 00-.25-.25h-3.5a.25.25 0 00-.25.25z"/></svg>';
     } else if (t.includes('gateway') || t.includes('applicationgateway')) {
         // Gateway / App Gateway
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#8250df"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM2.07 7.5h3.46c.05-1.2.24-2.3.56-3.18.15-.43.34-.8.56-1.1A5.96 5.96 0 002.07 7.5zm4.47 0h2.92c-.05-1.07-.22-2.03-.49-2.78-.27-.75-.6-1.22-.89-1.47-.29.25-.62.72-.89 1.47-.27.75-.44 1.71-.49 2.78H6.54zm2.92 1H6.54c.05 1.07.22 2.03.49 2.78.27.75.6 1.22.89 1.47.29-.25.62-.72.89-1.47.27-.75.44-1.71.49-2.78zm.91 0c-.05 1.2-.24 2.3-.56 3.18-.15.43-.34.8-.56 1.1a5.96 5.96 0 004.58-4.28h-3.46zm3.46-1h-3.46c-.05-1.2-.24-2.3-.56-3.18a3.9 3.9 0 00-.56-1.1 5.96 5.96 0 014.58 4.28zM6.65 3.22c-.22.3-.41.67-.56 1.1-.32.88-.51 1.98-.56 3.18H2.07a5.96 5.96 0 014.58-4.28zm-3.58 5.28h3.46c.05 1.2.24 2.3.56 3.18.15.43.34.8.56 1.1a5.96 5.96 0 01-4.58-4.28z"/></svg>';
@@ -598,22 +733,22 @@ function radiusRenderGraph(containerId, resources, options) {
             var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
             if (repoUrl && d.codeRef) {
                 var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
-                links.push('<a href="' + codeUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">📄 View code</a>');
+                links.push('<a href="' + codeUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">📄 View code</a>');
             } else if (repoUrl) {
                 // No precise location discovered — fall back to a repo-scoped code
                 // search for the resource name/type so a code link is always present.
                 var term = (d.label ? d.label.split('\\n')[0] : '') || d.resourceType || '';
                 var searchUrl = repoUrl + '/search?q=' + encodeURIComponent(term) + '&type=code';
-                links.push('<a href="' + searchUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔎 Search code</a>');
+                links.push('<a href="' + searchUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔎 Search code</a>');
             }
             if (d.defGenerated && d.defFile) {
                 // No committed app.bicep in the repo — link to a local viewer that
                 // renders the generated bicep (with the resource's line highlighted).
                 var genUrl = '/generated-bicep' + (d.defLine ? '?line=' + d.defLine : '');
-                links.push('<a href="' + genUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
+                links.push('<a href="' + genUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
             } else if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
-                links.push('<a href="' + defUrl + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
+                links.push('<a href="' + defUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
             }
             if (diffMode && d.diffStatus) {
                 var statusLabel = d.diffStatus.charAt(0).toUpperCase() + d.diffStatus.slice(1);
@@ -622,7 +757,7 @@ function radiusRenderGraph(containerId, resources, options) {
             // Azure portal links for live cloud resources (from the deployed graph).
             function azurePortalUrl(armId) { return 'https://portal.azure.com/#@/resource' + armId + '/overview'; }
             if (d.cloudId) {
-                links.push('<a href="' + escLocal(azurePortalUrl(d.cloudId)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 View in Azure portal</a>');
+                links.push('<a href="' + escLocal(azurePortalUrl(d.cloudId)) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 View in Azure portal</a>');
             }
             if (d.cloudResources) {
                 try {
@@ -630,7 +765,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     for (var ci = 0; ci < cloudList.length; ci++) {
                         var cr = cloudList[ci];
                         var crLabel = cr.name || (cr.type ? cr.type.split('/').pop() : 'resource');
-                        links.push('<a href="' + escLocal(azurePortalUrl(cr.id)) + '" onclick="window.open(this.href); return false;" style="color:#0969da; text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 ' + escLocal(crLabel) + ' in Azure portal</a>');
+                        links.push('<a href="' + escLocal(azurePortalUrl(cr.id)) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 ' + escLocal(crLabel) + ' in Azure portal</a>');
                     }
                 } catch (err) { /* ignore */ }
             }
@@ -718,7 +853,7 @@ function radiusSetGraphLoading(containerId) {
         '</div>' +
         '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#0969da;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid #0969da;box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
 }
 
 function radiusSetGraphError(containerId, message) {

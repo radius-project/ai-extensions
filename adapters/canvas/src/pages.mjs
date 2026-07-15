@@ -7,121 +7,237 @@
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
 import { getInlineVendorScripts } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
+import { topNav, radiusMark } from "./ui.mjs";
 
-export function pageShell(title, bodyContent) {
+// Pick the active top-nav section from a page title.
+function navFromTitle(title) {
+    const t = String(title || '').toLowerCase();
+    if (t.includes('environment')) return 'environments';
+    if (t.includes('deploying') || t.includes('deployment')) return 'deployments';
+    return 'applications';
+}
+
+export function pageShell(title, bodyContent, activeNav) {
+    const active = activeNav || navFromTitle(title);
     return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='64' fill='%23C9452B'/%3E%3Ccircle cx='64' cy='64' r='56' fill='%23BF3E24' opacity='0.3'/%3E%3Cline x1='64' y1='64' x2='34' y2='28' stroke='white' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='64' r='8' fill='white'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='64' fill='%23da4c2a'/%3E%3Ccircle cx='64' cy='64' r='56' fill='%23bb311e' opacity='0.3'/%3E%3Cline x1='64' y1='64' x2='34' y2='28' stroke='white' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='64' r='8' fill='white'/%3E%3C/svg%3E" />
 <title>${title} — Radius</title>
 <style>
+  /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
+  :root {
+    /* Follow the host app's theme. Radius brand accents stay constant across
+       light/dark; every neutral surface/text/border binds to the Copilot app's
+       injected semantic tokens (with light-mode fallbacks for standalone use). */
+    color-scheme: light dark;
+    --rad-brand: #da4c2a;
+    --rad-brand-dark: #bb311e;
+    --rad-primary: #1a7f37;
+    --rad-primary-hover: #218a3f;
+    --rad-bg: var(--background-color-default, #ffffff);
+    --rad-surface: var(--background-color-default, #ffffff);
+    --rad-bg-subtle: var(--background-color-segmented, #f1f1f1);
+    --rad-bg-selected: var(--background-color-segmentedControl-bg-emphasis, #e1e1e1);
+    --rad-bg-hover: var(--background-color-control-transparent-hover, #d5d5d5);
+    --rad-stroke: var(--border-color-default, #d8d8d8);
+    --rad-stroke-strong: var(--border-color-default, #919191);
+    --rad-text: var(--text-color-default, #000000);
+    --rad-text-secondary: var(--text-color-default, #1a1a1a);
+    --rad-text-tertiary: var(--text-color-muted, #6e6e6e);
+    --rad-radius: 6px;
+    --rad-radius-lg: 10px;
+    --rad-font: 'Mona Sans', var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    --rad-mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; overflow: hidden; }
   body {
-    font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-    font-size: var(--text-body-medium, 14px);
-    line-height: var(--leading-body-medium, 20px);
-    background: var(--background-color-default, #ffffff);
-    color: var(--text-color-default, #1f2328);
-    display: flex;
-  }
-  .sidebar {
-    width: 48px;
-    min-width: 48px;
-    background: transparent;
-    border-right: 1px solid var(--border-color-default, #d1d9e0);
+    font-family: var(--rad-font);
+    font-size: 14px;
+    line-height: 20px;
+    background: var(--rad-bg);
+    color: var(--rad-text);
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 12px 0;
-    gap: 4px;
-    height: 100vh;
   }
-  .sidebar a {
+
+  /* ─── Top segmented pill nav ──────────────────────────────────────────── */
+  .rad-topnav {
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--rad-stroke);
+    flex: 0 0 auto;
+  }
+  .rad-topnav__pill {
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: var(--rad-radius-lg);
+    background: var(--rad-bg-subtle);
+    color: var(--rad-text-secondary);
     text-decoration: none;
-    font-size: 18px;
-    color: var(--text-color-muted, #656d76);
-    transition: all 0.15s;
-    position: relative;
+    font-weight: 600;
+    font-size: 14px;
+    transition: background 0.15s, color 0.15s;
   }
-  .sidebar a:hover { background: var(--background-color-inset, #f6f8fa); }
-  .sidebar a.active { background: var(--background-color-inset, #f6f8fa); color: #0969da; }
-  .sidebar a .tooltip {
-    display: none;
-    position: absolute;
-    left: 52px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: #24292f;
-    color: #fff;
-    font-size: 11px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    white-space: nowrap;
-    z-index: 100;
-  }
-  .sidebar a:hover .tooltip { display: block; }
+  .rad-topnav__pill:hover { background: var(--rad-bg-selected); }
+  .rad-topnav__pill--active { background: var(--rad-bg-selected); color: var(--rad-text); font-weight: 700; }
+  .rad-topnav__pill svg { flex: 0 0 auto; }
+
   .main-content {
-    flex: 1;
+    flex: 1 1 auto;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px;
-    height: 100vh;
+    padding: 20px;
     min-width: 0;
   }
-  h1 { font-size: var(--text-title-large, 22px); font-weight: var(--font-weight-semibold, 600); margin-bottom: 16px; }
+
+  /* ─── Headings ────────────────────────────────────────────────────────── */
+  .rad-heading { margin-bottom: 20px; }
+  .rad-heading h1, h1 {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 24px; font-weight: 700; letter-spacing: -0.01em;
+    color: var(--rad-text); margin-bottom: 8px;
+  }
+  .rad-lede { color: var(--rad-text-tertiary); font-weight: 300; font-size: 15px; line-height: 22px; max-width: 720px; }
+  .rad-lede strong, .rad-lede b { font-weight: 500; color: var(--rad-text-secondary); }
   h2 { font-size: 16px; font-weight: 600; margin: 16px 0 8px; }
-  .status { padding: 12px; border-radius: 6px; margin: 12px 0; }
-  .status.info { background: #ddf4ff; border: 1px solid #54aeff; }
-  .status.success { background: #dcffe4; border: 1px solid #2da44e; }
-  .status.error { background: #ffebe9; border: 1px solid #cf222e; }
-  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-color-default, #d1d9e0); margin-bottom: 16px; }
+
+  /* ─── Sub-tabs (underlined) ───────────────────────────────────────────── */
+  .rad-subtabs { display: flex; gap: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--rad-stroke); }
+  .rad-subtab {
+    padding: 0 2px 8px; font-size: 15px; font-weight: 500; cursor: pointer;
+    color: var(--rad-text-tertiary); text-decoration: none;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 0.15s;
+  }
+  .rad-subtab:hover { color: var(--rad-text); }
+  .rad-subtab--active { color: var(--rad-text); font-weight: 700; border-bottom-color: var(--rad-brand); }
+
+  /* ─── Status banners ──────────────────────────────────────────────────── */
+  .status, .rad-status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
+  .status.info, .rad-status--info { background: color-mix(in srgb, var(--rad-brand) 14%, transparent); border: 1px solid var(--rad-brand); color: var(--rad-text); }
+  .status.success, .rad-status--success { background: color-mix(in srgb, var(--rad-primary) 16%, transparent); border: 1px solid var(--rad-primary); color: var(--rad-text); }
+  .status.error, .rad-status--error { background: color-mix(in srgb, #cf222e 16%, transparent); border: 1px solid #cf222e; color: var(--rad-text); }
+
+  /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }
   .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 500; user-select: none; }
-  .tab.active { border-bottom-color: #0969da; color: #0969da; }
-  code { font-family: var(--font-mono, monospace); font-size: 12px; background: #f6f8fa; padding: 2px 6px; border-radius: 4px; }
-  pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
-  label { display: block; font-weight: 500; margin: 10px 0 4px; }
-  input, select {
+  .tab.active { border-bottom-color: var(--rad-brand); color: var(--rad-text); }
+
+  code { font-family: var(--rad-mono); font-size: 12px; background: var(--rad-bg-subtle); padding: 2px 6px; border-radius: 4px; }
+  pre { background: var(--rad-bg-subtle); padding: 12px; border-radius: var(--rad-radius); overflow-x: auto; font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+
+  /* ─── Fields, inputs, selects ─────────────────────────────────────────── */
+  label { display: block; font-weight: 600; font-size: 12px; color: var(--rad-text-tertiary); margin: 10px 0 4px; }
+  .rad-field { display: flex; flex-direction: column; gap: 4px; }
+  .rad-field label { margin: 0; }
+  input, select, .rad-select {
     width: 100%; padding: 8px 10px;
-    border: 1px solid var(--border-color-default, #d1d9e0);
-    border-radius: 6px; font-size: 13px;
-    background: var(--background-color-default, #fff);
-    color: var(--text-color-default, #1f2328);
-    font-family: var(--font-mono, monospace);
+    border: 1px solid var(--rad-stroke-strong);
+    border-radius: var(--rad-radius); font-size: 13px;
+    background: var(--rad-bg); color: var(--rad-text);
+    font-family: var(--rad-font);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.02);
   }
-  input:focus, select:focus { outline: 2px solid var(--color-focus-outline, #0969da); }
-  button, .verify-btn {
+  input:focus, select:focus, .rad-select:focus { outline: 2px solid var(--rad-brand); outline-offset: -1px; border-color: var(--rad-brand); }
+  select.radius-select, .rad-select { appearance: auto; cursor: pointer; min-width: 180px; }
+
+  /* ─── Buttons ─────────────────────────────────────────────────────────── */
+  button, .verify-btn, .rad-btn {
     display: inline-block; margin-top: 16px; padding: 8px 16px;
-    background: #238636; color: #fff; border: none; border-radius: 6px;
-    font-weight: 600; font-size: 13px; cursor: pointer;
+    border: none; border-radius: var(--rad-radius);
+    font-weight: 600; font-size: 13px; cursor: pointer; font-family: var(--rad-font);
+    transition: background 0.15s, opacity 0.15s;
   }
-  button:hover, .verify-btn:hover { background: #2ea043; }
-  .resolved-name { font-weight: 400; color: #1a7f37; font-size: 12px; }
-  #graph-container { width: 100%; height: 450px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; position: relative; }
-  #graph-container:empty { border-color: transparent; }
+  button, .verify-btn, .rad-btn--primary { background: var(--rad-primary); color: #fff; }
+  button:hover, .verify-btn:hover, .rad-btn--primary:hover { background: var(--rad-primary-hover); }
+  .rad-btn--brand { background: var(--rad-brand); color: #fff; }
+  .rad-btn--brand:hover { background: var(--rad-brand-dark); }
+  .rad-btn--neutral { background: var(--rad-bg-selected); color: var(--rad-text); }
+  .rad-btn--neutral:hover { background: var(--rad-bg-hover); }
+  .rad-btn--info { background: #1f6feb; color: #fff; }
+  .rad-btn--danger { background: #c93c37; color: #fff; }
+  .rad-btn--danger:hover { background: #b52f2a; }
+  .rad-select-wrap { position: relative; display: inline-block; }
+  .rad-select-wrap select {
+    appearance: none; -webkit-appearance: none; min-width: 230px; padding: 9px 40px 9px 12px;
+    font-size: 14px; color: var(--rad-text); background: var(--rad-surface);
+    border: 1px solid var(--rad-stroke); border-radius: 8px; cursor: pointer;
+  }
+  .rad-select-wrap::after {
+    content: ""; position: absolute; right: 14px; top: 50%; width: 8px; height: 8px;
+    border-right: 2px solid var(--rad-text-tertiary); border-bottom: 2px solid var(--rad-text-tertiary);
+    transform: translateY(-70%) rotate(45deg); pointer-events: none;
+  }
+  .rad-spinner-lg { flex: 0 0 auto; width: 34px; height: 34px; border: 4px solid var(--rad-stroke, #e1e4e8); border-top-color: #1f6feb; border-radius: 50%; animation: rad-spin 0.8s linear infinite; }
+  @keyframes rad-spin { to { transform: rotate(360deg); } }
+  .rad-btn--info:hover { background: #388bfd; }
+  button:disabled, .rad-btn:disabled { opacity: 0.6; cursor: default; }
+  .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
+  .rad-status-link { text-decoration: none; color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .rad-status-link:hover .rad-status-label { text-decoration: underline; }
+  .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
+
+  /* ─── Cards, sections, tables (Environments/Deployments) ──────────────── */
+  .rad-card {
+    background: var(--rad-surface); border: 1px solid var(--rad-stroke);
+    border-radius: var(--rad-radius-lg); padding: 20px 24px; margin: 0 0 20px;
+  }
+  .rad-card__title { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; color: var(--rad-text); margin-bottom: 4px; }
+  .rad-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--rad-stroke); }
+  .rad-section:first-of-type { border-top: none; padding-top: 0; margin-top: 16px; }
+  .rad-section__title { font-size: 15px; font-weight: 600; color: var(--rad-text); margin-bottom: 4px; }
+  .rad-section__desc { font-size: 13px; color: var(--rad-text-tertiary); margin-bottom: 8px; }
+  .rad-link { color: #1f6feb; text-decoration: underline; cursor: pointer; font-size: 13px; }
+  .rad-link:hover { color: #388bfd; }
+
+  .rad-table-wrap { border: 1px solid var(--rad-stroke); border-radius: var(--rad-radius-lg); overflow-x: auto; background: var(--rad-surface); }
+  .rad-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .rad-table thead th {
+    text-align: left; padding: 12px 14px; font-size: 12px; font-weight: 600;
+    letter-spacing: 0.03em; text-transform: uppercase; color: var(--rad-text-tertiary);
+    border-bottom: 1px solid var(--rad-stroke); background: var(--rad-bg);
+  }
+  .rad-table thead th:last-child, .rad-table__actions { text-align: right; }
+  .rad-table tbody td { padding: 12px 14px; border-top: 1px solid var(--rad-stroke); vertical-align: middle; }
+  .rad-table tbody tr:first-child td { border-top: none; }
+  .rad-table__env { font-weight: 700; color: var(--rad-text); }
+  .rad-table__provider { color: var(--rad-text-tertiary); }
+  .rad-table__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
+  .rad-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+  .rad-dot--success { background: #1a7f37; }
+  .rad-dot--failed { background: #cf222e; }
+  .rad-dot--pending { background: var(--rad-text-tertiary); }
+  .rad-status-label { vertical-align: middle; }
+
+  /* ─── Graph + node cards ──────────────────────────────────────────────── */
+  #graph-container { width: 100%; height: 450px; border-radius: var(--rad-radius-lg); position: relative; background: var(--rad-bg-subtle); }
+  #graph-container:empty { background: transparent; }
   .legend { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
-  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid #999; box-sizing: border-box; }
+  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
+  .rad-node {
+    position: relative; width: 220px; min-height: 92px;
+    background: var(--rad-surface); border: 2px solid var(--rad-stroke-strong);
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .rad-node__icon { width: 32px; height: 32px; }
+  .rad-node__title { font-weight: 500; font-size: 16px; color: var(--rad-text); margin-top: 6px; }
+  .rad-node__type { font-size: 12px; color: var(--rad-text-tertiary); margin-top: 2px; }
+
   .field { margin: 8px 0; }
-  .field-label { font-weight: 500; color: var(--text-color-muted, #656d76); font-size: 12px; }
-  .field-value { font-family: var(--font-mono, monospace); font-size: 13px; margin-top: 2px; }
-  .field-value.placeholder { color: var(--text-color-muted, #656d76); font-style: italic; }
-  select.radius-select { width: 100%; padding: 6px 10px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; font-size: 13px; appearance: auto; cursor: pointer; background: var(--background-color-default, #fff); min-width: 180px; }
+  .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }
+  .field-value { font-family: var(--rad-mono); font-size: 13px; margin-top: 2px; }
+  .field-value.placeholder { color: var(--rad-text-tertiary); font-style: italic; }
 </style>
 </head>
 <body>
-<nav class="sidebar">
-  <a href="/?page=graph" class="${title.includes('Application Graph') && !title.includes('Diff') && !title.includes('Planned') ? 'active' : ''}">📊<span class="tooltip">Model Graph</span></a>
-  <a href="/?page=environment" class="${title.includes('Deploy') || title.includes('Environment') || title.includes('Accounts') || title.includes('Configure') ? 'active' : ''}">🚀<span class="tooltip">Environment</span></a>
-</nav>
+${topNav(active)}
 <script>
 ${CLIENT_REPO_BRANCH_JS}
 </script>
@@ -132,9 +248,9 @@ ${CLIENT_GRAPH_JS}
 <div class="main-content">
 ${bodyContent}
 </div>
-<div id="radius-reconnect-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(255,255,255,0.92); align-items:center; justify-content:center; flex-direction:column; gap:12px; font-family:var(--font-sans, -apple-system, sans-serif);">
-  <div style="width:28px; height:28px; border:3px solid #d1d9e0; border-top-color:#C9452B; border-radius:50%; animation:radius-spin 0.8s linear infinite;"></div>
-  <div style="font-size:13px; color:#656d76;">Reconnecting to Radius…</div>
+<div id="radius-reconnect-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:color-mix(in srgb, var(--rad-bg) 92%, transparent); align-items:center; justify-content:center; flex-direction:column; gap:12px; font-family:var(--rad-font);">
+  <div style="width:28px; height:28px; border:3px solid var(--rad-stroke); border-top-color:var(--rad-brand); border-radius:50%; animation:radius-spin 0.8s linear infinite;"></div>
+  <div style="font-size:13px; color:var(--rad-text-tertiary);">Reconnecting to Radius…</div>
 </div>
 <style>@keyframes radius-spin { to { transform: rotate(360deg); } }</style>
 <script>
@@ -163,7 +279,7 @@ export function oidcPage(state) {
 <div class="field"><span class="field-label">Region</span><div class="field-value">${escapeHtml(awsResult.region)}</div></div>` : "";
 
     return pageShell("Accounts", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Cloud Accounts</h1>
+<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Cloud Accounts</h1>
 <p style="margin-bottom:16px; color: var(--text-color-muted, #656d76);">
   Set up OpenID Connect federation so GitHub Actions can authenticate to your cloud provider without long-lived secrets.
 </p>
@@ -256,7 +372,7 @@ export function appGeneratePage(state) {
     const targetBranch = state?.generateBranch || state?.contextBranch || 'main';
     if (state && state.generatedContent) {
         return pageShell("Generated app.bicep", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>✓ app.bicep Generated</h1>
+<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>✓ app.bicep Generated</h1>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
@@ -270,7 +386,7 @@ export function appGeneratePage(state) {
       <option value="">Select repo first</option>
     </select>
   </div>
-  <button id="gen-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Regenerate</button>
+  <button id="gen-btn" class="rad-btn rad-btn--neutral" style="margin-top:0;">Regenerate</button>
 </div>
 <div class="status success">Successfully generated application model for ${escapeHtml(targetRepo)}</div>
 ${state.generatedWarning ? `<div class="status info">Generated content is available below, but it could not be committed to the selected remote branch: ${escapeHtml(state.generatedWarning)}</div>` : ''}
@@ -293,7 +409,7 @@ document.getElementById('gen-btn').addEventListener('click', function() {
 <\/script>`);
     }
     return pageShell("Generate app.bicep", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Generate Application Model</h1>
+<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Generate Application Model</h1>
 <p style="margin-bottom:16px; color: var(--text-color-muted, #656d76);">
   Analyze your repository and generate a Radius <code>app.bicep</code> file using the app-modeling skill.
 </p>
@@ -345,24 +461,23 @@ radiusSetupRepoBranch('gen-repo', 'gen-branch', '${escapeHtml(targetRepo)}', '${
 
 export function graphHeader(activePage) {
     const pages = [
-        { id: 'graph', label: 'Model' },
-        { id: 'planned', label: 'Plan' },
-        { id: 'graph-diff', label: 'Diff' },
-        { id: 'deployed', label: 'Deployed' }
+        { id: 'graph', label: 'Modeled' },
+        { id: 'planned', label: 'Planned' },
+        { id: 'deployed', label: 'Deployed' },
+        { id: 'graph-diff', label: 'Diff' }
     ];
     const navLinks = pages.map(p => {
-        const isActive = p.id === activePage;
-        const style = isActive
-            ? 'font-weight:600; color:var(--text-color-default, #1f2328); text-decoration:none; border-bottom:2px solid #0969da; padding-bottom:2px;'
-            : 'color:var(--text-color-muted, #656d76); text-decoration:none; padding-bottom:2px; cursor:pointer;';
-        return `<a href="?page=${p.id}" data-page="${p.id}" style="${style}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
+        const cls = p.id === activePage ? 'rad-subtab rad-subtab--active' : 'rad-subtab';
+        return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
     }).join('\n  ');
     return `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Application Graph</h1>
-<p style="margin-bottom:12px; color: var(--text-color-muted, #656d76);">
-  Visualize your application as you've designed it (<strong>Model</strong>), as you want it deployed (<strong>Plan</strong>), and as it's running in your environments (<strong>Deployed</strong>) &mdash; plus the differences between branches (<strong>Diff</strong>).
-</p>
-<nav id="graph-nav" style="display:flex; gap:12px; margin-bottom:16px; font-size:13px;">
+<div class="rad-heading">
+  <h1>${radiusMark(26)}<span>Application Graph</span></h1>
+  <p class="rad-lede">
+    Visualize your application as you've designed it (<strong>Modeled</strong>), as you want it deployed (<strong>Planned</strong>), and as it's running in your environments (<strong>Deployed</strong>) &mdash; plus the differences between branches (<strong>Diff</strong>).
+  </p>
+</div>
+<nav id="graph-nav" class="rad-subtabs">
   ${navLinks}
 </nav>
 <div id="graph-page-content">`;
@@ -382,34 +497,103 @@ export function graphPage(state) {
         return pageShell("Application Graph", `
 ${graphHeader('graph')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="graph-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="graph-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="graph-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px;">
-      <option value="">Select repo first</option>
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="graph-branch" class="rad-select" style="min-width:220px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="load-graph-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Load Graph</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Deploy Application</button>
 </div>
-<div id="graph-status" class="status info">Select a repository and click Load Graph. If no app.bicep exists, one will be generated from the repo structure.</div>
+<div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('graph-repo', 'graph-branch', CONTEXT_REPO, CONTEXT_BRANCH);
 
-document.getElementById('load-graph-btn').addEventListener('click', function() {
-    var repo = document.getElementById('graph-repo').value.trim();
-    var branch = document.getElementById('graph-branch').value.trim() || 'main';
+// Populate the Application dropdown for the current repository.
+(function() {
+    var appSel = document.getElementById('graph-app');
+    if (!CONTEXT_REPO) { appSel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = d.applications || [];
+            appSel.innerHTML = '';
+            if (apps.length === 0) {
+                var fallback = CONTEXT_REPO.split('/').pop() || CONTEXT_REPO;
+                var o = document.createElement('option');
+                o.value = fallback; o.textContent = fallback; appSel.appendChild(o);
+                return;
+            }
+            apps.forEach(function(a) {
+                var o = document.createElement('option');
+                o.value = a.name; o.textContent = a.name; appSel.appendChild(o);
+            });
+        })
+        .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+})();
+
+// Populate the Branch dropdown, defaulting to the current worktree branch.
+(function() {
+    var branchSel = document.getElementById('graph-branch');
+    if (!CONTEXT_REPO) { branchSel.innerHTML = '<option value="">No repository context</option>'; return; }
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: CONTEXT_REPO}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            var workspaceBranch = (d && d.workspaceBranch) || CONTEXT_BRANCH || '';
+            branchSel.innerHTML = '<option value="">— Select a branch —</option>';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                if (workspaceBranch && b.name === workspaceBranch) o.selected = true;
+                branchSel.appendChild(o);
+            });
+            // Default to the current worktree branch and auto-generate its graph.
+            if (workspaceBranch && branchSel.value === workspaceBranch) {
+                branchSel.dispatchEvent(new Event('change'));
+            }
+        })
+        .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
+})();
+
+// Auto-generate the graph as soon as a branch is chosen, and enable the
+// Deploy Application button (greyed out until a branch is selected).
+document.getElementById('graph-branch').addEventListener('change', function() {
+    var deployBtn = document.getElementById('deploy-app-btn');
+    if (this.value) {
+        if (deployBtn) deployBtn.disabled = false;
+        generateGraph();
+    } else if (deployBtn) {
+        deployBtn.disabled = true;
+    }
+});
+
+// Deploy Application → go to the Deployments page with the app preselected.
+document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
+    if (this.disabled) return;
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+});
+
+function generateGraph() {
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('graph-branch').value.trim();
     if (!repo) return;
-    this.textContent = '⏳ Generating...';
-    this.disabled = true;
-    var btn = this;
+    var statusEl0 = document.getElementById('graph-status');
+    if (!branch) {
+        if (statusEl0) { statusEl0.textContent = 'Select a branch to generate the application graph.'; statusEl0.className = 'status info'; statusEl0.style.display = ''; }
+        return;
+    }
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
@@ -422,7 +606,7 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
         '</div>' +
         '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#0969da;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid #0969da;box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
 
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
@@ -449,8 +633,6 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
-            btn.textContent = 'Load Graph';
-            btn.disabled = false;
             if (d.reload) {
                 // Final progress update
                 var prev = stepsEl.querySelector('.step-active');
@@ -465,19 +647,7 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
                 if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
             }
         })
-        .catch(function() { clearInterval(pollInterval); btn.textContent = 'Load Graph'; btn.disabled = false; container.innerHTML = ''; });
-});
-// Auto-load when context repo is provided
-if (CONTEXT_REPO) {
-    // Wait for radiusSetupRepoBranch to finish populating, then auto-click
-    radiusPopulateRepos('graph-repo', CONTEXT_REPO).then(function() {
-        var repoSel = document.getElementById('graph-repo');
-        if (repoSel && repoSel.value) {
-            return radiusPopulateBranches('graph-branch', repoSel.value, CONTEXT_BRANCH);
-        }
-    }).then(function() {
-        document.getElementById('load-graph-btn').click();
-    });
+        .catch(function() { clearInterval(pollInterval); container.innerHTML = ''; });
 }
 <\/script>
 ${graphHeaderClose()}`);
@@ -487,19 +657,20 @@ ${graphHeaderClose()}`);
 ${graphHeader('graph')}
 ${''/* bicepGenerated note moved below graph container */}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="graph-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d0d7de); border-radius:6px; font-size:13px; min-width:180px; width:auto; max-width:400px; background:var(--background-color-default, #fff); color:var(--text-color-default, #1f2328);">
-      <option value="${escapeHtml(targetRepo)}" selected>${escapeHtml(targetRepo)}</option>
+  <input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="graph-app" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="graph-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d0d7de); border-radius:6px; font-size:13px; min-width:180px; width:auto; max-width:400px; background:var(--background-color-default, #fff); color:var(--text-color-default, #1f2328);">
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="graph-branch" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
       <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch || 'main')}</option>
     </select>
   </div>
-  <button id="load-graph-btn" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Reload</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
 </div>
 <div id="graph-container"></div>
 <div style="margin-top:8px; font-size:12px; color:var(--text-color-muted, #656d76);">
@@ -507,50 +678,70 @@ ${state.bicepGenerated ? 'Generated from repo analysis — no existing app.bicep
 </div>
 
 <script>
-// Auto-populate repos dropdown
-radiusSetupRepoBranch('graph-repo', 'graph-branch', document.getElementById('graph-repo').value, document.getElementById('graph-branch').value);
+var CONTEXT_REPO = document.getElementById('graph-repo').value;
+var CURRENT_BRANCH = '${escapeHtml(graphBranch || 'main')}';
 
-document.getElementById('load-graph-btn').addEventListener('click', function() {
-    var repo = document.getElementById('graph-repo').value.trim();
-    var branch = document.getElementById('graph-branch').value.trim() || 'main';
-    if (!repo) return;
-    this.textContent = '⏳ Generating...';
-    this.disabled = true;
-    var btn = this;
-    radiusSetGraphLoading('graph-container');
-    var stepsEl = document.getElementById('progress-steps');
-    var shownSteps = 0;
-    var pollInterval = setInterval(function() {
-        fetch('/api/progress').then(function(r) { return r.json(); }).then(function(d) {
-            var msgs = d.messages || [];
-            for (var i = shownSteps; i < msgs.length; i++) {
-                var prev = stepsEl.querySelector('.step-active');
-                if (prev) prev.className = 'step-done';
-                var div = document.createElement('div');
-                div.className = 'step-active';
-                div.textContent = msgs[i];
-                stepsEl.appendChild(div);
+// Populate the Application dropdown for the current repository.
+(function() {
+    var appSel = document.getElementById('graph-app');
+    if (!CONTEXT_REPO) { appSel.innerHTML = '<option value="">No application context</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = d.applications || [];
+            appSel.innerHTML = '';
+            if (apps.length === 0) {
+                var f = CONTEXT_REPO.split('/').pop() || CONTEXT_REPO;
+                var o = document.createElement('option'); o.value = f; o.textContent = f; appSel.appendChild(o);
+                return;
             }
-            shownSteps = msgs.length;
-        }).catch(function() {});
-    }, 800);
+            apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+        })
+        .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
+})();
+
+// Populate the Branch dropdown, keeping the current branch selected.
+(function() {
+    var branchSel = document.getElementById('graph-branch');
+    if (!CONTEXT_REPO) return;
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: CONTEXT_REPO}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            if (!branches.length) return;
+            branchSel.innerHTML = '';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                if (b.name === CURRENT_BRANCH) o.selected = true;
+                branchSel.appendChild(o);
+            });
+        })
+        .catch(function() {});
+})();
+
+// Regenerate the graph when a different branch is selected.
+document.getElementById('graph-branch').addEventListener('change', function() {
+    var repo = CONTEXT_REPO;
+    var branch = this.value.trim();
+    if (!repo || !branch) return;
+    var container = document.getElementById('graph-container');
+    container.innerHTML = '<div style="padding:20px; color:var(--text-color-muted,#656d76);">⏳ Regenerating graph for ' + branch + '…</div>';
     fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            clearInterval(pollInterval);
-            btn.textContent = 'Reload';
-            btn.disabled = false;
-            if (d.reload) {
-                var prev = stepsEl.querySelector('.step-active');
-                if (prev) prev.className = 'step-done';
-                var doneDiv = document.createElement('div');
-                doneDiv.className = 'step-done';
-                doneDiv.textContent = 'Graph ready!';
-                stepsEl.appendChild(doneDiv);
-                setTimeout(function() { window.location.reload(); }, 600);
-            }
+            if (d.reload) { window.location.reload(); }
+            else if (d.error) { container.innerHTML = '<div class="status error">Error: ' + d.error + '</div>'; }
         })
-        .catch(function() { clearInterval(pollInterval); btn.textContent = 'Reload'; btn.disabled = false; });
+        .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
+});
+
+// Deploy Application → go to the Deployments page with the app preselected.
+document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
 });
 
 var resources = ${resourcesJson};
@@ -579,39 +770,42 @@ export function plannedGraphPage(state) {
         return pageShell("Planned Graph", `
 ${graphHeader('planned')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="planned-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="planned-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="planned-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px;">
-      <option value="">Select repo first</option>
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="planned-branch" class="rad-select" style="min-width:200px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cloud Provider</label>
-    <select id="planned-provider" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:140px;">
-      <option value="azure"${provider === 'azure' ? ' selected' : ''}>Azure</option>
-      <option value="aws"${provider === 'aws' ? ' selected' : ''}>AWS</option>
+  <div class="rad-field">
+    <label>Environment</label>
+    <select id="planned-env" class="rad-select" style="min-width:180px;">
+      <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
 </div>
-<div id="plan-status" class="status info">Configure your target environment and click "Plan Deployment" to see what resources will be created.</div>
+<div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('planned-repo', 'planned-branch', CONTEXT_REPO, CONTEXT_BRANCH);
+var ENV_PROVIDERS = {};
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    var repo = document.getElementById('planned-repo').value.trim();
-    var branch = document.getElementById('planned-branch').value.trim() || 'main';
-    var provider = document.getElementById('planned-provider').value;
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('planned-branch').value.trim();
+    var env = document.getElementById('planned-env').value;
+    var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
+    var statusEl0 = document.getElementById('plan-status');
+    if (!branch) { if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to plan the deployment.'; statusEl0.className='status info'; } return; }
     this.textContent = '⏳ Planning...';
     this.disabled = true;
     var btn = this;
@@ -627,7 +821,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
         '</div>' +
         '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#1a7f37;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid #0969da;box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#1a7f37;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
     var pollInterval = setInterval(function() {
@@ -644,7 +838,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             shownSteps = msgs.length;
         }).catch(function() {});
     }, 800);
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider}) })
+    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
@@ -674,26 +868,25 @@ ${graphHeaderClose()}`);
     return pageShell("Planned Graph", `
 ${graphHeader('planned')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="planned-repo" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+  <div class="rad-field">
+    <label>Application</label>
+    <select id="planned-app" class="rad-select" style="min-width:280px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="planned-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px;">
-      <option value="">Select repo first</option>
+  <div class="rad-field">
+    <label>Branch</label>
+    <select id="planned-branch" class="rad-select" style="min-width:200px;">
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cloud Provider</label>
-    <select id="planned-provider" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:140px;">
-      <option value="azure"${provider === 'azure' ? ' selected' : ''}>Azure</option>
-      <option value="aws"${provider === 'aws' ? ' selected' : ''}>AWS</option>
+  <div class="rad-field">
+    <label>Environment</label>
+    <select id="planned-env" class="rad-select" style="min-width:180px;">
+      <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Re-Plan</button>
 </div>
 <div class="legend" style="margin-bottom:12px;">
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/></svg> Compute</div>
@@ -702,27 +895,29 @@ ${graphHeader('planned')}
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><polygon points="4,2 14,2 17,5 17,9 14,12 4,12 1,9 1,5" fill="#e9f5ee" stroke="#1a7f37" stroke-width="1.5"/></svg> Secrets</div>
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><polygon points="1,2 12,2 17,7 12,12 1,12" fill="#f2ecfb" stroke="#8250df" stroke-width="1.5"/></svg> Networking</div>
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#ede9f7" stroke="#6639ba" stroke-width="1.5"/></svg> Other</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#f6f8fa; border:1px dashed #8c959f; border-radius:3px;"></div> Cloud Resource</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--rad-bg-subtle); border:1px dashed var(--rad-stroke-strong); border-radius:3px;"></div> Cloud Resource</div>
 </div>
 <div id="graph-container"></div>
 
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
-radiusSetupRepoBranch('planned-repo', 'planned-branch', CONTEXT_REPO, CONTEXT_BRANCH);
+var ENV_PROVIDERS = {};
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    var repo = document.getElementById('planned-repo').value.trim();
-    var branch = document.getElementById('planned-branch').value.trim() || 'main';
-    var provider = document.getElementById('planned-provider').value;
+    var repo = CONTEXT_REPO;
+    var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
+    var env = document.getElementById('planned-env').value;
+    var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
     this.textContent = 'Planning...';
     this.disabled = true;
     var btn = this;
     // Clear existing graph
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text-color-muted,#656d76);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid #e1e4e8;border-top-color:#1a7f37;border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider}) })
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text-color-muted,#656d76);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke,#e1e4e8);border-top-color:var(--rad-primary,#1a7f37);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
             btn.textContent = 'Re-Plan';
@@ -762,74 +957,60 @@ export function graphDiffPage(state) {
         const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
         return pageShell("Graph Diff", `
 ${graphHeader('graph-diff')}
-<div style="display:flex; gap:16px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+<input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
+<div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="diff-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
+    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-</div>
-<div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
-      <option value="">Select repo first</option>
+      <option value="">Loading branches...</option>
     </select>
   </div>
   <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
-      <option value="">Select repo first</option>
+      <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="compare-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Compare</button>
 </div>
-<div id="diff-status" class="status info">Select a repository to load branches.</div>
+<div id="diff-status" class="status info">Loading branches…</div>
 <script>
 var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
-var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
+var CONTEXT_REPO = document.getElementById('diff-repo-select').value;
 
-// Load repos and auto-select context repo
-radiusPopulateRepos('diff-repo-select', CONTEXT_REPO).then(function() {
-    var sel = document.getElementById('diff-repo-select');
-    if (sel.value) loadBranches(sel.value);
-});
+radiusPopulateApplications(CONTEXT_REPO, 'diff-app');
+radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD);
 
-document.getElementById('diff-repo-select').addEventListener('change', function() {
-    if (this.value) loadBranches(this.value);
-});
-
-function loadBranches(repo) {
-    document.getElementById('diff-status').textContent = 'Loading branches...';
-    radiusPopulateBranches(['base-branch', 'head-branch'], repo, [STATE_BASE || 'main', STATE_HEAD || '']).then(function() {
-        document.getElementById('diff-status').textContent = 'Ready — select base and head branches, then click Compare.';
-        if (STATE_BASE && STATE_HEAD) {
-            document.getElementById('compare-btn').click();
-        }
-    });
-}
-
-document.getElementById('compare-btn').addEventListener('click', function() {
+// Auto-load the diff graph whenever the head (or base, once head is set)
+// branch changes — no Compare button.
+function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
     var repo = document.getElementById('diff-repo-select').value;
     if (!repo || !base || !head) return;
-    this.textContent = 'Comparing...';
-    this.disabled = true;
-    var btn = this;
-    document.getElementById('diff-status').textContent = 'Fetching app.bicep (or generating from repo structure if not found)...';
+    var statusEl = document.getElementById('diff-status');
+    statusEl.className = 'status info';
+    statusEl.textContent = 'Comparing ' + base + ' → ' + head + ' (fetching app.bicep, generating if not found)…';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Compare';
-            btn.disabled = false;
-            if (d.error) { document.getElementById('diff-status').textContent = d.error; document.getElementById('diff-status').className = 'status error'; }
+            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
-            else if (d.message) { document.getElementById('diff-status').textContent = d.message; }
-        });
+            else if (d.message) { statusEl.textContent = d.message; }
+        })
+        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+}
+
+document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('base-branch').addEventListener('change', function() {
+    if (document.getElementById('head-branch').value) runDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -842,15 +1023,14 @@ ${graphHeaderClose()}`);
     const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
     return pageShell("Graph Diff", `
 ${graphHeader('graph-diff')}
-<div style="display:flex; gap:16px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+<input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
+<div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="diff-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="${escapeHtml(targetRepo)}" selected>${escapeHtml(targetRepo)}</option>
+    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+      <option value="">Loading applications...</option>
     </select>
   </div>
-</div>
-<div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
@@ -864,8 +1044,8 @@ ${graphHeader('graph-diff')}
       ${branchOptionsHead}
     </select>
   </div>
-  <button id="compare-btn" style="padding:6px 14px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Compare</button>
 </div>
+<div id="diff-status" class="status info" style="display:none;"></div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
@@ -883,36 +1063,37 @@ radiusRenderGraph('graph-container', resources, { diffMode: true });
 var DIFF_BASE = '${escapeHtml(baseBranch)}';
 var DIFF_HEAD = '${escapeHtml(headBranch)}';
 
-// Auto-populate repos dropdown
-radiusPopulateRepos('diff-repo-select', document.getElementById('diff-repo-select').value);
+radiusPopulateApplications(document.getElementById('diff-repo-select').value, 'diff-app');
 
-// Refresh the branch lists from GitHub on load so newly-created branches (e.g. a
-// PR branch pushed after this diff was last cached) appear in the dropdowns,
-// while preserving the currently-compared base/head selection.
-radiusPopulateBranches(['base-branch', 'head-branch'], document.getElementById('diff-repo-select').value, [DIFF_BASE || 'main', DIFF_HEAD || '']);
+// Refresh the branch lists from GitHub on load (so newly-pushed branches
+// appear) while preserving the currently-compared base/head selection. Do not
+// auto-compare — the diff is already rendered.
+radiusPopulateDiffBranches(document.getElementById('diff-repo-select').value, DIFF_BASE || 'main', DIFF_HEAD, false);
 
-document.getElementById('diff-repo-select').addEventListener('change', function() {
-    if (this.value) {
-        radiusPopulateBranches(['base-branch', 'head-branch'], this.value, [document.getElementById('base-branch').value || 'main', document.getElementById('head-branch').value || '']);
-    }
-});
-
-document.getElementById('compare-btn').addEventListener('click', function() {
+// Auto-load the diff graph whenever the head (or base, once head is set)
+// branch changes — no Compare button.
+function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
     var repo = document.getElementById('diff-repo-select').value;
     if (!repo || !base || !head) return;
-    this.textContent = 'Comparing...';
-    this.disabled = true;
-    var btn = this;
+    var statusEl = document.getElementById('diff-status');
+    statusEl.style.display = '';
+    statusEl.className = 'status info';
+    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Compare';
-            btn.disabled = false;
-            if (d.error) { alert(d.error); }
+            if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
-        });
+            else if (d.message) { statusEl.textContent = d.message; }
+        })
+        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+}
+
+document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('base-branch').addEventListener('change', function() {
+    if (document.getElementById('head-branch').value) runDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -922,52 +1103,236 @@ export function deployedGraphPage(state) {
     const targetRepo = state?.contextRepo || state?.deployingRepo || state?.plannedRepo || state?.graphTargetRepo || '';
     return pageShell("Deployed Graph", `
 ${graphHeader('deployed')}
-<div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Repository</label>
-    <select id="deployed-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:280px;">
-      <option value="">Loading repos...</option>
-    </select>
+<div class="rad-deployed-controls">
+  <div class="rad-field">
+    <label for="deployed-app-select">Application:</label>
+    <div class="rad-select-wrap"><select id="deployed-app-select"><option value="">Loading…</option></select></div>
+  </div>
+  <div class="rad-field">
+    <label for="deployed-env-select">Environment:</label>
+    <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
 </div>
-<div id="deployed-status" class="status info">Loading deployed application graph…</div>
-<div id="graph-container"></div>
+<button id="deployed-delete-btn" class="rad-btn rad-btn--danger" style="margin:0 0 18px;" disabled>Delete Deployment</button>
+
+<div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
+
+<div class="rad-card" style="margin:0;">
+  <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
+  <div id="deployed-status" class="status info">Loading deployed application graph…</div>
+  <div id="graph-container"></div>
+</div>
+
+<div id="deployed-log-section" class="rad-card" style="margin:16px 0 0; display:none;">
+  <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:10px;">Deployment Logs</div>
+  <div id="deployed-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="deployed-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="rad-card" style="max-width:460px; width:90%; margin:0;">
+    <div class="rad-card__title" style="margin-bottom:8px;">Delete Deployment</div>
+    <p id="deployed-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
+    <div style="display:flex; justify-content:flex-end; gap:10px;">
+      <button id="deployed-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
+      <button id="deployed-delete-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete Deployment</button>
+    </div>
+  </div>
+</div>
+
+<!-- Deleting (transition) modal -->
+<div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
+  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
+    <div class="rad-spinner-lg" aria-hidden="true"></div>
+    <div>
+      <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;">Deleting Deployment…</div>
+      <div id="deployed-deleting-text" style="font-size:13px; color:var(--rad-text-secondary);"></div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .rad-deployed-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:8px 0 16px; }
+  .rad-deployed-controls .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
+</style>
 <script>
 var CONTEXT_REPO = ${JSON.stringify(targetRepo)};
 
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+
 (function() {
+    var params = new URLSearchParams(window.location.search);
+    var wantEnv = params.get('environment') || '';
+    var wantApp = params.get('application') || '';
+
+    var appSelect = document.getElementById('deployed-app-select');
+    var envSelect = document.getElementById('deployed-env-select');
+    var deleteBtn = document.getElementById('deployed-delete-btn');
     var statusEl = document.getElementById('deployed-status');
+    var labelEl = document.getElementById('deployed-graph-label');
     var container = document.getElementById('graph-container');
+    var inlineStatus = document.getElementById('deployed-inline-status');
+    var pollTimer = null;
+
+    // --- Deployment log streaming (shown under the graph while a deploy runs) ---
+    var logSection = document.getElementById('deployed-log-section');
+    var logOutput = document.getElementById('deployed-log-output');
+    var logTimer = null;
+    var LOG_TOTAL = 0;
+    var logStreamStarted = false;
+
+    function stopLogStream() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
+
+    function pollLogs() {
+        fetch('/api/deploy-status?since=' + LOG_TOTAL).then(function(r) { return r.json(); }).then(function(d) {
+            if (d.logsNew && d.logsNew.length) {
+                for (var i = 0; i < d.logsNew.length; i++) { logOutput.textContent += d.logsNew[i] + '\\n'; }
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
+            if (typeof d.logTotal === 'number') { LOG_TOTAL = d.logTotal; }
+            if (d.status === 'complete' || d.status === 'success' || d.status === 'failed') { stopLogStream(); }
+        }).catch(function() {});
+    }
+
+    function startLogStream() {
+        if (logStreamStarted) return;
+        logStreamStarted = true;
+        logSection.style.display = 'block';
+        // Pull the full buffer once (since=0), then stream incrementally.
+        fetch('/api/deploy-status?since=0').then(function(r) { return r.json(); }).then(function(d) {
+            var lines = (d && d.logs) || (d && d.logsNew) || [];
+            for (var i = 0; i < lines.length; i++) { logOutput.textContent += lines[i] + '\\n'; }
+            logOutput.scrollTop = logOutput.scrollHeight;
+            if (typeof d.logTotal === 'number') { LOG_TOTAL = d.logTotal; }
+            else { LOG_TOTAL = lines.length; }
+            if (d && (d.status === 'complete' || d.status === 'success' || d.status === 'failed')) return;
+            logTimer = setInterval(pollLogs, 1500);
+        }).catch(function() {});
+    }
+
+    function showInline(kind, msg) {
+        inlineStatus.style.display = 'block';
+        inlineStatus.textContent = msg;
+        if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
+        else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
+    }
+
+    function refreshControls() {
+        var app = appSelect.value, env = envSelect.value;
+        deleteBtn.disabled = !(CONTEXT_REPO && app && env);
+        labelEl.innerHTML = (app && env)
+            ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
+            : '';
+    }
 
     function showNothing(msg) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--text-color-muted,#656d76); font-size:14px; border:1px dashed var(--border-color-default,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
+        container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
     }
 
-    function loadDeployedGraph(repo) {
-        if (!repo) { showNothing('Nothing deployed yet'); return; }
+    function renderGraph(resources) {
+        if (statusEl) { statusEl.style.display = 'none'; }
+        radiusRenderGraph('graph-container', resources, {
+            repoUrl: 'https://github.com/' + CONTEXT_REPO,
+            branch: 'main',
+            showLegend: true
+        });
+    }
+
+    function loadGraph() {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
         if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
-        container.innerHTML = '';
-        fetch('/api/deployed-graph?repo=' + encodeURIComponent(repo)).then(function(r) { return r.json(); }).then(function(d) {
-            if (d.error) { showNothing('Nothing deployed yet'); return; }
-            var resources = d.resources || [];
-            if (resources.length === 0) { showNothing('Nothing deployed yet'); return; }
-            if (statusEl) { statusEl.style.display = 'none'; }
-            radiusRenderGraph('graph-container', resources, {
-                repoUrl: 'https://github.com/' + repo,
-                branch: d.branch || 'main',
-                showLegend: true
-            });
+        // Prefer a live/in-progress deployment so the graph fills in as it deploys.
+        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
+            var liveRes = (s && s.resources) || [];
+            var st = s && s.status;
+            // Stream deployment logs under the graph whenever a deploy is running
+            // or has produced log output.
+            if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
+                startLogStream();
+            }
+            if (liveRes.length && (st === 'in_progress' || st === 'success')) {
+                renderGraph(liveRes);
+                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
+                return;
+            }
+            // Fall back to the terminal deployed graph from the status branch.
+            fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
+                var resources = (d && d.resources) || [];
+                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
+                renderGraph(resources);
+            }).catch(function() { showNothing('Nothing deployed yet'); });
         }).catch(function() { showNothing('Nothing deployed yet'); });
     }
 
-    radiusPopulateRepos('deployed-repo-select', CONTEXT_REPO).then(function() {
-        var sel = document.getElementById('deployed-repo-select');
-        loadDeployedGraph(sel.value);
+    function loadApplications() {
+        return fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var apps = (d && d.applications) || [];
+                if (!apps.length) { appSelect.innerHTML = '<option value="">No applications</option>'; return; }
+                appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
+                if (wantApp) { appSelect.value = wantApp; }
+            })
+            .catch(function() { appSelect.innerHTML = '<option value="">Could not load</option>'; });
+    }
+
+    function loadEnvironments() {
+        return fetch('/api/list-environments?repo=' + encodeURIComponent(CONTEXT_REPO))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var envs = (d && d.environments) || [];
+                if (!envs.length) { envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+                envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
+                if (wantEnv) { envSelect.value = wantEnv; }
+            })
+            .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+    }
+
+    appSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
+    envSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
+
+    // --- Delete deployment ---
+    var delModal = document.getElementById('deployed-delete-modal');
+    var delText = document.getElementById('deployed-delete-text');
+    var delConfirm = document.getElementById('deployed-delete-confirm');
+    var delCancel = document.getElementById('deployed-delete-cancel');
+
+    deleteBtn.addEventListener('click', function() {
+        var app = appSelect.value, env = envSelect.value;
+        if (!app || !env) return;
+        delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong>?';
+        delModal.style.display = 'flex';
+    });
+    delCancel.addEventListener('click', function() { delModal.style.display = 'none'; });
+    delModal.addEventListener('click', function(e) { if (e.target === delModal) { delModal.style.display = 'none'; } });
+    delConfirm.addEventListener('click', function() {
+        var app = appSelect.value, env = envSelect.value;
+        if (!app || !env) return;
+        delModal.style.display = 'none';
+        document.getElementById('deployed-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(app) + '</strong> from <strong>' + escapeHtmlClient(env) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
+        document.getElementById('deployed-deleting-modal').style.display = 'flex';
+        fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CONTEXT_REPO, environment: env, application: app }) })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(res) {
+                document.getElementById('deployed-deleting-modal').style.display = 'none';
+                if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
+                window.location.href = '/?page=deploying';
+            })
+            .catch(function() {
+                document.getElementById('deployed-deleting-modal').style.display = 'none';
+                showInline('error', 'Could not delete the deployment. Please try again.');
+            });
     });
 
-    document.getElementById('deployed-repo-select').addEventListener('change', function() {
-        loadDeployedGraph(this.value);
+    Promise.all([loadApplications(), loadEnvironments()]).then(function() {
+        refreshControls();
+        loadGraph();
     });
 })();
 <\/script>
@@ -999,7 +1364,7 @@ export function environmentPage(state) {
         return pageShell(r.error ? "Deployment Failed" : "Deployment Initiated", `
 <h1>${r.error ? "⚠ Deployment Failed" : "🚀 Deployment Initiated"}</h1>
 <div class="status ${r.error ? "error" : "success"}">${escapeHtml(r.error || r.message)}</div>
-${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:#0969da;">View GitHub Actions workflow run →</a></p>` : ""}
+${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>` : ""}
 ${r.workflow ? `<h2>Generated Workflow</h2><pre style="max-height:400px; overflow:auto;">${escapeHtml(r.workflow)}</pre>` : ""}
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--border-color-default, #d1d9e0); color:var(--text-color-default, #1f2328); border:none; border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <script>
@@ -1009,57 +1374,55 @@ document.getElementById('back-btn').addEventListener('click', function() {
 <\/script>`);
     }
 
-    const envOptions = existingEnvs.map(e => `<option value="${e}"${e === envName ? ' selected' : ''}>${e}</option>`).join('');
+    const ctxRepo = state?.targetRepo || state?.contextRepo || '';
+    const ctxBranch = state?.contextBranch || state?.plannedBranch || state?.graphBranch || 'main';
 
-    return pageShell("Radius Environment", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Radius Environment</h1>
-<p style="margin-bottom:16px; color: var(--text-color-muted, #656d76);">
-  Configure your cloud provider, credentials, and deploy your Radius application.
-</p>
+    return pageShell("Environments", `
+<div class="rad-heading">
+  <h1>${radiusMark(26)}<span>Environments</span></h1>
+  <p class="rad-lede">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
+</div>
 
-<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Environment</label>
-    <div style="display:flex; gap:8px;">
-      <select id="env-select" style="flex:1; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-        ${envOptions}
-        <option value="__new__">+ Create new...</option>
-      </select>
+<!-- Landing: New Environment button + environments table -->
+<div id="env-landing">
+  <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
+  <div class="rad-table-wrap">
+    <table class="rad-table">
+      <thead><tr><th>Environment</th><th>Status</th><th>Provider</th><th>Actions</th></tr></thead>
+      <tbody id="env-table-body">
+        <tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Create Environment form (revealed by New Environment / Deploy Apps / edit) -->
+<div id="env-form" style="display:none;">
+  <div class="rad-card">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+      <div class="rad-card__title" style="margin:0;">Create Environment</div>
+      <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; color:var(--rad-info,#0969da); cursor:pointer;">← Back to environments</button>
     </div>
-  </div>
-  <div id="new-env-row" style="display:none; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">New Environment Name</label>
-    <input id="new-env-name" type="text" placeholder="e.g. dev, staging, prod" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
-  </div>
-</div>
-
-<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Target Repository</label>
-    <select id="deploy-repo-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-      <option value="${escapeHtml(state?.targetRepo || state?.contextRepo || '')}" selected>${escapeHtml(state?.targetRepo || state?.contextRepo || 'Loading...')}</option>
-    </select>
-    <input type="hidden" id="target-repo" value="${escapeHtml(state?.targetRepo || state?.contextRepo || '')}" />
-  </div>
-  <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Branch</label>
-    <select id="deploy-branch-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-      <option value="" disabled selected>Loading...</option>
-    </select>
-  </div>
-</div>
-
-<div class="tabs">
-  <div class="tab${provider === 'azure' ? ' active' : ''}" id="tab-azure">Azure</div>
-  <div class="tab${provider === 'aws' ? ' active' : ''}" id="tab-aws">AWS</div>
-</div>
+    <div class="rad-section">
+      <div class="rad-field"><label>Provider</label>
+        <select id="env-provider-select" class="rad-select" style="max-width:280px;">
+          <option value="azure" selected>Azure</option>
+        </select>
+      </div>
+      <div class="rad-field" style="margin-top:12px; margin-bottom:20px;"><label>Environment Name</label>
+        <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" style="max-width:280px;" />
+      </div>
+      <!-- Repository and branch are assumed from the current workspace. -->
+      <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
+      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
+    </div>
 
 <!-- Azure Panel -->
 <div id="panel-azure" style="${provider === 'azure' ? '' : 'display:none;'}">
   <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 8px 0; font-size:13px; font-weight:600;">🔑 Cloud Accounts</h3>
+    <h3 style="margin:0 0 8px 0; font-size:15px; font-weight:600;">Account</h3>
     <p style="font-size:12px; color:var(--text-color-muted, #656d76); margin:0 0 10px 0;">
-      Enter your Azure tenant and subscription, then verify your CLI login.
+      Enter your Azure tenant and subscription, then verify your CLI login to ensure you have the necessary credentials.
     </p>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px;">
       <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1071,23 +1434,24 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.subscriptionId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
       </div>
     </div>
-    <button id="btn-verify-azure" style="padding:6px 14px; background:#1f883d; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">✓ Verify Azure Login</button>
+    <input type="hidden" id="az-client-id" value="${escapeHtml(oidcAzure?.clientId || '')}" />
+    <button id="btn-verify-azure" class="rad-btn rad-btn--info" style="margin-top:0; padding:6px 14px; font-size:12px;">Verify Credentials</button>
     <div id="verify-azure-status" style="margin-top:8px; font-size:12px; display:none;"></div>
   </div>
 
   <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 4px 0; font-size:13px; font-weight:600;">☸️ Azure Infrastructure</h3>
+    <h3 style="margin:0 0 4px 0; font-size:15px; font-weight:600;">Infrastructure</h3>
     <div id="azure-discover-status" style="font-size:11px; color:var(--text-color-muted, #656d76); margin-bottom:10px;">Discovering resources...</div>
+    <div style="display:flex; flex-direction:column; gap:4px; max-width:410px; margin-bottom:12px;">
+      <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Resource Group</label>
+      <select id="azure-rg-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
+        <option value="" disabled selected>Loading...</option>
+      </select>
+      <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+    </div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
       <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Resource Group</label>
-        <select id="azure-rg-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
-      </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">AKS Cluster</label>
+        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cluster</label>
         <select id="azure-cluster-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
           <option value="" disabled selected>Loading...</option>
         </select>
@@ -1102,21 +1466,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
       </div>
     </div>
   </div>
-
-  <div id="auto-setup-section" style="margin-bottom:12px; padding:8px 12px; background:var(--background-color-inset, #eff2f5); border-radius:8px; border:1px dashed var(--border-color-default, #d1d9e0); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-    <p style="font-size:11px; margin:0; color:var(--text-color-muted, #656d76); flex:1; min-width:200px;">
-      <strong>Auto-create credentials</strong> creates a new App Registration, a federated credential for GitHub OIDC, and a Contributor role assignment using your <code>az</code> CLI login. The generated credentials are passed straight to the GitHub environment and deploy workflows.
-    </p>
-    <button id="btn-auto-setup" style="padding:6px 14px; background:#0969da; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">⚡ Auto-create credentials</button>
-    <input id="az-client-id" type="hidden" value="${escapeHtml(oidcAzure?.clientId || '')}" />
-    <div id="auto-setup-status" style="flex-basis:100%; font-size:12px; display:none;"></div>
   </div>
-</div>
 
 <!-- AWS Panel -->
 <div id="panel-aws" style="${provider === 'aws' ? '' : 'display:none;'}">
   <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 4px 0; font-size:13px; font-weight:600;">☸️ AWS Infrastructure</h3>
+    <h3 style="margin:0 0 4px 0; font-size:15px; font-weight:600;">Infrastructure</h3>
     <div id="aws-discover-status" style="font-size:11px; color:var(--text-color-muted, #656d76); margin-bottom:10px;">Discovering resources...</div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
       <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1157,33 +1512,151 @@ document.getElementById('back-btn').addEventListener('click', function() {
   <div id="log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:350px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
-<div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color-default, #d1d9e0);">
-  <button id="deploy-btn" style="display:block; box-sizing:border-box; margin:0; padding:12px 32px; background:#1a7f37; color:#fff; border:none; border-radius:6px; font-size:14px; font-weight:600; cursor:pointer; width:100%;">🚀 Deploy Application</button>
+<div class="rad-section">
+  <div style="display:flex;">
+    <button id="deploy-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;">Create Environment</button>
+  </div>
+</div>
+  </div>
 </div>
 
-<script>
-var envSelect = document.getElementById('env-select');
-var newEnvRow = document.getElementById('new-env-row');
-envSelect.addEventListener('change', function() {
-    newEnvRow.style.display = this.value === '__new__' ? 'flex' : 'none';
-});
+<div id="env-creating-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:340px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+    <div style="min-width:0;">
+      <div id="env-creating-title" style="font-size:14px; line-height:1.4;">Creating environment…</div>
+      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+    </div>
+  </div>
+</div>
 
-// Tab switching logic
+<div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+    <div style="min-width:0;">
+      <div id="env-verify-title" style="font-size:14px; font-weight:600; line-height:1.4;">Verifying authentication to Azure…</div>
+      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+    </div>
+  </div>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}
+/* Match Figma: the environments table's ACTIONS column is left-aligned. */
+#env-landing .rad-table thead th:last-child { text-align: left; }
+#env-landing .rad-table__actions { justify-content: flex-start; }
+</style>
+
+<script>
+var CTX_REPO = '${escapeHtml(ctxRepo)}';
+var CTX_BRANCH = '${escapeHtml(ctxBranch)}';
+
+// --- Landing table <-> Create Environment form toggle ---------------------
+var envLanding = document.getElementById('env-landing');
+var envForm = document.getElementById('env-form');
+var envNameInput = document.getElementById('env-name-input');
+
+function showEnvForm(preset) {
+    preset = preset || {};
+    if (preset.name !== undefined) envNameInput.value = preset.name;
+    if (preset.provider) {
+        var ps = document.getElementById('env-provider-select');
+        ps.value = preset.provider;
+        applyProvider(preset.provider);
+    }
+    envLanding.style.display = 'none';
+    envForm.style.display = '';
+    envNameInput.focus();
+}
+function showEnvLanding() {
+    envForm.style.display = 'none';
+    envLanding.style.display = '';
+    loadEnvTable();
+}
+document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
+document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
+
+// --- Environments table (best-effort real data from GitHub) ---------------
+function statusCell(status) {
+    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'] };
+    var m = map[status] || map.pending;
+    return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
+}
+var envPollTimer = null;
+function loadEnvTable() {
+    var body = document.getElementById('env-table-body');
+    if (!CTX_REPO) {
+        body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
+            '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
+        wireEmptyState();
+        return;
+    }
+    body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>';
+    fetch('/api/list-environments?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var envs = (data && data.environments) || [];
+            if (envs.length === 0) {
+                body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
+                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
+                wireEmptyState();
+                return;
+            }
+            body.innerHTML = envs.map(function(e) {
+                var prov = e.provider || '—';
+                var editHref = e.webUrl || ('https://github.com/' + CTX_REPO + '/settings/environments');
+                return '<tr>' +
+                    '<td class="rad-table__env">' + escapeHtmlClient(e.name) + '</td>' +
+                    '<td>' + statusCell(e.status) + '</td>' +
+                    '<td class="rad-table__provider">' + escapeHtmlClient(prov) + '</td>' +
+                    '<td class="rad-table__actions">' +
+                        '<a class="rad-link" href="' + escapeHtmlClient(editHref) + '" target="_blank" rel="noopener noreferrer">edit</a>' +
+                        '<button class="rad-btn rad-btn--info js-deploy-apps" data-env="' + escapeHtmlClient(e.name) + '" data-provider="' + escapeHtmlClient(e.provider || '') + '" style="margin:0;">Deploy Apps</button>' +
+                        '<button class="rad-btn rad-btn--danger" style="margin:0;" onclick="return false;">Delete Env</button>' +
+                    '</td>' +
+                '</tr>';
+            }).join('');
+            wireRowActions();
+            // Keep polling while any environment is still pending (its
+            // verify-credentials workflow hasn't finished) so the status flips
+            // to Success/Failed on its own without a manual refresh.
+            if (envPollTimer) { clearTimeout(envPollTimer); envPollTimer = null; }
+            if (envs.some(function(e) { return e.status === 'pending'; })) {
+                envPollTimer = setTimeout(loadEnvTable, 10000);
+            }
+        })
+        .catch(function() {
+            body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
+        });
+}
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+function wireEmptyState() {
+    var b = document.querySelector('.js-create-env');
+    if (b) b.addEventListener('click', function() { showEnvForm({ name: '' }); });
+}
+function wireRowActions() {
+    document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var envName = this.dataset.env || '';
+            // Go to the Deployments page with this environment pre-selected —
+            // do NOT start a deployment here.
+            window.location.href = '/?page=deploying' + (envName ? '&env=' + encodeURIComponent(envName) : '');
+        });
+    });
+}
+loadEnvTable();
+
+// --- Provider dropdown drives which infra panel is shown ------------------
 var activeProvider = '${provider}';
-document.getElementById('tab-azure').addEventListener('click', function() {
-    activeProvider = 'azure';
-    this.classList.add('active');
-    document.getElementById('tab-aws').classList.remove('active');
-    document.getElementById('panel-azure').style.display = '';
-    document.getElementById('panel-aws').style.display = 'none';
-});
-document.getElementById('tab-aws').addEventListener('click', function() {
-    activeProvider = 'aws';
-    this.classList.add('active');
-    document.getElementById('tab-azure').classList.remove('active');
-    document.getElementById('panel-aws').style.display = '';
-    document.getElementById('panel-azure').style.display = 'none';
-});
+function applyProvider(p) {
+    activeProvider = p === 'aws' ? 'aws' : 'azure';
+    document.getElementById('panel-azure').style.display = activeProvider === 'azure' ? '' : 'none';
+    document.getElementById('panel-aws').style.display = activeProvider === 'aws' ? '' : 'none';
+}
+document.getElementById('env-provider-select').addEventListener('change', function() { applyProvider(this.value); });
+applyProvider(activeProvider);
 
 // Combo select: show custom input when "__custom__" is chosen
 function setupCombo(selectId, customId) {
@@ -1202,18 +1675,8 @@ setupCombo('aws-namespace-select', 'aws-namespace-custom');
 setupCombo('aws-vpc-select', 'aws-vpc-custom');
 setupCombo('aws-subnets-select', 'aws-subnets-custom');
 
-// Deploy repo + branch selects — wired via the shared repo/branch library
-radiusSetupRepoBranch('deploy-repo-select', 'deploy-branch-select', '${escapeHtml(state?.targetRepo || state?.contextRepo || '')}', '${escapeHtml(deployDefaultBranch)}');
-
-// Keep the hidden target-repo input in sync for deploy submission
-(function syncTargetRepo() {
-    var sel = document.getElementById('deploy-repo-select');
-    var inp = document.getElementById('target-repo');
-    if (!sel || !inp) { setTimeout(syncTargetRepo, 100); return; }
-    var sync = function() { inp.value = sel.value; };
-    sel.addEventListener('change', sync);
-    sync();
-})();
+// Repository and branch are assumed from the current workspace and provided as
+// hidden inputs (#target-repo, #deploy-branch-select) — no picker needed.
 
 // Populate a select element with discovered items
 function populateSelect(selectId, items, placeholder) {
@@ -1335,9 +1798,17 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
     var statusEl = document.getElementById('verify-azure-status');
     var tenantId = document.getElementById('az-tenant-id').value.trim();
     var subId = document.getElementById('az-sub-id').value.trim();
+    var verifyModal = document.getElementById('env-verify-modal');
+
+    if (!tenantId || !subId) {
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = '<span style="color:#cf222e;">❌ Please enter both a Tenant ID and a Subscription ID before verifying.</span>';
+        return;
+    }
 
     btn.disabled = true;
     btn.textContent = '⏳ Verifying...';
+    verifyModal.style.display = 'flex';
     statusEl.style.display = 'block';
     statusEl.innerHTML = '<span style="color:var(--text-color-muted, #656d76);">Logging into Azure CLI...</span>';
 
@@ -1346,15 +1817,12 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId })
     }).then(function(r) { return r.json(); }).then(function(data) {
+        verifyModal.style.display = 'none';
         btn.disabled = false;
-        btn.textContent = '✓ Verify Azure Login';
+        btn.textContent = 'Verify Credentials';
         if (data.error) {
-            btn.style.background = '#cf222e';
-            btn.textContent = '✗ Verify Azure Login';
             statusEl.innerHTML = '<span style="color:#cf222e;">❌ ' + data.error + '</span>';
         } else {
-            btn.style.background = '#1f883d';
-            btn.textContent = '✓ Verify Azure Login';
             statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong> — ' + (data.subscriptionName || data.subscriptionId || '') + '</span>';
             // Auto-fill tenant/sub if returned
             if (data.tenantId && !tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
@@ -1363,9 +1831,9 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
             discoverResources('azure');
         }
     }).catch(function(err) {
+        verifyModal.style.display = 'none';
         btn.disabled = false;
-        btn.style.background = '#cf222e';
-        btn.textContent = '✗ Verify Azure Login';
+        btn.textContent = 'Verify Credentials';
         statusEl.innerHTML = '<span style="color:#cf222e;">❌ Error: ' + err.message + '</span>';
     });
 });
@@ -1385,62 +1853,39 @@ function appendLog(text, color) {
     logEl.scrollTop = logEl.scrollHeight;
 }
 
-// Auto-setup button handler
-document.getElementById('btn-auto-setup').addEventListener('click', function() {
-    var btn = this;
-    var statusEl = document.getElementById('auto-setup-status');
-    var targetRepo = document.getElementById('target-repo').value.trim();
-    var env = envSelect.value === '__new__' ? document.getElementById('new-env-name').value : envSelect.value;
-    var resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
-    var cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
-
-    if (!targetRepo) { statusEl.style.display = 'block'; statusEl.innerHTML = '<span style="color:#cf222e;">Please specify a target repository first.</span>'; return; }
-    if (!resourceGroup) { statusEl.style.display = 'block'; statusEl.innerHTML = '<span style="color:#cf222e;">Please select a Resource Group first.</span>'; return; }
-    if (!cluster) { statusEl.style.display = 'block'; statusEl.innerHTML = '<span style="color:#cf222e;">Please select an AKS Cluster first.</span>'; return; }
-    if (!env) { statusEl.style.display = 'block'; statusEl.innerHTML = '<span style="color:#cf222e;">Please select an environment first.</span>'; return; }
-
-    btn.disabled = true;
-    btn.textContent = '⏳ Creating credentials...';
-    statusEl.style.display = 'block';
-    statusEl.innerHTML = '<span style="color:var(--text-color-muted, #656d76);">Running Azure CLI commands... this may take a moment.</span>';
-
-    fetch('/api/azure-auto-setup', {
+// Creates Azure OIDC credentials (App Registration + federated credential +
+// Contributor role) via the az CLI, then populates the credential fields.
+// Returns a Promise that resolves with the created credentials or rejects with
+// an Error. Invoked as part of the "Create Environment" flow when no client ID
+// has been provided yet.
+function runAzureAutoSetup(params) {
+    return fetch('/api/azure-auto-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            repo: targetRepo,
-            environment: env,
-            resourceGroup: resourceGroup,
-            cluster: cluster,
+            repo: params.repo,
+            environment: params.environment,
+            resourceGroup: params.resourceGroup,
+            cluster: params.cluster,
             subscriptionId: document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '',
             tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : ''
         })
     }).then(function(r) { return r.json(); }).then(function(data) {
-        btn.disabled = false;
-        btn.textContent = '⚡ Auto-create credentials';
         if (data.error) {
-            statusEl.innerHTML = '<span style="color:#cf222e;">❌ ' + data.error + '</span>' +
-                (data.steps ? '<br><small style="color:var(--text-color-muted, #656d76);">' + data.steps.join('<br>') + '</small>' : '');
-            return;
+            var detail = data.steps && data.steps.length ? ' — ' + data.steps.join('; ') : '';
+            throw new Error(data.error + detail);
         }
-        // Populate the credential fields
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
         if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
         if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
-        // Clear the highlight if it was set
-        document.getElementById('auto-setup-section').style.border = '1px dashed var(--border-color-default, #d1d9e0)';
-        statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Credentials created successfully!</span><br><small style="color:var(--text-color-muted, #656d76);">' + (data.steps || []).join('<br>') + '</small>';
-    }).catch(function(err) {
-        btn.disabled = false;
-        btn.textContent = '⚡ Auto-create credentials';
-        statusEl.innerHTML = '<span style="color:#cf222e;">❌ Error: ' + err.message + '</span>';
+        return data;
     });
-});
+}
 
 document.getElementById('deploy-btn').addEventListener('click', function() {
     var btn = this;
     var statusEl = document.getElementById('deploy-status');
-    var env = envSelect.value === '__new__' ? document.getElementById('new-env-name').value : envSelect.value;
+    var env = envNameInput.value.trim();
     if (!env) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please enter an environment name.'; return; }
     var provider = activeProvider;
     var appFile = 'app.bicep';
@@ -1452,6 +1897,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
         namespace = getComboValue('azure-namespace-select', 'azure-namespace-custom') || 'default';
         resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
+        if (!resourceGroup) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a resource group.'; return; }
         if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an AKS cluster.'; return; }
     } else {
         cluster = getComboValue('aws-cluster-select', 'aws-cluster-custom');
@@ -1459,69 +1905,542 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         vpc = getComboValue('aws-vpc-select', 'aws-vpc-custom');
         subnets = getComboValue('aws-subnets-select', 'aws-subnets-custom');
         if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an EKS cluster.'; return; }
+        if (!vpc) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a VPC.'; return; }
+        if (!subnets) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify at least one subnet.'; return; }
     }
 
     btn.textContent = 'Creating environment...';
     btn.disabled = true;
-    statusEl.style.display = 'block';
-    statusEl.className = 'status';
-    statusEl.textContent = 'Setting up GitHub environment and workflows...';
+    statusEl.style.display = 'none';
 
-    // First create the GitHub environment with secrets, variables, and workflows
-    var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
-    envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
-    // Application parameters are not collected from the UI. The server parses the
-    // app.bicep only to auto-generate values for required params without a Bicep
-    // default (e.g. the app's @secure() password) and inlines the rest.
-    if (provider === 'azure') {
-        envData.clientId = document.getElementById('az-client-id').value.trim();
-        envData.tenantId = document.getElementById('az-tenant-id').value.trim();
-        envData.subscriptionId = document.getElementById('az-sub-id').value.trim();
-        envData.resourceGroup = resourceGroup;
-    } else {
-        envData.roleArn = document.querySelector('[data-aws-role-arn]')?.dataset?.awsRoleArn || '';
-        envData.region = document.querySelector('[data-aws-region]')?.dataset?.awsRegion || '';
-        envData.accountId = document.querySelector('[data-aws-account-id]')?.dataset?.awsAccountId || '';
-        envData.vpcId = vpc;
-        envData.subnetIds = subnets;
-    }
+    // Show the Figma-style "Creating … Environment …" modal overlay.
+    var creatingModal = document.getElementById('env-creating-modal');
+    var creatingTitle = document.getElementById('env-creating-title');
+    var providerLabel = provider === 'aws' ? 'AWS' : 'Azure';
 
-    fetch('/api/create-environment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(envData)
-    }).then(function(r) { return r.json(); }).then(function(envResult) {
-        if (envResult.error) {
-            btn.textContent = '🚀 Deploy Application';
-            btn.disabled = false;
-            statusEl.className = 'status error';
-            statusEl.textContent = 'Environment setup failed: ' + envResult.error;
-            return;
-        }
-        statusEl.textContent = '✅ Environment created. Starting deployment...';
-        btn.textContent = 'Deploying...';
-
-        // Now trigger the deploy
-        var branch = document.getElementById('deploy-branch-select').value || 'main';
-        return fetch('/api/deploy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ environment: env, provider: provider, appFile: appFile, targetRepo: targetRepo, branch: branch, cluster: cluster, namespace: namespace, resourceGroup: resourceGroup, vpc: vpc, subnets: subnets })
-        }).then(function() {
-            window.location.href = '/?page=deploying';
-        });
-    }).catch(function(err) {
-        btn.textContent = '🚀 Deploy Application';
+    function failEnv(msg) {
+        creatingModal.style.display = 'none';
+        btn.textContent = 'Create Environment';
         btn.disabled = false;
         statusEl.style.display = 'block';
         statusEl.className = 'status error';
-        statusEl.textContent = 'Failed: ' + (err.message || 'unknown error');
+        statusEl.textContent = msg;
+    }
+
+    // For Azure, create OIDC credentials as part of "Create Environment" when no
+    // client ID has been provided yet (verified/entered manually or from a prior
+    // auto-setup). This folds the old separate "Auto-create credentials" step in.
+    var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
+    var preflight;
+    if (needsAzureCreds) {
+        creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
+        creatingModal.style.display = 'flex';
+        preflight = runAzureAutoSetup({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster });
+    } else {
+        creatingTitle.innerHTML = 'Creating <strong>' + providerLabel + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
+        creatingModal.style.display = 'flex';
+        preflight = Promise.resolve(null);
+    }
+
+    preflight.then(function() {
+        creatingTitle.innerHTML = 'Creating <strong>' + providerLabel + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
+
+        // Build the environment payload with the (possibly just-created) credentials.
+        var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
+        envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
+        if (provider === 'azure') {
+            envData.clientId = document.getElementById('az-client-id').value.trim();
+            envData.tenantId = document.getElementById('az-tenant-id').value.trim();
+            envData.subscriptionId = document.getElementById('az-sub-id').value.trim();
+            envData.resourceGroup = resourceGroup;
+        } else {
+            envData.roleArn = document.querySelector('[data-aws-role-arn]')?.dataset?.awsRoleArn || '';
+            envData.region = document.querySelector('[data-aws-region]')?.dataset?.awsRegion || '';
+            envData.accountId = document.querySelector('[data-aws-account-id]')?.dataset?.awsAccountId || '';
+            envData.vpcId = vpc;
+            envData.subnetIds = subnets;
+        }
+
+        return fetch('/api/create-environment', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(envData)
+        }).then(function(r) { return r.json(); }).then(function(envResult) {
+            if (envResult.error) {
+                failEnv('Environment setup failed: ' + envResult.error);
+                return;
+            }
+            // Environment (credentials + workflows) is created and the verify
+            // workflow was dispatched. Wait for verification to complete before
+            // returning to the list — the environment isn't "ready" until both
+            // the GitHub environment exists AND credentials verify successfully.
+            creatingTitle.innerHTML = 'Verifying credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
+            btn.textContent = 'Verifying credentials...';
+
+            var pollStart = Date.now();
+            var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
+            function pollVerify() {
+                fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env))
+                    .then(function(r) { return r.json(); })
+                    .then(function(v) {
+                        if (v.state === 'success') {
+                            creatingModal.style.display = 'none';
+                            btn.textContent = 'Create Environment';
+                            btn.disabled = false;
+                            statusEl.style.display = 'none';
+                            showEnvLanding();
+                            loadEnvTable();
+                            return;
+                        }
+                        if (v.state === 'failed') {
+                            failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : ''));
+                            return;
+                        }
+                        if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) {
+                            failEnv('Timed out waiting for credential verification to complete.' + (v.runUrl ? ' It may still be running — view it at ' + v.runUrl : ''));
+                            return;
+                        }
+                        setTimeout(pollVerify, 5000);
+                    })
+                    .catch(function() {
+                        if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) {
+                            failEnv('Timed out waiting for credential verification to complete.');
+                            return;
+                        }
+                        setTimeout(pollVerify, 5000);
+                    });
+            }
+            pollVerify();
+        });
+    }).catch(function(err) {
+        failEnv('Failed: ' + (err.message || 'unknown error'));
     });
 });
 <\/script>`);
 }
 
 export function deployingPage(state) {
+    // The Deployments tab is always the landing page (application + environment
+    // selectors, a Deploy button, and a table of existing deployments). Live
+    // deployment progress (graph + logs) is shown on the Applications → Deployed
+    // tab instead, so navigating back here always shows the listing view.
+    return deployLandingView(state);
+}
+
+function deployLandingView(state) {
+    const ctxRepo = state?.contextRepo || state?.plannedRepo || state?.graphTargetRepo || state?.deployingRepo || '';
+    const ctxBranch = state?.contextBranch || state?.plannedBranch || state?.graphBranch || 'main';
+
+    return pageShell("Deployments", `
+<div class="rad-heading">
+  <h1>${radiusMark(26)}<span>Deployments</span></h1>
+  <p class="rad-lede">Deploy your application to one of your configured environments. Radius will provision the necessary cloud infrastructure required to run your application.</p>
+</div>
+
+<div class="rad-deploy-controls">
+  <div class="rad-field">
+    <label for="deploy-app-select">Application:</label>
+    <div class="rad-select-wrap"><select id="deploy-app-select"><option value="">Loading…</option></select></div>
+  </div>
+  <div class="rad-field">
+    <label for="deploy-env-select">Environment:</label>
+    <div class="rad-select-wrap"><select id="deploy-env-select"><option value="">Loading…</option></select></div>
+  </div>
+  <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
+</div>
+
+<div id="deploy-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
+
+<div class="rad-table-wrap">
+  <table class="rad-table">
+    <thead><tr><th>Application</th><th>Environment</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody id="deploy-table-body">
+      <tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Deploying (transition) modal -->
+<div id="deploy-progress-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
+  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:flex-start; gap:18px;">
+    <div id="deploy-progress-spinner" class="rad-spinner-lg" aria-hidden="true"></div>
+    <div id="deploy-progress-failicon" style="display:none; flex:none; font-size:26px; line-height:1;" aria-hidden="true">❌</div>
+    <div style="min-width:0; flex:1;">
+      <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
+      <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
+      <div id="deploy-progress-links" style="margin-top:12px; display:flex; flex-direction:column; gap:6px;">
+        <a id="deploy-view-graph" href="#" style="font-size:13px; color:var(--rad-link,#0969da); text-decoration:none; font-weight:500;">View App Graph</a>
+        <a id="deploy-view-workflow" href="#" target="_blank" rel="noopener noreferrer" style="font-size:13px; color:var(--rad-text-tertiary); text-decoration:none; font-weight:500; pointer-events:none;">Resolving workflow run…</a>
+      </div>
+      <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
+        <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Deleting (transition) modal -->
+<div id="deploy-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
+  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
+    <div class="rad-spinner-lg" aria-hidden="true"></div>
+    <div>
+      <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;">Deleting Deployment…</div>
+      <div id="deploy-deleting-text" style="font-size:13px; color:var(--rad-text-secondary);"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="rad-card" style="max-width:460px; width:90%; margin:0;">
+    <div class="rad-card__title" style="margin-bottom:8px;">Delete Deployment</div>
+    <p id="deploy-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
+    <div style="display:flex; justify-content:flex-end; gap:10px;">
+      <button id="deploy-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
+      <button id="deploy-delete-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete Deployment</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .rad-deploy-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:0 0 20px; }
+  .rad-field { display:flex; flex-direction:column; gap:8px; }
+  .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
+  .rad-select-wrap { position:relative; }
+  .rad-select-wrap select {
+    appearance:none; -webkit-appearance:none; min-width:230px; padding:9px 40px 9px 12px;
+    font-size:14px; color:var(--rad-text); background:var(--rad-surface);
+    border:1px solid var(--rad-stroke); border-radius:8px; cursor:pointer;
+  }
+  .rad-select-wrap::after {
+    content:""; position:absolute; right:14px; top:50%; width:8px; height:8px;
+    border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary);
+    transform:translateY(-70%) rotate(45deg); pointer-events:none;
+  }
+  .rad-btn--danger { background:#c93c37; color:#fff; }
+  .rad-btn--danger:hover { background:#b52f2a; }
+  .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; }
+  .rad-deploy-applink:hover { color:#388bfd; }
+  .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+
+<script>
+var CTX_REPO = ${JSON.stringify(ctxRepo)};
+var CTX_BRANCH = ${JSON.stringify(ctxBranch)};
+
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+
+var deployBtn = document.getElementById('deploy-now-btn');
+var appSelect = document.getElementById('deploy-app-select');
+var envSelect = document.getElementById('deploy-env-select');
+var inlineStatus = document.getElementById('deploy-inline-status');
+var ENV_PROVIDERS = {};
+var HAS_APPS = false;
+var HAS_ENVS = false;
+
+// Renders an inline status message. Defaults to textContent so server-provided
+// strings (e.g. error text) can never inject HTML. Pass isHtml=true only for
+// intentionally-built, escaped markup (see the delete-success link below).
+function showInline(kind, msg, isHtml) {
+    inlineStatus.style.display = 'block';
+    if (isHtml) inlineStatus.innerHTML = msg; else inlineStatus.textContent = msg;
+    if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
+    else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
+}
+
+function refreshDeployBtn() {
+    // The primary button adapts to what's missing:
+    //   • no application options  → "Create Application" (go model an app)
+    //   • app but no environments → "Create Environment"
+    //   • otherwise               → "Deploy" (enabled once app+env chosen)
+    if (!HAS_APPS) {
+        deployBtn.dataset.mode = 'create-app';
+        deployBtn.textContent = 'Create Application';
+        deployBtn.disabled = false;
+    } else if (!HAS_ENVS) {
+        deployBtn.dataset.mode = 'create-env';
+        deployBtn.textContent = 'Create Environment';
+        deployBtn.disabled = false;
+    } else {
+        deployBtn.dataset.mode = 'deploy';
+        deployBtn.textContent = 'Deploy';
+        deployBtn.disabled = !(CTX_REPO && appSelect.value && envSelect.value);
+    }
+}
+
+function loadApplications() {
+    if (!CTX_REPO) { appSelect.innerHTML = '<option value="">No repository</option>'; return; }
+    fetch('/api/list-applications?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var apps = (d && d.applications) || [];
+            HAS_APPS = apps.length > 0;
+            if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; refreshDeployBtn(); return; }
+            appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
+            // Pre-select the application passed via ?app= (e.g. from the
+            // "Deploy Application" button on the Application Graph page).
+            try {
+                var preApp = new URLSearchParams(window.location.search).get('app');
+                if (preApp) {
+                    var hasApp = apps.some(function(a) { return a.name === preApp; });
+                    if (!hasApp) {
+                        var o = document.createElement('option');
+                        o.value = preApp; o.textContent = preApp;
+                        appSelect.insertBefore(o, appSelect.firstChild);
+                    }
+                    appSelect.value = preApp;
+                }
+            } catch (e) {}
+            refreshDeployBtn();
+        })
+        .catch(function() { appSelect.innerHTML = '<option value="">Could not load</option>'; });
+}
+
+function loadEnvironmentsDropdown() {
+    if (!CTX_REPO) { envSelect.innerHTML = '<option value="">No repository</option>'; return; }
+    fetch('/api/list-environments?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var envs = (d && d.environments) || [];
+            HAS_ENVS = envs.length > 0;
+            if (envs.length === 0) { envSelect.innerHTML = '<option value="">No environments</option>'; refreshDeployBtn(); return; }
+            ENV_PROVIDERS = {};
+            envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || 'azure'; });
+            envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
+            // Pre-select the environment passed via ?env= (e.g. from the
+            // "Deploy Apps" button on the environments list).
+            try {
+                var preEnv = new URLSearchParams(window.location.search).get('env');
+                if (preEnv && ENV_PROVIDERS.hasOwnProperty(preEnv)) { envSelect.value = preEnv; }
+            } catch (e) {}
+            refreshDeployBtn();
+        })
+        .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+}
+
+function statusCell(status) {
+    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'], deleting: ['pending','Deleting…'] };
+    var m = map[status] || map.pending;
+    return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
+}
+
+function loadDeployments() {
+    var body = document.getElementById('deploy-table-body');
+    if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
+    body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
+    fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var deps = (d && d.deployments) || [];
+            if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
+            var appHref = 'https://github.com/' + CTX_REPO;
+            body.innerHTML = deps.map(function(dep) {
+                var statusHtml = statusCell(dep.status);
+                if (dep.runUrl) {
+                    statusHtml = '<a class="rad-status-link" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + statusHtml + '</a>';
+                }
+                return '<tr>' +
+                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(appHref) + '" target="_blank" rel="noopener noreferrer">↗ ' + escapeHtmlClient(dep.app) + '</a></td>' +
+                    '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
+                    '<td>' + statusHtml + '</td>' +
+                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
+                '</tr>';
+            }).join('');
+            wireDeleteButtons();
+        })
+        .catch(function() { body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
+}
+
+// --- Delete deployment modal ---
+var delModal = document.getElementById('deploy-delete-modal');
+var delText = document.getElementById('deploy-delete-text');
+var delConfirm = document.getElementById('deploy-delete-confirm');
+var delCancel = document.getElementById('deploy-delete-cancel');
+var pendingDelete = null;
+
+function wireDeleteButtons() {
+    document.querySelectorAll('.js-del-dep').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            pendingDelete = { environment: this.dataset.env, app: this.dataset.app };
+            delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(pendingDelete.app) + '</strong> in environment <strong>' + escapeHtmlClient(pendingDelete.environment) + '</strong>?';
+            delModal.style.display = 'flex';
+        });
+    });
+}
+delCancel.addEventListener('click', function() { delModal.style.display = 'none'; pendingDelete = null; });
+delModal.addEventListener('click', function(e) { if (e.target === delModal) { delModal.style.display = 'none'; pendingDelete = null; } });
+delConfirm.addEventListener('click', function() {
+    if (!pendingDelete) return;
+    var dep = pendingDelete;
+    delModal.style.display = 'none';
+    document.getElementById('deploy-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(dep.app) + '</strong> from <strong>' + escapeHtmlClient(dep.environment) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
+    document.getElementById('deploy-deleting-modal').style.display = 'flex';
+    fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        .then(function(res) {
+            document.getElementById('deploy-deleting-modal').style.display = 'none';
+            pendingDelete = null;
+            if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
+            showInline('success', 'Delete workflow started' + (res.d && res.d.runUrl ? ' — <a href="' + escapeHtmlClient(res.d.runUrl) + '" target="_blank" rel="noopener noreferrer">view run ↗</a>' : '') + '.', true);
+            loadDeployments();
+        })
+        .catch(function() {
+            document.getElementById('deploy-deleting-modal').style.display = 'none';
+            pendingDelete = null;
+            showInline('error', 'Could not delete the deployment. Please try again.');
+        });
+});
+
+appSelect.addEventListener('change', refreshDeployBtn);
+envSelect.addEventListener('change', refreshDeployBtn);
+
+// Restore the deploy modal to its default "in progress" (spinner) layout. The
+// modal is mutated in place when a deploy fails, so we reset before each run.
+function resetDeployModal() {
+    var spin = document.getElementById('deploy-progress-spinner');
+    var fail = document.getElementById('deploy-progress-failicon');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var links = document.getElementById('deploy-progress-links');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    if (spin) spin.style.display = '';
+    if (fail) fail.style.display = 'none';
+    if (sub) { sub.textContent = 'This may take a few minutes…'; sub.style.color = 'var(--rad-text-secondary)'; }
+    if (links) links.style.display = 'flex';
+    if (failActions) failActions.style.display = 'none';
+}
+
+// Switch the deploy modal into a "failed" state: swap the spinner for an error
+// icon, show the error message, and offer a button back to the deployments list.
+function showDeployFailed(app, env, errText, runUrl) {
+    var modal = document.getElementById('deploy-progress-modal');
+    var spin = document.getElementById('deploy-progress-spinner');
+    var fail = document.getElementById('deploy-progress-failicon');
+    var title = document.getElementById('deploy-progress-title');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var links = document.getElementById('deploy-progress-links');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    if (spin) spin.style.display = 'none';
+    if (fail) fail.style.display = '';
+    if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
+    if (sub) {
+        var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
+        if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
+        sub.innerHTML = msg;
+        sub.style.color = '#cf222e';
+    }
+    if (links) links.style.display = 'none';
+    if (failActions) failActions.style.display = 'block';
+    if (modal) modal.style.display = 'flex';
+    deployBtn.disabled = false;
+    refreshDeployBtn();
+}
+
+// "Back to Deployments" dismisses the failed dialog and refreshes the list.
+(function() {
+    var backBtn = document.getElementById('deploy-fail-back');
+    if (backBtn) backBtn.addEventListener('click', function() {
+        var modal = document.getElementById('deploy-progress-modal');
+        if (modal) modal.style.display = 'none';
+        resetDeployModal();
+        loadDeployments();
+    });
+})();
+
+deployBtn.addEventListener('click', function() {
+    var mode = deployBtn.dataset.mode || 'deploy';
+    if (mode === 'create-app') { window.location.href = '/?page=graph'; return; }
+    if (mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    var env = envSelect.value;
+    var app = appSelect.value;
+    if (!CTX_REPO || !env || !app) return;
+    var provider = ENV_PROVIDERS[env] || 'azure';
+    resetDeployModal();
+    deployBtn.disabled = true;
+    deployBtn.textContent = 'Deploying…';
+    var progTitle = document.getElementById('deploy-progress-title');
+    progTitle.innerHTML = 'Deploying <strong>' + escapeHtmlClient(app) + '</strong> to environment <strong>' + escapeHtmlClient(env) + '</strong>';
+    // "View App Graph" routes to the Applications → Deployed tab (graph + logs).
+    var graphLink = document.getElementById('deploy-view-graph');
+    graphLink.setAttribute('href', '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app));
+    // "View Workflow in GitHub" resolves once the dispatched run is detected.
+    var wfLink = document.getElementById('deploy-view-workflow');
+    wfLink.textContent = 'Resolving workflow run…';
+    wfLink.removeAttribute('href');
+    wfLink.style.pointerEvents = 'none';
+    wfLink.style.color = 'var(--rad-text-tertiary)';
+    document.getElementById('deploy-progress-modal').style.display = 'flex';
+
+    // Poll deploy-status until the workflow run URL is available, then wire the
+    // "View Workflow in GitHub" link. We stay on the Deployments page; the dialog
+    // persists so the user can open either link at their convenience.
+    var wfResolved = false;
+    var wfPoll = setInterval(function() {
+        fetch('/api/deploy-status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (!wfResolved && d && d.deployRunUrl) {
+                    wfResolved = true;
+                    wfLink.textContent = 'View Workflow in GitHub ↗';
+                    wfLink.setAttribute('href', d.deployRunUrl);
+                    wfLink.style.pointerEvents = '';
+                    wfLink.style.color = 'var(--rad-link,#0969da)';
+                    loadDeployments();
+                }
+                if (d && d.status === 'failed') {
+                    clearInterval(wfPoll);
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '');
+                    loadDeployments();
+                    return;
+                }
+                if (d && (d.status === 'success' || d.status === 'complete')) {
+                    clearInterval(wfPoll);
+                    loadDeployments();
+                }
+            })
+            .catch(function() {});
+    }, 2500);
+
+    fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: CTX_BRANCH, appFile: '.radius/app.bicep' })
+    }).then(function(r) { return r.json().catch(function() { return {}; }); })
+      .catch(function() {
+          clearInterval(wfPoll);
+          document.getElementById('deploy-progress-modal').style.display = 'none';
+          deployBtn.disabled = false;
+          refreshDeployBtn();
+          showInline('error', 'Could not start the deployment. Please try again.');
+      });
+});
+
+// Dismiss the deploy dialog by clicking the backdrop; the deployment keeps
+// running in the background and shows up in the deployments table.
+(function() {
+    var pm = document.getElementById('deploy-progress-modal');
+    if (pm) pm.addEventListener('click', function(e) {
+        if (e.target === pm) {
+            pm.style.display = 'none';
+            resetDeployModal();
+            deployBtn.disabled = false;
+            refreshDeployBtn();
+            loadDeployments();
+        }
+    });
+})();
+
+loadApplications();
+loadEnvironmentsDropdown();
+loadDeployments();
+<\/script>`, 'deployments');
+}
+
+function deployProgressView(state) {
     const resources = state?.deployingResources || state?.plannedResources || [];
     const targetRepo = state?.deployingRepo || state?.deployParams?.targetRepo || state?.plannedRepo || state?.contextRepo || '';
     const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || state?.contextBranch || 'main';
@@ -1533,7 +2452,7 @@ export function deployingPage(state) {
     const logsJson = JSON.stringify(logs);
 
     return pageShell("Deploying", `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#C9452B"/><circle cx="64" cy="64" r="56" fill="#BF3E24" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Deployment Progress</h1>
+<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Deployment Progress</h1>
 <p style="margin-bottom:12px; color: var(--text-color-muted, #656d76);">
   Deploying <strong>${escapeHtml(targetRepo)}</strong> (branch: <code>${escapeHtml(targetBranch)}</code>) to ${provider === 'aws' ? 'AWS' : 'Azure'}
 </p>
@@ -1579,7 +2498,7 @@ var DEPLOY_PROVIDER = ${JSON.stringify(provider)};
 if (resources.length === 0) {
     var emptyMsg = document.getElementById('graph-container');
     function showPlanningSpinner(msg) {
-        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid #e1e4e8;border-top-color:#0969da;border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
+        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid #e1e4e8;border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
     }
     showPlanningSpinner('Loading deployment resources...');
     fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
