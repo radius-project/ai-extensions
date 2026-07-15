@@ -5,7 +5,7 @@ export default defineConfig({
     include: ["src/**/*_test.mjs"],
     environment: "node",
     coverage: {
-      include: ["src/pages.mjs", "src/client.mjs", "src/server.mjs"],
+      include: ["src/pages.mjs", "src/client.mjs", "src/server.mjs", "src/hooks.mjs"],
     },
   },
 });

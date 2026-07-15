@@ -23,6 +23,7 @@ import {
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
+import { evaluateAppBicepHook } from "./hooks.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -550,6 +551,21 @@ only; do not generate or reference singleton recipes for custom types.`;
         },
     ],
     hooks: {
+        // Guard the graph-generating tool calls: if a graph page is opened (or a
+        // PR graph diff is generated) while no .radius/app.bicep exists, deny the
+        // call and instruct the agent to author + SAVE it via the radius-app-bicep
+        // skill first. The extension never writes bicep itself; it only triggers
+        // the skill. Fail open — a hook error must never break tool execution.
+        onPreToolUse: async (input) => {
+            try {
+                return await evaluateAppBicepHook(
+                    { toolName: input.toolName, toolArgs: input.toolArgs },
+                    { workspaceState, fetchBicep: fetchBicepForBranch, defaultBranchForState },
+                );
+            } catch {
+                return undefined;
+            }
+        },
         onSessionStart: async () => {
             return {
                 additionalContext: `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
@@ -568,6 +584,8 @@ When the user asks to "show me the app graph", "show me the application graph", 
 1. First, check if .radius/app.bicep (or app.bicep) exists in the repository.
 2. If app.bicep does NOT exist, generate it using the radius_generate_app tool. IMPORTANT: Use ONLY Radius.* namespaces (e.g., Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets). NEVER use Applications.* namespaces.
 3. Only AFTER app.bicep exists in the session worktree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
+
+The same rule applies to the "planned" and "graph-diff" pages: they render from .radius/app.bicep, so if it does not exist, first create AND SAVE it with the radius_generate_app tool (radius-app-bicep skill) using ONLY Radius.* namespaces before opening those pages.
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
 
