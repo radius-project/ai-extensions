@@ -151,7 +151,7 @@ Do NOT use any type not listed above. Do NOT invent properties.
 
 ## Extension
 
-Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Only ever create or update `.radius/bicepconfig.json`, never a config outside `.radius/`. Prefer an immutable extension reference when a specific schema revision is required.
+Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Only ever create or update `.radius/bicepconfig.json`, never a config outside `.radius/`.
 
 ## bicepconfig.json
 
@@ -172,7 +172,7 @@ Declare exactly one extension, `extension radius`. It provides every Radius type
 }
 ```
 
-Add an `"aws": "br:biceptypes.azurecr.io/aws:latest"` extension entry only when `app.bicep` declares AWS-native resources; omit it otherwise. The `radius:latest` tag is mutable and can drift; pin an immutable reference instead when a specific schema revision is required.
+Add an `"aws": "br:biceptypes.azurecr.io/aws:latest"` extension entry only when `app.bicep` declares AWS-native resources; omit it otherwise. Default to the `radius:latest` tag. Pin an immutable reference only when a specific version is provided (by an existing `bicepconfig.json`, the user, or the target Environment); the skill does not infer a version from source.
 
 ## app.bicep Structure (mandatory order)
 
