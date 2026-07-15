@@ -52,6 +52,11 @@ import {
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
 
+// Short-lived cache for the /api/list-environments listing to keep the planned
+// and deploy pages snappy. Invalidated on environment creation.
+const ENV_LIST_TTL_MS = 15000;
+const envListCache = new Map(); // repo -> { at, payload }
+
 // Handoff callback registered by the SDK entry (extension.mjs). The server has
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
