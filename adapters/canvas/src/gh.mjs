@@ -86,6 +86,9 @@ export function runCommand(cmd, args, opts = {}) {
 // Run gh with only its stored keyring credential. This is intentionally stricter
 // than cliExec's normal fallback because package bootstrap must never inherit an
 // ambient workflow/app token whose package visibility semantics may differ.
+// Deleting GH_HOST pins these calls to github.com. That is intentional: the GHCR
+// and GitHub Packages API paths in this feature are hardcoded to ghcr.io/github.com,
+// so package bootstrap is github.com-only and does not support GHES today.
 export function runGhKeyringCommand(args, opts = {}) {
     const env = { ...(opts.env || process.env) };
     delete env.GH_TOKEN;

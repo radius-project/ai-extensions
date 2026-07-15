@@ -337,14 +337,10 @@ export async function bootstrapGHCRStatePackage({
     let metadata = null;
     for (let attempt = 0; attempt < metadataAttempts; attempt++) {
         metadata = await githubJson(fetchImpl, endpoint, auth.token, true);
-        if (metadata) {
-            if (metadata.visibility !== "private" && metadata.visibility !== "internal") {
-                validatePackage(metadata, targetRepository);
-            }
-            if (metadata.repository?.full_name?.toLowerCase() === targetRepository.toLowerCase()) {
-                validatePackage(metadata, targetRepository);
-                return { registry, bootstrapTag: BOOTSTRAP_TAG, visibility: metadata.visibility };
-            }
+        // validatePackage fails fast on public visibility and on a wrong repository
+        // link; a not-yet-propagated (missing) link returns false so we keep retrying.
+        if (metadata && validatePackage(metadata, targetRepository, true)) {
+            return { registry, bootstrapTag: BOOTSTRAP_TAG, visibility: metadata.visibility };
         }
         if (attempt + 1 < metadataAttempts) {
             await sleep(Math.min(500 * 2 ** attempt, 4000));
