@@ -9,9 +9,17 @@
 
 import { randomBytes } from "node:crypto";
 
-// Parameters the deploy workflow supplies itself; never surface these in the UI
-// or provision them as application parameters.
-export const WORKFLOW_MANAGED_PARAMS = new Set(["environment", "image"]);
+// Parameters supplied outside the app-parameter provisioning path; never surface
+// these in the UI, auto-generate values for them, or inline them into the
+// `rad deploy` command. `environment` and `application` are injected by the rad
+// CLI at deploy time (the CLI resolves them from the workspace/environment
+// context, per Radius' automatic parameter injection), and `image` is supplied
+// by the deploy workflow. Auto-generating a random `application` value here would
+// both corrupt the application name and make `rad deploy` reject the deployment
+// when the template does not declare an `application` parameter
+// ("The following parameters were supplied, but do not correspond to any
+// parameters defined in the template: 'application'").
+export const WORKFLOW_MANAGED_PARAMS = new Set(["environment", "application", "image"]);
 
 // Parse `param` declarations from Bicep source. Returns one entry per parameter:
 //   { name, type, secure, hasDefault, default, description }
