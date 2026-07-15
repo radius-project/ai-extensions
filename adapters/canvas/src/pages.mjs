@@ -2316,7 +2316,9 @@ function resetDeployModal() {
 
 // Switch the deploy modal into a "failed" state: swap the spinner for an error
 // icon, show the error message, and offer a button back to the deployments list.
-function showDeployFailed(app, env, errText, runUrl) {
+// The kind argument lets us render a cleaner, tailored panel for well-known
+// failures (e.g. a branch that hasn't been pushed) instead of raw CLI stderr.
+function showDeployFailed(app, env, errText, runUrl, kind, branch) {
     var modal = document.getElementById('deploy-progress-modal');
     var spin = document.getElementById('deploy-progress-spinner');
     var fail = document.getElementById('deploy-progress-failicon');
@@ -2326,16 +2328,43 @@ function showDeployFailed(app, env, errText, runUrl) {
     var failActions = document.getElementById('deploy-progress-fail-actions');
     if (spin) spin.style.display = 'none';
     if (fail) fail.style.display = '';
-    if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
-    if (sub) {
-        var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
-        if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
-        sub.innerHTML = msg;
-        sub.style.color = '#cf222e';
+    if (kind === 'branch-not-pushed') {
+        var br = branch || 'your branch';
+        var pushCmd = 'git push -u origin ' + br;
+        if (title) title.innerHTML = 'Branch not pushed yet';
+        if (sub) {
+            sub.style.color = 'var(--rad-text-secondary)';
+            sub.innerHTML =
+                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\'t been pushed to GitHub yet, so there\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
+                '<div style="margin-top:10px; color:var(--rad-text-secondary);">Push it, then deploy again:</div>' +
+                '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-surface-2,#f0f1f2); border:1px solid var(--rad-border,#d0d7de); border-radius:6px; padding:8px 10px;">' +
+                  '<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">' + escapeHtmlClient(pushCmd) + '</code>' +
+                  '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
+                '</div>';
+        }
+    } else {
+        if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
+        if (sub) {
+            var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
+            if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
+            sub.innerHTML = msg;
+            sub.style.color = '#cf222e';
+        }
     }
     if (links) links.style.display = 'none';
     if (failActions) failActions.style.display = 'block';
     if (modal) modal.style.display = 'flex';
+    // Wire the copy button (present only for the branch-not-pushed panel).
+    var copyBtn = document.getElementById('deploy-copy-push');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', function() {
+            var cmd = 'git push -u origin ' + (branch || '');
+            var done = function() { copyBtn.textContent = 'Copied'; setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500); };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(cmd).then(done).catch(function() {});
+            }
+        });
+    }
     deployBtn.disabled = false;
     refreshDeployBtn();
 }
@@ -2393,7 +2422,7 @@ deployBtn.addEventListener('click', function() {
                 }
                 if (d && d.status === 'failed') {
                     clearInterval(wfPoll);
-                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '');
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '');
                     loadDeployments();
                     return;
                 }
