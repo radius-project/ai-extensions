@@ -86,7 +86,7 @@ export function nodeCard(title, typeLabel, iconHtml) {
 // --- Nav icons — the exact artwork from the Figma file (Applications page) -----
 // Each is a black line-art PNG exported from Figma, applied as a CSS mask so it
 // paints in `currentColor` and therefore follows the pill's theme + active state.
-function navIcon(dataUri, size = 18) {
+function navIcon(dataUri, size = 22) {
     return `<span aria-hidden="true" style="display:inline-block;width:${size}px;height:${size}px;`
         + `background-color:currentColor;`
         + `-webkit-mask:url(${dataUri}) center/contain no-repeat;`
