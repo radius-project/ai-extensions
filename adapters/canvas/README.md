@@ -29,6 +29,6 @@ modules and the TypeScript core) is bundled.
 
 ## Extending
 
-See the architecture recipes in
+See the architecture guides in
 [`radius-core/README.md`](../../radius-core/README.md) for
 adding a compute platform, a canvas action/tool, or a new UI adapter.

@@ -4,7 +4,7 @@ Radius Canvas is the application-modeling + deployment product behind the Radius
 GitHub canvas. This document describes how the code is laid out after the
 modularization refactor (see
 [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md))
-and gives step-by-step recipes for the three changes contributors make most
+and gives step-by-step guides for the three changes contributors make most
 often: **adding a compute platform**, **adding a canvas action/tool**, and
 **adding a whole new UI adapter**.
 
@@ -41,9 +41,9 @@ DOM. Anything that touches the outside world is reached through a **port**
 (`src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`, `Logger`.
 Adapters depend on the core, supply port implementations, and own all
 UI/transport concerns. This keeps the product logic testable in isolation and
-makes a second UI (recipe 3) a thin layer rather than a fork.
+makes a second UI (guide 3) a thin layer rather than a fork.
 
-## Recipe 1 — Add a compute platform
+## Guide 1: Add a compute platform
 
 Everything provider-specific lives behind the `ComputePlatform` interface
 (`src/platforms/types.ts`): OIDC bootstrap, portal deep-links, and the
@@ -63,7 +63,7 @@ platform never requires touching the workflow templates or any UI adapter.
 
 No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
 
-## Recipe 2 — Add a canvas action / tool
+## Guide 2: Add a canvas action / tool
 
 Actions are invoked on an open canvas; tools are callable by the agent. Both are
 declared in the `joinSession({ canvases, tools })` block in
@@ -82,7 +82,7 @@ declared in the `joinSession({ canvases, tools })` block in
    into `PAGE_RENDERERS` in `server.mjs`.
 5. `pnpm build:canvas`.
 
-## Recipe 3 — Add a new UI adapter
+## Guide 3: Add a new UI adapter
 
 Because all product logic is in `radius-core` behind ports, a new front-end
 (browser panel, chat surface, CLI) is a thin adapter:
