@@ -155,10 +155,10 @@ Declare exactly one extension, `extension radius`. It provides every Radius type
 
 ## bicepconfig.json
 
-`app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Always create or update `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`); only ever write that file, never a `bicepconfig.json` outside `.radius/`.
+`app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Always create or update `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`) so it fits the generated `app.bicep`; only ever write that file, never a `bicepconfig.json` outside `.radius/`.
 
-- If `.radius/bicepconfig.json` already exists, update it in place: keep every existing key and reference, and add only what `app.bicep` needs that is missing. An already-correct file produces an empty diff.
-- If it does not exist, create it. When a `bicepconfig.json` in a parent directory already applies to `.radius/app.bicep`, use it as the starting point — carry its `radius` extension reference and settings into the new `.radius/bicepconfig.json` rather than overriding them — but do not modify the parent file.
+- If `.radius/bicepconfig.json` already exists, update it to fit `app.bicep`: add or correct what `app.bicep` needs (the `radius` extension reference, `extensibility`, and `aws` when required), preserve unrelated existing settings, and change or remove entries only where they conflict with what `app.bicep` needs. An already-correct file produces an empty diff.
+- If it does not exist, create it. When a `bicepconfig.json` in a parent directory already applies to `.radius/app.bicep`, use it as the starting point and adjust the new `.radius/bicepconfig.json` so it fits `app.bicep` (keep the parent's compatible settings; add, correct, or drop entries as needed); do not modify the parent file.
 - When there is nothing to carry forward, create `.radius/bicepconfig.json` with:
 
 ```json
