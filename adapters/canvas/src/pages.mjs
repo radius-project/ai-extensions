@@ -540,7 +540,7 @@ var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
         .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
 })();
 
-// Populate the Branch dropdown with NO branch pre-selected.
+// Populate the Branch dropdown, defaulting to the current worktree branch.
 (function() {
     var branchSel = document.getElementById('graph-branch');
     if (!CONTEXT_REPO) { branchSel.innerHTML = '<option value="">No repository context</option>'; return; }
@@ -548,13 +548,19 @@ var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var branches = (d && d.branches) || [];
+            var workspaceBranch = (d && d.workspaceBranch) || CONTEXT_BRANCH || '';
             branchSel.innerHTML = '<option value="">— Select a branch —</option>';
             branches.forEach(function(b) {
                 var o = document.createElement('option');
                 o.value = b.name;
                 o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
+                if (workspaceBranch && b.name === workspaceBranch) o.selected = true;
                 branchSel.appendChild(o);
             });
+            // Default to the current worktree branch and auto-generate its graph.
+            if (workspaceBranch && branchSel.value === workspaceBranch) {
+                branchSel.dispatchEvent(new Event('change'));
+            }
         })
         .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
 })();
@@ -1794,6 +1800,12 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
     var subId = document.getElementById('az-sub-id').value.trim();
     var verifyModal = document.getElementById('env-verify-modal');
 
+    if (!tenantId || !subId) {
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = '<span style="color:#cf222e;">❌ Please enter both a Tenant ID and a Subscription ID before verifying.</span>';
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = '⏳ Verifying...';
     verifyModal.style.display = 'flex';
@@ -1885,6 +1897,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
         namespace = getComboValue('azure-namespace-select', 'azure-namespace-custom') || 'default';
         resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
+        if (!resourceGroup) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a resource group.'; return; }
         if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an AKS cluster.'; return; }
     } else {
         cluster = getComboValue('aws-cluster-select', 'aws-cluster-custom');
@@ -1892,6 +1905,8 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
         vpc = getComboValue('aws-vpc-select', 'aws-vpc-custom');
         subnets = getComboValue('aws-subnets-select', 'aws-subnets-custom');
         if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an EKS cluster.'; return; }
+        if (!vpc) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a VPC.'; return; }
+        if (!subnets) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify at least one subnet.'; return; }
     }
 
     btn.textContent = 'Creating environment...';
@@ -2048,13 +2063,17 @@ function deployLandingView(state) {
 <!-- Deploying (transition) modal -->
 <div id="deploy-progress-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
   <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:flex-start; gap:18px;">
-    <div class="rad-spinner-lg" aria-hidden="true"></div>
-    <div style="min-width:0;">
+    <div id="deploy-progress-spinner" class="rad-spinner-lg" aria-hidden="true"></div>
+    <div id="deploy-progress-failicon" style="display:none; flex:none; font-size:26px; line-height:1;" aria-hidden="true">❌</div>
+    <div style="min-width:0; flex:1;">
       <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
-      <div style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
-      <div style="margin-top:12px; display:flex; flex-direction:column; gap:6px;">
+      <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
+      <div id="deploy-progress-links" style="margin-top:12px; display:flex; flex-direction:column; gap:6px;">
         <a id="deploy-view-graph" href="#" style="font-size:13px; color:var(--rad-link,#0969da); text-decoration:none; font-weight:500;">View App Graph</a>
         <a id="deploy-view-workflow" href="#" target="_blank" rel="noopener noreferrer" style="font-size:13px; color:var(--rad-text-tertiary); text-decoration:none; font-weight:500; pointer-events:none;">Resolving workflow run…</a>
+      </div>
+      <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
+        <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
       </div>
     </div>
   </div>
@@ -2277,6 +2296,58 @@ delConfirm.addEventListener('click', function() {
 appSelect.addEventListener('change', refreshDeployBtn);
 envSelect.addEventListener('change', refreshDeployBtn);
 
+// Restore the deploy modal to its default "in progress" (spinner) layout. The
+// modal is mutated in place when a deploy fails, so we reset before each run.
+function resetDeployModal() {
+    var spin = document.getElementById('deploy-progress-spinner');
+    var fail = document.getElementById('deploy-progress-failicon');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var links = document.getElementById('deploy-progress-links');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    if (spin) spin.style.display = '';
+    if (fail) fail.style.display = 'none';
+    if (sub) { sub.textContent = 'This may take a few minutes…'; sub.style.color = 'var(--rad-text-secondary)'; }
+    if (links) links.style.display = 'flex';
+    if (failActions) failActions.style.display = 'none';
+}
+
+// Switch the deploy modal into a "failed" state: swap the spinner for an error
+// icon, show the error message, and offer a button back to the deployments list.
+function showDeployFailed(app, env, errText, runUrl) {
+    var modal = document.getElementById('deploy-progress-modal');
+    var spin = document.getElementById('deploy-progress-spinner');
+    var fail = document.getElementById('deploy-progress-failicon');
+    var title = document.getElementById('deploy-progress-title');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var links = document.getElementById('deploy-progress-links');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    if (spin) spin.style.display = 'none';
+    if (fail) fail.style.display = '';
+    if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
+    if (sub) {
+        var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
+        if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
+        sub.innerHTML = msg;
+        sub.style.color = '#cf222e';
+    }
+    if (links) links.style.display = 'none';
+    if (failActions) failActions.style.display = 'block';
+    if (modal) modal.style.display = 'flex';
+    deployBtn.disabled = false;
+    refreshDeployBtn();
+}
+
+// "Back to Deployments" dismisses the failed dialog and refreshes the list.
+(function() {
+    var backBtn = document.getElementById('deploy-fail-back');
+    if (backBtn) backBtn.addEventListener('click', function() {
+        var modal = document.getElementById('deploy-progress-modal');
+        if (modal) modal.style.display = 'none';
+        resetDeployModal();
+        loadDeployments();
+    });
+})();
+
 deployBtn.addEventListener('click', function() {
     var mode = deployBtn.dataset.mode || 'deploy';
     if (mode === 'create-app') { window.location.href = '/?page=graph'; return; }
@@ -2285,6 +2356,7 @@ deployBtn.addEventListener('click', function() {
     var app = appSelect.value;
     if (!CTX_REPO || !env || !app) return;
     var provider = ENV_PROVIDERS[env] || 'azure';
+    resetDeployModal();
     deployBtn.disabled = true;
     deployBtn.textContent = 'Deploying…';
     var progTitle = document.getElementById('deploy-progress-title');
@@ -2316,7 +2388,13 @@ deployBtn.addEventListener('click', function() {
                     wfLink.style.color = 'var(--rad-link,#0969da)';
                     loadDeployments();
                 }
-                if (d && (d.status === 'success' || d.status === 'failed')) {
+                if (d && d.status === 'failed') {
+                    clearInterval(wfPoll);
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '');
+                    loadDeployments();
+                    return;
+                }
+                if (d && (d.status === 'success' || d.status === 'complete')) {
                     clearInterval(wfPoll);
                     loadDeployments();
                 }
@@ -2345,6 +2423,7 @@ deployBtn.addEventListener('click', function() {
     if (pm) pm.addEventListener('click', function(e) {
         if (e.target === pm) {
             pm.style.display = 'none';
+            resetDeployModal();
             deployBtn.disabled = false;
             refreshDeployBtn();
             loadDeployments();
