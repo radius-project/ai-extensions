@@ -21,7 +21,7 @@ import {
 import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold, commitFileToRepo } from "./gh.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
@@ -35,7 +35,7 @@ import {
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
-  DEPLOY_DISPATCHER_FILE, DEPLOY_AWS_FILE,
+  DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE,
   DELETE_APP_DISPATCHER_FILE, DELETE_AWS_FILE,
 } from "./infra.mjs";
 import {
@@ -85,7 +85,38 @@ function deleteLegacyDeployWorkflow(targetRepo) {
     });
 }
 
-// Timestamp of the last request served to any canvas webview. Updated by the
+// Ensure the deploy workflow files exist on `branch` so that dispatching
+// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
+// itself and the provider workflow it pulls in via a local-path `uses:`. The
+// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
+// contents API commit is branch-less), so a feature/worktree branch usually
+// lacks them. Missing files are generated from the pinned upstream templates and
+// committed onto `branch`; existing ones are left untouched. Best-effort per
+// file — a commit failure is surfaced by the caller, not thrown here.
+async function ensureDeployWorkflowsOnBranch(repo, branch, envName, log = () => {}) {
+    if (!repo || !branch) return;
+    // Only the dispatcher + the Azure provider workflow are published to target
+    // repos today (the AWS provider file is intentionally withheld, matching the
+    // env-creation commit step), so those are the two a `--ref` dispatch needs.
+    const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+    const existsOnBranch = (file) => new Promise((resolve) => {
+        cliExec('gh', ['api', `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`, '--jq', '.sha'],
+            { timeout: 15000 }, (err, stdout) => resolve(!err && !!(stdout || '').trim()));
+    });
+    const presence = await Promise.all(wanted.map(existsOnBranch));
+    const missing = wanted.filter((_, i) => !presence[i]);
+    if (missing.length === 0) return;
+    log('Publishing deploy workflow(s) to branch "' + branch + '": ' + missing.join(', '));
+    const generated = await generateDeployWorkflow(envName, '.radius/app.bicep');
+    for (const file of missing) {
+        const content = generated && generated[file];
+        if (!content) continue;
+        await commitFileToRepo(repo, '.github/workflows/' + file, content, branch,
+            'Add Radius deploy workflow (' + file + ') to ' + branch + ' for worktree-consistent deploy');
+    }
+}
+
+
 // request handler and read by the host-channel keepalive via the getter below
 // to tell whether a panel is actively open (so the process isn't idle-reaped).
 let lastWebviewActivityAt = 0;
@@ -554,6 +585,23 @@ function createRequestHandler(instanceId) {
                         bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', paramBranch);
                         bicepPath = 'app.bicep';
                     }
+                    // Fall back to the repo default branch if the requested branch
+                    // has no app.bicep (e.g. an unpushed worktree branch). Without
+                    // this, step 2b would silently write neither RADIUS_DEPLOY_PARAMS
+                    // nor RADIUS_RAD_COMMANDS, leaving the deploy with no password
+                    // and a missing rad command.
+                    if (!bicepSource && paramBranch !== 'main') {
+                        const fallbackBranch = 'main';
+                        bicepPath = '.radius/app.bicep';
+                        bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', fallbackBranch);
+                        if (!bicepSource) {
+                            bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', fallbackBranch);
+                            bicepPath = 'app.bicep';
+                        }
+                        if (bicepSource) {
+                            steps.push(`ℹ️ No app.bicep on "${paramBranch}"; resolved deploy parameters from "${fallbackBranch}".`);
+                        }
+                    }
                     if (bicepSource) {
                         const parsed = appParams(bicepSource);
                         const resolved = resolveDeployParams(parsed);
@@ -575,6 +623,8 @@ function createRequestHandler(instanceId) {
                         if (names.length > 0) {
                             steps.push(`Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(', ')}).`);
                         }
+                    } else {
+                        steps.push(`⚠️ Could not read app.bicep on "${paramBranch}" (or the default branch), so RADIUS_DEPLOY_PARAMS / RADIUS_RAD_COMMANDS were not set for "${envName}". Deploys will fail until the branch has a committed .radius/app.bicep.`);
                     }
                 } catch (paramErr) {
                     steps.push('⚠️ Could not resolve application parameters: ' + paramErr.message);
@@ -1855,12 +1905,25 @@ function createRequestHandler(instanceId) {
                         addLog('━━ Deploying Radius application ━━');
                         const envForDeploy = entry.state.envName || data.environment || 'dev';
                         const deployWorkflowFile = 'run-rad-commands.yml';
+                        // Deploy the SELECTED branch's code (worktree-consistent): run
+                        // the workflow on `branch` so it checks out and `rad deploy`s
+                        // that branch's app.bicep — the same file the params below are
+                        // computed from — instead of always deploying the default branch.
+                        const deployRef = branch || 'main';
                         const runGhDeploy = (args, envOverride) => new Promise((resolve) => {
                             cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
                                 resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                             });
                         });
-                        const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '-f', 'environment=' + envForDeploy, '--repo', repo];
+                        // Like runGhDeploy but feeds a value (e.g. a secret JSON) over
+                        // stdin so it never lands on the argv/process list.
+                        const runGhDeployStdin = (args, stdin, envOverride) => new Promise((resolve) => {
+                            const child = cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
+                                resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                            });
+                            if (stdin !== undefined) child.stdin?.end(stdin);
+                        });
+                        const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '--ref', deployRef, '-f', 'environment=' + envForDeploy, '--repo', repo];
 
                         // Recompute the rad commands from the CURRENT app.bicep at
                         // dispatch time (rather than relying on the RADIUS_RAD_COMMANDS
@@ -1879,7 +1942,35 @@ function createRequestHandler(instanceId) {
                             if (bicepSource) {
                                 const parsed = appParams(bicepSource);
                                 const resolved = resolveDeployParams(parsed);
-                                const { public: publicParams } = partitionParams(parsed, resolved);
+                                const { public: publicParams, secret: secretParams } = partitionParams(parsed, resolved);
+
+                                // Ensure the environment carries the secret params the
+                                // deployed app.bicep needs (e.g. an @secure() password).
+                                // These are appended by the workflow from the
+                                // RADIUS_DEPLOY_PARAMS secret at runtime. If env-creation
+                                // never wrote it (its provisioning can silently skip when
+                                // the app.bicep isn't found), the deploy would fail for a
+                                // missing required parameter. Provision it here from the
+                                // SAME branch bicep when the environment has no such secret
+                                // yet. If one already exists, leave it untouched so the
+                                // value stays stable across redeploys (we can't read it
+                                // back to compare).
+                                if (Object.keys(secretParams).length > 0) {
+                                    const secretsList = await runGhDeploy(['api', `/repos/${repo}/environments/${encodeURIComponent(envForDeploy)}/secrets`, '--jq', '.secrets[].name']);
+                                    const hasDeployParams = (secretsList.stdout || '').split('\n').map(s => s.trim()).includes('RADIUS_DEPLOY_PARAMS');
+                                    if (!hasDeployParams) {
+                                        addLog('Provisioning RADIUS_DEPLOY_PARAMS for "' + envForDeploy + '" (' + Object.keys(secretParams).join(', ') + ')...');
+                                        const setArgs = ['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envForDeploy, '--repo', repo];
+                                        let setRes = await runGhDeployStdin(setArgs, JSON.stringify(secretParams));
+                                        if (setRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
+                                            const fe = { ...process.env }; delete fe.GH_TOKEN; delete fe.GITHUB_TOKEN;
+                                            const retry = await runGhDeployStdin(setArgs, JSON.stringify(secretParams), fe);
+                                            if (retry.code === 0) setRes = retry;
+                                        }
+                                        if (setRes.code !== 0) addLog('⚠ Could not set RADIUS_DEPLOY_PARAMS: ' + ((setRes.stderr || '').trim() || 'unknown error') + ' — the deploy may fail for a missing required parameter.');
+                                    }
+                                }
+
                                 const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
                                 const appMatch = bicepSource.match(/application\s+['"]([^'"]+)['"]/) || bicepSource.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
                                 const appName = appMatch ? appMatch[1] : '';
@@ -1894,8 +1985,19 @@ function createRequestHandler(instanceId) {
                         } catch (e) {
                             addLog('⚠ Could not compute rad commands from bicep (' + e.message + '); falling back to the environment default.');
                         }
+                        // Make sure the workflow files exist on the branch we're
+                        // about to dispatch on. The env-creation flow only commits
+                        // them to the default branch, so a feature/worktree branch
+                        // usually needs them published first.
+                        try {
+                            await ensureDeployWorkflowsOnBranch(repo, deployRef, envForDeploy, addLog);
+                        } catch (e) {
+                            addLog('⚠ Could not publish deploy workflows to branch "' + deployRef + '": ' + (e.message || e) +
+                                '. The dispatch below will fail if the branch has no run-rad-commands workflow.');
+                        }
+
                         const deployDispatchedAt = Date.now();
-                        addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') for environment "' + envForDeploy + '"...');
+                        addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') on branch "' + deployRef + '" for environment "' + envForDeploy + '"...');
                         let dispatchDeployRes = await runGhDeploy(dispatchArgs);
                         if (dispatchDeployRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
                             // The injected OAuth token may lack the `workflow` scope; retry
@@ -1911,7 +2013,7 @@ function createRequestHandler(instanceId) {
                             addLog('❌ Failed to dispatch the run rad commands workflow: ' + de);
                             const scopeHint = /workflow.{0,20}scope/i.test(de)
                                 ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-                                : ' Ensure ' + deployWorkflowFile + ' exists on the default branch and that GitHub Actions are enabled for ' + repo + '.';
+                                : ' Ensure ' + deployWorkflowFile + ' exists on branch "' + deployRef + '" (push the branch so it carries the app.bicep and workflow files) and that GitHub Actions are enabled for ' + repo + '.';
                             entry.state.deployError = 'Failed to start the run rad commands workflow (' + deployWorkflowFile + ') on ' + repo + '. ' + (de || 'The dispatch request failed.') + scopeHint;
                             entry.state.deployStatus = 'failed';
                             return;
@@ -2346,7 +2448,20 @@ const PAGE_RENDERERS = {
 };
 
 function preferredPortForInstance(instanceId) {
-    const hash = createHash("sha256").update(String(instanceId)).digest();
+    // Namespace the deterministic port by the Copilot session. Every session is
+    // told to open the canvas with the same instanceId ("radius-panel"), so
+    // hashing instanceId alone makes all concurrent sessions resolve to one
+    // global port. Only the first session to bind it wins; the rest fall back to
+    // an ephemeral port (listen(0)) while their webviews keep pinging the shared
+    // port — which is now owned by a different, independently-churning process.
+    // From those webviews' perspective the server appears to flap down/up as the
+    // owning process is reaped/respawned, and the client heartbeat reloads the
+    // page on every recovery — the "page keeps reloading" symptom. Mixing the
+    // session id into the hash gives each session its own stable port. It stays
+    // stable across respawns within the same session, so the heartbeat's
+    // reconnect-and-reload still restores a live page after a genuine restart.
+    const sessionId = process.env.COPILOT_AGENT_SESSION_ID || process.env.SESSION_ID || "";
+    const hash = createHash("sha256").update(sessionId + "\u0000" + String(instanceId)).digest();
     // Map into a high, mostly-unprivileged range (20000–60000) to reduce the
     // chance of clashing with other listeners.
     return 20000 + (hash.readUInt32BE(0) % 40000);
