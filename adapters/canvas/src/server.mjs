@@ -2562,12 +2562,17 @@ function createRequestHandler(instanceId) {
         await ensureVendorScripts();
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         const entry = servers.get(instanceId);
-        let page = url.searchParams.get("page") || entry?.page || "environment";
+        const requestedPage = url.searchParams.get("page");
+        let page = requestedPage || entry?.page || "environment";
         const state = entry?.state || {};
-        // If a deployment is actively in progress, redirect the environment /
-        // credentials pages to the live deploying page so the user always lands
-        // on the in-flight deployment instead of re-triggering one.
-        if ((page === "environment" || page === "credentials") && state.deployStatus === "in_progress") {
+        // While a deployment is actively in progress, an IMPLICIT landing on the
+        // environment / credentials page (a bare "/" load with no ?page=, e.g. a
+        // panel re-open or a heartbeat reload that lost the query) is redirected
+        // to the live deploying page so the user lands on the in-flight run. An
+        // EXPLICIT navigation — a top-nav "Environments" click or any URL that
+        // carries ?page= — is always honored, so the user can freely leave the
+        // deploying view while a deploy is still being monitored.
+        if (!requestedPage && (page === "environment" || page === "credentials") && state.deployStatus === "in_progress") {
             page = "deploying";
         }
         const renderer = PAGE_RENDERERS[page];
