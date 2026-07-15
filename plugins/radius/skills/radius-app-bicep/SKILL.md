@@ -37,7 +37,7 @@ Before writing the Bicep:
 3. Inventory every executable workload and backing service in the selected profile from manifests, Dockerfiles, compose/Helm files, entrypoints, source configuration reads, client initialization, and referenced config files. Treat web, worker, producer, consumer, migration, scheduler, and sidecar roles separately.
 4. Extract each workload's runtime contract: image/build context, entrypoint and arguments, listener and ports, required environment/configuration, secrets, writable storage, dependencies, wire protocols, and feature-critical configuration.
 5. Map every selected backing service to a Radius type with [component-catalog.md](references/component-catalog.md), using [architecture-patterns.md](references/architecture-patterns.md) only as context. Report unsupported essential components instead of substituting unrelated types.
-6. Inspect the repository's `bicepconfig.json` and resolve every emitted type and planned property read/write against the exact configured Radius extension. If the repository has no `bicepconfig.json` that resolves the `radius` extension, plan to generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) and resolve against the extension reference it declares. Record the verbatim property path and schema proof in the ledger; for recipe outputs, also prove the output mapping and any managed-secret key. Reject an absent path before generation instead of guessing an alias, convenience property, or wrapper. Use the matching `resource-types-contrib` schema revision and target Environment recipe/output contract; do not copy shapes from another version.
+6. Resolve every emitted type and planned property read/write against the Radius extension that `.radius/bicepconfig.json` declares. The skill always creates or updates `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)), using any `bicepconfig.json` already applicable to `.radius/app.bicep` as input. Record the verbatim property path and schema proof in the ledger; for recipe outputs, also prove the output mapping and any managed-secret key. Reject an absent path before generation instead of guessing an alias, convenience property, or wrapper. Use the matching `resource-types-contrib` schema revision and target Environment recipe/output contract; do not copy shapes from another version.
 7. Choose a source build only when the repository has a complete, practical build context. Otherwise use a pinned published image. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
 8. Generate the Bicep using [naming-conventions.md](references/naming-conventions.md), then compile it with the exact configured extension. Treat unknown type/property warnings as unresolved schema mismatches.
 9. Perform the [validation checklist](#validation-checklist) and close every item in the requirement ledger. Compilation or process startup alone is not success.
@@ -151,13 +151,13 @@ Do NOT use any type not listed above. Do NOT invent properties.
 
 ## Extension
 
-Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through a `bicepconfig.json`; if the target repository has none that resolves it, generate `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)). Only ever create or update `.radius/bicepconfig.json`, never a config outside `.radius/`.
+Declare exactly one extension, `extension radius`. It provides every Radius type (`Radius.Core/*`, `Radius.Compute/*`, `Radius.Data/*`, `Radius.Messaging/*`, `Radius.AI/*`, `Radius.Storage/*`, `Radius.Security/*`). Do NOT declare per-namespace or per-type extensions (`radiusCompute`, `containers`, `kafka`, etc.). The `radius` alias must resolve through `.radius/bicepconfig.json`, which the skill always creates or updates (see [bicepconfig.json](#bicepconfigjson)); only ever write that file, never a config outside `.radius/`.
 
 ## bicepconfig.json
 
 `app.bicep` cannot compile or deploy unless a `bicepconfig.json` resolves the `radius` extension. Always create or update `.radius/bicepconfig.json` (co-located with `.radius/app.bicep`) so it fits the generated `app.bicep`; only ever write that file, never a `bicepconfig.json` outside `.radius/`.
 
-- If `.radius/bicepconfig.json` already exists, update it to fit `app.bicep`: add or correct what `app.bicep` needs (the `radius` extension reference, `extensibility`, and `aws` when required), preserve unrelated existing settings, and change or remove entries only where they conflict with what `app.bicep` needs. An already-correct file produces an empty diff.
+- If `.radius/bicepconfig.json` already exists, update it to fit `app.bicep`: add or correct what `app.bicep` needs (the `radius` extension reference and `extensibility`), preserve unrelated existing settings, and change or remove entries only where they conflict with what `app.bicep` needs. An already-correct file produces an empty diff.
 - If it does not exist, create it. When a `bicepconfig.json` in a parent directory already applies to `.radius/app.bicep`, use it as the starting point and adjust the new `.radius/bicepconfig.json` so it fits `app.bicep` (keep the parent's compatible settings; add, correct, or drop entries as needed); do not modify the parent file.
 - When there is nothing to carry forward, create `.radius/bicepconfig.json` with:
 
@@ -172,7 +172,7 @@ Declare exactly one extension, `extension radius`. It provides every Radius type
 }
 ```
 
-Add an `"aws": "br:biceptypes.azurecr.io/aws:latest"` extension entry only when `app.bicep` declares AWS-native resources; omit it otherwise. Default to the `radius:latest` tag. Pin an immutable reference only when a specific version is provided (by an existing `bicepconfig.json`, the user, or the target Environment); the skill does not infer a version from source.
+Default to the `radius:latest` tag. Pin an immutable reference only when a specific version is provided (by an existing `bicepconfig.json`, the user, or the target Environment); the skill does not infer a version from source.
 
 ## app.bicep Structure (mandatory order)
 
