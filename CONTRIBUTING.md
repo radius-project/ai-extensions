@@ -7,7 +7,7 @@ follow the guidelines below.
 For what this repository is and does, see the [README](./README.md). This guide
 covers how to build, test, and contribute to it.
 
-## Current status
+## How to contribute
 
 We welcome pull request contributions from anyone (docs improvements, bug
 fixes, features) as long as they follow a few guidelines:
@@ -147,5 +147,5 @@ settings to find it and enable it.
 
 ## Code of conduct
 
-This project has adopted the [Contributor Covenant](http://contributor-covenant.org/).
+This project has adopted the [Contributor Covenant](https://contributor-covenant.org/).
 For more information see the [Radius Community Code of Conduct](https://github.com/radius-project/community/blob/main/CODE-OF-CONDUCT.md).
