@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
     GRAPH_PAGES,
     appBicepReminder,
+    appBicepHandoffPrompt,
     graphTriggerTargets,
     evaluateAppBicepHook,
 } from "./hooks.mjs";
@@ -25,6 +26,33 @@ describe("appBicepReminder", () => {
 
     it("omits the repo suffix when repo is empty", () => {
         expect(appBicepReminder("")).toContain("No .radius/app.bicep exists,");
+    });
+});
+
+describe("appBicepHandoffPrompt", () => {
+    it("directs the agent to generate and save app.bicep for the repo", () => {
+        const msg = appBicepHandoffPrompt("acme/widgets", "graph");
+        expect(msg).toContain("acme/widgets");
+        expect(msg).toContain("radius_generate_app");
+        expect(msg).toContain("radius-app-bicep");
+        expect(msg).toContain("Radius.");
+        expect(msg).toContain(".radius/app.bicep");
+        expect(msg).toContain("SAVE");
+        expect(msg).toContain("open_canvas");
+        expect(msg).toContain("graph");
+    });
+
+    it("mentions the page name and defaults it to graph", () => {
+        expect(appBicepHandoffPrompt("acme/widgets", "graph-diff")).toContain("graph-diff");
+        expect(appBicepHandoffPrompt("acme/widgets")).toContain("Radius graph canvas");
+    });
+
+    it("omits the repo suffix when repo is empty", () => {
+        expect(appBicepHandoffPrompt("")).toContain("no .radius/app.bicep exists,");
+    });
+
+    it("forbids fabricating singleton recipes", () => {
+        expect(appBicepHandoffPrompt("acme/widgets")).toContain("recipe packs");
     });
 });
 

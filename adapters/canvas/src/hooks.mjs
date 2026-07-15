@@ -95,3 +95,22 @@ export async function evaluateAppBicepHook(input, deps) {
         additionalContext: appBicepReminder(repo),
     };
 }
+
+// Prompt injected as a new user turn (via session.send) when a Radius graph
+// canvas is opened but no .radius/app.bicep exists. The built-in open_canvas
+// tool is not gated by onPreToolUse, so this is how the extension hands the work
+// off to the agent/skill instead of leaving the user staring at an error.
+export function appBicepHandoffPrompt(repo, page = "graph") {
+    const where = repo ? ` for ${repo}` : "";
+    return [
+        `The Radius ${page} canvas was opened but no .radius/app.bicep exists${where}, so the application graph cannot render yet. Generate it now — do not tell the user to do it manually.`,
+        "",
+        "Steps:",
+        "1. Call the radius_generate_app tool (or follow the radius-app-bicep skill) to analyze the repository and author the application model.",
+        "2. Use ONLY Radius.* namespaces (e.g. Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets) — never Applications.*.",
+        "3. SAVE the result to .radius/app.bicep in the repository.",
+        "4. Re-open the Radius canvas (open_canvas with canvasId \"radius\", instanceId \"radius-panel\") so the graph renders from the saved app.bicep.",
+        "",
+        "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.",
+    ].join("\n");
+}

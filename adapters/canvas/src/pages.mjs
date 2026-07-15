@@ -459,6 +459,9 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
                 doneDiv.textContent = 'Graph ready!';
                 stepsEl.appendChild(doneDiv);
                 setTimeout(function() { window.location.reload(); }, 600);
+            } else if (d.needsAppBicep) {
+                container.innerHTML = '';
+                if (statusEl) { statusEl.textContent = 'Generating app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
             } else if (d.error) {
                 container.innerHTML = '';
                 if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
@@ -550,7 +553,7 @@ document.getElementById('load-graph-btn').addEventListener('click', function() {
                 var prev = stepsEl.querySelector('.step-active');
                 if (prev) prev.className = 'step-done';
                 var msg = d.needsAppBicep
-                    ? 'No app.bicep found for ' + repo + '. Ask Copilot to generate one with the Radius app-bicep skill.'
+                    ? 'Generating app.bicep for ' + repo + ' with the Radius app-bicep skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'
                     : ('Error: ' + (d.error || 'Failed to load graph.'));
                 var gc = document.getElementById('graph-container');
                 gc.innerHTML = '';

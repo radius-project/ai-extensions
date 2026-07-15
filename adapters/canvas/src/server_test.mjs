@@ -5,7 +5,7 @@
 // real ephemeral loopback server and mock only the I/O leaves that reach
 // GitHub so the route's branching is exercised deterministically.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 
 const io = vi.hoisted(() => ({ bicep: null, file: null }));
 
@@ -19,7 +19,7 @@ vi.mock("./gh.mjs", async (importActual) => ({
     fetchFileFromRepo: vi.fn(async () => io.file),
 }));
 
-const { servers, getOrCreateServer } = await import("./server.mjs");
+const { servers, getOrCreateServer, setAppBicepHandoff } = await import("./server.mjs");
 
 const instanceId = "generate-bicep-test";
 let entry;
@@ -37,6 +37,10 @@ beforeEach(() => {
     io.bicep = null;
     io.file = null;
     entry.state = {};
+});
+
+afterEach(() => {
+    setAppBicepHandoff(null);
 });
 
 async function postGenerate(body, { raw = false } = {}) {
@@ -97,6 +101,33 @@ describe("/api/generate-bicep — committed app.bicep exists", () => {
         expect(status).toBe(200);
         expect(json.reload).toBe(true);
         expect(entry.state.generatedContent).toBe(content);
+    });
+});
+
+describe("/api/generate-bicep — app.bicep handoff", () => {
+    it("invokes the registered handoff when no app.bicep exists", async () => {
+        const handoff = vi.fn();
+        setAppBicepHandoff(handoff);
+        await postGenerate({ repo: "octo/app", branch: "dev" });
+        expect(handoff).toHaveBeenCalledTimes(1);
+        expect(handoff).toHaveBeenCalledWith({ repo: "octo/app", branches: ["dev"], page: "generate" });
+        expect(entry.state.appBicepHandoffKey).toBe("octo/app::dev");
+    });
+
+    it("does not re-invoke the handoff for the same repo+branch", async () => {
+        const handoff = vi.fn();
+        setAppBicepHandoff(handoff);
+        await postGenerate({ repo: "octo/app", branch: "dev" });
+        await postGenerate({ repo: "octo/app", branch: "dev" });
+        expect(handoff).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not invoke the handoff when app.bicep exists", async () => {
+        io.bicep = "resource app 'x' = {}";
+        const handoff = vi.fn();
+        setAppBicepHandoff(handoff);
+        await postGenerate({ repo: "octo/app", branch: "main" });
+        expect(handoff).not.toHaveBeenCalled();
     });
 });
 

@@ -22,8 +22,8 @@ import {
     parseRepoFromRemote,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
-import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
-import { evaluateAppBicepHook } from "./hooks.mjs";
+import { servers, getOrCreateServer, getLastWebviewActivityAt, setAppBicepHandoff } from "./server.mjs";
+import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -42,6 +42,47 @@ async function fetchBicepForBranch(repo, branch, state) {
         if (local) return local;
     }
     return await fetchBicepFromRepo(github, repo, branch);
+}
+
+// When a graph canvas is opened but no .radius/app.bicep exists, hand the work
+// off to the agent/skill. The built-in open_canvas tool is NOT gated by
+// onPreToolUse, so this is the only place the extension can trigger generation
+// instead of leaving the user on the "No app.bicep found" error. Fire-and-forget
+// (session.send resolves only when the agent finishes, and we are mid-open), and
+// guard so we send at most once per repo+branch combination.
+async function maybeHandoffAppBicep(entry, page, ctx) {
+    try {
+        if (!GRAPH_PAGES.has(page)) return;
+        const state = entry.state;
+        const repo = state.contextRepo || ctx.input?.repo || "";
+        if (!repo) return;
+
+        let branches;
+        if (page === "graph-diff") {
+            branches = [ctx.input?.baseBranch, ctx.input?.headBranch].filter(Boolean);
+            if (!branches.length) branches = [state.contextBranch];
+        } else {
+            branches = [state.contextBranch];
+        }
+        branches = branches.map((b) => b || defaultBranchForState(state));
+
+        const key = `${repo}::${branches.join(",")}`;
+        if (state.appBicepHandoffKey === key) return; // already handed off for this target
+
+        const found = await Promise.all(branches.map(async (branch) => {
+            try {
+                return !!(await fetchBicepForBranch(repo, branch, state));
+            } catch {
+                return false;
+            }
+        }));
+        if (found.some(Boolean)) return; // at least one branch has it → nothing to do
+
+        state.appBicepHandoffKey = key;
+        try {
+            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page))).catch(() => {});
+        } catch { /* session.send unavailable → ignore */ }
+    } catch { /* never block canvas open on handoff failure */ }
 }
 
 // ─── Canvas + Tools ───────────────────────────────────────────────────────────
@@ -289,6 +330,8 @@ const session = await joinSession({
                         // If fetching fails, leave empty for manual comparison
                     }
                 }
+
+                await maybeHandoffAppBicep(entry, page, ctx);
 
                 return { title: "Radius", url: entry.url };
             },
@@ -603,7 +646,11 @@ When a recipe is not found for a resource type during planned graph resolution, 
     },
 });
 
-// ─── Process Lifecycle Hardening ──────────────────────────────────────────────
+// Wire the server-side app.bicep handoff to the SDK session. Graph/generate
+// routes fire when a repo/branch is selected (not just on canvas open), so this
+// is how selection changes trigger the radius-app-bicep skill automatically.
+setAppBicepHandoff(({ repo, page }) => session.send(appBicepHandoffPrompt(repo, page)));
+
 // The extension runs as a long-lived Node process that registers canvases/tools
 // with the host. Two failure modes were observed:
 //   1. A stray throw / unhandled rejection in an async request handler (e.g. the
