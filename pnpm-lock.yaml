@@ -32,6 +32,10 @@ importers:
       '@radius-project/shared':
         specifier: workspace:*
         version: link:../shared
+    devDependencies:
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@26.1.0)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.0)(esbuild@0.28.1))
 
   adapters/shared:
     dependencies:
