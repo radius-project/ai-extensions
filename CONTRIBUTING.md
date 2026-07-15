@@ -54,7 +54,7 @@ platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
 ### Agentic skills
 
-Agentic skills live in [`.copilot/skills/`](./.copilot/skills), one directory
+Agentic skills live in [`plugins/radius/skills/`](./plugins/radius/skills), one directory
 per skill, each with a `SKILL.md` (name + description frontmatter and guidance)
 and optional `references/`. The skills (`radius-app-bicep`, `radius-app-graph`,
 `radius-environment`, `radius-deploy`) drive the same workflows the canvas
@@ -65,7 +65,7 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> .github/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/extensions/radius/extension.mjs
 ```
 
 Other useful scripts:

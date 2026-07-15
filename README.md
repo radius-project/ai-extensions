@@ -16,7 +16,7 @@ In the **GitHub Copilot CLI**:
 
 ```bash
 /plugin marketplace add radius-project/ai-extensions
-/plugin install radius@ai-extensions
+/plugin install radius@radius-plugins
 ```
 
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin

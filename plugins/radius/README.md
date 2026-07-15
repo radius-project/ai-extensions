@@ -26,7 +26,7 @@ for details.
 /plugin marketplace add radius-project/ai-extensions
 
 # Install the plugin
-/plugin install radius@ai-extensions
+/plugin install radius@radius-plugins
 ```
 
 Restart your Copilot session after installing so the skills and the canvas
