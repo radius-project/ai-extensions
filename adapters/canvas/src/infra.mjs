@@ -16,10 +16,16 @@ import {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
+  generateDeleteWorkflow as coreGenerateDeleteWorkflow,
+  DELETE_RADIUS_REF,
+  DELETE_APP_DISPATCHER_FILE,
+  DELETE_AZURE_FILE,
+  DELETE_AWS_FILE,
 } from "@radius-project/core";
 import { cliExec, fetchFileFromRepoResult } from "./gh.mjs";
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
+export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
 
 export function generateAzureOIDC(data) {
     return getPlatform('azure').generateOidc(data);
@@ -128,12 +134,12 @@ export function generateAWSOIDC(data) {
  * a hard error rather than a fall back to a bundled copy. The underlying cause
  * (gh stderr, 404, decode error) is surfaced in the thrown message.
  */
-async function fetchRadiusTemplate(fileName) {
-    const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${RADIUS_REF}"`;
+async function fetchRadiusTemplate(fileName, ref = RADIUS_REF) {
+    const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${ref}"`;
     const { content, error } = await fetchFileFromRepoResult(
         RADIUS_WORKFLOW_REPO,
         `${RADIUS_WORKFLOW_DIR}/${fileName}`,
-        RADIUS_REF,
+        ref,
     );
     if (error) {
         throw new Error(`Failed to fetch workflow template ${source}: ${error}`);
@@ -172,7 +178,59 @@ export async function generateDeployWorkflow(env, appFile) {
     files.forEach((f, i) => {
         templates[f] = bodies[i];
     });
-    return coreGenerateDeployWorkflow(env, appFile, templates);
+    const generated = coreGenerateDeployWorkflow(env, appFile, templates);
+    // Creating an environment should ONLY run the verify-credentials workflow.
+    // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
+    // trigger once verify completes; strip it so `run-rad-commands` runs only on
+    // explicit `workflow_dispatch` (the Deploy button), never on env creation.
+    if (generated && typeof generated[DEPLOY_DISPATCHER_FILE] === 'string') {
+        generated[DEPLOY_DISPATCHER_FILE] = stripWorkflowRunTrigger(generated[DEPLOY_DISPATCHER_FILE]);
+    }
+    return generated;
+}
+
+/**
+ * Generate the application-delete workflow files (dispatcher + both provider
+ * workflows). Returns an object mapping bare workflow filename -> YAML content;
+ * the caller commits each under `.github/workflows/`. The provider is
+ * auto-detected at runtime by the dispatcher, so all files are emitted.
+ *
+ * The templates + the `delete-resource` composite action they reference live in
+ * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
+ * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
+ */
+export async function generateDeleteWorkflow(env) {
+    const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE];
+    const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF)));
+    const templates = {};
+    files.forEach((f, i) => {
+        templates[f] = bodies[i];
+    });
+    return coreGenerateDeleteWorkflow(env, templates);
+}
+
+/**
+ * Remove the top-level `workflow_run:` trigger (and its preceding comment block)
+ * from a GitHub Actions workflow YAML, leaving `workflow_dispatch` as the only
+ * trigger. Operates on the `on:` mapping where triggers are indented two spaces
+ * and their children deeper.
+ */
+function stripWorkflowRunTrigger(yaml) {
+    const lines = yaml.split('\n');
+    const start = lines.findIndex((l) => /^  workflow_run:\s*$/.test(l));
+    if (start === -1) return yaml;
+    // Include any contiguous comment lines directly above the trigger.
+    let from = start;
+    while (from > 0 && /^  #/.test(lines[from - 1])) from--;
+    // Drop the trigger line and all more-deeply-indented child lines.
+    let to = start + 1;
+    while (to < lines.length && (/^    /.test(lines[to]) || lines[to].trim() === '')) {
+        // Stop at a blank line that is followed by a non-child (keeps section spacing).
+        if (lines[to].trim() === '' && !(to + 1 < lines.length && /^    /.test(lines[to + 1]))) break;
+        to++;
+    }
+    lines.splice(from, to - from);
+    return lines.join('\n');
 }
 export function generatePortalUrl(resourceType, provider, state) {
     return coreGeneratePortalUrl(resourceType, provider, state);
