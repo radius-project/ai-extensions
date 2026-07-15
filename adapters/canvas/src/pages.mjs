@@ -995,7 +995,7 @@ function runDiff() {
     if (!repo || !base || !head) return;
     var statusEl = document.getElementById('diff-status');
     statusEl.className = 'status info';
-    statusEl.textContent = 'Comparing ' + base + ' → ' + head + ' (fetching app.bicep, generating if not found)…';
+    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
