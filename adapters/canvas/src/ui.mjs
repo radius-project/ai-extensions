@@ -86,12 +86,16 @@ export function nodeCard(title, typeLabel, iconHtml) {
 // --- Nav icons — the exact artwork from the Figma file (Applications page) -----
 // Each is a black line-art PNG exported from Figma, applied as a CSS mask so it
 // paints in `currentColor` and therefore follows the pill's theme + active state.
-function navIcon(dataUri, size = 22) {
+// `fit` is the mask-size: 'contain' fits the whole PNG (used for the square
+// 96×96 icons); 'cover' scales to fill the box height and crops transparent
+// side padding (used for the wide 96×48 deployments icon so its glyph renders at
+// the same visual height as the square ones instead of appearing half-size).
+function navIcon(dataUri, size = 22, fit = 'contain') {
     return `<span aria-hidden="true" style="display:inline-block;width:${size}px;height:${size}px;`
         + `background-color:currentColor;`
-        + `-webkit-mask:url(${dataUri}) center/contain no-repeat;`
-        + `mask:url(${dataUri}) center/contain no-repeat;"></span>`;
+        + `-webkit-mask:url(${dataUri}) center/${fit} no-repeat;`
+        + `mask:url(${dataUri}) center/${fit} no-repeat;"></span>`;
 }
 function iconApplications() { return navIcon(ICON_APP); }
 function iconEnvironments() { return navIcon(ICON_ENV); }
-function iconDeployments() { return navIcon(ICON_DEP); }
+function iconDeployments() { return navIcon(ICON_DEP, 22, 'cover'); }
