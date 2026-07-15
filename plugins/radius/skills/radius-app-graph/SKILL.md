@@ -79,10 +79,10 @@ The canvas will:
 
 ## Related files
 
-- `.github/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
-- `.github/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
+- `plugins/radius/extensions/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
+- `plugins/radius/extensions/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`)
-- `.github/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
-- `.github/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
-- `.github/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
+- `plugins/radius/extensions/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
+- `plugins/radius/extensions/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
+- `plugins/radius/extensions/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic

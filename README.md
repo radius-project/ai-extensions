@@ -1,11 +1,26 @@
 # Radius AI Extension
 
-Radius AI Extension is a canvas extension for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
-It lets you define, visualize, and deploy an application with
-[Radius](https://github.com/radius-project/radius) without leaving Copilot.
-Radius is a cloud-native application platform that helps developers and platform
-engineers build and manage applications together.
+Radius AI Extension is a GitHub Copilot **plugin** for the
+[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app)
+and the GitHub Copilot CLI. It lets you define, visualize, and deploy an
+application with [Radius](https://github.com/radius-project/radius) without
+leaving Copilot. Radius is a cloud-native application platform that helps
+developers and platform engineers build and manage applications together.
+
+## Install the plugin
+
+In the **GitHub Copilot app**, open app settings, click **Plugins**, and install
+the `radius` plugin from the `radius-project/ai-extensions` marketplace.
+
+In the **GitHub Copilot CLI**:
+
+```bash
+/plugin marketplace add radius-project/ai-extensions
+/plugin install radius@radius-plugins
+```
+
+See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
+bundles and how to use it.
 
 > **NOTE:** Radius AI Extension is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
@@ -55,16 +70,16 @@ additional UI surfaces beyond the Copilot canvas in the future.
 ## Agentic skills
 
 The repository also ships a set of agentic skills under
-[`.copilot/skills/`](./.copilot/skills). Each skill tells the agent how and when
+[`plugins/radius/skills/`](./plugins/radius/skills). Each skill tells the agent how and when
 to drive a part of the Radius workflow, and pairs with the matching canvas
 actions and tools:
 
 | Skill                                                              | What it does                                                                                              |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`radius-app-bicep`](./.copilot/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
-| [`radius-app-graph`](./.copilot/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
-| [`radius-environment`](./.copilot/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
-| [`radius-deploy`](./.copilot/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
+| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
+| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
+| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
+| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
 
 ## Architecture
 
@@ -85,7 +100,7 @@ Build the extension bundle locally:
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> .github/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/extensions/radius/extension.mjs
 ```
 
 See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development
