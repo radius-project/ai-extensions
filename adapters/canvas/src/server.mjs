@@ -1099,7 +1099,20 @@ function createRequestHandler(instanceId) {
                     `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
                     "--jq", ".workflow_runs[] | (.id|tostring) + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")",
                 ]);
-                const namesRaw = await gh(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[] | (.id|tostring) + \"\\t\" + .name"]);
+                const namesRes = await new Promise((resolve) => {
+                    cliExec("gh", ["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[] | (.id|tostring) + \"\\t\" + .name"], { timeout: 12000 }, (err, stdout, stderr) => {
+                        if (err) { resolve({ error: ((stderr || err.message || "").trim()) || "Failed to list environments." }); return; }
+                        resolve({ stdout: (stdout || "").trim() });
+                    });
+                });
+                // Surface a genuine API/auth/permission failure instead of
+                // silently reporting "no environments" (which hides real
+                // problems). Failures are not cached so a retry can recover.
+                if (namesRes.error) {
+                    respond({ environments: [], error: namesRes.error });
+                    return;
+                }
+                const namesRaw = namesRes.stdout;
                 const rows = namesRaw ? namesRaw.split("\n").filter(Boolean).map((l) => {
                     const tab = l.indexOf("\t");
                     return tab === -1 ? { id: "", name: l } : { id: l.slice(0, tab), name: l.slice(tab + 1) };

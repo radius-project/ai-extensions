@@ -2143,9 +2143,12 @@ var ENV_PROVIDERS = {};
 var HAS_APPS = false;
 var HAS_ENVS = false;
 
-function showInline(kind, msg) {
+// Renders an inline status message. Defaults to textContent so server-provided
+// strings (e.g. error text) can never inject HTML. Pass isHtml=true only for
+// intentionally-built, escaped markup (see the delete-success link below).
+function showInline(kind, msg, isHtml) {
     inlineStatus.style.display = 'block';
-    inlineStatus.innerHTML = msg;
+    if (isHtml) inlineStatus.innerHTML = msg; else inlineStatus.textContent = msg;
     if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
     else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
 }
@@ -2283,7 +2286,7 @@ delConfirm.addEventListener('click', function() {
             document.getElementById('deploy-deleting-modal').style.display = 'none';
             pendingDelete = null;
             if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            showInline('success', 'Delete workflow started' + (res.d && res.d.runUrl ? ' — <a href="' + res.d.runUrl + '" target="_blank" rel="noopener noreferrer">view run ↗</a>' : '') + '.');
+            showInline('success', 'Delete workflow started' + (res.d && res.d.runUrl ? ' — <a href="' + escapeHtmlClient(res.d.runUrl) + '" target="_blank" rel="noopener noreferrer">view run ↗</a>' : '') + '.', true);
             loadDeployments();
         })
         .catch(function() {

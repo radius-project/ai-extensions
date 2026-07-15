@@ -77,7 +77,7 @@ export {
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
 } from "./workflows/index.js";
-export type { DeployWorkflowFiles } from "./workflows/index.js";
+export type { DeployWorkflowFiles, DeleteWorkflowFiles } from "./workflows/index.js";
 export type {
   Shell,
   ShellResult,

@@ -6,8 +6,10 @@ import { RADIUS_REF } from "./deploy.js";
 // (radius-project/radius) and are NOT yet on `main`, so both the template fetch
 // and the `{{RADIUS_REF}}` the provider workflows pin their composite actions to
 // must point at the PR branch. Once #12367 merges, switch this back to
-// RADIUS_REF ("main") and delete this constant.
-export const DELETE_RADIUS_REF = "sk593-custom-types-recipe-packs";
+// RADIUS_REF ("main") and delete this constant. It can be overridden via the
+// RADIUS_DELETE_REF env var (e.g. pin to a commit SHA) so it can be updated
+// without releasing a new core package if the PR branch moves.
+export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
 
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
