@@ -34,20 +34,19 @@ application, shows that application as a live graph across its lifecycle, and
 deploys it to your cloud environment, all from inside Copilot. It is organized
 into three areas:
 
-- **Applications.** Point Radius Canvas at a GitHub repository and it analyzes
-  your source code, models the application, and renders a live application graph.
-  Switch between four views:
+- **Applications.** The application graph models the source code in your GitHub
+  repository and renders it as a live graph with four views:
   - **Modeled**: the application as you've designed it.
   - **Planned**: the application as you want it deployed.
   - **Deployed**: the application as it runs in your environments.
   - **Diff**: what changed between two branches, such as a pull request against
     `main`.
-- **Environments.** An environment is your landing zone: it defines where
-  applications deploy. Create one for Azure, verify its credentials, and
-  configure the infrastructure your applications run on.
-- **Deployments.** Deploy to any configured environment. Radius provisions the
-  cloud infrastructure your application needs and runs it through the generated
-  GitHub Actions workflow.
+- **Environments.** An environment is the landing zone that defines where an
+  application deploys. You create an environment for Azure, verify its
+  credentials, and configure the infrastructure your applications run on.
+- **Deployments.** A deployment sends an application to a configured environment.
+  Radius provisions the cloud infrastructure the application needs and runs it
+  through the generated GitHub Actions workflow.
 
 The product logic is UI-agnostic and lives in a shared core (`radius-core`), so
 the same modeling, graph, platform, and workflow-generation logic can back
@@ -108,8 +107,7 @@ test, and contribute to this repository.
 
 We welcome your contributions and suggestions! One of the easiest ways to
 contribute is to participate in Issue discussions, chat on our
-[Discord server](https://discord.gg/SRG3ePMKNy) or join the monthly community
-calls. For more information on community engagement, developer and contributing
+[Discord server](https://discord.gg/SRG3ePMKNy). For more information on community engagement, developer and contributing
 guidelines and more, head over to the
 [Radius community repo](https://github.com/radius-project/community).
 
