@@ -715,7 +715,7 @@ function createRequestHandler(instanceId) {
                         const radDeployCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
                         const radCommands = [radDeployCommand];
                         const appName = extractAppName(bicepSource);
-                        if (appName) radCommands.push('app graph --application ' + appName);
+                        if (appName) radCommands.push('app graph --application ' + appName + ' --preview');
                         const radCommand = JSON.stringify(radCommands);
                         await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
 
@@ -2135,7 +2135,7 @@ function createRequestHandler(instanceId) {
                                 const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
                                 const appName = extractAppName(bicepSource);
                                 const commands = [deployCmd];
-                                if (appName) commands.push('app graph --application ' + appName);
+                                if (appName) commands.push('app graph --application ' + appName + ' --preview');
                                 const radCommandsInput = JSON.stringify(commands);
                                 dispatchArgs.push('-f', 'rad_commands=' + radCommandsInput);
                                 addLog('Deploying with rad commands: ' + commands.join('  |  '));
