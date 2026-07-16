@@ -4,19 +4,15 @@
 // Recipe resolution that needs GitHub access — discovers recipes in
 // radius-project/resource-types-contrib and resolves a planned app's abstract
 // resources to the concrete cloud/k8s resources each recipe deploys. Reaches
-// GitHub only through the injected {@link GitHub} port; the pure parsing and
-// canonical-map helpers live in ./terraform, ./recipes.
+// GitHub only through the injected {@link GitHub} port; the pure recipe parsing
+// helpers live in ./terraform, ./recipes. When no discovered recipe matches a
+// resource type, resolution yields no outputs — custom-type recipes are handled
+// by recipe packs at deploy time, not fabricated here.
 
 import type { GitHub } from "../ports/index.js";
 import { getPlatform } from "../platforms/index.js";
 import { parseTerraformResources } from "./terraform.js";
-import {
-  parseRecipeResources,
-  CANONICAL_RESOURCE_MAP,
-  inferResourcesFromSchema,
-  generateRecipeFromStaticMappings,
-  radiusTypeToContribDir,
-} from "./recipes.js";
+import { parseRecipeResources } from "./recipes.js";
 
 export async function loadRecipeResources(gh, recipePath, format) {
     const ghApiGetContent = (p) => gh.getContent(p);
@@ -117,39 +113,14 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
         const rawType = appRes.type.split('@')[0];
         const baseType = normalizeType(rawType);
 
-        // Cloud-managed database types are provisioned by the deploy workflow via the
-        // provider-specific (azure/aws) terraform recipe, NOT the generic kubernetes
-        // recipe. Resolve them straight from the canonical map for the active provider
-        // so the planned graph matches what actually gets deployed.
-        const CLOUD_MANAGED_TYPES = new Set([
-            'Radius.Data/mySqlDatabases',
-            'Radius.Data/postgreSqlDatabases',
-            'Radius.Data/sqlDatabases',
-        ]);
-        if (CLOUD_MANAGED_TYPES.has(baseType) && provider !== 'kubernetes' && CANONICAL_RESOURCE_MAP[baseType]?.[provider]) {
-            resolved.push({
-                ...appRes,
-                recipe: { name: 'generated', templateKind: 'canonical-managed', templatePath: `radius-project/resource-types-contrib (${provider})` },
-                outputResources: CANONICAL_RESOURCE_MAP[baseType][provider],
-            });
-            continue;
-        }
+        // Match a real recipe discovered from resource-types-contrib by resource
+        // type (try both normalized and raw). Recipe resolution for custom types
+        // is owned by recipe packs at deploy time and the radius-app-bicep skill —
+        // this modeling code no longer fabricates outputs when nothing matches.
+        const matchingRecipe = recipes.find(r => r.resourceType === baseType) ||
+                               recipes.find(r => r.resourceType === rawType);
 
-        // Find matching recipe by resource type (try both normalized and raw)
-        let matchingRecipe = recipes.find(r => r.resourceType === baseType) ||
-                             recipes.find(r => r.resourceType === rawType);
-
-        // If no recipe found, dynamically resolve from resource-types-contrib
         let outputResources = matchingRecipe?.concreteResources || [];
-        let recipeSource = matchingRecipe ? 'contrib-direct' : null;
-        if (outputResources.length === 0) {
-            const dynamicResult = await generateRecipeFromContrib(gh, baseType, provider);
-            outputResources = dynamicResult.resources;
-            recipeSource = dynamicResult.source;
-            if (dynamicResult.recipe && !matchingRecipe) {
-                matchingRecipe = dynamicResult.recipe;
-            }
-        }
 
         // Annotate K8s Deployment nodes with managed service name (AKS/EKS)
         const k8sServiceName = getPlatform(provider)?.clusterServiceName || 'K8s';
@@ -167,7 +138,7 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
                 name: matchingRecipe.name,
                 templateKind: matchingRecipe.templateKind,
                 templatePath: matchingRecipe.templatePath,
-            } : { name: 'generated', templateKind: recipeSource || 'schema-generated', templatePath: `radius-project/resource-types-contrib (${provider})` },
+            } : null,
             outputResources: outputResources,
         };
         resolved.push(planned);
@@ -175,65 +146,3 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
     return resolved;
 }
 
-export async function fetchResourceTypeSchema(gh, radiusType) {
-    const ghApiGetContent = (p) => gh.getContent(p);
-    const dir = radiusTypeToContribDir(radiusType);
-    if (!dir) return null;
-    const typeName = dir.split('/').pop();
-    const schemaPath = `${dir}/${typeName}.yaml`;
-    return ghApiGetContent(`/repos/radius-project/resource-types-contrib/contents/${schemaPath}`);
-}
-
-export async function fetchRecipeFromAnyPlatform(gh, radiusType, excludePlatform) {
-    const ghApiListNames = (p) => gh.listNames(p);
-    const dir = radiusTypeToContribDir(radiusType);
-    if (!dir) return null;
-
-    // Check which platforms have recipes
-    const platforms = await ghApiListNames(`/repos/radius-project/resource-types-contrib/contents/${dir}/recipes`);
-
-    // Try platforms other than the excluded one
-    for (const platform of platforms) {
-        if (platform === excludePlatform) continue;
-        for (const format of ['terraform', 'bicep']) {
-            const recipePath = `${dir}/recipes/${platform}/${format}`;
-            const loaded = await loadRecipeResources(gh, recipePath, format);
-            if (!loaded) continue;
-
-            const concreteResources = loaded.concreteResources;
-
-            return {
-                name: dir.split('/').pop(),
-                resourceType: radiusType,
-                templateKind: format,
-                templatePath: `ghcr.io/radius-project/resource-types-contrib/${recipePath}`,
-                provider: platform,
-                concreteResources
-            };
-        }
-    }
-    return null;
-}
-
-export async function generateRecipeFromContrib(gh, radiusType, provider) {
-    const targetPlatform = getPlatform(provider)?.recipePlatform || 'kubernetes';
-
-    // Step 1: Try fetching a recipe from any other platform in resource-types-contrib
-    const altRecipe = await fetchRecipeFromAnyPlatform(gh, radiusType, targetPlatform);
-    if (altRecipe && altRecipe.concreteResources.length > 0) {
-        return { resources: altRecipe.concreteResources, source: 'contrib-alt-platform', recipe: altRecipe };
-    }
-
-    // Step 2: Fetch the YAML schema and use it to infer what gets deployed
-    const schema = await fetchResourceTypeSchema(gh, radiusType);
-    if (schema) {
-        const inferred = inferResourcesFromSchema(schema, radiusType, provider);
-        if (inferred.length > 0) {
-            return { resources: inferred, source: 'contrib-schema', recipe: null };
-        }
-    }
-
-    // Step 3: Fall back to static mappings
-    const staticResult = generateRecipeFromStaticMappings(radiusType, provider);
-    return { resources: staticResult, source: 'static-fallback', recipe: null };
-}
