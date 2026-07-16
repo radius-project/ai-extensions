@@ -15,7 +15,7 @@ the SQLite default does not override the explicit selection.
 | MySQL backing service | Emit the exact configured `Radius.Data/mySqlDatabases` type |
 | Source-built workload | Use the complete Dockerfile context at an immutable source ref |
 | Native database contract | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB` |
-| Runtime secret | Bind `MYSQL_PASSWORD` through an authored secret and `secretKeyRef` |
+| Developer-supplied credential | Set `MYSQL_PASSWORD` from the same `@secure()` password parameter via `env.value` |
 | Listener | Expose the source-configured port 3000 |
 
 ## Source analysis
@@ -40,9 +40,10 @@ the SQLite default does not override the explicit selection.
 3. Map all four native variables. A generic connection does not invent these
    application-specific names.
 4. Pass the developer-supplied password to the schema's sensitive resource
-   property from `@secure()`, and separately expose it to the workload through a
-   supported `Radius.Security/secrets` resource and `secretKeyRef`.
-5. Referencing the image, MySQL host, and runtime secret creates dependency
+   property from a `@secure()` parameter, and assign that same parameter directly
+   to the workload's `MYSQL_PASSWORD` `env.value`. Radius encrypts and injects it,
+   so no wrapper `Radius.Security/secrets` resource or `secretKeyRef` is needed.
+5. Referencing the image and MySQL host creates dependency
    ordering. Omit a generic connection unless the request explicitly requires
    Radius relationship metadata or the source consumes its exact projection.
 6. Consume the source build through the image resource's verified
@@ -54,8 +55,9 @@ the SQLite default does not override the explicit selection.
 
 - The selected MySQL type and source-built workload are both emitted.
 - Every required native variable appears with exact spelling and format.
-- The workload password uses `secretKeyRef`; no password is hardcoded or placed
-  in a plain environment value.
+- The workload password comes from the same `@secure()` parameter assigned to
+  `env.value`; no password is hardcoded and no wrapper secret or `secretKeyRef`
+  is authored.
 - The process listener, image entrypoint, and database name/version agree with
   the pinned source.
 - The definition compiles against the exact configured extension and has no
