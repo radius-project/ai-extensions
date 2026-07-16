@@ -788,8 +788,9 @@ ${graphHeader('planned')}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
 </div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
@@ -799,6 +800,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim();
     var env = document.getElementById('planned-env').value;
@@ -886,8 +888,9 @@ ${graphHeader('planned')}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
 </div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div class="legend" style="margin-bottom:12px;">
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/></svg> Compute</div>
   <div class="legend-item"><svg width="18" height="15" style="vertical-align:middle"><path d="M2 4 a6 2 0 0 1 12 0 v6 a6 2 0 0 1 -12 0 z" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/><ellipse cx="8" cy="4" rx="6" ry="2" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/></svg> Data Store</div>
@@ -906,6 +909,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
     var env = document.getElementById('planned-env').value;

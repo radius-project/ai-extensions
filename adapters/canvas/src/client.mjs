@@ -133,15 +133,39 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var envs = (d && d.environments) || [];
-                if (!envs.length) { envSel.innerHTML = '<option value="">No environments</option>'; return; }
+                if (!envs.length) {
+                    envSel.innerHTML = '<option value="">No environments</option>';
+                    radiusApplyPlanEnvState(false);
+                    return;
+                }
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
                     var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
                 });
+                radiusApplyPlanEnvState(true);
             })
             .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
     }
+}
+
+// Toggle the planned-graph primary button between "Create Environment" (when the
+// repo has no Radius-managed environment) and its normal plan label. When there
+// is no environment the button navigates to the environment page instead of
+// planning, and an explanatory note is shown.
+function radiusApplyPlanEnvState(hasEnv) {
+    var btn = document.getElementById('plan-btn');
+    var note = document.getElementById('plan-env-note');
+    if (btn) {
+        if (hasEnv) {
+            btn.dataset.mode = 'plan';
+            btn.textContent = btn.dataset.planLabel || 'Plan Deployment';
+        } else {
+            btn.dataset.mode = 'create-env';
+            btn.textContent = 'Create Environment';
+        }
+    }
+    if (note) note.style.display = hasEnv ? 'none' : '';
 }
 
 // Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
