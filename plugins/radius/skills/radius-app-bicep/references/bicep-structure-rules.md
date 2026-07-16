@@ -200,7 +200,8 @@ Rules:
 - `data` is an object map, NOT an array
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
 - `USERNAME` is the database administrator you author (e.g. `myadmin`) — it is not derived from the source
-- A `@secure()` parameter assigned directly to `env.value` is encrypted and injected by Radius, so it stays out of plain state; use a secret resource plus `secretKeyRef` only for recipe-generated managed secrets or schema-required `secretName` inputs
+- A `@secure()` parameter assigned directly to `env.value` is encrypted and injected by Radius, so it stays out of plain state; a developer-supplied credential needs no authored secret and no `secretKeyRef`
+- Use `valueFrom.secretKeyRef` (to `<resource>.properties.secrets.name`) only to bind a recipe-generated managed secret; author a `Radius.Security/secrets` resource only for app secrets/config files or a type whose schema requires `secretName`
 
 ## Radius.Compute/routes structure
 

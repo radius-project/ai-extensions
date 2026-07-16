@@ -48,6 +48,9 @@ connections: {
 Map every required input to the exact name the source consumes:
 
 ```bicep
+@secure()
+param password string
+
 containers: {
   api: {
     image: apiImage.properties.imageReference

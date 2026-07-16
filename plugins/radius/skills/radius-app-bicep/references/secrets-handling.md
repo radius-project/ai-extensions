@@ -58,7 +58,7 @@ resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
 }
 ```
 
-The names above are illustrative. Confirm the resource properties, the app-native variable name, and the required value format against the target version and source. Reserve authored `Radius.Security/secrets` + `secretKeyRef` for recipe-generated managed-secret outputs (below) and for genuine application secrets or types whose schema requires `secretName`.
+The names above are illustrative. Confirm the resource properties, the app-native variable name, and the required value format against the target version and source. For a recipe-generated managed-secret output (below), bind it with `secretKeyRef` to the recipe's managed secret via `<resource>.properties.secrets.name`; do not author a wrapper secret. Reserve an authored `Radius.Security/secrets` resource for genuine application secrets or config files, or for a type whose schema requires `secretName`.
 
 ## Recipe-generated secret outputs
 
@@ -103,9 +103,10 @@ For a non-URL format, the pattern can look like:
 ```bicep
 env: {
   DB_PASSWORD: {
-    value: password
+    value: password // developer-supplied @secure() parameter
   }
   APP_DATABASE_OPTIONS: {
+    // mysql is the database resource symbol; substitute your actual resource
     value: 'host=${mysql.properties.host};password=$(DB_PASSWORD)'
   }
 }
