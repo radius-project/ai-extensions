@@ -103,7 +103,7 @@ const session = await joinSession({
                 properties: {
                     page: {
                         type: "string",
-                        enum: ["credentials", "generate", "graph", "planned", "graph-diff", "deployed", "environment", "deploying"],
+                        enum: ["credentials", "graph", "planned", "graph-diff", "deployed", "environment", "deploying"],
                         description: "Which page to display",
                     },
                     repo: {
@@ -156,35 +156,6 @@ const session = await joinSession({
                     },
                 },
                 {
-                    name: "generate_app",
-                    description: "Display generated app.bicep content in the canvas",
-                    inputSchema: {
-                        type: "object",
-                        properties: {
-                            content: { type: "string", description: "The generated app.bicep content to display" },
-                        },
-                    },
-                    handler: async (ctx) => {
-                        const entry = await getOrCreateServer(ctx.instanceId, "generate");
-                        Object.assign(entry.state, await workspaceState());
-                        if (ctx.input?.content) {
-                            entry.state.generatedContent = ctx.input.content;
-                        } else {
-                            const repo = entry.state.generateTargetRepo || entry.state.contextRepo || '';
-                            const branch = defaultBranchForState(entry.state);
-                            // app.bicep generation is owned by the radius-app-bicep
-                            // skill. Only surface a committed/persisted app.bicep here;
-                            // when absent, leave empty so the page prompts the user to
-                            // have Copilot run the skill.
-                            entry.state.generatedContent = repo
-                                ? (await fetchBicepForBranch(repo, branch, entry.state) || '')
-                                : '';
-                        }
-                        entry.url = `${entry.baseUrl}/?page=generate`;
-                        return { message: "app.bicep content ready", url: entry.url };
-                    },
-                },
-                {
                     name: "render_graph",
                     description: "Render the application graph from ApplicationGraphResource data",
                     inputSchema: {
@@ -201,7 +172,7 @@ const session = await joinSession({
                         const entry = await getOrCreateServer(ctx.instanceId, "graph");
                         // Populate the active worktree context (repo/branch/path) so the
                         // graph page defaults to the session branch and reads the worktree
-                        // app.bicep — matching generate_app and the open() handler.
+                        // app.bicep — matching the open() handler.
                         Object.assign(entry.state, await workspaceState());
                         if (ctx.input?.resources) {
                             entry.state.graphResources = ctx.input.resources;

@@ -9,7 +9,6 @@ import { describe, it, expect } from "vitest";
 import {
     pageShell,
     oidcPage,
-    appGeneratePage,
     graphHeader,
     graphHeaderClose,
     graphPage,
@@ -38,47 +37,6 @@ describe("graphHeader / graphHeaderClose", () => {
     it("renders the nav header and matching close markup", () => {
         expect(graphHeader("graph")).toContain("<");
         expect(graphHeaderClose()).toContain("<");
-    });
-});
-
-describe("appGeneratePage — loaded model branch", () => {
-    const html = appGeneratePage({
-        generatedContent: "resource app 'Applications.Core/applications@2023-10-01-preview'",
-        generateTargetRepo: "octo/app",
-        generateBranch: "main",
-    });
-
-    it("shows the loaded app.bicep content", () => {
-        expect(html).toContain("app.bicep Generated");
-        expect(html).toContain("Applications.Core/applications");
-    });
-
-    it("emits none of the removed generated-bicep tokens", () => {
-        for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-    });
-});
-
-describe("appGeneratePage — empty (load) branch", () => {
-    const html = appGeneratePage({ contextRepo: "octo/app", contextBranch: "main" });
-
-    it("attributes app.bicep authoring to the Radius app-bicep skill", () => {
-        expect(html).toContain("Radius app-bicep skill");
-        expect(html).toContain(".radius/app.bicep");
-    });
-
-    it("handles needsAppBicep from /api/generate-bicep by pointing to the skill", () => {
-        expect(html).toContain("/api/generate-bicep");
-        expect(html).toContain("d.needsAppBicep");
-        expect(html).toContain("Ask Copilot to generate one with the Radius app-bicep skill");
-    });
-
-    it("emits none of the removed generated-bicep tokens", () => {
-        for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-    });
-
-    it("renders with no state at all", () => {
-        expect(typeof appGeneratePage(undefined)).toBe("string");
-        expect(typeof appGeneratePage({})).toBe("string");
     });
 });
 

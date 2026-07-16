@@ -48,7 +48,7 @@ import {
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
-  appGeneratePage, graphPage, plannedGraphPage, graphDiffPage,
+  graphPage, plannedGraphPage, graphDiffPage,
   deployedGraphPage, environmentPage, deployingPage,
 } from "./pages.mjs";
 
@@ -1545,60 +1545,6 @@ function createRequestHandler(instanceId) {
             return;
         }
 
-        if (pathname === "/api/generate-bicep" && req.method === "POST") {
-            let body = "";
-            for await (const chunk of req) body += chunk;
-            try {
-                const data = JSON.parse(body);
-                const repo = data.repo || '';
-                const entry = servers.get(instanceId);
-                const branch = data.branch || defaultBranchForState(entry?.state);
-                // app.bicep generation is owned by the Radius app-bicep skill, not
-                // this server. This endpoint only surfaces a committed/persisted
-                // app.bicep for preview; if none exists, direct the user to have
-                // Copilot run the skill.
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
-                if (!content) {
-                    triggerAppBicepHandoff(entry, repo, branch, 'generate');
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({
-                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-                        needsAppBicep: true,
-                        repo,
-                        branch,
-                    }));
-                    return;
-                }
-                if (entry) {
-                    entry.state.generatedContent = content;
-                    entry.state.generateTargetRepo = repo;
-                    entry.state.generateBranch = branch;
-                }
-
-                // Preview mode: return the fetched app.bicep content for review
-                // without triggering a page reload.
-                if (data.preview) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({ repo, branch, content, committed: true }));
-                    return;
-                }
-
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(200);
-                res.end(JSON.stringify({ reload: true }));
-            } catch (e) {
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
-            }
-            return;
-        }
-
         if (pathname === "/api/discover-branches" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
@@ -2290,7 +2236,6 @@ function createRequestHandler(instanceId) {
 
 const PAGE_RENDERERS = {
     "credentials": environmentPage,
-    "generate": appGeneratePage,
     "graph": graphPage,
     "planned": plannedGraphPage,
     "graph-diff": graphDiffPage,
