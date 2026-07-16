@@ -124,6 +124,6 @@ Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion 
 - Recipe-generated secrets bind directly from the exact declared managed-secret name and key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No secret is hardcoded, interpolated into a plain Bicep value, or assumed to appear in generic connection variables.
-- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` binds a recipe-generated managed secret through the owner's read-only `properties.secrets.name`; an authored `Radius.Security/secrets` resource is only for genuine application secrets/config files or a type whose schema requires `secretName`.
+- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` binds a secret resource into the container: a recipe-generated managed secret through the owner's read-only `properties.secrets.name`, or an authored `Radius.Security/secrets`. Author a secret only for genuine application secrets/config files or a type whose schema requires `secretName`, never to wrap a recipe output.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
 - A final credential-bearing URL/config is either bound directly from a matching managed secret or composed at runtime from secret references; it is never reconstructed in Bicep plain state.

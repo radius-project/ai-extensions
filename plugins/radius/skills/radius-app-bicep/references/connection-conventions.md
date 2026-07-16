@@ -23,7 +23,7 @@ For every dependency:
 4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format.
 5. Select the wiring for each app-native value:
    - explicit `env.value` from a verified nonsecret output or literal, or from a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
-   - `valueFrom.secretKeyRef` from an exact recipe-generated managed secret/key;
+   - `valueFrom.secretKeyRef` from an exact secret and key: a recipe-generated managed secret via `<resource>.properties.secrets.name`, or an authored `Radius.Security/secrets`;
    - runtime composition; or
    - generic connection projection only when the source explicitly consumes that applicable contract.
 
