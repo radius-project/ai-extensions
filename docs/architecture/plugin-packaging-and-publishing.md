@@ -88,7 +88,7 @@ graph TD
     Assemble --> Latest
 
     Release -->|source pins ref: release| MP[".github/plugin/marketplace.json"]
-    MP -->|/plugin install radius@radius-plugins| Install["Copilot app / CLI<br/>installs complete plugin"]
+    MP -->|install from the app| Install["GitHub Copilot app<br/>installs complete plugin"]
 ```
 
 The publish step is deliberately simple: `git checkout -B release` **recreates** the `release` branch at the just-built `main` commit, then a single commit force-adds the otherwise-ignored `extension.mjs`. The result is that `release` equals the entire `main` tree — `plugin.json`, `package.json`, all `skills/`, and `README.md` — **plus** one commit that adds only the bundle. The skills and manifest travel to `release` automatically because the branch is the `main` tree; there is no separate copy step. Finally the `latest` tag is force-moved to the new `release` head.
@@ -106,14 +106,9 @@ The publish step is deliberately simple: `git checkout -B release` **recreates**
 }
 ```
 
-The pinned `ref: release` means an install resolves the plugin from the `release` branch regardless of which ref the user added the marketplace from, so the user runs the plain commands with no `@ref` suffix (typed at the Copilot prompt or via the app's plugins UI):
+The pinned `ref: release` means an install resolves the plugin from the `release` branch regardless of which ref the marketplace was added from, so there is no `@ref` suffix to specify. Because the Radius canvas can only be hosted by the GitHub Copilot app, the plugin is installed from the app: open app settings, click **Plugins**, add the `radius-project/ai-extensions` marketplace, and install the `radius` plugin.
 
-```text
-/plugin marketplace add radius-project/ai-extensions
-/plugin install radius@radius-plugins
-```
-
-The installer copies the git-tracked files at `plugins/radius/` from the `release` ref into `~/.copilot/installed-plugins/radius-plugins/radius/`. Because the bundle is committed on `release`, the installed plugin now contains everything: `plugin.json`, `package.json`, `extension.mjs`, and `skills/`.
+The installer copies the git-tracked files at `plugins/radius/` from the `release` ref into the app's installed-plugins directory (for example, `~/.copilot/installed-plugins/radius-plugins/radius/`). Because the bundle is committed on `release`, the installed plugin now contains everything: `plugin.json`, `package.json`, `extension.mjs`, and `skills/`.
 
 ## Notable details
 

@@ -9,7 +9,7 @@ The `radius` plugin ships two things to GitHub Copilot: agentic **skills** (plai
 
 That artifact is intentionally git-ignored, and the Copilot marketplace installs a plugin by copying the **git-tracked** files from the installed ref with **no build step**. As a result the canvas file never ships, and opening the canvas fails with `No canvas "radius" is registered`. The skills install fine because they are tracked; the canvas does not because it is generated and ignored.
 
-This design proposes a **publishing workflow** that keeps `main` free of the compiled artifact while still shipping it. On every merge to `main`, CI rebuilds `extension.mjs` and commits it to a dedicated **`release` branch** (main's tree plus the built bundle), then moves a `latest` tag to that commit. The plugin's `source` in `.github/plugin/marketplace.json` is changed to the **object form that pins a `ref`**, so the plugin is always resolved from the `release` branch — no matter which ref the user added the marketplace from. Users therefore run the plain `add radius-project/ai-extensions` and receive the skills and a correctly-packaged canvas extension (`extension.mjs` + `package.json` at the plugin root). This avoids the merge conflicts and noisy diffs that would come from committing a single large compiled file to `main` on every change.
+This design proposes a **publishing workflow** that keeps `main` free of the compiled artifact while still shipping it. On every merge to `main`, CI rebuilds `extension.mjs` and commits it to a dedicated **`release` branch** (main's tree plus the built bundle), then moves a `latest` tag to that commit. The plugin's `source` in `.github/plugin/marketplace.json` is changed to the **object form that pins a `ref`**, so the plugin is always resolved from the `release` branch — no matter which ref the marketplace was added from. Users therefore install the plugin from the GitHub Copilot app and receive the skills and a correctly-packaged canvas extension (`extension.mjs` + `package.json` at the plugin root). This avoids the merge conflicts and noisy diffs that would come from committing a single large compiled file to `main` on every change.
 
 > **Scope note.** This design covers only how the bundle is **packaged and published** to the install ref. Separately, testing found that the current GitHub App does **not** auto-discover a marketplace plugin's declared `extensions`, so an installed plugin's canvas does not activate on its own (reproduced with GitHub's own `github/awesome-copilot` `accessibility-kanban` canvas plugin). That is a **GitHub App bug**; fixing or working around it is **out of scope** for this design and the accompanying PR. This work is a prerequisite either way — the bundle must ship correctly before any discovery fix can surface the canvas.
 
@@ -19,7 +19,7 @@ This design proposes a **publishing workflow** that keeps `main` free of the com
 - **Bundle / built artifact**: The single `extension.mjs` emitted by esbuild from `adapters/canvas/src` + `radius-core`. Also referred to as "the bundle".
 - **Plugin manifest**: `plugins/radius/plugin.json`, which declares `skills` (`./skills/`) and `extensions` (`.`, the plugin root) as repo-relative paths. The canvas `extension.mjs` and its `package.json` live at the plugin root.
 - **Marketplace manifest**: `.github/plugin/marketplace.json`, which declares each plugin's `source`. `source` accepts two forms: a **string** repo-relative path (`"./plugins/radius"`, resolved against the ref the marketplace was added from), or an **object** that pins an explicit repo and ref (`{ "source": "github", "repo": "owner/repo", "path": "...", "ref": "..." }`). Both forms are used in the official `github/awesome-copilot` marketplace.
-- **Ref**: A git branch, tag, or commit SHA. `/plugin marketplace add owner/repo@ref` installs from a specific ref; omitting `@ref` uses the repository's default branch. A `ref` can also be pinned inside the marketplace manifest's object-form `source`, in which case it wins regardless of how the marketplace was added.
+- **Ref**: A git branch, tag, or commit SHA. Adding a marketplace can target a specific ref, and omitting one uses the repository's default branch. A `ref` can also be pinned inside the marketplace manifest's object-form `source`, in which case it wins regardless of which ref the marketplace was added from.
 - **`release` branch**: A generated branch that mirrors `main` and additionally contains the committed `extension.mjs`. The plugin `source` pins its `ref` to this branch.
 - **`latest` tag**: A moving tag pointing at the current `release` head, usable as a stable install alias.
 
@@ -35,7 +35,7 @@ Fix canvas registration by making a correct `extension.mjs` present on the ref t
 - Keep `main` clean: the compiled `extension.mjs` is **not** committed to `main`, so contributors never hand-resolve conflicts in a generated 450 KB file.
 - Automate publishing: the bundle is rebuilt from reviewed source and published by CI, not by hand, so it cannot drift from source.
 - Keep skills and canvas in sync: the install ref always contains the skills and a bundle built from the same commit.
-- Keep the install experience simple: users run the plain `add radius-project/ai-extensions` (default branch); the manifest redirects the plugin to the published `release` ref, so no `@ref` suffix is required and the app UI and CLI behave identically.
+- Keep the install experience simple: users install the plugin from the GitHub Copilot app; the manifest redirects the plugin to the published `release` ref, so no ref needs to be specified and the install resolves the same way however the marketplace was added.
 - Success is measured by: (1) a fresh install places a valid canvas extension package (`extension.mjs` + `package.json`) on the install ref, and (2) no `extension.mjs` diffs appear in `main` pull requests. (Canvas activation additionally depends on the GitHub App discovery fix noted in Non-goals.)
 
 ### Non-goals
@@ -50,7 +50,7 @@ Fix canvas registration by making a correct `extension.mjs` present on the ref t
 
 #### User story 1
 
-As a developer, I run `/plugin marketplace add radius-project/ai-extensions` (no ref needed) and `/plugin install radius@radius-plugins`, and the plugin arrives with its skills and a correctly-packaged canvas extension — no manual build required. Once the GitHub App discovers plugin `extensions` (a separate app fix — see Non-goals), the Radius canvas opens from the app's side panel.
+As a developer, I install the `radius` plugin from the GitHub Copilot app (app settings → **Plugins** → add the `radius-project/ai-extensions` marketplace → install `radius`), and the plugin arrives with its skills and a correctly-packaged canvas extension — no manual build required. Once the GitHub App discovers plugin `extensions` (a separate app fix — see Non-goals), the Radius canvas opens from the app's side panel.
 
 #### User story 2
 
@@ -58,14 +58,13 @@ As a maintainer, I merge a PR into `main` that changes canvas code. CI rebuilds 
 
 ## User experience (if applicable)
 
-There is **no change to the install command**. Because the plugin `source` in `marketplace.json` pins the `release` ref, the plain marketplace-add against the default branch resolves the plugin (skills + built bundle) from `release`. What users notice is that the plugin now ships a complete canvas extension package; the canvas surfaces once the GitHub App discovers plugin `extensions` (see Non-goals).
+There is **no change to the install flow**. Because the Radius canvas can only be hosted by the GitHub Copilot app, the plugin is installed from the app, and because the plugin `source` in `marketplace.json` pins the `release` ref, that install resolves the plugin (skills + built bundle) from `release`. What users notice is that the plugin now ships a complete canvas extension package; the canvas surfaces once the GitHub App discovers plugin `extensions` (see Non-goals).
 
-**Sample input** (typed at the GitHub Copilot CLI prompt, or done via the app's **Settings → Plugins** UI — these are Copilot slash commands, not shell commands):
+**Sample steps** (in the GitHub Copilot app):
 
-```text
-/plugin marketplace add radius-project/ai-extensions
-/plugin install radius@radius-plugins
-```
+1. Open app settings and click **Plugins**.
+2. Add the `radius-project/ai-extensions` marketplace.
+3. Install the `radius` plugin.
 
 **Sample output:**
 
@@ -81,7 +80,7 @@ Today, `main` carries everything the installer reads **except** the built bundle
 - It builds the bundle from the just-merged commit and writes `plugins/radius/extension.mjs`.
 - It **force-updates the `release` branch** to equal `main` plus one commit that adds the (otherwise ignored) bundle, then **moves the `latest` tag** to that commit.
 - The plugin `source` in `marketplace.json` is changed to the **object form that pins `ref: release`**, so the plugin — its `plugin.json`, skills, and the bundle — is always fetched from the `release` ref, whichever ref the user added the marketplace from. The canvas `extension.mjs` and its `package.json` sit at the **plugin root** (`plugin.json` declares `extensions: "."`), so they resolve within the `release` checkout where the bundle exists.
-- Because the ref is pinned in the manifest, install docs keep the plain `add radius-project/ai-extensions` command; no `@ref` suffix is needed.
+- Because the ref is pinned in the manifest, install docs simply direct users to install the plugin from the app; no ref needs to be specified.
 
 `main` remains the source of truth and stays free of the compiled artifact; `release` is a **generated, force-updated** branch that no one commits to by hand.
 
@@ -114,7 +113,7 @@ graph TD
 
 ### Detailed design
 
-The installer resolves the plugin's `source`, and the extension path, against a **single ref**. So the built `extension.mjs` must physically exist on that ref. Two levers matter: **which ref carries the bundle**, and **how the install is pointed at it** — either by the user (the `@ref` suffix on marketplace-add) or by the manifest (the object-form `source` that pins a `ref`). The options below differ along both.
+The installer resolves the plugin's `source`, and the extension path, against a **single ref**. So the built `extension.mjs` must physically exist on that ref. Two levers matter: **which ref carries the bundle**, and **how the install is pointed at it** — either by the ref the marketplace was added from, or by the manifest (the object-form `source` that pins a `ref`). The options below differ along both.
 
 #### Option 1: Commit the bundle to `main`
 
@@ -123,7 +122,7 @@ Un-ignore `plugins/radius/extension.mjs`, commit it, and add a CI drift-check th
 ##### Advantages
 
 - Simplest mental model: install from `main`, everything is there.
-- No new branch or tag machinery; the marketplace-add command is unchanged.
+- No new branch or tag machinery; the install flow is unchanged.
 - A drift-check guarantees the committed bundle matches source.
 
 ##### Disadvantages
@@ -142,7 +141,7 @@ Keep the bundle git-ignored on `main`. A workflow on every push to `main` builds
 - `main` never contains the compiled artifact, so **no contributor ever resolves a bundle conflict** and code reviews stay clean.
 - The bundle is always built by CI from reviewed `main` source, so it cannot drift and is never hand-edited.
 - The `release` ref always carries skills **and** a matching bundle (same commit tree), keeping them in sync.
-- Because the ref is **pinned in the manifest**, the install command is unchanged and the **app UI and CLI behave identically** — users need not know about `release`.
+- Because the ref is **pinned in the manifest**, the install flow is unchanged and the plugin resolves the same way however the marketplace was added — users need not know about `release`.
 - Reuses the existing `build.yml` steps (install → typecheck → test → build).
 
 ##### Disadvantages
@@ -168,7 +167,7 @@ Build and publish the bundle only when a release tag is cut (aligned with Change
 
 #### Proposed option
 
-**Option 2 — publish to a generated `release` branch on every push to `main`, move a `latest` tag, and pin the plugin `source` to `ref: release`.** It directly fixes registration, keeps `main` free of the compiled artifact (eliminating the merge-conflict problem), guarantees the published bundle is CI-built from reviewed source, and — because the ref is pinned in the manifest — leaves the install command unchanged and consistent between the app and the CLI. Option 3 (version-tag publishing) can be layered on later for reproducible, pinnable installs.
+**Option 2 — publish to a generated `release` branch on every push to `main`, move a `latest` tag, and pin the plugin `source` to `ref: release`.** It directly fixes registration, keeps `main` free of the compiled artifact (eliminating the merge-conflict problem), guarantees the published bundle is CI-built from reviewed source, and — because the ref is pinned in the manifest — leaves the install flow unchanged and consistent however the marketplace was added. Option 3 (version-tag publishing) can be layered on later for reproducible, pinnable installs.
 
 We can move to option 3 later if we want clear release cycles rather than releasing every PR.
 
@@ -200,7 +199,7 @@ N/A for programmatic APIs. The one contract change is in `marketplace.json`: the
 }
 ```
 
-This uses the same object-form `source` shape already used in the official `github/awesome-copilot` marketplace. `plugin.json`'s schema is unchanged. The user-facing install command does **not** change (see User experience).
+This uses the same object-form `source` shape already used in the official `github/awesome-copilot` marketplace. `plugin.json`'s schema is unchanged. The user-facing install flow does **not** change (see User experience).
 
 ### Implementation details
 
@@ -208,7 +207,7 @@ This uses the same object-form `source` shape already used in the official `gith
 
 - `.github/plugin/marketplace.json`: change the plugin `source` from the string `"./plugins/radius"` to the object form pinning `ref: release` (see API design). This is the change that makes the plain install resolve the bundle.
 - `plugin.json`: `extensions` is `"."` (the plugin root), so the canvas `extension.mjs` and its `package.json` are resolved from the plugin root within the `release` checkout where the bundle exists.
-- `plugins/radius/README.md` and root `README.md`: install instructions stay as the plain `add radius-project/ai-extensions`; add a short note explaining that the canvas bundle is served from the generated `release` branch (or link this design).
+- `plugins/radius/README.md` and root `README.md`: install instructions direct users to install the plugin from the GitHub Copilot app; add a short note explaining that the canvas bundle is served from the generated `release` branch (or link this design).
 
 #### Build & packaging
 
@@ -231,7 +230,7 @@ This uses the same object-form `source` shape already used in the official `gith
 - **Publish workflow validation**:
   - On a test merge to `main`, confirm the workflow builds and force-updates `release` with an `extension.mjs` present, and moves `latest`.
   - Confirm the `release` tree equals `main`'s tree plus exactly the bundle file.
-- **End-to-end install (packaging)**: from a clean environment, the plain `/plugin marketplace add radius-project/ai-extensions` then `/plugin install radius@radius-plugins`; verify the installed plugin dir contains `extension.mjs` and `package.json` at the plugin root alongside `skills/`, all fetched from the pinned `release` ref. Confirm the pinned `ref` is honored in both the CLI and the app UI.
+- **End-to-end install (packaging)**: from a clean environment, install the plugin from the GitHub Copilot app (app settings → **Plugins** → add the `radius-project/ai-extensions` marketplace → install `radius`); verify the installed plugin dir contains `extension.mjs` and `package.json` at the plugin root alongside `skills/`, all fetched from the pinned `release` ref.
 - **Canvas activation**: registering the canvas (`open_canvas({ canvasId: "radius" })`) depends on the GitHub App discovering plugin `extensions`, which is out of scope for this design (see Non-goals). As a manual sanity check that the shipped bundle is loadable, placing the two files in a discovered extensions dir (e.g. `~/.copilot/extensions/radius/`) registers the canvas — confirming the package itself is correct.
 - **Drift/sanity**: confirm the published bundle byte-for-byte matches a local `pnpm run build` from the same `main` commit.
 - **Testing challenges**: verifying registration requires the Copilot app/CLI runtime (an external host), so end-to-end install is a manual/integration check rather than a unit test.
@@ -246,7 +245,7 @@ This uses the same object-form `source` shape already used in the official `gith
 
 ## Compatibility (optional)
 
-- **Install command is unchanged**: users keep running the plain `add radius-project/ai-extensions`. The manifest's pinned `ref: release` makes the plugin resolve from `release`, so the canvas extension package now ships where it previously did not — a strict improvement, not a regression. (Canvas activation still depends on the GitHub App discovery fix noted in Non-goals.)
+- **Install flow is unchanged**: users keep installing the plugin from the GitHub Copilot app. The manifest's pinned `ref: release` makes the plugin resolve from `release`, so the canvas extension package now ships where it previously did not — a strict improvement, not a regression. (Canvas activation still depends on the GitHub App discovery fix noted in Non-goals.)
 - **Manifest change is backward-neutral**: only `marketplace.json`'s `source` moves to the object form (a shape the installer already supports); `plugin.json` is unchanged.
 - **Existing installs** continue to work; re-adding or updating picks up the pinned `release` bundle. Anyone who previously added the marketplace and got skills-only gains the canvas after refreshing.
 
@@ -260,8 +259,8 @@ This uses the same object-form `source` shape already used in the official `gith
 
 1. **Add the publish workflow** (`.github/workflows/publish.yml`): trigger, build (reusing `build.yml` steps), and the force-update of `release` + `latest`, with `contents: write` and SHA-pinned actions. Add `concurrency` so only one publish runs at a time per branch. *(Checked in first; validated on a scratch branch/tag before pointing docs at it.)*
 2. **Create and protect the `release` branch** and configure branch protection so only the workflow updates it.
-3. **Pin the manifest**: change the plugin `source` in `.github/plugin/marketplace.json` to the object form with `ref: release`. Keep `README.md` and `plugins/radius/README.md` install commands as the plain `add radius-project/ai-extensions`; add a short "how the canvas bundle is published" note (or link this design).
-4. **End-to-end verification (packaging)**: perform a clean install (plain command) in both the CLI and the app UI and confirm the plugin ships `extension.mjs` + `package.json` at the plugin root from the pinned `release` ref. (Canvas activation depends on the separate GitHub App discovery fix — see Non-goals.)
+3. **Pin the manifest**: change the plugin `source` in `.github/plugin/marketplace.json` to the object form with `ref: release`. Keep `README.md` and `plugins/radius/README.md` install instructions directing users to install from the GitHub Copilot app; add a short "how the canvas bundle is published" note (or link this design).
+4. **End-to-end verification (packaging)**: perform a clean install from the GitHub Copilot app and confirm the plugin ships `extension.mjs` + `package.json` at the plugin root from the pinned `release` ref. (Canvas activation depends on the separate GitHub App discovery fix — see Non-goals.)
 5. **(Optional, later)** Add version-tag publishing (Option 3) aligned with Changesets for reproducible, pinnable installs (pin `source.ref` to the version tag instead of the branch).
 
 Each step is small; the workflow itself is the main work and is estimated at a few hours including validation.
