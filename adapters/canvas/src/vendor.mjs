@@ -11,6 +11,7 @@ const VENDOR_URLS = {
     'cytoscape': 'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js',
     'dagre': 'https://unpkg.com/dagre@0.8.5/dist/dagre.min.js',
     'cytoscape-dagre': 'https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js',
+    'cytoscape-node-html-label': 'https://unpkg.com/cytoscape-node-html-label@1.2.2/dist/cytoscape-node-html-label.js',
 };
 const vendorCache = new Map(); // name → content string
 
@@ -52,7 +53,8 @@ export function getInlineVendorScripts() {
     const cy = esc(vendorCache.get('cytoscape'));
     const dg = esc(vendorCache.get('dagre'));
     const cd = esc(vendorCache.get('cytoscape-dagre'));
-    return `<script>${cy}</script>\n<script>${dg}</script>\n<script>${cd}</script>`;
+    const nhl = esc(vendorCache.get('cytoscape-node-html-label'));
+    return `<script>${cy}</script>\n<script>${dg}</script>\n<script>${cd}</script>\n<script>${nhl}</script>`;
 }
 
 // Pre-fetch all vendor scripts at extension startup

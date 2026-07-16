@@ -482,6 +482,8 @@ function radiusRenderGraph(containerId, resources, options) {
                 bgColor: colors.bg,
                 shape: typeStyle.shape,
                 icon: radiusResolveIcon(r),
+                nodeName: r.name,
+                typeLabel: shortType,
                 codeRef: r.codeReference || '',
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
@@ -531,6 +533,8 @@ function radiusRenderGraph(containerId, resources, options) {
                         bgColor: '#f6f8fa',
                         shape: radiusGetTypeStyle(out.type || out.displayType || '').shape,
                         icon: radiusResolveIcon(out),
+                        nodeName: out.name || outLabel,
+                        typeLabel: outLabel,
                         resourceType: out.type || '',
                         diffStatus: '',
                         cloudId: (out.id && out.id.indexOf('/subscriptions/') === 0) ? out.id : ''
@@ -629,6 +633,51 @@ function radiusRenderGraph(containerId, resources, options) {
         minZoom: 0.3,
         maxZoom: 3
     });
+
+    // ── Optional: render nodes as pixel-exact .rad-node HTML cards ────────────
+    // When the cytoscape-node-html-label extension is present we overlay a real
+    // DOM .rad-node card on each node (icon + bold name + muted Namespace/type),
+    // so the graph matches the rest of the panel exactly. The native cytoscape
+    // node stays sized as an invisible hit-target, so edges, dagre spacing and
+    // the click-to-open popup all keep working unchanged. If the extension fails
+    // to load, the graph falls back to the native drawn nodes above.
+    if (typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
+        try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
+    }
+    if (typeof cy.nodeHtmlLabel === 'function') {
+        cy.style()
+            .selector('node').style({
+                'width': 220,
+                'height': 92,
+                'background-opacity': 0,
+                'border-width': 0,
+                'background-image': 'none',
+                'text-opacity': 0
+            })
+            .selector('node.hover').style({ 'border-width': 0 })
+            .update();
+        var radEsc = function(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        };
+        cy.nodeHtmlLabel([{
+            query: 'node',
+            halign: 'center', valign: 'center',
+            halignBox: 'center', valignBox: 'center',
+            tpl: function(data) {
+                var icon = data.icon
+                    ? '<img class="rad-node__icon" src="' + data.icon + '" alt="" />'
+                    : '';
+                return '<div class="rad-node" style="box-sizing:border-box;background:'
+                    + (data.bgColor || '#ffffff') + ';border-color:'
+                    + (data.borderColor || '#d0d7de') + ';">'
+                    + '<div class="rad-node__head">' + icon
+                    + '<span class="rad-node__title">' + radEsc(data.nodeName) + '</span></div>'
+                    + '<div class="rad-node__type">' + radEsc(data.typeLabel) + '</div>'
+                    + '</div>';
+            }
+        }]);
+    }
 
     // ── Layout + edge routing via dagre (with bend-point waypoints) ──────────
     // cytoscape-dagre discards the per-edge bend points dagre computes to route
