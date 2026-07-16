@@ -22,7 +22,6 @@ export {
   computeGraphDiff,
 } from "./graph/index.js";
 export {
-  parseComposeServices,
   parseTerraformResources,
   formatTerraformType,
   formatTerraformModule,
@@ -30,20 +29,11 @@ export {
   parseRecipeResources,
   formatResourceType,
   radiusTypeToContribDir,
-  CANONICAL_RESOURCE_MAP,
-  categorizeToCanonicalType,
-  resolveCanonicalResources,
-  inferResourcesFromSchema,
-  generateRecipeFromStaticMappings,
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
   loadRecipeResources,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
-  fetchResourceTypeSchema,
-  fetchRecipeFromAnyPlatform,
-  generateRecipeFromContrib,
 } from "./modeling/index.js";
 export {
   getPlatform,
@@ -71,6 +61,9 @@ export {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
+  DEFAULT_STATE_ARCHIVE,
+  OCI_STATE_BACKEND,
+  stateRegistryForEnvironment,
   generateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
@@ -87,4 +80,3 @@ export type {
   Logger,
   Ports,
 } from "./ports/index.js";
-

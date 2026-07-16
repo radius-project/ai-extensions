@@ -14,14 +14,17 @@ import {
   computeGraphDiff,
   discoverSourceCodeRefs,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
+  DEFAULT_STATE_ARCHIVE,
+  OCI_STATE_BACKEND,
+  stateRegistryForEnvironment,
 } from "@radius-project/core";
-import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
+import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
@@ -30,7 +33,6 @@ import {
   fetchWorkspaceFile,
   fetchWorkspaceTree,
   isWorkspaceSelection,
-  writeWorkspaceRadiusScaffold,
 } from "./workspace.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
@@ -46,7 +48,7 @@ import {
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
-  appGeneratePage, graphPage, plannedGraphPage, graphDiffPage,
+  graphPage, plannedGraphPage, graphDiffPage,
   deployedGraphPage, environmentPage, deployingPage,
 } from "./pages.mjs";
 
@@ -54,13 +56,35 @@ import {
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
 
-// Short-lived cache for the (comparatively expensive) environment listing. The
-// dropdown load and the page render both hit /api/list-environments back-to-back,
-// and each environment resolves its status via several GitHub API round-trips.
-// Caching the result for a few seconds keeps repeated loads effectively instant.
+// Short-lived cache for the /api/list-environments listing to keep the planned
+// and deploy pages snappy. Invalidated on environment creation.
 const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map(); // repo -> { at, payload }
 
+// Handoff callback registered by the SDK entry (extension.mjs). The server has
+// no access to the SDK `session`, so when a graph/generate route finds no
+// app.bicep it delegates through this hook, which injects a user turn asking the
+// agent to run the radius-app-bicep skill. This is what makes branch/repo
+// selection (not just canvas open) trigger generation automatically.
+let appBicepHandoff = null;
+export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
+
+// Fire the app.bicep handoff at most once per repo+branch(es) for a given
+// instance. Fire-and-forget so it never blocks the HTTP response.
+function triggerAppBicepHandoff(entry, repo, branches, page) {
+    try {
+        if (typeof appBicepHandoff !== "function") return;
+        if (!repo) return;
+        const list = (Array.isArray(branches) ? branches : [branches]).filter(Boolean);
+        const state = entry?.state;
+        const key = `${repo}::${list.join(",")}`;
+        if (state) {
+            if (state.appBicepHandoffKey === key) return; // already handed off
+            state.appBicepHandoffKey = key;
+        }
+        Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(() => {});
+    } catch { /* never let a handoff failure break the response */ }
+}
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
 // action model (run-rad-commands*.yml) replaces. Removed from target repos on
@@ -173,19 +197,6 @@ async function fetchTreeForSelection(entry, repo, branch) {
         if (localTree !== null) return localTree;
     }
     return await fetchRepoTree(repo, access.branch);
-}
-
-async function generateBicepForSelection(entry, repo, branch) {
-    const access = accessForSelection(entry, repo, branch);
-    return await generateBicepFromRepo(access.github, repo, access.branch);
-}
-
-async function persistRadiusScaffoldForSelection(entry, repo, branch, content, opts) {
-    const access = accessForSelection(entry, repo, branch);
-    if (access.useWorkspace) {
-        return await writeWorkspaceRadiusScaffold(entry.state, repo, access.branch, content, opts);
-    }
-    return await commitRadiusScaffold(repo, access.branch, content, opts);
 }
 
 function createRequestHandler(instanceId) {
@@ -500,6 +511,24 @@ function createRequestHandler(instanceId) {
                     });
                 }
 
+                async function runGhOrThrow(args, message, stdin) {
+                    const result = await runGh(args, stdin);
+                    if (result.code !== 0) {
+                        const detail = (result.stderr || result.stdout || '').trim();
+                        throw new Error(detail ? `${message}: ${detail}` : message);
+                    }
+                    return result;
+                }
+
+                async function setEnvironmentVariable(name, value) {
+                    if (!value) return false;
+                    await runGhOrThrow(
+                        ['variable', 'set', name, '--body', value, '--env', envName, '--repo', targetRepo],
+                        `Failed to set ${name} on GitHub environment "${envName}"`
+                    );
+                    return true;
+                }
+
                 // The host often injects GH_TOKEN (an OAuth app token) that lacks the
                 // `workflow` scope, which is required to create/update files under
                 // .github/workflows/ or to dispatch workflows. The user's stored gh
@@ -527,6 +556,14 @@ function createRequestHandler(instanceId) {
                 }
 
                 const steps = [];
+                const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
+
+                steps.push('Creating private GHCR state package "' + stateRegistry + '"...');
+                const statePackage = await bootstrapGHCRStatePackage({
+                    targetRepository: targetRepo,
+                    registry: stateRegistry,
+                });
+                steps.push(`✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`);
 
                 // --- Workflow commit + PR-fallback plumbing ---------------------
                 // Workflow files are normally committed straight to the repo's
@@ -611,12 +648,21 @@ function createRequestHandler(instanceId) {
 
                 // Step 1: Create the GitHub environment
                 steps.push('Creating GitHub environment "' + envName + '"...');
-                await runGh(['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName]);
+                await runGhOrThrow(
+                    ['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName],
+                    'Failed to create GitHub environment "' + envName + '"'
+                );
                 // Tag the environment as Radius-managed so the listing can filter
                 // out environments created outside this extension.
-                await runGh(['variable', 'set', 'RADIUS_MANAGED', '--body', 'true', '--env', envName, '--repo', targetRepo]);
+                await setEnvironmentVariable('RADIUS_MANAGED', 'true');
                 // A new environment invalidates the cached listing for this repo.
                 envListCache.delete(targetRepo);
+
+                steps.push('Configuring Radius state package "' + stateRegistry + '"...');
+                await setEnvironmentVariable('RADIUS_STATE_BACKEND', OCI_STATE_BACKEND);
+                await setEnvironmentVariable('RADIUS_STATE_REGISTRY', stateRegistry);
+                await setEnvironmentVariable('RADIUS_STATE_ARCHIVE', DEFAULT_STATE_ARCHIVE);
+                steps.push(`✅ Radius state package configured with archive tag "${DEFAULT_STATE_ARCHIVE}".`);
 
                 // Step 2: Set environment variables and secrets based on provider
                 steps.push('Setting environment variables and secrets...');
@@ -631,12 +677,12 @@ function createRequestHandler(instanceId) {
                     const rg = data.resourceGroup || '';
                     const k8s = data.cluster || '';
 
-                    if (clientId) await runGh(['variable', 'set', 'AZURE_CLIENT_ID', '--body', clientId, '--env', envName, '--repo', targetRepo]);
-                    if (tenantId) await runGh(['variable', 'set', 'AZURE_TENANT_ID', '--body', tenantId, '--env', envName, '--repo', targetRepo]);
-                    if (subscriptionId) await runGh(['variable', 'set', 'AZURE_SUBSCRIPTION_ID', '--body', subscriptionId, '--env', envName, '--repo', targetRepo]);
-                    if (rg) await runGh(['variable', 'set', 'AZURE_RESOURCE_GROUP', '--body', rg, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'AZURE_AKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
-                    if (data.location) await runGh(['variable', 'set', 'AZURE_LOCATION', '--body', data.location, '--env', envName, '--repo', targetRepo]);
+                    await setEnvironmentVariable('AZURE_CLIENT_ID', clientId);
+                    await setEnvironmentVariable('AZURE_TENANT_ID', tenantId);
+                    await setEnvironmentVariable('AZURE_SUBSCRIPTION_ID', subscriptionId);
+                    await setEnvironmentVariable('AZURE_RESOURCE_GROUP', rg);
+                    await setEnvironmentVariable('AZURE_AKS_CLUSTER_NAME', k8s);
+                    await setEnvironmentVariable('AZURE_LOCATION', data.location);
 
                     const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location].filter(Boolean).length;
                     steps.push(`Set ${setCount} environment value(s) for Azure.`);
@@ -649,12 +695,12 @@ function createRequestHandler(instanceId) {
                     const accountId = data.accountId || awsCreds.accountId || '';
                     const k8s = data.cluster || '';
 
-                    if (roleArn) await runGh(['variable', 'set', 'AWS_ROLE_ARN', '--body', roleArn, '--env', envName, '--repo', targetRepo]);
-                    if (region) await runGh(['variable', 'set', 'AWS_REGION', '--body', region, '--env', envName, '--repo', targetRepo]);
-                    if (accountId) await runGh(['variable', 'set', 'AWS_ACCOUNT_ID', '--body', accountId, '--env', envName, '--repo', targetRepo]);
-                    if (k8s) await runGh(['variable', 'set', 'AWS_EKS_CLUSTER_NAME', '--body', k8s, '--env', envName, '--repo', targetRepo]);
-                    if (data.vpcId) await runGh(['variable', 'set', 'RADIUS_VPC_ID', '--body', data.vpcId, '--env', envName, '--repo', targetRepo]);
-                    if (data.subnetIds) await runGh(['variable', 'set', 'RADIUS_SUBNET_IDS', '--body', data.subnetIds, '--env', envName, '--repo', targetRepo]);
+                    await setEnvironmentVariable('AWS_ROLE_ARN', roleArn);
+                    await setEnvironmentVariable('AWS_REGION', region);
+                    await setEnvironmentVariable('AWS_ACCOUNT_ID', accountId);
+                    await setEnvironmentVariable('AWS_EKS_CLUSTER_NAME', k8s);
+                    await setEnvironmentVariable('RADIUS_VPC_ID', data.vpcId);
+                    await setEnvironmentVariable('RADIUS_SUBNET_IDS', data.subnetIds);
                 }
 
                 // Step 2b: Provision application parameters. Parse the app.bicep the
@@ -699,7 +745,11 @@ function createRequestHandler(instanceId) {
                         // Split into secret (provisioned as a secret, appended by the
                         // workflow) and non-secret (inlined into the rad deploy command).
                         const { secret: secretParams, public: publicParams } = partitionParams(parsed, resolved);
-                        await runGh(['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo], Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}');
+                        await runGhOrThrow(
+                            ['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envName, '--repo', targetRepo],
+                            `Failed to set RADIUS_DEPLOY_PARAMS on GitHub environment "${envName}"`,
+                            Object.keys(secretParams).length ? JSON.stringify(secretParams) : '{}'
+                        );
 
                         // Build the rad deploy command with non-secret params inline and
                         // store it as an environment variable. The deploy workflow reads
@@ -716,8 +766,7 @@ function createRequestHandler(instanceId) {
                         const radCommands = [radDeployCommand];
                         const appName = extractAppName(bicepSource);
                         if (appName) radCommands.push('app graph --application ' + appName + ' --preview');
-                        const radCommand = JSON.stringify(radCommands);
-                        await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
+                        await setEnvironmentVariable('RADIUS_RAD_COMMANDS', JSON.stringify(radCommands));
 
                         const names = Object.keys(resolved);
                         if (names.length > 0) {
@@ -858,9 +907,16 @@ function createRequestHandler(instanceId) {
                     steps.push('Skipping credential verification until the pull request is merged.');
                 } else {
                     steps.push('Dispatching verify-credentials workflow...');
-                    // Wait briefly for GitHub to index the workflow
+                    // Wait briefly for GitHub to index the workflow, then dispatch with
+                    // a few retries to ride out indexing/propagation races.
                     await new Promise(r => setTimeout(r, 3000));
-                    const dispatchResult = await runGhWorkflow(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                    const dispatchDelays = [0, 2000, 5000];
+                    let dispatchResult = { code: 1, stdout: '', stderr: '' };
+                    for (const delay of dispatchDelays) {
+                        if (delay > 0) await new Promise(r => setTimeout(r, delay));
+                        dispatchResult = await runGhWorkflow(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                        if (dispatchResult.code === 0) break;
+                    }
 
                     if (dispatchResult.code === 0) {
                         steps.push('✅ Verify workflow dispatched.');
@@ -876,7 +932,21 @@ function createRequestHandler(instanceId) {
                         } catch {}
                         steps.push('Credentials verification dispatched. Deploy your application from the Environments list when ready.');
                     } else {
-                        steps.push('⚠️ Could not dispatch verify workflow (may need to retry): ' + dispatchResult.stderr);
+                        const detail = (dispatchResult.stderr || dispatchResult.stdout || '').trim() || 'The GitHub CLI request failed.';
+                        steps.push('❌ Could not dispatch verify workflow: ' + detail);
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            error: 'Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. ' + detail,
+                            environment: envName,
+                            provider,
+                            repo: targetRepo,
+                            stateBackend: OCI_STATE_BACKEND,
+                            stateRegistry,
+                            stateArchive: DEFAULT_STATE_ARCHIVE,
+                            steps
+                        }));
+                        return;
                     }
                 }
 
@@ -898,6 +968,9 @@ function createRequestHandler(instanceId) {
                     environment: envName,
                     provider,
                     repo: targetRepo,
+                    stateBackend: OCI_STATE_BACKEND,
+                    stateRegistry,
+                    stateArchive: DEFAULT_STATE_ARCHIVE,
                     verifyRunUrl,
                     pullRequestUrl,
                     steps
@@ -936,55 +1009,22 @@ function createRequestHandler(instanceId) {
 
             try {
                 sendProgress(`Checking ${repo} for existing app.bicep...`);
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
+                const content = await fetchBicepForSelection(entry, repo, branch);
 
-                let generated = false;
                 if (content) {
                     sendProgress('Found existing app.bicep — parsing resources...');
                 } else {
-                    sendProgress('No app.bicep found — analyzing repository structure...');
-                    // Inline generation with progress
-                    const tree = await fetchTreeForSelection(entry, repo, branch);
-                    if (!tree || tree.length === 0) {
-                        sendDone({ error: `Could not read repository tree for ${repo}.` });
-                        return;
-                    }
-                    sendProgress(`Scanned ${tree.length} files — detecting services...`);
-
-                    const dockerfiles = tree.filter(p => /^(.*\/)?Dockerfile$/i.test(p));
-                    const composeFiles = tree.filter(p => /^(.*\/)?(docker-)?compose\.(ya?ml)$/i.test(p));
-                    const packageJsons = tree.filter(p => /^(.*\/)?package\.json$/i.test(p) && !p.includes('node_modules'));
-
-                    if (composeFiles.length > 0) {
-                        sendProgress(`Found ${composeFiles[0]} — parsing services...`);
-                    } else if (dockerfiles.length > 0) {
-                        sendProgress(`Found ${dockerfiles.length} Dockerfile(s) — inferring services...`);
-                    }
-
-                    content = await generateBicepForSelection(entry, repo, branch);
-                    generated = true;
-
-                    if (!content) {
-                        sendDone({ error: `Could not analyze ${repo}. Ensure the repo has source code.` });
-                        return;
-                    }
-                    sendProgress('Generated app.bicep — building graph...');
+                    triggerAppBicepHandoff(entry, repo, branch, 'graph');
+                    sendDone({
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        needsAppBicep: true,
+                        repo,
+                        branch,
+                    });
+                    return;
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
-                // Persist the generated scaffold only after rad validated that the
-                // Bicep compiles, so an invalid app.bicep never lands on the branch.
-                // Non-fatal on failure (e.g. no write access) — the graph still renders.
-                if (generated) {
-                    try {
-                        await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: sendProgress });
-                    } catch (e) {
-                        sendProgress(`Could not persist .radius scaffold: ${e.message}`);
-                    }
-                }
                 // Discover source code references for resources missing codeReference
                 const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery) {
@@ -1001,11 +1041,9 @@ function createRequestHandler(instanceId) {
                     entry.state.graphResources = resources;
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
-                    entry.state.generatedBicep = content;
-                    entry.state.bicepGenerated = generated;
                 }
 
-                sendDone({ reload: true, generated });
+                sendDone({ reload: true });
             } catch (e) {
                 sendDone({ error: e.message });
             }
@@ -1018,39 +1056,6 @@ function createRequestHandler(instanceId) {
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             res.end(JSON.stringify({ messages }));
-            return;
-        }
-
-        // Local viewer for a generated app.bicep that is not committed to the repo.
-        // The model/planned graphs link here for "View app definition" when the bicep
-        // was synthesized from repo analysis (no .radius/app.bicep exists on GitHub).
-        if (pathname === "/generated-bicep" && req.method === "GET") {
-            const entry = servers.get(instanceId);
-            const bicep = entry?.state?.generatedBicep || '';
-            const targetLine = parseInt(url.searchParams.get('line') || '0', 10) || 0;
-            res.setHeader("Content-Type", "text/html; charset=utf-8");
-            res.setHeader("Cache-Control", "no-store");
-            if (!bicep) {
-                res.writeHead(200);
-                res.end(`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif; padding:24px; color:#656d76;">No generated app.bicep is available for this view. Reload the graph and try again.</body></html>`);
-                return;
-            }
-            const lines = bicep.replace(/\r\n/g, '\n').split('\n');
-            const rows = lines.map((ln, i) => {
-                const n = i + 1;
-                const hl = n === targetLine;
-                return `<tr id="${hl ? 'target-line' : ('L' + n)}"${hl ? ' style="background:#fff8c5;"' : ''}>`
-                    + `<td style="text-align:right; color:#8c959f; padding:0 12px 0 16px; user-select:none; border-right:1px solid #eaeef2; white-space:nowrap;">${n}</td>`
-                    + `<td style="padding:0 16px; white-space:pre;">${escapeHtml(ln) || '&nbsp;'}</td></tr>`;
-            }).join('');
-            res.writeHead(200);
-            res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Generated app.bicep</title></head>`
-                + `<body style="margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.6; color:#1f2328; background:#fff;">`
-                + `<div style="padding:12px 16px; border-bottom:1px solid #d1d9e0; background:#f6f8fa; font-family:system-ui,sans-serif; font-size:13px;">`
-                + `<strong>Generated app.bicep</strong> <span style="color:#656d76;">— synthesized from repository analysis (not committed to the repo)</span></div>`
-                + `<table style="border-collapse:collapse; width:100%;"><tbody>${rows}</tbody></table>`
-                + `<script>var t=document.getElementById('target-line'); if(t){t.scrollIntoView({block:'center'});}<\/script>`
-                + `</body></html>`);
             return;
         }
 
@@ -1136,55 +1141,24 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for existing app.bicep...`);
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
-                let generated = false;
+                const content = await fetchBicepForSelection(entry, repo, branch);
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
-                    addProgress('No app.bicep found — analyzing repository structure...');
-                    const tree = await fetchTreeForSelection(entry, repo, branch);
-                    if (!tree || tree.length === 0) {
-                        addProgress('Error: could not read repository tree.');
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ error: `Could not read repository tree for ${repo}.` }));
-                        return;
-                    }
-                    addProgress(`Scanned ${tree.length} files — detecting services...`);
-
-                    const dockerfiles = tree.filter(p => /^(.*\/)?Dockerfile$/i.test(p));
-                    const composeFiles = tree.filter(p => /^(.*\/)?(docker-)?compose\.(ya?ml)$/i.test(p));
-                    if (composeFiles.length > 0) {
-                        addProgress(`Found ${composeFiles[0]} — parsing services...`);
-                    } else if (dockerfiles.length > 0) {
-                        addProgress(`Found ${dockerfiles.length} Dockerfile(s) — inferring services...`);
-                    }
-
-                    content = await generateBicepForSelection(entry, repo, branch);
-                    generated = true;
-                    if (!content) {
-                        addProgress('Error: could not generate app.bicep.');
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ error: `Could not analyze ${repo} on branch ${branch}. Ensure the repo has source code.` }));
-                        return;
-                    }
-                    addProgress('Generated app.bicep — building graph...');
+                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
+                    triggerAppBicepHandoff(entry, repo, branch, 'graph');
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        needsAppBicep: true,
+                        repo,
+                        branch,
+                    }));
+                    return;
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Persist the generated scaffold only after rad validated that the
-                // Bicep compiles, so an invalid app.bicep never lands on the branch.
-                if (generated) {
-                    try {
-                        await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: addProgress });
-                    } catch (e) {
-                        addProgress(`Could not persist .radius scaffold: ${e.message}`);
-                    }
-                }
                 // Discover source code references
                 const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSourceDiscovery2) {
@@ -1201,12 +1175,10 @@ function createRequestHandler(instanceId) {
                     entry.state.graphResources = resources;
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
-                    entry.state.generatedBicep = content;
-                    entry.state.bicepGenerated = generated;
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
-                res.end(JSON.stringify({ reload: true, generated }));
+                res.end(JSON.stringify({ reload: true }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
@@ -1668,37 +1640,23 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for app.bicep...`);
-                let generated = false;
-                let content = await fetchBicepForSelection(entry, repo, branch);
+                const content = await fetchBicepForSelection(entry, repo, branch);
                 if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
+                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
+                    triggerAppBicepHandoff(entry, repo, branch, 'graph');
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        needsAppBicep: true,
+                        repo,
+                        branch,
+                    }));
+                    return;
                 }
-                if (!content) {
-                    addProgress('No app.bicep found — generating from repository...');
-                    content = await generateBicepForSelection(entry, repo, branch);
-                    if (!content) {
-                        addProgress('Error: could not generate app.bicep.');
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ error: `No app.bicep found and could not generate one for ${repo}` }));
-                        return;
-                    }
-                    generated = true;
-                    addProgress('Generated app.bicep from repo analysis.');
-                } else {
-                    addProgress('Found app.bicep — parsing resources...');
-                }
+                addProgress('Found app.bicep — parsing resources...');
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Persist the generated scaffold only after rad validated that the
-                // Bicep compiles, so an invalid app.bicep never lands on the branch.
-                if (generated) {
-                    try {
-                        await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: addProgress });
-                    } catch (e) {
-                        addProgress(`Could not persist .radius scaffold: ${e.message}`);
-                    }
-                }
                 // Discover source code references for planned graph
                 const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
                 if (needsSrcDisc) {
@@ -1728,82 +1686,10 @@ function createRequestHandler(instanceId) {
                     entry.state.plannedBranch = branch;
                     entry.state.plannedProvider = provider;
                     entry.state.resolvedRecipes = recipes;
-                    entry.state.generatedBicep = content;
-                    entry.state.plannedBicepGenerated = generated;
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ reload: true }));
-            } catch (e) {
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
-            }
-            return;
-        }
-
-        if (pathname === "/api/generate-bicep" && req.method === "POST") {
-            let body = "";
-            for await (const chunk of req) body += chunk;
-            try {
-                const data = JSON.parse(body);
-                const repo = data.repo || '';
-                const entry = servers.get(instanceId);
-                const branch = data.branch || defaultBranchForState(entry?.state);
-                // Fetch existing app.bicep or generate from repo structure. When
-                // force is set, skip the existing file and always synthesize a
-                // fresh definition — used to heal a stale/malformed committed
-                // app.bicep (e.g. one using an outdated schema that fails
-                // `bicep build`).
-                let content = data.force ? null : await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    // No committed app.bicep — synthesize one from repo analysis
-                    // using the single source-of-truth generator (modern Radius.*
-                    // schema with connection env vars). NEVER emit Applications.*.
-                    content = await generateBicepForSelection(entry, repo, branch);
-                }
-                if (!content) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Could not generate app.bicep for ${repo}` }));
-                    return;
-                }
-                if (entry) {
-                    entry.state.generatedContent = content;
-                    entry.state.generateTargetRepo = repo;
-                    entry.state.generateBranch = branch;
-                    entry.state.generatedWarning = "";
-                }
-
-                // Preview mode: return the generated content without committing,
-                // so it can be reviewed before being written to the repo.
-                if (data.preview) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({ repo, branch, content, committed: false }));
-                    return;
-                }
-
-                // Persist generated Radius files on the selected branch. For the
-                // current Copilot session branch this writes to the local worktree;
-                // remote branches still use GitHub Contents API fallback.
-                let persistWarning = "";
-                try {
-                    await persistRadiusScaffoldForSelection(entry, repo, branch, content, { log: () => {} });
-                } catch (e) {
-                    if (accessForSelection(entry, repo, branch).useWorkspace) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: e.message }));
-                        return;
-                    }
-                    persistWarning = e.message || "Could not persist generated files to the selected remote branch.";
-                    if (entry) entry.state.generatedWarning = persistWarning;
-                }
-
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(200);
-                res.end(JSON.stringify({ reload: true, warning: persistWarning || undefined }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
@@ -1869,25 +1755,23 @@ function createRequestHandler(instanceId) {
                     entry.state.diffTargetRepo = repo;
                 }
 
-                // Fetch existing app.bicep, or generate from repo analysis if not found
-                let [baseContent, headContent] = await Promise.all([
+                // Fetch the committed/persisted app.bicep on each branch. app.bicep
+                // generation is owned by the Radius app-bicep skill, so branches
+                // without one simply contribute nothing to the diff (added/removed).
+                const [baseContent, headContent] = await Promise.all([
                     fetchBicepForSelection(entry, repo, data.base),
                     fetchBicepForSelection(entry, repo, data.head)
                 ]);
-                let baseGenerated = false, headGenerated = false;
-                if (!baseContent) {
-                    baseContent = await generateBicepForSelection(entry, repo, data.base);
-                    baseGenerated = !!baseContent;
-                }
-                if (!headContent) {
-                    headContent = await generateBicepForSelection(entry, repo, data.head);
-                    headGenerated = !!headContent;
-                }
 
                 if (!baseContent && !headContent) {
+                    triggerAppBicepHandoff(entry, repo, [data.base, data.head], 'graph-diff');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.` }));
+                    res.end(JSON.stringify({
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        needsAppBicep: true,
+                        repo,
+                    }));
                     return;
                 }
 
@@ -1899,8 +1783,8 @@ function createRequestHandler(instanceId) {
 
                 if (entry) {
                     entry.state.diffResources = diffResources;
-                    entry.state.diffBaseGenerated = baseGenerated;
-                    entry.state.diffHeadGenerated = headGenerated;
+                    entry.state.diffBaseGenerated = false;
+                    entry.state.diffHeadGenerated = false;
                     entry.state.page = 'graphDiff';
                 }
 
@@ -1993,9 +1877,7 @@ function createRequestHandler(instanceId) {
                         if (resources.length === 0) {
                             addLog('Resolving planned application graph for ' + repo + '...');
                             try {
-                                let content = await fetchBicepForSelection(entry, repo, branch);
-                                if (!content) content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                                if (!content) content = await generateBicepForSelection(entry, repo, branch);
+                                const content = await fetchBicepForSelection(entry, repo, branch);
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
@@ -2006,6 +1888,8 @@ function createRequestHandler(instanceId) {
                                     resources = planned;
                                     entry.state.deployingResources = resources;
                                     addLog('Planned ' + planned.length + ' resource(s).');
+                                } else {
+                                    addLog('⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph.');
                                 }
                             } catch (e) { addLog('⚠ Could not resolve planned graph: ' + e.message); }
                         }
@@ -2623,7 +2507,6 @@ function createRequestHandler(instanceId) {
 
 const PAGE_RENDERERS = {
     "credentials": environmentPage,
-    "generate": appGeneratePage,
     "graph": graphPage,
     "planned": plannedGraphPage,
     "graph-diff": graphDiffPage,

@@ -4,7 +4,6 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile, execFileSync } from "node:child_process";
-import { RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shared";
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment.
 // gh always prefers that env token over the user's stored (keyring) login, but
@@ -81,6 +80,20 @@ export function runCommand(cmd, args, opts = {}) {
         });
         if (stdin !== undefined) child.stdin?.end(stdin);
     });
+}
+
+// Run gh with only its stored keyring credential. This is intentionally stricter
+// than cliExec's normal fallback because package bootstrap must never inherit an
+// ambient workflow/app token whose package visibility semantics may differ.
+// Deleting GH_HOST pins these calls to github.com. That is intentional: the GHCR
+// and GitHub Packages API paths in this feature are hardcoded to ghcr.io/github.com,
+// so package bootstrap is github.com-only and does not support GHES today.
+export function runGhKeyringCommand(args, opts = {}) {
+    const env = { ...(opts.env || process.env) };
+    delete env.GH_TOKEN;
+    delete env.GITHUB_TOKEN;
+    delete env.GH_HOST;
+    return runCommand("gh", args, { ...opts, env });
 }
 
 export const AWS_REGIONS = [

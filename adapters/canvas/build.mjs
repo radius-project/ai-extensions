@@ -4,7 +4,7 @@
 // UI-agnostic TypeScript core from radius-core) into the single
 // runtime-loadable artifact the Copilot canvas loader runs:
 //
-//   .github/radius/extension.mjs
+//   plugins/radius/extensions/radius/extension.mjs
 //
 // The Copilot SDK is marked external so its auto-resolved import is preserved in
 // the output (the loader resolves @github/copilot-sdk at runtime).
@@ -31,7 +31,7 @@ const isWatch = process.argv.includes("--watch");
 // edit in, so the reconnect blip never interrupts active canvas use.
 const isInstall = process.argv.includes("--install");
 
-const outfile = join(repoRoot, ".github", "radius", "extension.mjs");
+const outfile = join(repoRoot, "plugins", "radius", "extensions", "radius", "extension.mjs");
 
 // Where the extension is installed locally. Override with RADIUS_CANVAS_INSTALL_PATH.
 const installPath =
@@ -79,6 +79,10 @@ const options = {
   target: "node18",
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
+  // Inline the radius-app-bicep skill Markdown (SKILL.md + references) as text
+  // so the extension ships the authoritative skill content even when installed
+  // without the sibling plugins/radius/skills/ tree. See src/skill.mjs.
+  loader: { ".md": "text" },
   legalComments: "none",
   logLevel: "info",
   banner: {
@@ -93,6 +97,6 @@ if (isWatch) {
   console.log("[canvas] watching for changes…");
 } else {
   await esbuild.build(options);
-  console.log("[canvas] built .github/radius/extension.mjs");
+  console.log("[canvas] built plugins/radius/extensions/radius/extension.mjs");
   if (isInstall) installToLocal();
 }

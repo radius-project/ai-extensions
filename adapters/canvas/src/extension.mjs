@@ -10,15 +10,12 @@ import { existsSync, statSync, watch as fsWatch } from "node:fs";
 import { dirname, join } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
-  getPlatform,
   computeGraphDiff,
   fetchBicepFromRepo,
-  generateBicepFromRepo,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
-import { runCommand, github } from "./gh.mjs";
+import { github } from "./gh.mjs";
 import {
-    createWorkspaceGitHub,
     defaultBranchForState,
     detectWorkspaceContext,
     fetchWorkspaceBicep,
@@ -26,7 +23,9 @@ import {
     parseRepoFromRemote,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
-import { servers, getOrCreateServer, getLastWebviewActivityAt } from "./server.mjs";
+import { servers, getOrCreateServer, getLastWebviewActivityAt, setAppBicepHandoff } from "./server.mjs";
+import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
+import { radiusAppBicepSkill } from "./skill.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -47,11 +46,55 @@ async function fetchBicepForBranch(repo, branch, state) {
     return await fetchBicepFromRepo(github, repo, branch);
 }
 
-async function generateBicepForBranch(repo, branch, state) {
-    const source = isWorkspaceSelection(state, repo, branch)
-        ? createWorkspaceGitHub(state, repo, branch)
-        : github;
-    return await generateBicepFromRepo(source, repo, branch);
+// When a graph canvas is opened but no .radius/app.bicep exists, hand the work
+// off to the agent/skill. The built-in open_canvas tool is NOT gated by
+// onPreToolUse, so this is the only place the extension can trigger generation
+// instead of surfacing a dead-end in the canvas. Fire-and-forget
+// (session.send resolves only when the agent finishes, and we are mid-open), and
+// guard so we send at most once per repo+branch combination.
+async function maybeHandoffAppBicep(entry, page, ctx) {
+    try {
+        if (!GRAPH_PAGES.has(page)) return;
+        const state = entry.state;
+        const repo = state.contextRepo || ctx.input?.repo || "";
+        if (!repo) return;
+
+        let branches;
+        if (page === "graph-diff") {
+            branches = [ctx.input?.baseBranch, ctx.input?.headBranch].filter(Boolean);
+            // Match the onPreToolUse hook's graphTriggerTargets: when no branches
+            // are supplied, use [undefined] so both paths resolve to the default
+            // branch below and compute the same dedupe key.
+            if (!branches.length) branches = [undefined];
+        } else {
+            // Honor an explicit branch from open_canvas input; fall back to the
+            // resolved context branch (the session worktree branch for the
+            // workspace repo) so we never default the session repo to main.
+            branches = [ctx.input?.branch || state.contextBranch];
+        }
+        branches = branches.map((b) => b || defaultBranchForState(state));
+
+        const key = `${repo}::${branches.join(",")}`;
+        if (state.appBicepHandoffKey === key) return; // already handed off for this target
+        // Claim the key before the async fetch so a concurrent canvas-open and
+        // server-route trigger for the same target cannot both pass the guard
+        // and double-handoff (TOCTOU). If bicep turns out to exist we simply
+        // skip the send below; the claimed key is harmless.
+        state.appBicepHandoffKey = key;
+
+        const found = await Promise.all(branches.map(async (branch) => {
+            try {
+                return !!(await fetchBicepForBranch(repo, branch, state));
+            } catch {
+                return false;
+            }
+        }));
+        if (found.some(Boolean)) return; // at least one branch has it → nothing to do
+
+        try {
+            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page))).catch(() => {});
+        } catch { /* session.send unavailable → ignore */ }
+    } catch { /* never block canvas open on handoff failure */ }
 }
 
 // ─── Canvas + Tools ───────────────────────────────────────────────────────────
@@ -66,7 +109,7 @@ const session = await joinSession({
                 properties: {
                     page: {
                         type: "string",
-                        enum: ["credentials", "generate", "graph", "planned", "graph-diff", "deployed", "environment", "deploying"],
+                        enum: ["credentials", "graph", "planned", "graph-diff", "deployed", "environment", "deploying"],
                         description: "Which page to display",
                     },
                     repo: {
@@ -119,31 +162,6 @@ const session = await joinSession({
                     },
                 },
                 {
-                    name: "generate_app",
-                    description: "Display generated app.bicep content in the canvas",
-                    inputSchema: {
-                        type: "object",
-                        properties: {
-                            content: { type: "string", description: "The generated app.bicep content to display" },
-                        },
-                    },
-                    handler: async (ctx) => {
-                        const entry = await getOrCreateServer(ctx.instanceId, "generate");
-                        Object.assign(entry.state, await workspaceState());
-                        if (ctx.input?.content) {
-                            entry.state.generatedContent = ctx.input.content;
-                        } else {
-                            const repo = entry.state.generateTargetRepo || entry.state.contextRepo || '';
-                            const branch = defaultBranchForState(entry.state);
-                            entry.state.generatedContent = repo
-                                ? (await generateBicepForBranch(repo, branch, entry.state) || '')
-                                : '';
-                        }
-                        entry.url = `${entry.baseUrl}/?page=generate`;
-                        return { message: "app.bicep content ready", url: entry.url };
-                    },
-                },
-                {
                     name: "render_graph",
                     description: "Render the application graph from ApplicationGraphResource data",
                     inputSchema: {
@@ -160,7 +178,7 @@ const session = await joinSession({
                         const entry = await getOrCreateServer(ctx.instanceId, "graph");
                         // Populate the active worktree context (repo/branch/path) so the
                         // graph page defaults to the session branch and reads the worktree
-                        // app.bicep — matching generate_app and the open() handler.
+                        // app.bicep — matching the open() handler.
                         Object.assign(entry.state, await workspaceState());
                         if (ctx.input?.resources) {
                             entry.state.graphResources = ctx.input.resources;
@@ -194,47 +212,54 @@ const session = await joinSession({
                 },
                 {
                     name: "create_environment",
-                    description: "Create a GitHub environment and configure cloud provider secrets",
+                    description: "Create a GitHub environment, private GHCR state package, cloud settings, and verification/deploy workflows",
                     inputSchema: {
                         type: "object",
                         properties: {
                             name: { type: "string", description: "Environment name (e.g. production)" },
                             provider: { type: "string", enum: ["azure", "aws"], description: "Cloud provider" },
                             repo: { type: "string", description: "Repository in owner/repo format" },
+                            clientId: { type: "string", description: "Azure application (client) ID" },
+                            tenantId: { type: "string", description: "Azure tenant ID" },
                             subscriptionId: { type: "string", description: "Azure Subscription ID" },
                             resourceGroup: { type: "string", description: "Azure Resource Group" },
                             location: { type: "string", description: "Azure Location" },
+                            roleArn: { type: "string", description: "AWS IAM role ARN used by GitHub OIDC" },
                             accountId: { type: "string", description: "AWS Account ID" },
                             region: { type: "string", description: "AWS Region" },
+                            cluster: { type: "string", description: "AKS or EKS cluster name" },
+                            vpcId: { type: "string", description: "Optional AWS VPC ID" },
+                            subnetIds: { type: "string", description: "Optional comma-separated AWS subnet IDs" },
                         },
                         required: ["name", "provider", "repo"],
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId, "environment");
                         const data = ctx.input;
-                        let output = "";
-                        let error = null;
                         try {
-                            const repo = data.repo;
-                            output += await runCommand("gh", ["api", "--method", "PUT", `/repos/${repo}/environments/${data.name}`]);
-                            output += "\nEnvironment created successfully.\n";
-                            const envPlatform = getPlatform(data.provider) || getPlatform("aws");
-                            for (const spec of envPlatform.environmentSecrets(data)) {
-                                if (!spec.value) continue;
-                                const verb = spec.kind === "variable" ? "variable" : "secret";
-                                // Variables can be passed on argv; secret values are fed over
-                                // stdin so they never appear in the process argument list.
-                                if (verb === "variable") {
-                                    await runCommand("gh", ["variable", "set", spec.name, "--body", spec.value, "--repo", repo, "--env", data.name]);
-                                } else {
-                                    await runCommand("gh", ["secret", "set", spec.name, "--repo", repo, "--env", data.name], { stdin: spec.value });
-                                }
-                                output += `Secret ${spec.name} set.\n`;
+                            const required = data.provider === "azure"
+                                ? ["clientId", "tenantId", "subscriptionId", "resourceGroup", "cluster"]
+                                : ["roleArn", "accountId", "region", "cluster"];
+                            const missing = required.filter((name) => !data[name]);
+                            if (missing.length > 0) {
+                                throw new Error(`Missing required ${data.provider} environment inputs: ${missing.join(", ")}.`);
                             }
-                        } catch (e) { error = e.message; }
-                        entry.state.envResult = error
-                            ? { error, output }
-                            : { message: `Environment '${data.name}' created and configured for ${data.repo}`, output };
+                            const response = await fetch(`${entry.baseUrl}/api/create-environment`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    ...data,
+                                    environment: data.name,
+                                }),
+                            });
+                            const result = await response.json();
+                            if (!response.ok && !result.error) {
+                                result.error = `Environment setup failed with HTTP ${response.status}.`;
+                            }
+                            entry.state.envResult = result;
+                        } catch (e) {
+                            entry.state.envResult = { error: e.message };
+                        }
                         entry.url = `${entry.baseUrl}/?page=environment`;
                         return entry.state.envResult;
                     },
@@ -276,13 +301,12 @@ const session = await joinSession({
                     entry.state.diffHead = ctx.input.headBranch;
                     entry.state.diffTargetRepo = repo;
                     try {
-                        // Fetch existing app.bicep, or generate from repo analysis if not found
+                        // Fetch the committed/persisted app.bicep on each branch.
+                        // Generation is owned by the radius-app-bicep skill.
                         let [baseContent, headContent] = await Promise.all([
                             fetchBicepForBranch(repo, ctx.input.baseBranch, entry.state),
                             fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
                         ]);
-                        if (!baseContent) baseContent = await generateBicepForBranch(repo, ctx.input.baseBranch, entry.state);
-                        if (!headContent) headContent = await generateBicepForBranch(repo, ctx.input.headBranch, entry.state);
 
                         const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                         const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -296,6 +320,8 @@ const session = await joinSession({
                         // If fetching fails, leave empty for manual comparison
                     }
                 }
+
+                await maybeHandoffAppBicep(entry, page, ctx);
 
                 return { title: "Radius", url: entry.url };
             },
@@ -324,7 +350,7 @@ const session = await joinSession({
         },
         {
             name: "radius_generate_app",
-            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns instructions for the agent to produce the bicep file with correct Radius.* namespace types.",
+            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
             parameters: {
                 type: "object",
                 properties: {
@@ -332,69 +358,7 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                return `To generate app.bicep, follow the radius-app-bicep skill:
-
-1. Analyze the repository at ${args.repoPath || "the current workspace"}:
-   - Find Dockerfiles, docker-compose files, config files, source code
-   - Identify containers, databases, caches, message queues, secrets, routes
-   - Check package.json/requirements.txt/go.mod for infrastructure client dependencies
-
-2. Resolve resource types from radius-project/resource-types-contrib:
-   - Check known types table below
-   - If not found, generate a custom resource type YAML schema and recipe at runtime
-
-3. Generate .radius/app.bicep with the correct structure
-
-CRITICAL — Use ONLY Radius.* namespaces (NEVER Applications.*):
-
-| Resource | Full Type |
-|---|---|
-| Containers | Radius.Compute/containers@2025-08-01-preview |
-| Container Images | Radius.Compute/containerImages@2025-08-01-preview |
-| Routes/Ingress | Radius.Compute/routes@2025-05-01-preview |
-| Persistent Volumes | Radius.Compute/persistentVolumes@2025-05-01-preview |
-| MySQL | Radius.Data/mySqlDatabases@2025-08-01-preview |
-| PostgreSQL | Radius.Data/postgreSqlDatabases@2025-08-01-preview |
-| Neo4j | Radius.Data/neo4jDatabases@2025-08-01-preview |
-| Redis | Radius.Data/redisCaches@2025-08-01-preview |
-| MongoDB | Radius.Data/mongoDatabases@2025-08-01-preview |
-| Secrets | Radius.Security/secrets@2025-05-01-preview |
-| RabbitMQ | Radius.Messaging/rabbitMQQueues@2025-08-01-preview |
-| Dapr State | Radius.Dapr/stateStores@2025-08-01-preview |
-
-Extensions:
-- extension radius
-
-The single published 'radius' Bicep extension provides ALL Radius.* namespaces
-(Compute, Data, Security, Messaging, Dapr, ...). Declare only 'extension radius'.
-Do NOT use split aliases like radiusCompute/radiusSecurity/radiusData — they are
-not published extensions and cause BCP204 "Extension not recognized" at build time.
-
-Structure: extension radius > params (environment, application, @secure password, image) > resources
-
-Key rules:
-- Always parameterize environment and application (injected by rad CLI)
-- Use connections to express dependencies between resources (source: <resource>.id)
-- Symbolic names: camelCase (e.g., webApp, redisCache)
-- Resource names: kebab-case (e.g., 'web-app', 'redis-cache')
-- Platform-agnostic: recipes handle deployment specifics
-- NEVER use Applications.Core/*, Applications.Datastores/*, or Applications.Dapr/*
-
-Radius.Compute/containerImages build.source (CRITICAL):
-- Images are built in-cluster by a BuildKit sidecar, so build.source MUST be a
-  'git::https://...' URL that BuildKit can clone. NEVER use a local filesystem
-  path (e.g. '/app', '/app/demo', '.') — the runner's filesystem is not visible
-  to the BuildKit pod and the build fails with "invalid local: ... no such file".
-- Use the application's own repository: source: 'git::https://github.com/<owner>/<repo>.git'
-- If the Dockerfile is in a subdirectory, append it as a go-getter subdir and
-  (optionally) pin a ref: 'git::https://github.com/<owner>/<repo>.git//<subdir>?ref=<branch-or-sha>'
-- Set build.dockerfile only when the Dockerfile is not named 'Dockerfile' at the
-  build context root (it defaults to 'Dockerfile').
-
-Recipe resolution for planned graph:
-1. Check radius-project/resource-types-contrib for recipes under <Category>/<typeName>/recipes/
-2. If not found for target platform, check other platforms
-3. If no recipe exists anywhere, generate one at runtime based on the resource type schema`;
+                return radiusAppBicepSkill(args.repoPath);
             },
         },
         {
@@ -456,11 +420,9 @@ Recipe resolution for planned graph:
                         fetchBicepForBranch(repo, baseBranch, state),
                         fetchBicepForBranch(repo, headBranch, state)
                     ]);
-                    if (!baseContent) baseContent = await generateBicepForBranch(repo, baseBranch, state);
-                    if (!headContent) headContent = await generateBicepForBranch(repo, headBranch, state);
 
                     if (!baseContent && !headContent) {
-                        return "No app.bicep found on either branch and could not generate from repo structure. Ensure the repository has a Dockerfile or docker-compose file.";
+                        return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. Author it with the Radius app-bicep skill (run the radius_generate_app tool), SAVE it to .radius/app.bicep, then re-run this tool.`;
                     }
 
                     const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -560,6 +522,21 @@ Recipe resolution for planned graph:
         },
     ],
     hooks: {
+        // Guard the graph-generating tool calls: if a graph page is opened (or a
+        // PR graph diff is generated) while no .radius/app.bicep exists, deny the
+        // call and instruct the agent to author + SAVE it via the radius-app-bicep
+        // skill first. The extension never writes bicep itself; it only triggers
+        // the skill. Fail open — a hook error must never break tool execution.
+        onPreToolUse: async (input) => {
+            try {
+                return await evaluateAppBicepHook(
+                    { toolName: input.toolName, toolArgs: input.toolArgs },
+                    { workspaceState, fetchBicep: fetchBicepForBranch, defaultBranchForState },
+                );
+            } catch {
+                return undefined;
+            }
+        },
         onSessionStart: async () => {
             return {
                 additionalContext: `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
@@ -576,8 +553,10 @@ The PR description will show the app graph diff inline on GitHub, and the canvas
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check if .radius/app.bicep (or app.bicep) exists in the repository.
-2. If app.bicep does NOT exist, generate it using the radius_generate_app tool. IMPORTANT: Use ONLY Radius.* namespaces (e.g., Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets). NEVER use Applications.* namespaces.
+2. If app.bicep does NOT exist, generate AND SAVE it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure).
 3. Only AFTER app.bicep exists in the session worktree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
+
+The same rule applies to the "planned" and "graph-diff" pages: they render from .radius/app.bicep, so if it does not exist, first create AND SAVE it with the radius_generate_app tool (radius-app-bicep skill) before opening those pages.
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
 
@@ -589,13 +568,17 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When a recipe is not found for a resource type during planned graph resolution, use the radius-app-bicep skill to resolve the resource type and generate a custom resource type and recipe on-demand.`
+When a recipe is not found for a resource type during planned graph resolution, report the unresolved resource type to the user and explain that a recipe pack providing that type must be registered to the target environment. Do NOT attempt to generate a singleton custom resource type or recipe on-demand — with Radius extensibility, recipes are supplied via recipe packs, not per-type singleton recipes.`
             };
         },
     },
 });
 
-// ─── Process Lifecycle Hardening ──────────────────────────────────────────────
+// Wire the server-side app.bicep handoff to the SDK session. Graph/generate
+// routes fire when a repo/branch is selected (not just on canvas open), so this
+// is how selection changes trigger the radius-app-bicep skill automatically.
+setAppBicepHandoff(({ repo, page }) => session.send(appBicepHandoffPrompt(repo, page)));
+
 // The extension runs as a long-lived Node process that registers canvases/tools
 // with the host. Two failure modes were observed:
 //   1. A stray throw / unhandled rejection in an async request handler (e.g. the
