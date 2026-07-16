@@ -23,6 +23,7 @@ import {
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt, setAppBicepHandoff } from "./server.mjs";
 import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
+import { radiusAppBicepSkill } from "./skill.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -347,7 +348,7 @@ const session = await joinSession({
         },
         {
             name: "radius_generate_app",
-            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns instructions for the agent to produce the bicep file with correct Radius.* namespace types.",
+            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
             parameters: {
                 type: "object",
                 properties: {
@@ -355,13 +356,7 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                return `Author .radius/app.bicep for the repository at ${args.repoPath || "the current workspace"} by following the radius-app-bicep skill, then SAVE the file to disk.
-
-The radius-app-bicep skill is the single source of truth for the model — resource types and API versions, extensions, structure, naming, secrets, and containerImages build.source. Analyze the repo (Dockerfiles, compose/config files, source, and dependency manifests) to identify the resources, then produce and SAVE .radius/app.bicep exactly as the skill instructs.
-
-Guardrails:
-- Use ONLY Radius.* namespaces — never Applications.*.
-- Recipes come from recipe packs registered on the environment at deploy time; do not author singleton recipes for custom types. If a required type has no recipe, stop and report it.`;
+                return radiusAppBicepSkill(args.repoPath);
             },
         },
         {
