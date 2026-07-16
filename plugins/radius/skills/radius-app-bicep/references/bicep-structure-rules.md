@@ -235,11 +235,11 @@ Rules:
 
 ## Image resolution
 
-The repository must contain a Dockerfile; a repo without one is unsupported at launch and the skill stops before modeling (see the skill's Prerequisites). Given that precondition:
+The repository must contain a Dockerfile; a repo without one is unsupported at launch and the skill stops before modeling (see the [Prerequisites in SKILL.md](../SKILL.md#prerequisites)). Building the application's own workloads from that Dockerfile is the default path:
 
 1. Build the application's own workloads from the repository Dockerfile using `Radius.Compute/containerImages` with an immutable `build.source` ref.
-2. Use a published image (immutable digest or pinned release tag) only for a genuinely third-party/backing container (for example a stock proxy, admin UI, or monitoring sidecar), or when the repository publishes its own maintained image — never as a substitute for the application's own missing Dockerfile.
-3. If a required workload has neither a usable Dockerfile nor, for a third-party component, a suitable maintained published image, report the packaging gap instead of using a bare runtime base image or inventing a fragile build wrapper.
+2. Use a published image (immutable digest or pinned release tag) only for a genuinely third-party/backing container (for example a stock proxy, admin UI, or monitoring sidecar), never for the application's own code.
+3. If a required workload has neither a usable Dockerfile (application code) nor a suitable maintained published image (third-party component), report the packaging gap instead of using a bare runtime base image or inventing a fragile build wrapper.
 
 Do not use branch refs or `latest` when an immutable commit, tag, or digest is available.
 
