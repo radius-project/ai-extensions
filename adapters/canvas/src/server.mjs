@@ -711,11 +711,12 @@ function createRequestHandler(instanceId) {
                 // JSON secret the deploy workflow reads and expands into
                 // `--parameters name=value` pairs.
                 try {
-                    let paramBranch = data.branch || '';
-                    if (!paramBranch) {
-                        const def = await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '');
-                        paramBranch = (def || '').trim() || 'main';
-                    }
+                    // Detect the repo's real default branch once so both the
+                    // requested-branch resolution and the fallback below use it
+                    // (a repo may default to master/develop, not main).
+                    const detectedDefault = (await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '') || '').trim();
+                    const defaultBranch = detectedDefault || 'main';
+                    let paramBranch = data.branch || defaultBranch;
                     let bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', paramBranch);
                     let bicepPath = '.radius/app.bicep';
                     if (!bicepSource) {
@@ -727,8 +728,8 @@ function createRequestHandler(instanceId) {
                     // this, step 2b would silently write neither RADIUS_DEPLOY_PARAMS
                     // nor RADIUS_RAD_COMMANDS, leaving the deploy with no password
                     // and a missing rad command.
-                    if (!bicepSource && paramBranch !== 'main') {
-                        const fallbackBranch = 'main';
+                    if (!bicepSource && paramBranch !== defaultBranch) {
+                        const fallbackBranch = defaultBranch;
                         bicepPath = '.radius/app.bicep';
                         bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', fallbackBranch);
                         if (!bicepSource) {
