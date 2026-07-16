@@ -6,6 +6,8 @@
 // no product logic — only the SDK surface and process-lifecycle hardening.
 
 import { execFile } from "node:child_process";
+import { existsSync, statSync, watch as fsWatch } from "node:fs";
+import { dirname, join } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   getPlatform,
@@ -705,3 +707,43 @@ const keepaliveTimer = setInterval(async () => {
 // Don't let the keepalive timer itself hold the process open if everything else
 // has settled and the host wants to shut us down.
 try { keepaliveTimer.unref?.(); } catch {}
+
+// ─── Dev self-reload ───────────────────────────────────────────────────────────
+// In development we want edits to the built extension.mjs to hot-reload without
+// the user manually running extensions_reload. We watch the extension directory
+// and, when extension.mjs changes size, gracefully shut down so the host respawns
+// a fresh process. This is opt-in and inert in production: it only arms when
+// RADIUS_CANVAS_DEV=1 or a `.dev-reload` sentinel file sits next to the extension.
+(function setupDevSelfReload() {
+    try {
+        const extPath = process.env.EXTENSION_PATH || "";
+        if (!extPath || !existsSync(extPath)) return;
+        const extDir = dirname(extPath);
+        const sentinel = join(extDir, ".dev-reload");
+        const enabled = process.env.RADIUS_CANVAS_DEV === "1" || existsSync(sentinel);
+        if (!enabled) return;
+        let lastSize = -1;
+        try { lastSize = statSync(extPath).size; } catch {}
+        let debounce = null;
+        let triggered = false;
+        const trigger = () => {
+            if (triggered || shuttingDown) return;
+            let size = lastSize;
+            try { size = statSync(extPath).size; } catch {}
+            if (size === lastSize) return;
+            lastSize = size;
+            triggered = true;
+            try { console.error("[radius][dev] extension.mjs changed — restarting for hot reload…"); } catch {}
+            setTimeout(() => { gracefulShutdown("DEV_RELOAD"); }, 250);
+        };
+        const watcher = fsWatch(extDir, { persistent: false }, (_evt, filename) => {
+            if (filename && filename !== "extension.mjs") return;
+            if (debounce) clearTimeout(debounce);
+            debounce = setTimeout(trigger, 300);
+        });
+        try { watcher.unref?.(); } catch {}
+        try { console.error(`[radius][dev] self-reload armed (watching ${extPath})`); } catch {}
+    } catch (e) {
+        try { console.error(`[radius][dev] self-reload setup failed (ignored): ${e?.message || e}`); } catch {}
+    }
+})();
