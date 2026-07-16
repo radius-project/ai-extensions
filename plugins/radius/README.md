@@ -32,6 +32,8 @@ for details.
 Restart your Copilot session after installing so the skills and the canvas
 extension become available.
 
+> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge and publishes it to a generated `release` branch, and the marketplace manifest pins the plugin `source` to that branch — so the commands above install the skills and a working canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
+
 ## What's included
 
 ### Skills

@@ -19,6 +19,8 @@ In the **GitHub Copilot CLI**:
 /plugin install radius@radius-plugins
 ```
 
+The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it to a generated `release` branch, and the marketplace manifest points the plugin at that branch, so the install commands above pull the skills and a working canvas automatically. See [`docs/design/2026-07-canvas-bundle-publishing.md`](./docs/design/2026-07-canvas-bundle-publishing.md) for how this works.
+
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
 
