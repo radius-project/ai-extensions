@@ -119,7 +119,7 @@ export function appBicepHandoffPrompt(repo, page = "graph") {
         SKILL_STEP_ANALYZE,
         SKILL_STEP_NAMESPACES,
         "3. SAVE the result to .radius/app.bicep in the repository.",
-        "4. Re-open the Radius canvas (open_canvas with canvasId \"radius\", instanceId \"radius-panel\") so the graph renders from the saved app.bicep.",
+        `4. Re-open the Radius canvas (open_canvas with canvasId "radius", instanceId "radius-panel", input.page "${page}") so it loads the saved app.bicep.`,
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
