@@ -193,7 +193,7 @@ resource dbSecret 'Radius.Security/secrets@2025-08-01-preview' = {
 ```
 
 Rules:
-- Use only when the exact schema supports it: for a type's required secret input, app secrets/config files, or a secure runtime binding for a developer-supplied credential
+- Use only when the exact schema supports it: for a type's required secret input (`secretName`), or app secrets/config files
 - Do not re-author a recipe-generated output. Bind directly from its schema-declared managed secret, or report that the exact contract cannot supply it
 - Never set authored secret `data.value` from a recipe resource's sensitive output or a guessed convenience property
 - NEVER hardcode passwords — use `@secure() param`

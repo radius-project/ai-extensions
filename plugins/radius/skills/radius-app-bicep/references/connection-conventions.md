@@ -56,19 +56,14 @@ containers: {
         value: database.properties.host
       }
       APP_DB_PASSWORD: {
-        valueFrom: {
-          secretKeyRef: {
-            secretName: databaseRuntimeSecret.name
-            key: 'password'
-          }
-        }
+        value: password
       }
     }
   }
 }
 ```
 
-This is a representative pattern, not a required variable naming scheme. Confirm that `host`, the secret resource, and its key exist in the exact schemas. Direct resource and secret references create dependency ordering, so a connection is not required merely to order deployment.
+This is a representative pattern, not a required variable naming scheme. `APP_DB_PASSWORD` is set from the same `@secure()` parameter supplied to the database resource; Radius injects it into the container without materializing it into plain state. Confirm that `host` and the app-native variable names exist in the exact schema and source. Direct resource references create dependency ordering, so a connection is not required merely to order deployment.
 
 Keep a connection alongside native variables when the source consumes generic values or the selected profile explicitly requires Radius relationship metadata. Explicit native variables are not categorically forbidden just because generic projection exists. Ensure duplicate names do not carry conflicting values.
 

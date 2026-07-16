@@ -75,7 +75,7 @@ Explicit profile-required resource, relationship, and app-native configuration n
 | Container | `<serviceName>Container` — service short name camelCase; single-container apps use `<shortName>Container` (e.g., `todoContainer`) |
 | Container image | `<serviceName>Image` (e.g., `todoImage`) |
 | Data store (database/cache/queue) | `<engine>` + role suffix, camelCase: `mysqlDb`, `postgresDb`, `neo4jDb`, `redisCache`. Multiple of the same engine: prefix with the source store name (e.g., `ordersPostgresDb`) |
-| Data store secret | `<engine>Secret` when the type requires `secretName`; `<engine>RuntimeSecret` when the app must consume a supplied credential via `secretKeyRef`; app secrets use `appSecrets` |
+| Data store secret | `<engine>Secret` when the type's schema requires `secretName`; app secrets use `appSecrets` |
 | Route | `<serviceName>Route` (e.g., `todoRoute`) |
 
 ### Resource `name` properties (string values in Bicep)
@@ -86,7 +86,7 @@ Explicit profile-required resource, relationship, and app-native configuration n
 | Container | Service name in kebab-case; single-container apps use the app name (e.g., `'todo-list-app'`) |
 | Container image | `'<service-name>-image'` (e.g., `'todo-list-app-image'`) |
 | Data store | Engine short name in kebab-case (`'mysql'`, `'postgres'`, `'neo4j'`, `'redis'`); multiple of the same engine use the source store name |
-| Data store secret | `'<engine>-secret'` or `'<engine>-runtime-secret'`; app secrets `'app-secrets'` |
+| Data store secret | `'<engine>-secret'` (when the schema requires `secretName`); app secrets `'app-secrets'` |
 
 ### Connection keys
 
@@ -182,7 +182,7 @@ Declare resources in this order (do NOT output this as code — it is only for y
 2. Params: `environment`; add a `@secure() param` for each developer-supplied secret value
 3. Application resource (`Radius.Core/applications@2025-08-01-preview`) — always exactly one
 4. Data / infrastructure resources (databases, caches, message brokers, object storage, AI services)
-5. Secret resources (app secrets, schema-required credentials, or runtime bindings for supplied secrets)
+5. Secret resources (app secrets, or schema-required credentials via `secretName`)
 6. Container image resources (if building from Dockerfile)
 7. Container resources (with image, configuration, secret, and dependency wiring)
 8. Routes (only if external ingress needed)
@@ -210,7 +210,7 @@ Rules:
 
 See [secrets-handling.md](references/secrets-handling.md). Secret contracts are version- and type-specific:
 
-- **Inputs** (credentials you supply): follow the exact schema — sensitive resource properties, a referenced `Radius.Security/secrets`, or no credential input. Use `@secure()` for Bicep inputs, but remember it does not automatically protect every downstream `env.value` or interpolated property from state.
+- **Inputs** (credentials you supply): follow the exact schema — set an `x-radius-sensitive` property (e.g. `password`) from a `@secure()` parameter; author a referenced `Radius.Security/secrets` only when the schema uses `secretName`; or none. When the app container also needs a supplied credential, assign the same `@secure()` parameter directly to its `env.value` — Radius encrypts and injects it, so do NOT wrap it in a `Radius.Security/secrets` or route it through `secretKeyRef`.
 - **Outputs** (values a recipe generates): inspect the exact registered schema and recipe output mapping. When they declare managed-secret metadata, bind the workload directly with `secretName: <resource>.properties.secrets.name` and an exact key declared in that block. Those key declarations are not readable convenience properties. Never copy a recipe secret through an authored wrapper or guess `<resource>.properties.<key>`; if the managed-secret contract is absent, report the gap.
 - When an application requires a connection string containing a secret, bind the secret as a helper environment variable and compose at runtime with correct ordering and escaping. URL-encode credentials when the target syntax requires it.
 
@@ -230,7 +230,7 @@ Before returning the Bicep, verify:
 - [ ] Every required app-native input is supplied with the exact pinned-source name, casing, type, URL/config syntax, and value. Each declared generic connection is consumed by source or explicitly required as relationship metadata.
 - [ ] A source build has a complete practical Dockerfile/context and uses an immutable ref; otherwise the published image is pinned. Generated builds are consumed through `.properties.imageReference`.
 - [ ] Credentials match the type's schema: `username`+`password` on the resource, or `secretName`+secret, or none — whichever the schema defines. Password via `@secure() param`; `database`/`topic`/`queue`/etc. derived from source.
-- [ ] Every runtime secret follows the exact schema/recipe contract and reaches the exact native key through `secretKeyRef` where supported. Recipe-generated values bind directly from declared managed-secret metadata; no authored secret copies a resource output or guessed convenience property. A sensitive resource input is not assumed to be readable by the container. No secret is hardcoded or moved into plain state; runtime composition preserves ordering, escaping, and required encoding.
+- [ ] A developer-supplied credential the app consumes reaches the container via the same `@secure()` parameter assigned to `env.value` — no authored wrapper `Radius.Security/secrets`, no `secretKeyRef`. `secretKeyRef` + `<resource>.properties.secrets.name` is used only for recipe-generated managed-secret outputs; no authored secret copies a resource output or guessed convenience property. No secret is hardcoded or moved into plain state; runtime composition preserves ordering, escaping, and required encoding.
 - [ ] Read-only properties are never **set**. A referenced nonsecret output exists in the exact schema and recipe; a referenced secret path/key exists in the exact secret-output contract. Such direct references provide dependency ordering.
 - [ ] Every dependency has a complete client tuple: subresource name, endpoint/FQDN transformation, port, protocol/version, TLS mode, auth mechanism/identity, secret source, and final client syntax. Provider modules, SKUs, regions, and firewall configuration remain outside `app.bicep`.
 - [ ] Primary-feature readiness is proven: required model aliases, storage backends, database clients, and messaging inputs/outputs are configured and reference the selected resources. A health endpoint or idle/placeholder process is not sufficient.
