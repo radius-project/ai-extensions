@@ -832,7 +832,8 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             btn.textContent = 'Re-Plan';
             btn.disabled = false;
             if (d.reload) { window.location.reload(); }
-            else if (d.error) { container.innerHTML = '<div class="status error">' + d.error + '</div>'; }
+            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
+            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
         });
 });
 

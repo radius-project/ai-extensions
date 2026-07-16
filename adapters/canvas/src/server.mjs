@@ -866,10 +866,7 @@ function createRequestHandler(instanceId) {
 
             try {
                 sendProgress(`Checking ${repo} for existing app.bicep...`);
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
+                const content = await fetchBicepForSelection(entry, repo, branch);
 
                 if (content) {
                     sendProgress('Found existing app.bicep — parsing resources...');
@@ -999,10 +996,7 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for existing app.bicep...`);
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
+                const content = await fetchBicepForSelection(entry, repo, branch);
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
@@ -1484,10 +1478,7 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for app.bicep...`);
-                let content = await fetchBicepForSelection(entry, repo, branch);
-                if (!content) {
-                    content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
-                }
+                const content = await fetchBicepForSelection(entry, repo, branch);
                 if (!content) {
                     addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
@@ -1605,16 +1596,10 @@ function createRequestHandler(instanceId) {
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
                 // generation is owned by the Radius app-bicep skill, so branches
                 // without one simply contribute nothing to the diff (added/removed).
-                let [baseContent, headContent] = await Promise.all([
+                const [baseContent, headContent] = await Promise.all([
                     fetchBicepForSelection(entry, repo, data.base),
                     fetchBicepForSelection(entry, repo, data.head)
                 ]);
-                if (!baseContent) {
-                    baseContent = await fetchFileForSelection(entry, repo, data.base, '.radius/app.bicep');
-                }
-                if (!headContent) {
-                    headContent = await fetchFileForSelection(entry, repo, data.head, '.radius/app.bicep');
-                }
 
                 if (!baseContent && !headContent) {
                     triggerAppBicepHandoff(entry, repo, [data.base, data.head], 'graph-diff');
@@ -1728,8 +1713,7 @@ function createRequestHandler(instanceId) {
                         if (resources.length === 0) {
                             addLog('Resolving planned application graph for ' + repo + '...');
                             try {
-                                let content = await fetchBicepForSelection(entry, repo, branch);
-                                if (!content) content = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
+                                const content = await fetchBicepForSelection(entry, repo, branch);
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
