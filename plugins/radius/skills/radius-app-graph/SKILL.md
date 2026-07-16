@@ -20,8 +20,9 @@ Build and display the Radius application graph for a repo. The graph is assemble
 1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes a committed `app.bicep`.
 2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
-4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares the committed base- and head-branch `app.bicep` models and tags resources `added | removed | modified | unchanged`. If one branch has no committed `app.bicep`, that side is treated as an empty graph; `needsAppBicep` is returned only when both branches are missing an app definition.
-5. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
+4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
+5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise the runtime auto-discovers it during graph build. See [source-code-references.md](references/source-code-references.md).
+6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
 
 ## Rendering features
 
@@ -35,6 +36,16 @@ The renderer ports the production improvements from `radius-project/github-exten
   - `Succeeded` → falls back to diff coloring
 - **Cross-edge classification** — edges that point to a same-rank or backward-rank node (cycles, lateral links) render as **dashed red** instead of the default grey arrow; helps spot non-DAG structure at a glance.
 - **Configurable line type** — `radiusRenderGraph(..., { lineType })` accepts Cytoscape curve styles (`taxi`, `straight`, `unbundled-bezier`, `segments`, etc.). Defaults to `taxi`.
+- **Source-code links** — a node with a `codeReference` renders a clickable deep link to where the resource is defined/initialized in the repo (path + optional `#L<line>`). See [Source-code references](#source-code-references).
+
+## Source-code references
+
+The optional `codeReference` on each resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). It is normally hand-added metadata, but since the app model here is generated, this skill locates it automatically:
+
+- Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-bicep` skill) so the link is durable and high quality.
+- Any resource still missing one is auto-discovered during graph build (`discoverSourceCodeRefs`).
+
+For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
 
 ## How to invoke
 
@@ -81,8 +92,9 @@ The canvas will:
 - `plugins/radius/extensions/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
 - `plugins/radius/extensions/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
-- `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`)
-- `radius-core/src/modeling/repo.ts` — fetches the committed app definition (`fetchBicepFromRepo`), trying `.radius/app.bicep` then `app.bicep`; returns null (→ `needsAppBicep`) when neither exists. There is no repo-structure generation fallback.
+- `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
+- `radius-core/src/modeling/repo.ts` — runtime source-location discovery (`discoverSourceCodeRefs`) and bicep generation that emits `codeReference`; the authoritative source for the heuristics in [source-code-references.md](references/source-code-references.md)
+- `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source
 - `plugins/radius/extensions/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
 - `plugins/radius/extensions/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
 - `plugins/radius/extensions/radius/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
