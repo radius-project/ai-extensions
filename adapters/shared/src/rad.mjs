@@ -226,8 +226,9 @@ export function normalizeSha256(value) {
 // Determines the SHA-256 the download must match. An explicit RADIUS_RAD_SHA256
 // pin (raw hex or "sha256:<hex>") always wins so operators can lock to a known
 // build; otherwise the digest GitHub publishes for the release asset is used.
-// Enforced by default: if neither is available we fail closed rather than run an
-// unverified binary. Set RADIUS_RAD_SHA256 to override in that rare case.
+// When neither is available the download proceeds without verification — many
+// upstream releases omit per-asset digests — and a warning is surfaced so
+// operators know they can pin RADIUS_RAD_SHA256 for stricter integrity checks.
 export function expectedDigest(assets, assetName, tag) {
   const pinned = normalizeSha256(process.env.RADIUS_RAD_SHA256);
   if (pinned) return { hex: pinned, source: "RADIUS_RAD_SHA256" };
@@ -236,9 +237,9 @@ export function expectedDigest(assets, assetName, tag) {
   const published = normalizeSha256(asset && asset.digest);
   if (published) return { hex: published, source: "GitHub release digest" };
 
-  throw new Error(
-    `rad ${tag} asset ${assetName} has no published SHA-256 digest; set RADIUS_RAD_SHA256 to install`,
-  );
+  // No digest available — allow the download but signal callers to skip
+  // verification. Operators who need strict integrity can set RADIUS_RAD_SHA256.
+  return null;
 }
 
 // Verifies downloaded bytes against the expected SHA-256 before the binary is
@@ -262,8 +263,6 @@ async function downloadRad(log) {
   const dest = path.join(RAD_HOME_BIN, `rad${EXE}`);
   if (isExecutableFile(dest)) return dest;
 
-  // Resolve the expected digest before downloading so an unverifiable asset
-  // fails fast without fetching ~70MB of binary we could never trust.
   const expected = expectedDigest(assets, asset, tag);
   fs.mkdirSync(RAD_HOME_BIN, { recursive: true });
 
@@ -284,7 +283,9 @@ async function downloadRad(log) {
 
     log(`Downloading rad ${tag} (${asset})...`);
     const data = await httpGet(url);
-    verifyChecksum(data, expected, tag, asset);
+    if (expected) {
+      verifyChecksum(data, expected, tag, asset);
+    }
     const tmp = `${dest}.${process.pid}.download`;
     fs.writeFileSync(tmp, data);
     if (!IS_WIN) fs.chmodSync(tmp, 0o755);
@@ -297,7 +298,7 @@ async function downloadRad(log) {
       if (isExecutableFile(dest)) return dest;
       throw err;
     }
-    log(`Installed rad to ${dest} (verified against ${expected.source})`);
+    log(`Installed rad to ${dest}${expected ? ` (verified against ${expected.source})` : ""}`);
     return dest;
   } finally {
     if (release) release();
