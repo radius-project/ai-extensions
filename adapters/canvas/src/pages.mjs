@@ -2356,7 +2356,7 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
         if (sub) {
             sub.style.color = 'var(--rad-text-secondary)';
             sub.innerHTML =
-                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\'t been pushed to GitHub yet, so there\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
+                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\\'t been pushed to GitHub yet, so there\\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
                 '<div style="margin-top:10px; color:var(--rad-text-secondary);">Push it, then deploy again:</div>' +
                 '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-surface-2,#f0f1f2); border:1px solid var(--rad-border,#d0d7de); border-radius:6px; padding:8px 10px;">' +
                   '<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">' + escapeHtmlClient(pushCmd) + '</code>' +
