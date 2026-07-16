@@ -60,7 +60,7 @@ Rules:
 - `connections` is a TOP-LEVEL property under `properties` — NOT inside `containers`
 - `disableDefaultEnvVars` goes on the connection entry, NOT on the container
 - Port property is `containerPort`, NOT `port`
-- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it); use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` to bind a recipe-generated managed secret
+- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it); use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` to bind a secret resource, whether a recipe-generated managed secret (via `<resource>.properties.secrets.name`) or an authored `Radius.Security/secrets`
 - `containerPort` exposes the process port; it does not configure the process listener
 - `command` replaces the image `ENTRYPOINT`, and `args` replaces `CMD`; override only after inspecting the image contract and required binaries
 - Never **set** a read-only property. Referencing a read-only output is valid only when the exact schema exposes it and the configured recipe populates it
@@ -201,7 +201,7 @@ Rules:
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
 - `USERNAME` is the database administrator you author (e.g. `myadmin`) — it is not derived from the source
 - A `@secure()` parameter assigned directly to `env.value` is encrypted and injected by Radius, so it stays out of plain state; a developer-supplied credential needs no authored secret and no `secretKeyRef`
-- Use `valueFrom.secretKeyRef` (to `<resource>.properties.secrets.name`) only to bind a recipe-generated managed secret; author a `Radius.Security/secrets` resource only for app secrets/config files or a type whose schema requires `secretName`
+- `valueFrom.secretKeyRef` binds any secret resource; the `<resource>.properties.secrets.name` form is specifically for a recipe-generated managed secret. Author a `Radius.Security/secrets` resource only for app secrets/config files or a type whose schema requires `secretName`; do not author one to wrap a recipe output
 
 ## Radius.Compute/routes structure
 
