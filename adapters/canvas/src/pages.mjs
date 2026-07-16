@@ -1730,23 +1730,15 @@ function populateSelect(selectId, items, placeholder) {
     sel.appendChild(custom);
 }
 
-// Cross-filter the Azure Resource Group and AKS Cluster combos:
-//  - selecting a Resource Group narrows the cluster list to that group
-//  - selecting a cluster narrows the Resource Group box to the cluster's group
+// Selecting an Azure AKS cluster auto-fills its Resource Group for convenience.
+// Both dropdowns always keep their full option lists so the user can freely
+// switch between any resource group or cluster (we never remove options).
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
     var rgSel = document.getElementById('azure-rg-select');
     if (!clusterSel || !rgSel || clusterSel.__filterWired) return;
     clusterSel.__filterWired = true;
 
-    function rebuild(selectId, items, placeholder, keepValue) {
-        populateSelect(selectId, items, placeholder);
-        if (!keepValue) return;
-        var sel = document.getElementById(selectId);
-        for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === keepValue) { sel.value = keepValue; return; }
-        }
-    }
     function findCluster(cid) {
         var list = window.__azureClusters || [];
         for (var i = 0; i < list.length; i++) {
@@ -1755,24 +1747,25 @@ function setupAzureInfraFilter() {
         return null;
     }
 
-    rgSel.addEventListener('change', function() {
-        var rg = rgSel.value;
-        if (rg === '__custom__' || rg === '') {
-            rebuild('azure-cluster-select', window.__azureClusters || [], 'Select AKS cluster...', clusterSel.value);
-            return;
-        }
-        var filtered = (window.__azureClusters || []).filter(function(c) { return c.resourceGroup === rg; });
-        rebuild('azure-cluster-select', filtered, 'Select AKS cluster...', clusterSel.value);
-    });
-
     clusterSel.addEventListener('change', function() {
         var cid = clusterSel.value;
         if (cid === '__custom__' || cid === '') return;
         var cluster = findCluster(cid);
         if (!cluster || !cluster.resourceGroup) return;
-        var matchRg = (window.__azureRgs || []).filter(function(g) { return (g.id || g.name) === cluster.resourceGroup; });
-        if (matchRg.length === 0) matchRg = [{ id: cluster.resourceGroup, name: cluster.resourceGroup }];
-        rebuild('azure-rg-select', matchRg, 'Select resource group...', cluster.resourceGroup);
+        // Make sure the cluster's resource group is present in the (full) list,
+        // then select it — without dropping any of the other groups.
+        var hasRg = false, customOpt = null;
+        for (var i = 0; i < rgSel.options.length; i++) {
+            if (rgSel.options[i].value === cluster.resourceGroup) hasRg = true;
+            if (rgSel.options[i].value === '__custom__') customOpt = rgSel.options[i];
+        }
+        if (!hasRg) {
+            var opt = document.createElement('option');
+            opt.value = cluster.resourceGroup;
+            opt.textContent = cluster.resourceGroup;
+            if (customOpt) rgSel.insertBefore(opt, customOpt); else rgSel.appendChild(opt);
+        }
+        rgSel.value = cluster.resourceGroup;
     });
 }
 
