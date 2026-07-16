@@ -12,7 +12,6 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
   computeGraphDiff,
-  discoverSourceCodeRefs,
   fetchBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
@@ -23,7 +22,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
 import {
@@ -31,7 +30,6 @@ import {
   defaultBranchForState,
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
-  fetchWorkspaceTree,
   isWorkspaceSelection,
 } from "./workspace.mjs";
 import {
@@ -150,15 +148,6 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
         if (local !== null) return local;
     }
     return await fetchFileFromRepo(repo, repoPath, access.branch);
-}
-
-async function fetchTreeForSelection(entry, repo, branch) {
-    const access = accessForSelection(entry, repo, branch);
-    if (access.useWorkspace) {
-        const localTree = await fetchWorkspaceTree(entry.state, repo, access.branch);
-        if (localTree !== null) return localTree;
-    }
-    return await fetchRepoTree(repo, access.branch);
 }
 
 function createRequestHandler(instanceId) {
@@ -882,16 +871,6 @@ function createRequestHandler(instanceId) {
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
-                // Discover source code references for resources missing codeReference
-                const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSourceDiscovery) {
-                    sendProgress('Scanning repository for source code references...');
-                    let repoTree = null;
-                    try { repoTree = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (repoTree && repoTree.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, repoTree, repo, branch);
-                    }
-                }
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1014,16 +993,6 @@ function createRequestHandler(instanceId) {
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Discover source code references
-                const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSourceDiscovery2) {
-                    addProgress('Scanning repository for source code references...');
-                    let repoTree2 = null;
-                    try { repoTree2 = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (repoTree2 && repoTree2.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, repoTree2, repo, branch);
-                    }
-                }
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1495,16 +1464,6 @@ function createRequestHandler(instanceId) {
                 addProgress('Found app.bicep — parsing resources...');
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Discover source code references for planned graph
-                const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSrcDisc) {
-                    addProgress('Scanning repository for source code references...');
-                    let srcTree = null;
-                    try { srcTree = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (srcTree && srcTree.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, srcTree, repo, branch);
-                    }
-                }
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
                 // Fetch recipes from GitHub (radius-project/resource-types-contrib)

@@ -43,7 +43,7 @@ The renderer ports the production improvements from `radius-project/github-exten
 The optional `codeReference` on each resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). It is normally hand-added metadata, but since the app model here is generated, this skill locates it automatically:
 
 - Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-bicep` skill) so the link is durable and high quality.
-- Any resource still missing one is auto-discovered during graph build (`discoverSourceCodeRefs`).
+- Any resource still missing one is discovered by this skill's AI agent at graph-build time, using the heuristics in [source-code-references.md](references/source-code-references.md).
 
 For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
 
@@ -93,7 +93,7 @@ The canvas will:
 - `plugins/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
-- `radius-core/src/modeling/repo.ts` — runtime source-location discovery (`discoverSourceCodeRefs`) and bicep generation that emits `codeReference`; the authoritative source for the heuristics in [source-code-references.md](references/source-code-references.md)
+- `radius-core/src/modeling/repo.ts` — fetches the skill-generated `app.bicep` from the repo (`fetchBicepFromRepo`); source-code reference discovery is now handled by this skill's AI agent (see [source-code-references.md](references/source-code-references.md))
 - `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source
 - `plugins/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
 - `plugins/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`

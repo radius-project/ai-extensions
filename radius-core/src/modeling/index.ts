@@ -16,7 +16,6 @@ export {
 } from "./recipes.js";
 
 export {
-  discoverSourceCodeRefs,
   fetchBicepFromRepo,
 } from "./repo.js";
 export {
