@@ -83,7 +83,7 @@ APP_API_KEY: {
 
 The names are illustrative. `properties.secrets.name` identifies the managed `Radius.Security/secrets` resource, while other fields declared under `properties.secrets` name keys stored in that resource. They are metadata, not secret values readable from `service.properties.apiKey` or `service.properties.secrets.apiKey`.
 
-Bind a complete managed URL/connection string directly to the app-native key when its format matches the pinned source. Never create an authored `Radius.Security/secrets` wrapper whose `data` copies a recipe-generated value from a resource property. An authored secret is not an adapter for a missing or different output shape.
+Bind a complete managed URL/connection string directly to the app-native key when its format matches the pinned source. Radius itself materializes recipe secret outputs into the managed `Radius.Security/secrets` and populates the read-only `properties.secrets.name`, so the app definition never authors, names, or duplicates that resource; it only binds to it by reference. Never create an authored `Radius.Security/secrets` wrapper whose `data` copies a recipe-generated value from a resource property. An authored secret is not an adapter for a missing or different output shape.
 
 Do not assume one universal `properties.secrets` path or guess a key. If the exact schema/recipe does not expose the required managed-secret reference and key, report the gap. If a mutable compiled extension disagrees with that exact contract, report version drift rather than inventing a convenience property or wrapper.
 
@@ -124,6 +124,6 @@ Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion 
 - Recipe-generated secrets bind directly from the exact declared managed-secret name and key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No secret is hardcoded, interpolated into a plain Bicep value, or assumed to appear in generic connection variables.
-- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`; `secretKeyRef` and authored secret resources are reserved for recipe-generated managed secrets or schema-required `secretName` inputs.
+- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` binds a recipe-generated managed secret through the owner's read-only `properties.secrets.name`; an authored `Radius.Security/secrets` resource is only for genuine application secrets/config files or a type whose schema requires `secretName`.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
 - A final credential-bearing URL/config is either bound directly from a matching managed secret or composed at runtime from secret references; it is never reconstructed in Bicep plain state.
