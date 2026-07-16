@@ -212,7 +212,7 @@ This uses the same object-form `source` shape already used in the official `gith
 
 #### Build & packaging
 
-- **New workflow** `.github/workflows/publish-canvas.yml` implementing the trigger/build/publish steps above with `contents: write`.
+- **New workflow** `.github/workflows/publish.yml` implementing the trigger/build/publish steps above with `contents: write`.
 - Keep `.gitignore` line 181 (ignore the bundle) unchanged; CI force-adds it only on `release`.
 - Optionally keep the existing `build.yml` artifact upload for PR inspection.
 - Pin all actions by commit SHA, matching the convention already used in `build.yml`.
@@ -258,7 +258,7 @@ This uses the same object-form `source` shape already used in the official `gith
 
 ## Development plan
 
-1. **Add the publish workflow** (`.github/workflows/publish-canvas.yml`): trigger, build (reusing `build.yml` steps), and the force-update of `release` + `latest`, with `contents: write` and SHA-pinned actions. Add `concurrency` so only one publish runs at a time per branch. *(Checked in first; validated on a scratch branch/tag before pointing docs at it.)*
+1. **Add the publish workflow** (`.github/workflows/publish.yml`): trigger, build (reusing `build.yml` steps), and the force-update of `release` + `latest`, with `contents: write` and SHA-pinned actions. Add `concurrency` so only one publish runs at a time per branch. *(Checked in first; validated on a scratch branch/tag before pointing docs at it.)*
 2. **Create and protect the `release` branch** and configure branch protection so only the workflow updates it.
 3. **Pin the manifest**: change the plugin `source` in `.github/plugin/marketplace.json` to the object form with `ref: release`. Keep `README.md` and `plugins/radius/README.md` install commands as the plain `add radius-project/ai-extensions`; add a short "how the canvas bundle is published" note (or link this design).
 4. **End-to-end verification (packaging)**: perform a clean install (plain command) in both the CLI and the app UI and confirm the plugin ships `extension.mjs` + `package.json` at the plugin root from the pinned `release` ref. (Canvas activation depends on the separate GitHub App discovery fix — see Non-goals.)
