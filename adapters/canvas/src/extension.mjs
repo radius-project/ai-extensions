@@ -263,8 +263,41 @@ const session = await joinSession({
                     },
                 },
                 {
+                    name: "get_graph_resources",
+                    description: "Return the current graph resources, optionally filtered to only those missing a codeReference. Use this to discover which resources need source-code references after the graph has been built.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            missingOnly: {
+                                type: "boolean",
+                                description: "If true (default), return only resources missing codeReference. If false, return all resources.",
+                            },
+                        },
+                    },
+                    handler: async (ctx) => {
+                        const entry = await getOrCreateServer(ctx.instanceId);
+                        const allResources = entry.state.graphResources
+                            || entry.state.plannedResources
+                            || entry.state.diffResources
+                            || [];
+                        if (allResources.length === 0) {
+                            return { ready: false, resources: [], message: "Graph has not been built yet. Open the graph page and wait for it to load, then try again." };
+                        }
+                        const missingOnly = ctx.input?.missingOnly !== false;
+                        const resources = missingOnly
+                            ? allResources.filter(r => !r.codeReference && !r.type?.toLowerCase().includes('applications'))
+                            : allResources;
+                        return {
+                            ready: true,
+                            repo: entry.state.graphTargetRepo || entry.state.plannedRepo || entry.state.contextRepo || '',
+                            branch: entry.state.graphBranch || entry.state.plannedBranch || entry.state.contextBranch || '',
+                            resources: resources.map(r => ({ name: r.name, type: r.type, id: r.id, codeReference: r.codeReference || null })),
+                        };
+                    },
+                },
+                {
                     name: "update_source_refs",
-                    description: "Attach source-code references to graph resources so nodes deep-link to their definition/initialization site. Call after the graph has been built to enrich resources that are missing codeReference.",
+                    description: "Attach source-code references to graph resources so nodes deep-link to their definition/initialization site. Call after discovering source locations via get_graph_resources + repo search. If the graph hasn't built yet, refs are queued and applied when it arrives.",
                     inputSchema: {
                         type: "object",
                         properties: {
@@ -290,6 +323,10 @@ const session = await joinSession({
                         if (!Array.isArray(refs) || refs.length === 0) {
                             return { error: "refs array is required", updated: 0 };
                         }
+                        // Queue refs so they survive if the graph hasn't built yet
+                        if (!entry.state.pendingSourceRefs) entry.state.pendingSourceRefs = [];
+                        entry.state.pendingSourceRefs.push(...refs);
+                        // Apply immediately to any resource arrays that exist
                         const refMap = new Map(refs.map(r => [`${r.name}||${r.type}`, r.codeReference]));
                         let updated = 0;
                         for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
@@ -302,7 +339,11 @@ const session = await joinSession({
                                 }
                             }
                         }
-                        return { message: `Updated ${updated} resource(s) with source references.`, updated };
+                        const queued = refs.length - updated;
+                        const parts = [`Updated ${updated} resource(s) with source references.`];
+                        if (queued > 0) parts.push(`${queued} ref(s) queued for when the graph builds.`);
+                        if (updated > 0) parts.push(`Refresh the graph page to see the updated links.`);
+                        return { message: parts.join(' '), updated, queued };
                     },
                 },
             ],

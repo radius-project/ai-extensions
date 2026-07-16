@@ -51,7 +51,18 @@ For the per-resource discovery methodology — categorization, filename/initiali
 
 After the graph canvas is opened and the graph has been built, discover source-code references for resources that lack them:
 
-1. **Identify resources needing references** — read the graph resources from `app.bicep` (they are available in the canvas state after the graph builds). For each non-`applications` resource that has no `codeReference`, note its `name` and `type`.
+1. **Get resources needing references** — call the `get_graph_resources` canvas action to retrieve resources missing `codeReference`:
+
+```
+invoke_canvas_action({
+  instanceId: "radius-panel",
+  actionName: "get_graph_resources",
+  input: { missingOnly: true }
+})
+```
+
+If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes `repo`, `branch`, and `resources` (each with `name`, `type`, `id`).
+
 2. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
 3. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
 4. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
@@ -69,6 +80,8 @@ invoke_canvas_action({
   }
 })
 ```
+
+Refs are queued if the graph hasn't built yet and applied automatically when it arrives. If the graph is already rendered, tell the user to refresh the graph page to see the updated links.
 
 Only attach a reference when confident it points to the real initialization/definition site. An empty reference is better than a wrong one.
 

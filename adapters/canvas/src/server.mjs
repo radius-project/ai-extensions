@@ -150,6 +150,27 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
     return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
+// Merge any pending source-code references into the current graph resource
+// arrays. Called both when the agent pushes refs (they may arrive before the
+// graph) and when graph resources are assigned (so queued refs are applied).
+function applyPendingSourceRefs(entry) {
+    const pending = entry?.state?.pendingSourceRefs;
+    if (!Array.isArray(pending) || pending.length === 0) return 0;
+    const refMap = new Map(pending.map(r => [`${r.name}||${r.type}`, r.codeReference]));
+    let updated = 0;
+    for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
+        if (!Array.isArray(bucket)) continue;
+        for (const r of bucket) {
+            const key = `${r.name}||${r.type}`;
+            if (refMap.has(key) && !r.codeReference) {
+                r.codeReference = refMap.get(key);
+                updated++;
+            }
+        }
+    }
+    return updated;
+}
+
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
@@ -877,6 +898,7 @@ function createRequestHandler(instanceId) {
                     entry.state.graphResources = resources;
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    applyPendingSourceRefs(entry);
                 }
 
                 sendDone({ reload: true });
@@ -889,32 +911,32 @@ function createRequestHandler(instanceId) {
         // Agent-driven source-code reference enrichment: accepts an array of
         // {name, type, codeReference} objects and merges them into the current
         // graph/planned/diff resources so nodes gain "View code" deep links
-        // without a hard-coded pattern table.
+        // without a hard-coded pattern table. If the graph hasn't been built yet,
+        // refs are queued in pendingSourceRefs and merged when the graph arrives.
         if (pathname === "/api/update-source-refs" && req.method === "POST") {
             const entry = servers.get(instanceId);
             if (!entry) { res.writeHead(404); res.end('{}'); return; }
             let body = '';
             req.on('data', c => body += c);
             await new Promise(r => req.on('end', r));
-            const { refs } = JSON.parse(body || '{}');
+            let parsed;
+            try { parsed = JSON.parse(body || '{}'); } catch {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: "Invalid JSON" }));
+                return;
+            }
+            const { refs } = parsed;
             if (!Array.isArray(refs) || refs.length === 0) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: "refs array is required" }));
                 return;
             }
-            const refMap = new Map(refs.map(r => [`${r.name}||${r.type}`, r.codeReference]));
-            let updated = 0;
-            for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
-                if (!Array.isArray(bucket)) continue;
-                for (const res of bucket) {
-                    const key = `${res.name}||${res.type}`;
-                    if (refMap.has(key) && !res.codeReference) {
-                        res.codeReference = refMap.get(key);
-                        updated++;
-                    }
-                }
-            }
+            // Always store in pendingSourceRefs so late-arriving graphs pick them up
+            if (!entry.state.pendingSourceRefs) entry.state.pendingSourceRefs = [];
+            entry.state.pendingSourceRefs.push(...refs);
+            const updated = applyPendingSourceRefs(entry);
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             res.end(JSON.stringify({ updated }));
@@ -1034,6 +1056,7 @@ function createRequestHandler(instanceId) {
                     entry.state.graphResources = resources;
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    applyPendingSourceRefs(entry);
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1518,6 +1541,7 @@ function createRequestHandler(instanceId) {
                     entry.state.plannedBranch = branch;
                     entry.state.plannedProvider = provider;
                     entry.state.resolvedRecipes = recipes;
+                    applyPendingSourceRefs(entry);
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1715,6 +1739,7 @@ function createRequestHandler(instanceId) {
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
                                     entry.state.plannedResources = planned;
                                     entry.state.plannedRepo = repo;
+                                    applyPendingSourceRefs(entry);
                                     resources = planned;
                                     entry.state.deployingResources = resources;
                                     addLog('Planned ' + planned.length + ' resource(s).');
