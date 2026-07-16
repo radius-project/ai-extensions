@@ -22,7 +22,7 @@ import { buildGraphViaRad, RADIUS_BICEP_CONFIG_JSON } from "@radius-project/shar
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
-import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
@@ -700,7 +700,16 @@ function createRequestHandler(instanceId) {
                         // applies on both explicit dispatch and the verify→deploy auto
                         // trigger (where inputs are empty). Secret params are appended by
                         // the workflow from RADIUS_DEPLOY_PARAMS.
-                        const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
+                        //
+                        // Store a JSON array so the deploy also runs `rad app graph`
+                        // after `rad deploy`, matching the dispatch-time path — otherwise
+                        // the verify→deploy auto trigger (which relies on this variable)
+                        // would deploy without rendering the application graph.
+                        const radDeployCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
+                        const radCommands = [radDeployCommand];
+                        const appName = extractAppName(bicepSource);
+                        if (appName) radCommands.push('app graph --application ' + appName);
+                        const radCommand = JSON.stringify(radCommands);
                         await runGh(['variable', 'set', 'RADIUS_RAD_COMMANDS', '--env', envName, '--repo', targetRepo, '--body', radCommand]);
 
                         const names = Object.keys(resolved);
@@ -1357,8 +1366,8 @@ function createRequestHandler(instanceId) {
                     if (!raw) continue;
                     let decoded = "";
                     try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
-                    const m = decoded.match(/application\s+['"]([^'"]+)['"]/) || decoded.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
-                    if (m) { appName = m[1]; break; }
+                    const name = extractAppName(decoded);
+                    if (name) { appName = name; break; }
                 }
                 respond({ applications: [{ name: appName }] });
             } catch (e) {
@@ -2107,8 +2116,7 @@ function createRequestHandler(instanceId) {
                                 }
 
                                 const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
-                                const appMatch = bicepSource.match(/application\s+['"]([^'"]+)['"]/) || bicepSource.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
-                                const appName = appMatch ? appMatch[1] : '';
+                                const appName = extractAppName(bicepSource);
                                 const commands = [deployCmd];
                                 if (appName) commands.push('app graph --application ' + appName);
                                 const radCommandsInput = JSON.stringify(commands);

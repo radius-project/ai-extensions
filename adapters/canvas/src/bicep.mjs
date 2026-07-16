@@ -115,6 +115,23 @@ export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
   return parts.join(" ");
 }
 
+// Extract the Radius application name from an app.bicep source. The name is
+// declared as `name: '<app>'` on the single `Radius.Core/applications` resource
+// (e.g. `resource app 'Radius.Core/applications@2025-08-01-preview' = { name:
+// 'my-app' ... }`). Prefer that resource's name; fall back to the first
+// `name: '...'` in the file, mirroring the deploy workflow's own extraction
+// (`grep -oP "name:\s*'\K[^']+" .radius/app.bicep | head -1`). Returns "" when
+// no name can be found.
+export function extractAppName(source) {
+  if (!source) return "";
+  const onResource = source.match(
+    /applications@[^'"]*['"]\s*=\s*\{[\s\S]*?\bname:\s*['"]([^'"]+)['"]/
+  );
+  if (onResource) return onResource[1];
+  const first = source.match(/\bname:\s*['"]([^'"]+)['"]/);
+  return first ? first[1] : "";
+}
+
 // Build the map of application parameters to pass to `rad deploy`, given the
 // app's parsed params and the (possibly partial) values the user supplied.
 //   - user provided a non-empty value  -> use it
