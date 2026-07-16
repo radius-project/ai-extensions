@@ -123,7 +123,9 @@ resource database 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
 }
 ```
 
-To find the definition/initialization site for each resource, follow the discovery methodology in the app-graph skill's [source-code-references.md](../radius-app-graph/references/source-code-references.md) (category detection, filename/init patterns, skip rules, line pinpointing, output format). Point at the real initialization site — for a container, the service `Dockerfile` or entrypoint. Leave it out rather than link a test/mock or a file you cannot confirm. `codeReference` is metadata, not a schema-verified property, so it is exempt from the ledger's schema-proof requirement; omit it if in doubt.
+To find the definition/initialization site for each resource, follow the discovery methodology in the app-graph skill's [source-code-references.md](../radius-app-graph/references/source-code-references.md) (category detection, filename/init patterns, skip rules, line pinpointing, output format). Point at the real initialization site — for a container, the service `Dockerfile` or entrypoint. Leave it out rather than link a test/mock or a file you cannot confirm. `codeReference` is a framework-owned optional base property (defined in Radius's base resource schema and inherited by every type), so it is schema-valid but exempt from the per-type ledger's schema-proof requirement; omit it if in doubt.
+
+Author it as a **repo-relative path** (`path` or `path#L<line>`), not a full URL — the graph canvas resolves it against the graph's repo and branch (`<repo-url>/blob/<branch>/<path>#L<line>`). Radius's base schema documents `codeReference` as a fully-qualified source URI, but a full URL breaks that canvas deep-link path, so author repo-relative here.
 
 ## Resource Type Resolution
 

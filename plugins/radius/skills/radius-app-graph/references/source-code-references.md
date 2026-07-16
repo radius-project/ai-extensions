@@ -72,8 +72,8 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 
 ## Output format
 
-- Value is a repo-relative path with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`.
-- Do not include a branch or full URL; the canvas resolves those against the graph's repo and branch.
+- Author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. This is the canonical authored value.
+- Do not author a branch or full URL. The canvas resolves the repo-relative value against the graph's repo and branch into `<repo-url>/blob/<branch>/<path>#L<line>`. Radius's base resource schema documents `codeReference` as a fully-qualified source URI, but authoring a full URL breaks this canvas deep-link path, so keep authored values repo-relative.
 - If nothing credible is found, leave the reference empty rather than linking a wrong or test file — an empty link is better than a misleading one.
 
 ## Verify
