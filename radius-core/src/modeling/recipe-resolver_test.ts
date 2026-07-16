@@ -2,13 +2,9 @@ import { describe, it, expect } from "vitest";
 import type { GitHub } from "../ports/index.js";
 import {
   loadRecipeResources,
-  fetchResourceTypeSchema,
-  fetchRecipeFromAnyPlatform,
-  generateRecipeFromContrib,
   resolveRecipeOutputs,
   fetchRecipesFromGitHub,
 } from "./recipe-resolver.js";
-import { CANONICAL_RESOURCE_MAP } from "./recipes.js";
 
 interface FakeConfig {
   content?: Record<string, string | null>;
@@ -76,101 +72,7 @@ describe("loadRecipeResources", () => {
   });
 });
 
-describe("fetchResourceTypeSchema", () => {
-  it("fetches the <typeName>.yaml schema for a valid Radius type", async () => {
-    const gh = fakeGitHub({
-      content: { [`${CONTRIB}/Data/mySqlDatabases/mySqlDatabases.yaml`]: "description: mysql" },
-    });
-    expect(await fetchResourceTypeSchema(gh, "Radius.Data/mySqlDatabases")).toBe("description: mysql");
-  });
-
-  it("returns null for a type that has no contrib directory", async () => {
-    const gh = fakeGitHub();
-    expect(await fetchResourceTypeSchema(gh, "Radius.Compute")).toBeNull();
-  });
-});
-
-describe("fetchRecipeFromAnyPlatform", () => {
-  it("returns null when the type has no contrib directory", async () => {
-    const gh = fakeGitHub();
-    expect(await fetchRecipeFromAnyPlatform(gh, "Radius.Compute", "kubernetes")).toBeNull();
-  });
-
-  it("skips the excluded platform and loads from another one", async () => {
-    const dir = "Data/mySqlDatabases";
-    const gh = fakeGitHub({
-      names: {
-        [`${CONTRIB}/${dir}/recipes`]: ["kubernetes", "aws"],
-        [`${CONTRIB}/${dir}/recipes/aws/terraform`]: ["main.tf"],
-      },
-      content: {
-        [`${CONTRIB}/${dir}/recipes/aws/terraform/main.tf`]:
-          `resource "aws_db_instance" "mysql" { engine = "mysql" }`,
-      },
-    });
-    const recipe = await fetchRecipeFromAnyPlatform(gh, "Radius.Data/mySqlDatabases", "kubernetes");
-    expect(recipe?.provider).toBe("aws");
-    expect(recipe?.templateKind).toBe("terraform");
-    expect(recipe?.resourceType).toBe("Radius.Data/mySqlDatabases");
-    expect(recipe?.concreteResources[0].type).toBe("aws_db_instance");
-  });
-
-  it("returns null when only the excluded platform has a recipe", async () => {
-    const dir = "Data/mySqlDatabases";
-    const gh = fakeGitHub({
-      names: { [`${CONTRIB}/${dir}/recipes`]: ["kubernetes"] },
-    });
-    expect(await fetchRecipeFromAnyPlatform(gh, "Radius.Data/mySqlDatabases", "kubernetes")).toBeNull();
-  });
-});
-
-describe("generateRecipeFromContrib", () => {
-  it("uses an alternate-platform recipe when available", async () => {
-    const dir = "Data/mySqlDatabases";
-    const gh = fakeGitHub({
-      names: {
-        [`${CONTRIB}/${dir}/recipes`]: ["aws"],
-        [`${CONTRIB}/${dir}/recipes/aws/terraform`]: ["main.tf"],
-      },
-      content: {
-        [`${CONTRIB}/${dir}/recipes/aws/terraform/main.tf`]:
-          `resource "aws_db_instance" "mysql" { engine = "mysql" }`,
-      },
-    });
-    const result = await generateRecipeFromContrib(gh, "Radius.Data/mySqlDatabases", "azure");
-    expect(result.source).toBe("contrib-alt-platform");
-    expect(result.resources[0].type).toBe("aws_db_instance");
-  });
-
-  it("infers from the YAML schema when no recipe is available", async () => {
-    const gh = fakeGitHub({
-      content: {
-        [`${CONTRIB}/Data/redisCaches/redisCaches.yaml`]: "description: |\n  A redis cache.\ntypes:",
-      },
-    });
-    const result = await generateRecipeFromContrib(gh, "Radius.Data/redisCaches", "azure");
-    expect(result.source).toBe("contrib-schema");
-    expect(result.resources).toBe(CANONICAL_RESOURCE_MAP["Radius.Data/redisCaches"].azure);
-  });
-
-  it("falls back to static mappings when nothing is reachable", async () => {
-    const gh = fakeGitHub();
-    const result = await generateRecipeFromContrib(gh, "Radius.Data/redisCaches", "aws");
-    expect(result.source).toBe("static-fallback");
-    expect(result.resources).toBe(CANONICAL_RESOURCE_MAP["Radius.Data/redisCaches"].aws);
-  });
-});
-
 describe("resolveRecipeOutputs", () => {
-  it("resolves cloud-managed database types straight from the canonical map", async () => {
-    const gh = fakeGitHub();
-    const appResources = [{ name: "db", type: "Radius.Data/mySqlDatabases@2025-08-01-preview" }];
-    const resolved = await resolveRecipeOutputs(gh, appResources, [], "aws");
-    expect(resolved).toHaveLength(1);
-    expect(resolved[0].recipe.templateKind).toBe("canonical-managed");
-    expect(resolved[0].outputResources).toBe(CANONICAL_RESOURCE_MAP["Radius.Data/mySqlDatabases"].aws);
-  });
-
   it("matches a directly provided recipe by resource type", async () => {
     const gh = fakeGitHub();
     const recipes = [
@@ -209,13 +111,13 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources[0].displayType).toBe("K8s Deployment (AKS)");
   });
 
-  it("dynamically resolves via contrib when no recipe matches", async () => {
+  it("produces no outputs when no recipe matches", async () => {
     const gh = fakeGitHub();
     const appResources = [{ name: "cache", type: "Radius.Data/redisCaches@2025-08-01-preview" }];
     const resolved = await resolveRecipeOutputs(gh, appResources, [], "aws");
-    // No recipe passed and contrib unreachable -> static fallback.
-    expect(resolved[0].recipe.templateKind).toBe("static-fallback");
-    expect(resolved[0].outputResources).toEqual(CANONICAL_RESOURCE_MAP["Radius.Data/redisCaches"].aws);
+    // No matching recipe -> nothing is fabricated.
+    expect(resolved[0].recipe).toBeNull();
+    expect(resolved[0].outputResources).toEqual([]);
   });
 });
 
