@@ -104,7 +104,8 @@ describe("graphPage — with resources branch", () => {
     });
 
     it("handles needsAppBicep and error from /api/load-graph", () => {
-        expect(html).toContain("d.needsAppBicep || d.error");
+        expect(html).toContain("d.needsAppBicep");
+        expect(html).toContain("Error: ");
         expect(html).toContain("Radius app-bicep skill");
     });
 
