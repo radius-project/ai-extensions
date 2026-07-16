@@ -22,8 +22,8 @@ For every dependency:
 3. Inspect the exact resource outputs and connection projection supplied by the target schema and recipe.
 4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format.
 5. Select the wiring for each app-native value:
-   - explicit `env.value` from a verified nonsecret output or literal;
-   - `valueFrom.secretKeyRef` from an exact secret/key;
+   - explicit `env.value` from a verified nonsecret output or literal, or from a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
+   - `valueFrom.secretKeyRef` from an exact recipe-generated managed secret/key;
    - runtime composition; or
    - generic connection projection only when the source explicitly consumes that applicable contract.
 
@@ -71,8 +71,8 @@ Keep a connection alongside native variables when the source consumes generic va
 
 1. Never assume a connection invents app-specific variables, URLs, credentials, database names, or protocol settings.
 2. Never assume one universal JSON or scalar `CONNECTION_*` projection. Verify the target version.
-3. Sensitive outputs may be omitted from generic projection. Resolve and bind them through the exact secret contract described in [secrets-handling.md](secrets-handling.md).
-   A sensitive app-native key must use an explicit `secretKeyRef` even when its name looks exactly like `CONNECTION_<NAME>_<PROPERTY>`; the matching connection does not project the secret. Bind a recipe-generated value directly from schema-declared managed-secret metadata, never through an authored wrapper or guessed resource property.
+3. Sensitive recipe outputs may be omitted from generic projection. Resolve and bind them through the exact secret contract described in [secrets-handling.md](secrets-handling.md).
+   A recipe-generated sensitive app-native key must use an explicit `secretKeyRef` even when its name looks exactly like `CONNECTION_<NAME>_<PROPERTY>`; the matching connection does not project the secret. Bind it directly from schema-declared managed-secret metadata, never through an authored wrapper or guessed resource property. A developer-supplied credential you already hold as a `@secure()` parameter goes straight to `env.value` instead.
 4. Reference a nonsecret read-only output only when the exact schema exposes it and the configured recipe populates it. Do not **set** read-only properties.
 5. Use `disableDefaultEnvVars` only on the connection entry, only when the exact container schema supports it, and only when generic projection would conflict with the application.
 6. Treat case, number-to-string conversion, URL encoding, TLS mode, and protocol-specific formatting as part of the app's runtime contract.

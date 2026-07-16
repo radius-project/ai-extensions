@@ -106,7 +106,7 @@ env: {
     value: password
   }
   APP_DATABASE_OPTIONS: {
-    value: 'host=${database.properties.host};password=$(DB_PASSWORD)'
+    value: 'host=${mysql.properties.host};password=$(DB_PASSWORD)'
   }
 }
 ```
@@ -123,6 +123,6 @@ Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion 
 - Recipe-generated secrets bind directly from the exact declared managed-secret name and key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No secret is hardcoded, interpolated into a plain Bicep value, or assumed to appear in generic connection variables.
-- `@secure()` values flow only through properties marked sensitive or supported secret resources.
+- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`; `secretKeyRef` and authored secret resources are reserved for recipe-generated managed secrets or schema-required `secretName` inputs.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
 - A final credential-bearing URL/config is either bound directly from a matching managed secret or composed at runtime from secret references; it is never reconstructed in Bicep plain state.
