@@ -47,6 +47,31 @@ The optional `codeReference` on each resource is what makes a graph node link ba
 
 For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
 
+### Agent-driven discovery workflow
+
+After the graph canvas is opened and the graph has been built, discover source-code references for resources that lack them:
+
+1. **Identify resources needing references** — read the graph resources from `app.bicep` (they are available in the canvas state after the graph builds). For each non-`applications` resource that has no `codeReference`, note its `name` and `type`.
+2. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
+3. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
+4. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
+5. **Push discovered references** to the canvas via the `update_source_refs` action:
+
+```
+invoke_canvas_action({
+  instanceId: "radius-panel",
+  actionName: "update_source_refs",
+  input: {
+    refs: [
+      { name: "db", type: "Radius.Datastores/sqlDatabases", codeReference: "src/db.js#L14" },
+      { name: "cache", type: "Radius.Datastores/redisCaches", codeReference: "src/redis.js#L8" }
+    ]
+  }
+})
+```
+
+Only attach a reference when confident it points to the real initialization/definition site. An empty reference is better than a wrong one.
+
 ## How to invoke
 
 When the user asks to see, build, refresh, or compare the application graph, **open the canvas straight to the graph view**:

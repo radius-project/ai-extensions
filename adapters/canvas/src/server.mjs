@@ -886,6 +886,41 @@ function createRequestHandler(instanceId) {
             return;
         }
 
+        // Agent-driven source-code reference enrichment: accepts an array of
+        // {name, type, codeReference} objects and merges them into the current
+        // graph/planned/diff resources so nodes gain "View code" deep links
+        // without a hard-coded pattern table.
+        if (pathname === "/api/update-source-refs" && req.method === "POST") {
+            const entry = servers.get(instanceId);
+            if (!entry) { res.writeHead(404); res.end('{}'); return; }
+            let body = '';
+            req.on('data', c => body += c);
+            await new Promise(r => req.on('end', r));
+            const { refs } = JSON.parse(body || '{}');
+            if (!Array.isArray(refs) || refs.length === 0) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: "refs array is required" }));
+                return;
+            }
+            const refMap = new Map(refs.map(r => [`${r.name}||${r.type}`, r.codeReference]));
+            let updated = 0;
+            for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
+                if (!Array.isArray(bucket)) continue;
+                for (const res of bucket) {
+                    const key = `${res.name}||${res.type}`;
+                    if (refMap.has(key) && !res.codeReference) {
+                        res.codeReference = refMap.get(key);
+                        updated++;
+                    }
+                }
+            }
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(200);
+            res.end(JSON.stringify({ updated }));
+            return;
+        }
+
         if (pathname === "/api/progress" && req.method === "GET") {
             const entry = servers.get(instanceId);
             const messages = entry?.state?.progressMessages || [];

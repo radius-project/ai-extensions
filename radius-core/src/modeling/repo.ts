@@ -11,8 +11,8 @@
 
 import type { GitHub } from "../ports/index.js";
 
-export async function fetchBicepFromRepo(gh, repo, branch = 'main') {
-    const ghApiGetContent = (p) => gh.getContent(p);
+export async function fetchBicepFromRepo(gh: GitHub, repo: string, branch = 'main'): Promise<string | null> {
+    const ghApiGetContent = (p: string) => gh.getContent(p);
     // Try .radius/app.bicep first (standard Radius location), then app.bicep at root.
     const radiusPath = await ghApiGetContent(`/repos/${repo}/contents/.radius/app.bicep?ref=${branch}`);
     if (radiusPath) return radiusPath;

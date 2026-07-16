@@ -262,6 +262,49 @@ const session = await joinSession({
                         return entry.state.envResult;
                     },
                 },
+                {
+                    name: "update_source_refs",
+                    description: "Attach source-code references to graph resources so nodes deep-link to their definition/initialization site. Call after the graph has been built to enrich resources that are missing codeReference.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            refs: {
+                                type: "array",
+                                description: "Array of {name, type, codeReference} objects. codeReference is a repo-relative path, optionally with #L<line> (e.g. 'src/db.js#L14').",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        name: { type: "string", description: "Resource name" },
+                                        type: { type: "string", description: "Radius resource type" },
+                                        codeReference: { type: "string", description: "Repo-relative path with optional #L<line>" },
+                                    },
+                                    required: ["name", "type", "codeReference"],
+                                },
+                            },
+                        },
+                        required: ["refs"],
+                    },
+                    handler: async (ctx) => {
+                        const entry = await getOrCreateServer(ctx.instanceId);
+                        const refs = ctx.input?.refs;
+                        if (!Array.isArray(refs) || refs.length === 0) {
+                            return { error: "refs array is required", updated: 0 };
+                        }
+                        const refMap = new Map(refs.map(r => [`${r.name}||${r.type}`, r.codeReference]));
+                        let updated = 0;
+                        for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
+                            if (!Array.isArray(bucket)) continue;
+                            for (const r of bucket) {
+                                const key = `${r.name}||${r.type}`;
+                                if (refMap.has(key) && !r.codeReference) {
+                                    r.codeReference = refMap.get(key);
+                                    updated++;
+                                }
+                            }
+                        }
+                        return { message: `Updated ${updated} resource(s) with source references.`, updated };
+                    },
+                },
             ],
             open: async (ctx) => {
                 const page = ctx.input?.page || "environment";
