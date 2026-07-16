@@ -37,9 +37,9 @@ import {
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
-  DEPLOY_DISPATCHER_FILE, DEPLOY_AWS_FILE,
-  DELETE_APP_DISPATCHER_FILE, DELETE_AWS_FILE,
+  DELETE_APP_DISPATCHER_FILE,
 } from "./infra.mjs";
+import { environmentWorkflowFileEntries } from "./workflow-files.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
@@ -675,16 +675,17 @@ function createRequestHandler(instanceId) {
                 // provider workflows). The dispatcher references both provider
                 // files by path, so all three must exist in the target repo.
                 steps.push('Committing deploy workflows...');
-                const deployWorkflows = await generateDeployWorkflow(envName, '.radius/app.bicep');
+                // Generate and validate all six files before committing any of
+                // them. GitHub parses every local reusable-workflow reference
+                // before evaluating provider job conditions.
+                const [generatedDeployWorkflows, generatedDeleteWorkflows] = await Promise.all([
+                    generateDeployWorkflow(envName, '.radius/app.bicep'),
+                    generateDeleteWorkflow(envName),
+                ]);
+                const { deploy: deployWorkflows, delete: deleteWorkflows } =
+                    environmentWorkflowFileEntries(generatedDeployWorkflows, generatedDeleteWorkflows);
 
-                for (const [fileName, content] of Object.entries(deployWorkflows)) {
-                    // Only Azure workflows are pushed to the target repo for now.
-                    // The AWS deploy workflow is still generated (code retained)
-                    // but intentionally skipped so it never lands on the branch.
-                    if (fileName === DEPLOY_AWS_FILE) {
-                        steps.push('Skipping AWS deploy workflow (' + fileName + ').');
-                        continue;
-                    }
+                for (const [fileName, content] of deployWorkflows) {
                     const deployContent = Buffer.from(content).toString('base64');
                     const deployPath = '.github/workflows/' + fileName;
 
@@ -722,45 +723,42 @@ function createRequestHandler(instanceId) {
                 await deleteLegacyDeployWorkflow(targetRepo);
                 steps.push('✅ Deploy workflows committed.');
 
-                // Step 4b: Commit the application-delete workflows (dispatcher +
-                // provider workflows) so the Delete Deployment button can dispatch
-                // `rad app delete`. As with deploy, only the Azure workflows are
-                // pushed for now; the AWS provider file is skipped.
+                // Step 4b: Commit the application-delete dispatcher and both
+                // provider workflows so every local workflow reference resolves.
                 steps.push('Committing delete workflows...');
-                try {
-                    const deleteWorkflows = await generateDeleteWorkflow(envName);
-                    for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-                        if (fileName === DELETE_AWS_FILE) {
-                            steps.push('Skipping AWS delete workflow (' + fileName + ').');
-                            continue;
-                        }
-                        const delContent = Buffer.from(content).toString('base64');
-                        const delPath = '.github/workflows/' + fileName;
+                for (const [fileName, content] of deleteWorkflows) {
+                    const delContent = Buffer.from(content).toString('base64');
+                    const delPath = '.github/workflows/' + fileName;
 
-                        const delCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + delPath, '--jq', '.sha']);
-                        const delFileSha = delCheckResult.code === 0 ? delCheckResult.stdout.trim() : '';
+                    const delCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + delPath, '--jq', '.sha']);
+                    const delFileSha = delCheckResult.code === 0 ? delCheckResult.stdout.trim() : '';
 
-                        const delCommitBody = JSON.stringify({
-                            message: 'Add Radius delete workflow (' + fileName + ') for environment ' + envName,
-                            content: delContent,
-                            ...(delFileSha ? { sha: delFileSha } : {})
-                        });
+                    const delCommitBody = JSON.stringify({
+                        message: 'Add Radius delete workflow (' + fileName + ') for environment ' + envName,
+                        content: delContent,
+                        ...(delFileSha ? { sha: delFileSha } : {})
+                    });
 
-                        const tmpFile3 = join(tmpdir(), 'radius-delete-commit-' + Date.now() + '.json');
-                        writeFileSync(tmpFile3, delCommitBody);
-                        const delCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + delPath, '--input', tmpFile3]);
-                        try { unlinkSync(tmpFile3); } catch {}
+                    const tmpFile3 = join(tmpdir(), 'radius-delete-commit-' + Date.now() + '.json');
+                    writeFileSync(tmpFile3, delCommitBody);
+                    const delCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + delPath, '--input', tmpFile3]);
+                    try { unlinkSync(tmpFile3); } catch {}
 
-                        if (delCommitResult.code !== 0) {
-                            steps.push('⚠️ Could not commit delete workflow ' + fileName + ': ' + ((delCommitResult.stderr || '').trim() || 'GitHub API request failed.'));
-                        }
+                    if (delCommitResult.code !== 0) {
+                        steps.push('❌ Failed to commit delete workflow ' + fileName + '.');
+                        const scopeHint3 = needsWorkflowScope(delCommitResult.stderr)
+                            ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+                            : ' Check that you have write access to the repository and that GitHub Actions is enabled.';
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            error: 'Failed to commit the delete workflow (' + delPath + ') to ' + targetRepo + '. ' + ((delCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint3,
+                            steps
+                        }));
+                        return;
                     }
-                    steps.push('✅ Delete workflows committed.');
-                } catch (delErr) {
-                    // Delete workflows are non-critical to environment creation, so
-                    // surface the failure but don't abort the whole flow.
-                    steps.push('⚠️ Could not generate/commit delete workflows: ' + delErr.message);
                 }
+                steps.push('✅ Delete workflows committed.');
 
                 // Step 5: Dispatch the verify workflow
                 steps.push('Dispatching verify-credentials workflow...');
