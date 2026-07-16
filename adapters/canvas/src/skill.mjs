@@ -37,6 +37,31 @@ const REFERENCES = [
 ];
 
 /**
+ * The `repoPath` argument is caller-controlled and gets embedded in the returned
+ * string, which the agent consumes as instructions. An unsanitized value with
+ * newlines or backticks could inject additional prompt content, so reduce it to
+ * a single, inert, length-bounded token before echoing it. Returns a safe
+ * placeholder when the input is empty or has no usable characters.
+ *
+ * @param {unknown} repoPath
+ * @returns {string}
+ */
+function sanitizeRepoPath(repoPath) {
+    const FALLBACK = "the current workspace";
+    if (typeof repoPath !== "string") return FALLBACK;
+    // Collapse any whitespace (including newlines/tabs) to single spaces, drop
+    // control characters and backticks so the value can't break out of the
+    // surrounding prose or open a code fence, then bound the length.
+    const cleaned = repoPath
+        .replace(/[\u0000-\u001F\u007F]+/g, " ")
+        .replace(/`/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 256);
+    return cleaned || FALLBACK;
+}
+
+/**
  * Returns the full radius-app-bicep skill (SKILL.md plus every reference file it
  * links to) as a single string, so the agent has the authoritative, schema-
  * accurate, compile-tested guidance even when only the extension is installed.
@@ -45,7 +70,7 @@ const REFERENCES = [
  * @returns {string}
  */
 export function radiusAppBicepSkill(repoPath) {
-    const target = repoPath || "the current workspace";
+    const target = sanitizeRepoPath(repoPath);
     const intro =
         `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +
         `Model the repository at ${target} by following the skill below. This is ` +
