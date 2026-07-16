@@ -1385,6 +1385,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
 <!-- Landing: New Environment button + environments table -->
 <div id="env-landing">
+  <div id="env-success-banner" role="status" style="display:none;">
+    <span class="env-success-banner__check" aria-hidden="true">✓</span>
+    <span id="env-success-banner-text" class="env-success-banner__text"></span>
+    <button type="button" id="env-success-banner-close" class="env-success-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -1543,6 +1548,13 @@ document.getElementById('back-btn').addEventListener('click', function() {
 /* Match Figma: the environments table's ACTIONS column is left-aligned. */
 #env-landing .rad-table thead th:last-child { text-align: left; }
 #env-landing .rad-table__actions { justify-content: flex-start; }
+/* Success banner shown above the environments list after a successful create. */
+#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--background-color-default,#fff); border:1px solid var(--border-color-muted,#d8dee4); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#22c580; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--text-color-muted,#4f5966); }
+.env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
+.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
+.env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
 </style>
 
 <script>
@@ -1556,6 +1568,8 @@ var envNameInput = document.getElementById('env-name-input');
 
 function showEnvForm(preset) {
     preset = preset || {};
+    var sb = document.getElementById('env-success-banner');
+    if (sb) sb.style.display = 'none';
     if (preset.name !== undefined) envNameInput.value = preset.name;
     if (preset.provider) {
         var ps = document.getElementById('env-provider-select');
@@ -1571,6 +1585,19 @@ function showEnvLanding() {
     envLanding.style.display = '';
     loadEnvTable();
 }
+function showEnvSuccessBanner(provider, name) {
+    var banner = document.getElementById('env-success-banner');
+    var text = document.getElementById('env-success-banner-text');
+    if (!banner || !text) return;
+    var providerLabel = provider === 'aws' ? 'AWS' : 'Azure';
+    text.innerHTML = 'Successfully created <strong>' + escapeHtmlClient(providerLabel) +
+        '</strong> Environment <strong>' + escapeHtmlClient(name) + '</strong>';
+    banner.style.display = 'flex';
+}
+var envSuccessClose = document.getElementById('env-success-banner-close');
+if (envSuccessClose) envSuccessClose.addEventListener('click', function() {
+    document.getElementById('env-success-banner').style.display = 'none';
+});
 document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 
@@ -1989,6 +2016,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
                             btn.disabled = false;
                             statusEl.style.display = 'none';
                             showEnvLanding();
+                            showEnvSuccessBanner(provider, env);
                             loadEnvTable();
                             return;
                         }
