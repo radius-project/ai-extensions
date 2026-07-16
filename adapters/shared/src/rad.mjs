@@ -298,7 +298,7 @@ async function downloadRad(log) {
       if (isExecutableFile(dest)) return dest;
       throw err;
     }
-    log(`Installed rad to ${dest}${expected ? ` (verified against ${expected.source})` : ""}`);
+    log(`Installed rad to ${dest} (${expected ? `verified against ${expected.source}` : "unverified"})`);
     return dest;
   } finally {
     if (release) release();
