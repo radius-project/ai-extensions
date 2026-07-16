@@ -12,22 +12,23 @@
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { copyFileSync, mkdirSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..");
 
 const isWatch = process.argv.includes("--watch");
-// --install copies the build output into the locally installed extension dir.
-// The Copilot host watches the installed extension.mjs and auto-reloads the
-// extension when it changes, so copying the fresh build there is all that's
-// needed for a rebuilt extension to take effect. Combined with --watch this
-// gives edit-source → rebuild → copy → host auto-reload end to end.
+// --install copies the build output into the locally installed extension dir and
+// drops a `.dev-reload` sentinel so the extension's dev self-reloader arms. The
+// self-reloader watches the installed extension.mjs and gracefully restarts the
+// extension when it changes, so a fresh build hot-reloads. Combined with --watch
+// this gives edit-source → rebuild → copy → self-reload end to end.
 //
-// NOTE: reloading the extension that serves your *current* session briefly makes
-// that session's canvas/tools unresponsive while the process is torn down and
-// re-registered. For disruption-free iteration, run a separate session.
+// NOTE: the installed extension is user-scoped and shared by every session on
+// this machine, so a reload briefly (~1s) reconnects the extension in ALL
+// sessions. Do interactive canvas testing in a session separate from the one you
+// edit in, so the reconnect blip never interrupts active canvas use.
 const isInstall = process.argv.includes("--install");
 
 const outfile = join(repoRoot, ".github", "radius", "extension.mjs");
@@ -42,12 +43,15 @@ function installToLocal() {
     const installDir = dirname(installPath);
     mkdirSync(installDir, { recursive: true });
     // Write atomically: copy to a temp file in the same dir, then rename over the
-    // target. rename() is atomic on the same filesystem, so the host's file
+    // target. rename() is atomic on the same filesystem, so the self-reloader's
     // watcher never observes a half-written file (which would import as a
     // truncated module and crash the respawned process with no clean error).
     const tmp = `${installPath}.tmp-${process.pid}`;
     copyFileSync(outfile, tmp);
     renameSync(tmp, installPath);
+    // Arm the dev self-reloader in the installed copy (idempotent).
+    const sentinel = join(installDir, ".dev-reload");
+    if (!existsSync(sentinel)) writeFileSync(sentinel, "dev\n");
     console.log(`[canvas] installed → ${installPath}`);
   } catch (e) {
     console.error(`[canvas] install copy failed: ${e?.message || e}`);

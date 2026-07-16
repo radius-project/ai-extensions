@@ -1612,8 +1612,7 @@ function loadEnvTable() {
     var body = document.getElementById('env-table-body');
     if (!CTX_REPO) {
         body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-            '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
-        wireEmptyState();
+            '<td class="rad-table__actions"></td></tr>';
         return;
     }
     body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>';
@@ -1623,8 +1622,7 @@ function loadEnvTable() {
             var envs = (data && data.environments) || [];
             if (envs.length === 0) {
                 body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
-                wireEmptyState();
+                    '<td class="rad-table__actions"></td></tr>';
                 return;
             }
             body.innerHTML = envs.map(function(e) {
@@ -1658,10 +1656,6 @@ function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
         return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
     });
-}
-function wireEmptyState() {
-    var b = document.querySelector('.js-create-env');
-    if (b) b.addEventListener('click', function() { showEnvForm({ name: '' }); });
 }
 function wireRowActions() {
     document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
