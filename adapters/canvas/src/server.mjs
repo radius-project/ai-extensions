@@ -67,6 +67,13 @@ const envListCache = new Map(); // repo -> { at, payload }
 // commit so it does not double-trigger alongside the new dispatcher.
 const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
 
+// The workflow that actually runs `rad` deploy commands. The deployments list
+// only surfaces deployment records produced by this workflow — records created
+// by other environment-bound workflows (verify-credentials, delete-application)
+// are not real application deployments and are filtered out.
+const DEPLOY_WORKFLOW_FILE = 'run-rad-commands.yml';
+const DELETE_WORKFLOW_FILE = 'delete-application.yml';
+
 /**
  * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
  * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
@@ -1391,63 +1398,73 @@ function createRequestHandler(instanceId) {
             const appName = repo.split("/").pop() || repo;
             try {
                 // A "deployment" is the application deployed into a GitHub
-                // Environment. List every deployment record for the repo and
-                // collapse to the latest per environment, mapping its GitHub
-                // deployment-status state to our success/pending/failed model.
+                // Environment by the run-rad-commands workflow. List every
+                // deployment record for the repo (newest-first) and, per
+                // environment, resolve the latest record that was actually
+                // produced by the deploy workflow — skipping records created by
+                // other environment-bound workflows (verify-credentials, etc.).
                 const raw = await gh(["api", "--paginate", `/repos/${repo}/deployments?per_page=100`, "--jq", ".[] | (.id|tostring) + \"\\t\" + (.environment // \"\")"]);
                 const rows = raw ? raw.split("\n").filter(Boolean).map((l) => {
                     const t = l.indexOf("\t");
                     return t === -1 ? { id: l, environment: "" } : { id: l.slice(0, t), environment: l.slice(t + 1) };
                 }) : [];
-                // Latest deployment id per environment (list is newest-first).
-                const latestByEnv = new Map();
+                // Group deployment ids per environment, preserving newest-first order.
+                const idsByEnv = new Map();
                 for (const r of rows) {
                     if (!r.environment) continue;
-                    if (!latestByEnv.has(r.environment)) latestByEnv.set(r.environment, r.id);
+                    if (!idsByEnv.has(r.environment)) idsByEnv.set(r.environment, []);
+                    idsByEnv.get(r.environment).push(r.id);
                 }
-                const deployments = await Promise.all(Array.from(latestByEnv.entries()).map(async ([environment, id]) => {
-                    const [stateRaw, varsRaw] = await Promise.all([
-                        gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]),
-                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]),
-                    ]);
-                    const tab = stateRaw.indexOf("\t");
-                    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-                    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-                    // Link the status to the GitHub Actions run that produced it.
-                    let runUrl = "";
-                    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-                    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-
-                    // Deleting an application dispatches delete-application.yml,
-                    // which (via its environment-bound job) creates a fresh
-                    // deployment record for this environment. So the latest record
-                    // may belong to a delete run, not a deploy. Inspect the run: if
-                    // the app's most recent run is a SUCCESSFUL delete, the app no
-                    // longer exists in that environment, so drop it from the list.
-                    let isDelete = false;
-                    let deleteConclusion = "";
-                    if (m) {
-                        const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-                        const rt = runInfo.indexOf("\t");
-                        const runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-                        deleteConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
-                        isDelete = /(^|\/)delete-application\.yml$/.test(runPath);
-                    }
-                    if (isDelete && deleteConclusion === "success") return null;
-
-                    let status = "pending";
-                    if (isDelete) {
-                        // A delete run that hasn't succeeded (in progress or failed):
-                        // surface it as "deleting" so the row reflects the pending
-                        // teardown rather than a misleading deploy status.
-                        status = "deleting";
-                    } else if (state === "success") status = "success";
-                    else if (state === "failure" || state === "error") status = "failed";
+                const deployments = await Promise.all(Array.from(idsByEnv.entries()).map(async ([environment, ids]) => {
+                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
-                    return { app: appName, environment, provider, status, deploymentId: id, runUrl };
+
+                    // Walk this environment's deployment records newest-first and
+                    // use the first one whose GitHub Actions run is the deploy
+                    // workflow (run-rad-commands.yml) or a delete of the app. Any
+                    // other workflow's records (e.g. verify-credentials) are
+                    // skipped so they never appear as deployments.
+                    for (const id of ids) {
+                        const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
+                        const tab = stateRaw.indexOf("\t");
+                        const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
+                        const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+                        let runUrl = "";
+                        const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+                        if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
+                        else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
+
+                        // Identify which workflow produced this deployment record.
+                        let runPath = "";
+                        let runConclusion = "";
+                        if (m) {
+                            const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+                            const rt = runInfo.indexOf("\t");
+                            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
+                            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+                        }
+                        const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+                        const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+
+                        // Not a deploy or delete record (e.g. verify-credentials):
+                        // skip it and keep looking further back in history.
+                        if (!isDeploy && !isDelete) continue;
+
+                        // A successful delete means the app no longer exists in this
+                        // environment, so it should not be listed at all.
+                        if (isDelete && runConclusion === "success") return null;
+
+                        let status = "pending";
+                        if (isDelete) {
+                            status = "deleting";
+                        } else if (state === "success") status = "success";
+                        else if (state === "failure" || state === "error") status = "failed";
+                        return { app: appName, environment, provider, status, deploymentId: id, runUrl };
+                    }
+                    // No deploy/delete record for this environment — nothing to show.
+                    return null;
                 }));
                 respond({ deployments: deployments.filter(Boolean) });
             } catch (e) {
@@ -2001,7 +2018,7 @@ function createRequestHandler(instanceId) {
                         // default) rather than relying on a verify → deploy chain.
                         addLog('━━ Deploying Radius application ━━');
                         const envForDeploy = entry.state.envName || data.environment || 'dev';
-                        const deployWorkflowFile = 'run-rad-commands.yml';
+                        const deployWorkflowFile = DEPLOY_WORKFLOW_FILE;
                         // Deploy the SELECTED branch's code (worktree-consistent): run
                         // the workflow on `branch` so it checks out and `rad deploy`s
                         // that branch's app.bicep — the same file the params below are
