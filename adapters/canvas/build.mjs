@@ -12,17 +12,22 @@
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..");
 
 const isWatch = process.argv.includes("--watch");
-// --install copies the build output into the locally installed extension dir so
-// the extension's dev self-reloader (which watches the installed extension.mjs)
-// picks up the change and the host respawns automatically. Combined with --watch
-// this gives edit-source → rebuild → copy → auto-reload end to end.
+// --install copies the build output into the locally installed extension dir.
+// The Copilot host watches the installed extension.mjs and auto-reloads the
+// extension when it changes, so copying the fresh build there is all that's
+// needed for a rebuilt extension to take effect. Combined with --watch this
+// gives edit-source → rebuild → copy → host auto-reload end to end.
+//
+// NOTE: reloading the extension that serves your *current* session briefly makes
+// that session's canvas/tools unresponsive while the process is torn down and
+// re-registered. For disruption-free iteration, run a separate session.
 const isInstall = process.argv.includes("--install");
 
 const outfile = join(repoRoot, ".github", "radius", "extension.mjs");
@@ -36,10 +41,13 @@ function installToLocal() {
   try {
     const installDir = dirname(installPath);
     mkdirSync(installDir, { recursive: true });
-    copyFileSync(outfile, installPath);
-    // Ensure the self-reloader is armed in the installed copy.
-    const sentinel = join(installDir, ".dev-reload");
-    if (!existsSync(sentinel)) writeFileSync(sentinel, "dev\n");
+    // Write atomically: copy to a temp file in the same dir, then rename over the
+    // target. rename() is atomic on the same filesystem, so the host's file
+    // watcher never observes a half-written file (which would import as a
+    // truncated module and crash the respawned process with no clean error).
+    const tmp = `${installPath}.tmp-${process.pid}`;
+    copyFileSync(outfile, tmp);
+    renameSync(tmp, installPath);
     console.log(`[canvas] installed → ${installPath}`);
   } catch (e) {
     console.error(`[canvas] install copy failed: ${e?.message || e}`);
@@ -47,7 +55,7 @@ function installToLocal() {
 }
 
 // esbuild plugin that runs installToLocal after every (re)build, so it fires on
-// each watch rebuild too — the installed-file write is what trips the reloader.
+// each watch rebuild too — the installed-file write is what the host detects.
 const installPlugin = {
   name: "install-to-local",
   setup(build) {
