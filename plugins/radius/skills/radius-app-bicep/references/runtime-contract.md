@@ -64,8 +64,8 @@ Model separate web, worker, producer, consumer, and init roles separately even w
 
 For each required app-native input, choose exactly one supported source:
 
-- explicit nonsecret `env.value` from a literal or a verified resource output;
-- `valueFrom.secretKeyRef` using an exact secret resource and key;
+- explicit `env.value` from a literal, a verified nonsecret resource output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
+- `valueFrom.secretKeyRef` using an exact recipe-generated managed secret resource and key;
 - runtime composition from previously bound values when the app requires a larger URL/config value; or
 - a generic Radius connection only when the source parses the exact connection projection supplied by the configured Radius version.
 
@@ -83,7 +83,7 @@ For every workload-to-resource edge, account for all applicable fields:
 | Protocol | Client wire protocol and version supported by the concrete backend |
 | Transport security | TLS mode, certificate behavior, and encryption flags expected by source |
 | Authentication | Mechanism, identity/username, and source-supported config syntax |
-| Secret | Exact managed/authored secret resource and key, bound with `secretKeyRef` |
+| Secret | A developer-supplied credential from a `@secure()` parameter assigned to `env.value`, or a recipe-generated/authored secret bound with `secretKeyRef` |
 | Final format | Native URL, nested environment key, JAAS/config block, or generated file actually parsed by the workload |
 
 A resource output named `host` may be only one segment of the endpoint. A type name such as Kafka or RabbitMQ does not prove broker compatibility. Apply provider-specific values in `app.bicep` when the application must consume them, while keeping provider provisioning in Environment Bicep.
@@ -123,7 +123,7 @@ Before returning the model:
 1. Account for every required app-native environment/config input or document an intentional source default.
 2. Close every explicit acceptance criterion in the requirement ledger; preserve required literal values and exact relationship names.
 3. Reject every resource property read/write that lacks a closed ledger row proving its exact schema path and, for generated outputs, its recipe mapping.
-4. Confirm every secret uses the exact supported secret path and is not exposed through plain state.
+4. Confirm every secret uses a supported path (a `@secure()` parameter assigned to `env.value`, or a recipe-generated/authored secret bound with `secretKeyRef`) and is never hardcoded or copied into plain state.
 5. Confirm every declared port matches a configured process listener.
 6. Confirm every command/argument and generated config file is compatible with the image entrypoint and available binaries.
 7. Confirm every writable/persistent path has the required ownership and access mode.
