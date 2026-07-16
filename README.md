@@ -12,9 +12,9 @@ developers and platform engineers build and manage applications together.
 In the **GitHub Copilot app**, open app settings, click **Plugins**, and install
 the `radius` plugin from the `radius-project/ai-extensions` marketplace.
 
-In the **GitHub Copilot CLI**:
+In the **GitHub Copilot CLI**, type these at the Copilot prompt (they are Copilot slash commands, not shell commands):
 
-```bash
+```text
 /plugin marketplace add radius-project/ai-extensions
 /plugin install radius@radius-plugins
 ```

@@ -21,7 +21,9 @@ for details.
 
 ### GitHub Copilot CLI
 
-```bash
+Type these at the Copilot prompt (they are Copilot slash commands, not shell commands):
+
+```text
 # Add this marketplace (one-time setup)
 /plugin marketplace add radius-project/ai-extensions
 

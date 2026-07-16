@@ -57,9 +57,9 @@ As a maintainer, I merge a PR into `main` that changes canvas code. CI rebuilds 
 
 There is **no change to the install command**. Because the plugin `source` in `marketplace.json` pins the `release` ref, the plain marketplace-add against the default branch resolves the plugin (skills + built bundle) from `release`. The only fix users notice is that the canvas now works.
 
-**Sample input:**
+**Sample input** (typed at the GitHub Copilot CLI prompt, or done via the app's **Settings → Plugins** UI — these are Copilot slash commands, not shell commands):
 
-```bash
+```text
 /plugin marketplace add radius-project/ai-extensions
 /plugin install radius@radius-plugins
 ```
