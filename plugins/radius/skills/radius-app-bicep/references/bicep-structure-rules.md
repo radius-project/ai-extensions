@@ -60,7 +60,7 @@ Rules:
 - `connections` is a TOP-LEVEL property under `properties` — NOT inside `containers`
 - `disableDefaultEnvVars` goes on the connection entry, NOT on the container
 - Port property is `containerPort`, NOT `port`
-- `env` values use `{ value: 'string' }` for literals, or `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` to bind a secret
+- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it); use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` to bind a recipe-generated managed secret
 - `containerPort` exposes the process port; it does not configure the process listener
 - `command` replaces the image `ENTRYPOINT`, and `args` replaces `CMD`; override only after inspecting the image contract and required binaries
 - Never **set** a read-only property. Referencing a read-only output is valid only when the exact schema exposes it and the configured recipe populates it
@@ -193,14 +193,15 @@ resource dbSecret 'Radius.Security/secrets@2025-08-01-preview' = {
 ```
 
 Rules:
-- Use only when the exact schema supports it: for a type's required secret input, app secrets/config files, or a secure runtime binding for a developer-supplied credential
+- Use only when the exact schema supports it: for a type's required secret input (`secretName`), or app secrets/config files
 - Do not re-author a recipe-generated output. Bind directly from its schema-declared managed secret, or report that the exact contract cannot supply it
 - Never set authored secret `data.value` from a recipe resource's sensitive output or a guessed convenience property
 - NEVER hardcode passwords — use `@secure() param`
 - `data` is an object map, NOT an array
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
 - `USERNAME` is the database administrator you author (e.g. `myadmin`) — it is not derived from the source
-- `@secure()` does not make a downstream plain `env.value` secret; prefer a supported secret resource plus `secretKeyRef`
+- A `@secure()` parameter assigned directly to `env.value` is encrypted and injected by Radius, so it stays out of plain state; a developer-supplied credential needs no authored secret and no `secretKeyRef`
+- Use `valueFrom.secretKeyRef` (to `<resource>.properties.secrets.name`) only to bind a recipe-generated managed secret; author a `Radius.Security/secrets` resource only for app secrets/config files or a type whose schema requires `secretName`
 
 ## Radius.Compute/routes structure
 
