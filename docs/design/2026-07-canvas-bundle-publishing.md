@@ -5,7 +5,7 @@
 
 ## Overview
 
-The `radius` plugin ships two things to GitHub Copilot: agentic **skills** (plain files under `plugins/radius/skills/`) and a **canvas extension** whose runtime entry point is `plugins/radius/extensions/radius/extension.mjs`. The skills are committed source, but the canvas entry point is a **build artifact**: it is bundled from TypeScript/ESM source (`adapters/canvas/src` plus the `radius-core` package) by `adapters/canvas/build.mjs` (esbuild) into a single file.
+The `radius` plugin ships two things to GitHub Copilot: agentic **skills** (plain files under `plugins/radius/skills/`) and a **canvas extension** whose runtime entry point is `plugins/radius/extension.mjs`. The skills are committed source, but the canvas entry point is a **build artifact**: it is bundled from TypeScript/ESM source (`adapters/canvas/src` plus the `radius-core` package) by `adapters/canvas/build.mjs` (esbuild) into a single file.
 
 That artifact is intentionally git-ignored, and the Copilot marketplace installs a plugin by copying the **git-tracked** files from the installed ref with **no build step**. As a result the canvas file never ships, and opening the canvas fails with `No canvas "radius" is registered`. The skills install fine because they are tracked; the canvas does not because it is generated and ignored.
 
@@ -13,9 +13,9 @@ This design proposes a **publishing workflow** that keeps `main` free of the com
 
 ## Terms and definitions
 
-- **Canvas extension**: A package (here, `plugins/radius/extensions/radius/`) that registers an interactive Copilot canvas. Its entry point is `extension.mjs`, which calls `createCanvas({ id: "radius" })`.
+- **Canvas extension**: A package (here, the plugin root `plugins/radius/`) that registers an interactive Copilot canvas. Its entry point is `extension.mjs`, which calls `createCanvas({ id: "radius" })`.
 - **Bundle / built artifact**: The single `extension.mjs` emitted by esbuild from `adapters/canvas/src` + `radius-core`. Also referred to as "the bundle".
-- **Plugin manifest**: `plugins/radius/plugin.json`, which declares `skills` and `extensions` as **repo-relative paths** (`./extensions/radius`).
+- **Plugin manifest**: `plugins/radius/plugin.json`, which declares `skills` (`./skills/`) and `extensions` (`.`, the plugin root) as repo-relative paths. The canvas `extension.mjs` and its `package.json` live at the plugin root.
 - **Marketplace manifest**: `.github/plugin/marketplace.json`, which declares each plugin's `source`. `source` accepts two forms: a **string** repo-relative path (`"./plugins/radius"`, resolved against the ref the marketplace was added from), or an **object** that pins an explicit repo and ref (`{ "source": "github", "repo": "owner/repo", "path": "...", "ref": "..." }`). Both forms are used in the official `github/awesome-copilot` marketplace.
 - **Ref**: A git branch, tag, or commit SHA. `/plugin marketplace add owner/repo@ref` installs from a specific ref; omitting `@ref` uses the repository's default branch. A `ref` can also be pinned inside the marketplace manifest's object-form `source`, in which case it wins regardless of how the marketplace was added.
 - **`release` branch**: A generated branch that mirrors `main` and additionally contains the committed `extension.mjs`. The plugin `source` pins its `ref` to this branch.
@@ -75,7 +75,7 @@ The `radius` plugin installs with its skills and a working canvas; opening the c
 Today, `main` carries everything the installer reads **except** the built bundle. The fix has two parts: publish a ref that carries the bundle too (produced automatically from `main` so it can never drift), and **pin the plugin's `source` to that ref** in the marketplace manifest so every install resolves it.
 
 - A **publish workflow** runs on every push to `main` (i.e., after a PR merges).
-- It builds the bundle from the just-merged commit and writes `plugins/radius/extensions/radius/extension.mjs`.
+- It builds the bundle from the just-merged commit and writes `plugins/radius/extension.mjs`.
 - It **force-updates the `release` branch** to equal `main` plus one commit that adds the (otherwise ignored) bundle, then **moves the `latest` tag** to that commit.
 - The plugin `source` in `marketplace.json` is changed to the **object form that pins `ref: release`**, so the plugin — its `plugin.json`, skills, and the bundle — is always fetched from the `release` ref, whichever ref the user added the marketplace from. The `extensions` path in `plugin.json` stays repo-relative and unchanged; it resolves within the `release` checkout where the bundle exists.
 - Because the ref is pinned in the manifest, install docs keep the plain `add radius-project/ai-extensions` command; no `@ref` suffix is needed.
@@ -115,7 +115,7 @@ The installer resolves the plugin's `source`, and the extension path, against a 
 
 #### Option 1: Commit the bundle to `main`
 
-Un-ignore `plugins/radius/extensions/radius/extension.mjs`, commit it, and add a CI drift-check that fails a PR if the committed bundle does not match a fresh build. Users keep installing from the default branch.
+Un-ignore `plugins/radius/extension.mjs`, commit it, and add a CI drift-check that fails a PR if the committed bundle does not match a fresh build. Users keep installing from the default branch.
 
 ##### Advantages
 
@@ -172,10 +172,10 @@ We can move to option 3 later if we want clear release cycles rather than releas
 Concrete mechanics:
 
 1. Trigger: `on: push: branches: [main]` (runs after a PR merges), plus `workflow_dispatch` for manual re-publish.
-2. Build: reuse `build.yml`'s steps — `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm run test`, `pnpm run build` — producing `plugins/radius/extensions/radius/extension.mjs`.
+2. Build: reuse `build.yml`'s steps — `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm run test`, `pnpm run build` — producing `plugins/radius/extension.mjs`.
 3. Publish:
    - `git checkout -B release` from the current `main` commit.
-   - `git add -f plugins/radius/extensions/radius/extension.mjs` (force, because the path is git-ignored).
+   - `git add -f plugins/radius/extension.mjs` (force, because the path is git-ignored).
    - Commit with a generated message (for example, `chore(release): publish canvas bundle for <sha>`).
    - `git push --force origin release`.
    - Move the tag: `git tag -f latest && git push --force origin latest`.
@@ -204,7 +204,7 @@ This uses the same object-form `source` shape already used in the official `gith
 #### Plugin — plugins/radius
 
 - `.github/plugin/marketplace.json`: change the plugin `source` from the string `"./plugins/radius"` to the object form pinning `ref: release` (see API design). This is the change that makes the plain install resolve the bundle.
-- `plugin.json`: **no change** — `extensions: ["./extensions/radius"]` resolves within the `release` checkout where the bundle exists.
+- `plugin.json`: `extensions` is `"."` (the plugin root), so the canvas `extension.mjs` and its `package.json` are resolved from the plugin root within the `release` checkout where the bundle exists.
 - `plugins/radius/README.md` and root `README.md`: install instructions stay as the plain `add radius-project/ai-extensions`; add a short note explaining that the canvas bundle is served from the generated `release` branch (or link this design).
 
 #### Build & packaging

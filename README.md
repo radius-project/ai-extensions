@@ -102,7 +102,7 @@ Build the extension bundle locally:
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extensions/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
 ```
 
 See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development

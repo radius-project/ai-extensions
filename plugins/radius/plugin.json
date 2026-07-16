@@ -15,7 +15,5 @@
     "canvas"
   ],
   "skills": "./skills/",
-  "extensions": [
-    "./extensions/radius"
-  ]
+  "extensions": "."
 }

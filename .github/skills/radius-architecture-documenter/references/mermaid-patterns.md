@@ -14,7 +14,7 @@ graph TD
     subgraph Plugin["plugins/radius"]
         Manifest["plugin.json"]
         Skills["skills/"]
-        Ext["extensions/radius/extension.mjs<br/>(built bundle)"]
+        Ext["plugins/radius/extension.mjs<br/>(built bundle)"]
     end
 
     subgraph Adapters["adapters/"]
@@ -80,7 +80,7 @@ graph TD
     end
 
     subgraph Output["Generated"]
-        Bundle["plugins/radius/extensions/radius/extension.mjs"]
+        Bundle["plugins/radius/extension.mjs"]
     end
 
     CoreTS -->|transpiled + inlined| Build

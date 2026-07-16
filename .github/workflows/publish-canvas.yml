@@ -60,7 +60,7 @@ jobs:
 
       - name: Publish bundle to release branch and latest tag
         env:
-          BUNDLE: plugins/radius/extensions/radius/extension.mjs
+          BUNDLE: plugins/radius/extension.mjs
         run: |
           set -euo pipefail
 

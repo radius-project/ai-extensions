@@ -12,7 +12,7 @@ is given, review the current branch's diff against its base.
 This repo is a pnpm-workspace monorepo: UI-agnostic product logic lives in
 `radius-core` (TypeScript) and the Copilot-canvas SDK wiring + webview host lives
 in `adapters/canvas` (ESM `.mjs`). The canvas adapter is bundled by esbuild into a
-single generated artifact, `plugins/radius/extensions/radius/extension.mjs`.
+single generated artifact, `plugins/radius/extension.mjs`.
 
 **Error handling:**
 - If files are too large to analyze completely, focus on the most critical changes and say so in the review.
@@ -72,7 +72,7 @@ non-idiomatic usage; avoid purely complimentary comments or unnecessary summarie
 
 ### Repo-Specific Criteria
 
-- **Generated artifact**: `plugins/radius/extensions/radius/extension.mjs` is produced by `adapters/canvas/build.mjs` — never hand-edited. If adapter/core source changed, confirm the bundle was rebuilt (`pnpm run build`) and is in sync.
+- **Generated artifact**: `plugins/radius/extension.mjs` is produced by `adapters/canvas/build.mjs` — never hand-edited. If adapter/core source changed, confirm the bundle was rebuilt (`pnpm run build`) and is in sync.
 - **Core/adapter boundary**: Keep UI-agnostic logic in `radius-core` and Copilot/webview wiring in `adapters/canvas`. Flag leakage of UI/process concerns into core, or duplicated product logic in the adapter.
 - **Workflow-YAML generators** (`radius-core/src/platforms/*`, `radius-core/src/workflows/*`): Ensure `secrets.*` vs `vars.*` references match where the values are actually set, prefer OIDC/workload-identity (`azure wi`, `aws irsa`) over static credentials, and guard against unknown providers (`getPlatform` may return `undefined`).
 - **Changesets**: A user-facing change to `radius-core` or `adapters/canvas` should include a changeset under `.changeset/`.

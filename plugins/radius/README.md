@@ -49,7 +49,7 @@ extension become available.
 
 ### Canvas extension
 
-`extensions/radius/extension.mjs` registers the **Radius** canvas
+`extension.mjs` registers the **Radius** canvas
 plus supporting tools for OIDC configuration, `app.bicep` generation,
 application-graph rendering, PR graph diffs, and environment creation. It is a
 built artifact — see [Development](#development) to rebuild it.
@@ -72,7 +72,7 @@ The canvas extension is produced from TypeScript source in the repository root
 
 ```bash
 pnpm install
-pnpm build        # bundles -> plugins/radius/extensions/radius/extension.mjs
+pnpm build        # bundles -> plugins/radius/extension.mjs
 ```
 
 See the repository [`README.md`](../../README.md) and
