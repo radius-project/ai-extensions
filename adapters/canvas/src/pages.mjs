@@ -1841,7 +1841,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
         if (data.error) {
             statusEl.innerHTML = '<span style="color:#cf222e;">❌ ' + data.error + '</span>';
         } else {
-            statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong> — ' + (data.subscriptionName || data.subscriptionId || '') + '</span>';
+            statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong></span>';
             // Auto-fill tenant/sub if returned
             if (data.tenantId && !tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId && !subId) document.getElementById('az-sub-id').value = data.subscriptionId;
