@@ -21,7 +21,7 @@ Use this skill to generate a Radius application definition (`app.bicep`) from a 
 
 When asked to model a repository:
 
-1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) to the current working branch of the target repository.
+1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) to the current working branch of the target repository. If that branch does not exist yet, create it before writing.
 2. Commit both files to that branch, and push the branch when a remote is configured.
 3. In your chat reply, give a one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`."), then a short, natural summary of the resources you identified — a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis or the full file contents.
 4. Then ask whether to open a pull request against the default branch.
