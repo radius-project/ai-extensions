@@ -285,6 +285,10 @@ async function downloadRad(log) {
     const data = await httpGet(url);
     if (expected) {
       verifyChecksum(data, expected, tag, asset);
+    } else {
+      log(
+        `Warning: rad ${tag} asset ${asset} has no SHA-256 digest available; skipping verification. Set RADIUS_RAD_SHA256 to enforce verification.`,
+      );
     }
     const tmp = `${dest}.${process.pid}.download`;
     fs.writeFileSync(tmp, data);
