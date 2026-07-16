@@ -17,9 +17,17 @@ description: >
 
 Use this skill to generate a Radius application definition (`app.bicep`) from a source code repository.
 
+## Prerequisites
+
+This skill currently supports only repositories that already contain a Dockerfile for building the application image. Before doing anything else, confirm the target repository includes a Dockerfile for the application (repo root or the relevant service subdirectory; match `Dockerfile`, `Dockerfile.*`, or `*.Dockerfile`, case-insensitively).
+
+If no Dockerfile is present, stop immediately. Do not generate `app.bicep` or `bicepconfig.json`, do not create or write to a branch, and do not commit or push. Return only this error:
+
+> This repository does not contain a Dockerfile. The Radius app modeling skill currently supports only repositories that already include a Dockerfile for building the application image. Add a Dockerfile for the application service and run the skill again.
+
 ## Response
 
-When asked to model a repository:
+When asked to model a repository, first apply the [Prerequisites](#prerequisites) check. Only if it passes:
 
 1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) to the current working branch of the target repository. If that branch does not exist yet, create it before writing.
 2. Commit both files to that branch, and push the branch when a remote is configured.
@@ -30,7 +38,7 @@ Don't open the pull request automatically — wait for the user to confirm. If t
 
 ## Workflow
 
-Before writing the Bicep:
+Before writing the Bicep, confirm the repository satisfies the [Prerequisites](#prerequisites) (it must contain a Dockerfile); if not, stop and return the prerequisite error without modeling, generating, or writing anything. Then:
 
 1. Select one runnable deployment profile. Treat explicit user or scenario requirements for Radius types, workload roles/count, native configuration keys, secret bindings, provider profile, protocol values, and connection names as acceptance criteria. Verify that the pinned source supports that profile; do not silently replace it with an easier default or optional backend.
 2. Build an internal requirement ledger that maps every acceptance criterion and planned resource property reference to source evidence, an exact Radius schema/recipe field, and the workload setting that consumes it. Use it for reasoning and validation; do not print it or add it as Bicep comments. Follow [runtime-contract.md](references/runtime-contract.md).
@@ -38,7 +46,7 @@ Before writing the Bicep:
 4. Extract each workload's runtime contract: image/build context, entrypoint and arguments, listener and ports, required environment/configuration, secrets, writable storage, dependencies, wire protocols, and feature-critical configuration.
 5. Map every selected backing service to a Radius type with [component-catalog.md](references/component-catalog.md), using [architecture-patterns.md](references/architecture-patterns.md) only as context. Report unsupported essential components instead of substituting unrelated types.
 6. First create or update `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)), using any `bicepconfig.json` currently applicable to `.radius/app.bicep` as input. Then resolve every emitted type and planned property read/write against the Radius extension that `.radius/bicepconfig.json` declares. Record the verbatim property path and schema proof in the ledger; for recipe outputs, also prove the output mapping and any managed-secret key. Reject an absent path before generation instead of guessing an alias, convenience property, or wrapper. Use the matching `resource-types-contrib` schema revision and target Environment recipe/output contract; do not copy shapes from another version.
-7. Choose a source build only when the repository has a complete, practical build context. Otherwise use a pinned published image. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
+7. Build the application's own workloads from the repository Dockerfile; a repository without one is unsupported (see [Prerequisites](#prerequisites)). Use a pinned published image for a genuinely third-party/backing container or when the repository publishes its own maintained image, never as a substitute for the application's own missing Dockerfile. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
 8. Generate the Bicep using [naming-conventions.md](references/naming-conventions.md), then compile it with the exact configured extension. Treat unknown type/property warnings as unresolved schema mismatches.
 9. Perform the [validation checklist](#validation-checklist) and close every item in the requirement ledger. Compilation or process startup alone is not success.
 
@@ -243,6 +251,7 @@ Read [bicep-structure-rules.md](references/bicep-structure-rules.md) for all str
 ## Validation Checklist
 
 Before returning the Bicep, verify:
+- [ ] The repository contains a Dockerfile; a repo without one was rejected with the prerequisite error and produced no files (see [Prerequisites](#prerequisites)).
 - [ ] One deployment profile is selected. Every explicit type, workload role/count, native key, required value, secret binding, and connection name from the request is represented in a closed requirement ledger.
 - [ ] Every planned resource property read/write has its verbatim path in the ledger and exists in the exact configured schema/API version. Every recipe-generated output also has a verified output mapping; every managed-secret reference has the declared secret-name path and key. An absent path blocks generation rather than being replaced by a guessed property, alias, or wrapper.
 - [ ] Exactly one `Radius.Core/applications@2025-08-01-preview`, and one `extension radius` (no per-namespace or per-type extensions).
@@ -250,7 +259,7 @@ Before returning the Bicep, verify:
 - [ ] `param environment string` is declared; add a `@secure() param` for each developer-supplied secret.
 - [ ] Every required executable role is modeled, including co-scheduled producer/consumer or proxy/backend roles. Its image/build, entrypoint/arguments, listener, exposed ports, config artifacts, writable storage/ownership, and lifecycle are correct. `containerPort` matches the process; it does not configure the listener.
 - [ ] Every required app-native input is supplied with the exact pinned-source name, casing, type, URL/config syntax, and value. Each declared generic connection is consumed by source or explicitly required as relationship metadata.
-- [ ] A source build has a complete practical Dockerfile/context and uses an immutable ref; otherwise the published image is pinned. Generated builds are consumed through `.properties.imageReference`.
+- [ ] The application's own workloads build from the repository Dockerfile via `Radius.Compute/containerImages` with an immutable ref; a published image is pinned only for a third-party/backing container or a repository-published maintained image. Generated builds are consumed through `.properties.imageReference`.
 - [ ] Credentials match the type's schema: `username`+`password` on the resource, or `secretName`+secret, or none — whichever the schema defines. Password via `@secure() param`; `database`/`topic`/`queue`/etc. derived from source.
 - [ ] A developer-supplied credential the app consumes reaches the container via the same `@secure()` parameter assigned to `env.value` — no authored wrapper `Radius.Security/secrets`, no `secretKeyRef`. `secretKeyRef` + `<resource>.properties.secrets.name` is used only for recipe-generated managed-secret outputs; no authored secret copies a resource output or guessed convenience property. No secret is hardcoded or moved into plain state; runtime composition preserves ordering, escaping, and required encoding.
 - [ ] Read-only properties are never **set**. A referenced nonsecret output exists in the exact schema and recipe; a referenced secret path/key exists in the exact secret-output contract. Such direct references provide dependency ordering.
