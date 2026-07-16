@@ -17,10 +17,10 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Data flow
 
-1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one — it returns `needsAppBicep` and prompts the user to author the definition with the `radius-app-bicep` skill. App model generation is owned solely by that skill; the canvas only consumes a committed `app.bicep`.
+1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes a committed `app.bicep`.
 2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
-4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares the committed base- and head-branch `app.bicep` models and tags resources `added | removed | modified | unchanged`. Both branches must have a committed `app.bicep`; a branch without one is reported as missing rather than generated.
+4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares the committed base- and head-branch `app.bicep` models and tags resources `added | removed | modified | unchanged`. If one branch has no committed `app.bicep`, that side is treated as an empty graph; `needsAppBicep` is returned only when both branches are missing an app definition.
 5. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
 
 ## Rendering features
