@@ -105,6 +105,26 @@ Explicit profile-required resource, relationship, and app-native configuration n
 | Port key in `ports` map | `web` for the primary HTTP port; additional ports derive from protocol/use (`http`, `grpc`) |
 | `build.source` for containerImages | Repo git URL: `git::https://github.com/<org>/<repo>.git//<subdir>?ref=<sha-or-tag>` (`//<subdir>` only when the Dockerfile isn't at the repo root) |
 
+## Source-code reference metadata (`codeReference`)
+
+Each resource (except `applications`) may carry an optional `codeReference` in its `properties` — a repo-relative path, optionally with a `#L<line>` anchor, pointing at where that resource is defined/initialized in the source. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable deep link on the node. It does not affect deployment.
+
+Populate it for every non-application resource you can locate, because the developer is not hand-adding it:
+
+```bicep
+resource database 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
+  name: 'mysql'
+  properties: {
+    environment: environment
+    application: application
+    codeReference: 'src/db/mysql.js#L14'
+    // ...schema-verified properties...
+  }
+}
+```
+
+To find the definition/initialization site for each resource, follow the discovery methodology in the app-graph skill's [source-code-references.md](../radius-app-graph/references/source-code-references.md) (category detection, filename/init patterns, skip rules, line pinpointing, output format). Point at the real initialization site — for a container, the service `Dockerfile` or entrypoint. Leave it out rather than link a test/mock or a file you cannot confirm. `codeReference` is metadata, not a schema-verified property, so it is exempt from the ledger's schema-proof requirement; omit it if in doubt.
+
 ## Resource Type Resolution
 
 ### Built-in types (from `radius-project/radius`)
