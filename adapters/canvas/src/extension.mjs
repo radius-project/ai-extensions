@@ -64,7 +64,10 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
             // branch below and compute the same dedupe key.
             if (!branches.length) branches = [undefined];
         } else {
-            branches = [state.contextBranch];
+            // Honor an explicit branch from open_canvas input; fall back to the
+            // resolved context branch (the session worktree branch for the
+            // workspace repo) so we never default the session repo to main.
+            branches = [ctx.input?.branch || state.contextBranch];
         }
         branches = branches.map((b) => b || defaultBranchForState(state));
 
