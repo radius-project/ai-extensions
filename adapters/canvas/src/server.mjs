@@ -2507,7 +2507,6 @@ function createRequestHandler(instanceId) {
         await ensureVendorScripts();
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         const entry = servers.get(instanceId);
-        const requestedPage = url.searchParams.get("page");
         let page = requestedPage || entry?.page || "environment";
         const state = entry?.state || {};
         // While a deployment is actively in progress, an IMPLICIT landing on the
