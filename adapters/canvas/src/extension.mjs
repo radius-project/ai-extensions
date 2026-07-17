@@ -555,7 +555,7 @@ const session = await joinSession({
                     ]);
 
                     if (!baseContent && !headContent) {
-                        return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. Author it with the Radius app-bicep skill (run the radius_generate_app tool), SAVE it to .radius/app.bicep, then re-run this tool.`;
+                        return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. Author it with the Radius app-bicep skill (run the radius_generate_app tool) and follow the skill through committing and pushing it to the branch (the diff reads the pushed branch), then re-run this tool.`;
                     }
 
                     const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
@@ -685,11 +685,11 @@ IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via creat
 The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
-1. First, check if .radius/app.bicep (or app.bicep) exists in the repository.
-2. If app.bicep does NOT exist, generate AND SAVE it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure).
-3. Only AFTER app.bicep exists in the session worktree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }).
+1. First, check if .radius/app.bicep (or app.bicep) exists on the branch the graph reads (committed and pushed to the remote).
+2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, structure, and committing + pushing the file) and follow that skill to completion.
+3. Only AFTER the skill has committed and pushed app.bicep to that branch, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }). The graph renders from the pushed branch, so a local save is not enough.
 
-The same rule applies to the "planned" and "graph-diff" pages: they render from .radius/app.bicep, so if it does not exist, first create AND SAVE it with the radius_generate_app tool (radius-app-bicep skill) before opening those pages.
+The same rule applies to the "planned" and "graph-diff" pages: they render from the pushed .radius/app.bicep, so if it is not on the branch, first author it with the radius_generate_app tool (radius-app-bicep skill) and let the skill commit and push it before opening those pages.
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
 

@@ -14,14 +14,13 @@ describe("GRAPH_PAGES", () => {
 });
 
 describe("appBicepReminder", () => {
-    it("names the file, the skill/tool, Radius namespaces, and the repo", () => {
+    it("names the file, the skill/tool, the repo, and requires a push", () => {
         const msg = appBicepReminder("acme/widgets");
         expect(msg).toContain(".radius/app.bicep");
         expect(msg).toContain("radius-app-bicep");
         expect(msg).toContain("radius_generate_app");
-        expect(msg).toContain("Radius.");
         expect(msg).toContain("acme/widgets");
-        expect(msg).toContain("SAVE");
+        expect(msg).toContain("push");
     });
 
     it("omits the repo suffix when repo is empty", () => {
@@ -30,25 +29,28 @@ describe("appBicepReminder", () => {
 });
 
 describe("appBicepHandoffPrompt", () => {
-    it("directs the agent to generate and save app.bicep for the repo", () => {
+    it("directs the agent to generate and push app.bicep, without leaking tool mechanics", () => {
         const msg = appBicepHandoffPrompt("acme/widgets", "graph");
         expect(msg).toContain("acme/widgets");
         expect(msg).toContain("radius_generate_app");
         expect(msg).toContain("radius-app-bicep");
-        expect(msg).toContain("Radius.");
         expect(msg).toContain(".radius/app.bicep");
-        expect(msg).toContain("SAVE");
-        expect(msg).toContain("open_canvas");
+        expect(msg).toContain("push");
         expect(msg).toContain("graph");
+        // Injected as a visible user turn, so it must not leak internal
+        // tool-call mechanics or agent-only meta-instructions.
+        expect(msg).not.toContain("open_canvas");
+        expect(msg).not.toContain("do not tell the user");
     });
 
     it("mentions the page name and defaults it to graph", () => {
         expect(appBicepHandoffPrompt("acme/widgets", "graph-diff")).toContain("graph-diff");
-        expect(appBicepHandoffPrompt("acme/widgets")).toContain("Radius graph canvas");
+        expect(appBicepHandoffPrompt("acme/widgets")).toContain("Radius graph view");
     });
 
     it("omits the repo suffix when repo is empty", () => {
-        expect(appBicepHandoffPrompt("")).toContain("no .radius/app.bicep exists,");
+        expect(appBicepHandoffPrompt("acme/widgets")).toContain("view for acme/widgets");
+        expect(appBicepHandoffPrompt("")).toContain("Radius graph view can't render");
     });
 
     it("forbids fabricating singleton recipes", () => {
