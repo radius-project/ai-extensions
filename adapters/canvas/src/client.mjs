@@ -133,15 +133,39 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var envs = (d && d.environments) || [];
-                if (!envs.length) { envSel.innerHTML = '<option value="">No environments</option>'; return; }
+                if (!envs.length) {
+                    envSel.innerHTML = '<option value="">No environments</option>';
+                    radiusApplyPlanEnvState(false);
+                    return;
+                }
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
                     var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
                 });
+                radiusApplyPlanEnvState(true);
             })
             .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
     }
+}
+
+// Toggle the planned-graph primary button between "Create Environment" (when the
+// repo has no Radius-managed environment) and its normal plan label. When there
+// is no environment the button navigates to the environment page instead of
+// planning, and an explanatory note is shown.
+function radiusApplyPlanEnvState(hasEnv) {
+    var btn = document.getElementById('plan-btn');
+    var note = document.getElementById('plan-env-note');
+    if (btn) {
+        if (hasEnv) {
+            btn.dataset.mode = 'plan';
+            btn.textContent = btn.dataset.planLabel || 'Plan Deployment';
+        } else {
+            btn.dataset.mode = 'create-env';
+            btn.textContent = 'Create Environment';
+        }
+    }
+    if (note) note.style.display = hasEnv ? 'none' : '';
 }
 
 // Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
@@ -162,12 +186,18 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
             if (d.error) { if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
             var branches = d.branches || [];
             var workspaceBranch = d.workspaceBranch || '';
-            // Only pushed branches (real sha) can be compared via GitHub.
+            // Base must be a real GitHub ref (the diff is computed against a
+            // pushed base). Head may additionally be the local worktree branch —
+            // the backend reads its app.bicep straight from the workspace, so an
+            // unpushed worktree can be compared without being pushed first.
             var pushed = branches.filter(function(b) { return b.sha && b.sha !== 'worktree'; });
+            var headBranches = branches.filter(function(b) { return b.sha && (b.sha !== 'worktree' || b.name === workspaceBranch); });
             var worktreePushed = pushed.some(function(b) { return b.name === workspaceBranch; });
 
             var desiredBase = preferBase || 'main';
-            var desiredHead = preferHead || (worktreePushed ? workspaceBranch : '');
+            // Default head to the current worktree branch whether or not it is
+            // pushed, now that unpushed worktrees are selectable.
+            var desiredHead = preferHead || workspaceBranch;
 
             baseSel.innerHTML = '';
             headSel.innerHTML = '<option value="">— Select a branch —</option>';
@@ -176,6 +206,9 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
                 var ob = document.createElement('option'); ob.value = b.name; ob.textContent = label;
                 if (b.name === desiredBase) ob.selected = true;
                 baseSel.appendChild(ob);
+            });
+            headBranches.forEach(function(b) {
+                var label = b.name + (b.sha === 'worktree' ? ' (worktree)' : ' (' + b.sha.slice(0,7) + ')');
                 var oh = document.createElement('option'); oh.value = b.name; oh.textContent = label;
                 if (desiredHead && b.name === desiredHead) oh.selected = true;
                 headSel.appendChild(oh);
@@ -188,9 +221,7 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
                 if (autoCompare !== false) headSel.dispatchEvent(new Event('change'));
             } else if (statusEl) {
                 statusEl.className = 'status info';
-                statusEl.textContent = workspaceBranch
-                    ? ('The current branch "' + workspaceBranch + '" has not been pushed. Select a head branch to compare against ' + (baseSel.value || 'main') + '.')
-                    : ('Select a head branch to compare against ' + (baseSel.value || 'main') + '.');
+                statusEl.textContent = 'Select a head branch to compare against ' + (baseSel.value || 'main') + '.';
             }
         })
         .catch(function() { if (statusEl) { statusEl.textContent = 'Failed to load branches.'; statusEl.className = 'status error'; } });
