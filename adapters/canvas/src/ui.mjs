@@ -77,8 +77,8 @@ export function statusPill(id, kind, html) {
 // A resource node card used in the app graph (icon + title + type label).
 export function nodeCard(title, typeLabel, iconHtml) {
     return `<div class="rad-node">`
-        + `<div class="rad-node__icon">${iconHtml || ''}</div>`
-        + `<div class="rad-node__title">${escapeHtml(title)}</div>`
+        + `<div class="rad-node__head"><span class="rad-node__icon">${iconHtml || ''}</span>`
+        + `<span class="rad-node__title">${escapeHtml(title)}</span></div>`
         + `<div class="rad-node__type">${escapeHtml(typeLabel)}</div>`
         + `</div>`;
 }
