@@ -7,6 +7,7 @@ import {
   RADIUS_BICEP_CONFIG_JSON,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  buildGraphViaRadWithRaw,
   saveGraphJson,
   normalizeSha256,
   expectedDigest,
@@ -120,6 +121,13 @@ describe("buildGraphViaRad", () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.
     expect(await buildGraphViaRad("")).toEqual([]);
   });
+
+  it("returns empty resources and raw JSON for empty detailed builds", async () => {
+    expect(await buildGraphViaRadWithRaw("")).toEqual({
+      resources: [],
+      rawGraphJson: "",
+    });
+  });
 });
 
 describe("saveGraphJson", () => {
@@ -132,6 +140,15 @@ describe("saveGraphJson", () => {
     const raw = '{"resources":[{"id":"a"}]}';
     saveGraphJson(dest, raw);
     expect(fs.readFileSync(dest, "utf8")).toBe(raw);
+    expect(fs.readdirSync(path.dirname(dest))).toEqual(["app-graph.json"]);
+  });
+
+  it("atomically replaces an existing graph without leaving a temp file", () => {
+    const dest = path.join(tmp, "app-graph.json");
+    fs.writeFileSync(dest, "old");
+    saveGraphJson(dest, "new");
+    expect(fs.readFileSync(dest, "utf8")).toBe("new");
+    expect(fs.readdirSync(tmp)).toEqual(["app-graph.json"]);
   });
 
   it("logs and swallows errors instead of throwing", () => {

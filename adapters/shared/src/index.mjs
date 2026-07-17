@@ -13,4 +13,6 @@ export {
   ensureRadBinary,
   runRadAppGraph,
   buildGraphViaRad,
+  buildGraphViaRadWithRaw,
+  saveGraphJson,
 } from "./rad.mjs";
