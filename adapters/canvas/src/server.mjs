@@ -229,12 +229,19 @@ function createRequestHandler(instanceId) {
             for await (const chunk of req) body += chunk;
             res.setHeader("Content-Type", "application/json");
             try {
-                const target = (JSON.parse(body || "{}").url || "").trim();
-                if (!/^https?:\/\//i.test(target)) {
+                const raw = (JSON.parse(body || "{}").url || "").trim();
+                let targetUrl;
+                try { targetUrl = new URL(raw); } catch {
                     res.writeHead(400);
                     res.end(JSON.stringify({ ok: false, error: "invalid url" }));
                     return;
                 }
+                if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ ok: false, error: "invalid url" }));
+                    return;
+                }
+                const target = targetUrl.toString();
                 await openExternalUrl(target);
                 res.writeHead(200);
                 res.end(JSON.stringify({ ok: true }));
