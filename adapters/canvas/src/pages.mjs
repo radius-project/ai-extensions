@@ -223,12 +223,13 @@ export function pageShell(title, bodyContent, activeNav) {
   .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
   .rad-node {
     position: relative; width: 220px; min-height: 92px;
-    background: var(--rad-surface); border: 2px solid var(--rad-stroke-strong);
-    border-radius: 8px; padding: 12px 14px;
+    background: var(--rad-surface); border: 1px solid var(--rad-stroke);
+    border-radius: 16px; padding: 16px 18px;
   }
-  .rad-node__icon { width: 32px; height: 32px; }
-  .rad-node__title { font-weight: 500; font-size: 16px; color: var(--rad-text); margin-top: 6px; }
-  .rad-node__type { font-size: 12px; color: var(--rad-text-tertiary); margin-top: 2px; }
+  .rad-node__head { display: flex; align-items: center; gap: 10px; }
+  .rad-node__icon { width: 32px; height: 32px; flex: none; }
+  .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
+  .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }

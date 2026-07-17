@@ -370,6 +370,47 @@ function radiusGetTypeStyle(type) {
     return { bg: '#ede9f7', border: '#6639ba', shape: 'roundrectangle', category: 'Other' };
 }
 
+// Normalizes an icon supplied by a type/recipe pack into something Cytoscape can
+// paint as a node background-image. Packs may express an icon as a ready data
+// URI, an http(s) URL, or a raw <svg> markup string; anything unrecognized
+// returns '' so the caller falls back to the built-in glyph map.
+function radiusNormalizeIcon(icon) {
+    if (!icon || typeof icon !== 'string') return '';
+    var s = icon.trim();
+    if (!s) return '';
+    if (s.indexOf('data:') === 0 || s.indexOf('http://') === 0 || s.indexOf('https://') === 0) return s;
+    if (s.indexOf('<svg') === 0) {
+        if (s.indexOf('width=') === -1) s = s.replace('<svg ', '<svg width="64" height="64" ');
+        return 'data:image/svg+xml,' + encodeURIComponent(s);
+    }
+    return '';
+}
+
+// Resolves the icon for a resource. The artwork is owned by the resource's
+// type/recipe pack, so a pack-supplied icon (r.icon) wins; the built-in
+// type->glyph map is only a fallback for types whose pack omits an icon.
+function radiusResolveIcon(r) {
+    r = r || {};
+    var packIcon = radiusNormalizeIcon(r.icon);
+    if (packIcon) return packIcon;
+    return radiusGetIconSvg(r.type || r.displayType || '');
+}
+
+// Formats a resource type into the "Namespace/typeName" label shown under the
+// node name, e.g. "Radius.Compute/containers@2023-10-01-preview" becomes
+// "Compute/containers". Strips the vendor prefix and API version.
+function radiusFormatTypeLabel(type) {
+    if (!type) return '';
+    var t = String(type).split('@')[0];
+    var slash = t.indexOf('/');
+    if (slash === -1) return t;
+    var ns = t.substring(0, slash);
+    var name = t.substring(slash + 1);
+    var dot = ns.lastIndexOf('.');
+    if (dot !== -1) ns = ns.substring(dot + 1);
+    return ns + '/' + name;
+}
+
 function radiusRenderGraph(containerId, resources, options) {
     options = options || {};
     var container = document.getElementById(containerId);
@@ -411,6 +452,7 @@ function radiusRenderGraph(containerId, resources, options) {
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     var lineType = options.lineType || options.curveStyle || 'taxi';
+    var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
     function getNodeColors(r, typeStyle) {
         if (diffMode && r.diffStatus) {
@@ -421,7 +463,10 @@ function radiusRenderGraph(containerId, resources, options) {
                 default: return { bg: '#f3f4f6', border: '#9ca3af' };
             }
         }
-        return { bg: typeStyle.bg, border: typeStyle.border };
+        // Non-diff nodes use the clean "modeled graph" card style: a white
+        // surface with a thin neutral border. Category is conveyed by the icon
+        // (owned by the type/recipe pack), not by node fill/shape.
+        return { bg: '#ffffff', border: '#d0d7de' };
     }
 
     var elements = [];
@@ -446,7 +491,7 @@ function radiusRenderGraph(containerId, resources, options) {
         var r = resources[i];
         var typeStyle = radiusGetTypeStyle(r.type);
         var colors = getNodeColors(r, typeStyle);
-        var shortType = r.type ? r.type.split('/').pop().split('@')[0] : '';
+        var shortType = radiusFormatTypeLabel(r.type);
         var label = r.name + '\\n' + shortType;
         // Collect any cloud (ARM) output resources so the node popup can link to
         // the live resource in the Azure portal.
@@ -465,10 +510,12 @@ function radiusRenderGraph(containerId, resources, options) {
                 id: r.id || r.name,
                 label: label,
                 borderColor: colors.border,
-                borderWidth: 2,
+                borderWidth: 1.5,
                 bgColor: colors.bg,
                 shape: typeStyle.shape,
-                icon: radiusGetIconSvg(r.type),
+                icon: radiusResolveIcon(r),
+                nodeName: r.name,
+                typeLabel: shortType,
                 codeRef: r.codeReference || '',
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
@@ -517,7 +564,9 @@ function radiusRenderGraph(containerId, resources, options) {
                         borderWidth: 1,
                         bgColor: '#f6f8fa',
                         shape: radiusGetTypeStyle(out.type || out.displayType || '').shape,
-                        icon: radiusGetIconSvg(out.type || out.displayType || ''),
+                        icon: radiusResolveIcon(out),
+                        nodeName: out.name || outLabel,
+                        typeLabel: outLabel,
                         resourceType: out.type || '',
                         diffStatus: '',
                         cloudId: (out.id && out.id.indexOf('/subscriptions/') === 0) ? out.id : ''
@@ -567,24 +616,24 @@ function radiusRenderGraph(containerId, resources, options) {
                 'label': 'data(label)',
                 'text-valign': 'center',
                 'text-halign': 'center',
-                'text-margin-x': 8,
+                'text-margin-x': 12,
                 'font-size': '11px',
                 'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif',
                 'color': '#1f2328',
                 'background-color': 'data(bgColor)',
                 'border-color': 'data(borderColor)',
                 'border-width': 'data(borderWidth)',
-                'shape': 'data(shape)',
-                'width': 155,
-                'height': 55,
+                'shape': 'roundrectangle',
+                'width': 175,
+                'height': 58,
                 'text-wrap': 'wrap',
-                'text-max-width': '110px',
+                'text-max-width': '130px',
                 'background-image': 'data(icon)',
                 'background-image-opacity': 1,
-                'background-width': '20px',
-                'background-height': '20px',
-                'background-position-x': '8px',
-                'background-position-y': '8px',
+                'background-width': '24px',
+                'background-height': '24px',
+                'background-position-x': '10px',
+                'background-position-y': '10px',
                 'background-clip': 'none',
                 'background-image-containment': 'over',
                 'background-image-smoothing': 'yes'
@@ -616,6 +665,51 @@ function radiusRenderGraph(containerId, resources, options) {
         minZoom: 0.3,
         maxZoom: 3
     });
+
+    // ── Optional: render nodes as pixel-exact .rad-node HTML cards ────────────
+    // When the cytoscape-node-html-label extension is present we overlay a real
+    // DOM .rad-node card on each node (icon + bold name + muted Namespace/type),
+    // so the graph matches the rest of the panel exactly. The native cytoscape
+    // node stays sized as an invisible hit-target, so edges, dagre spacing and
+    // the click-to-open popup all keep working unchanged. If the extension fails
+    // to load, the graph falls back to the native drawn nodes above.
+    if (!diffMode && typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
+        try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
+    }
+    if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
+        cy.style()
+            .selector('node').style({
+                'width': 220,
+                'height': 92,
+                'background-opacity': 0,
+                'border-width': 0,
+                'background-image': 'none',
+                'text-opacity': 0
+            })
+            .selector('node.hover').style({ 'border-width': 0 })
+            .update();
+        var radEsc = function(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        };
+        cy.nodeHtmlLabel([{
+            query: 'node',
+            halign: 'center', valign: 'center',
+            halignBox: 'center', valignBox: 'center',
+            tpl: function(data) {
+                var icon = data.icon
+                    ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
+                    : '';
+                return '<div class="rad-node" style="box-sizing:border-box;background:'
+                    + (data.bgColor || '#ffffff') + ';border-color:'
+                    + (data.borderColor || '#d0d7de') + ';">'
+                    + '<div class="rad-node__head">' + icon
+                    + '<span class="rad-node__title">' + radEsc(data.nodeName) + '</span></div>'
+                    + '<div class="rad-node__type">' + radEsc(data.typeLabel) + '</div>'
+                    + '</div>';
+            }
+        }]);
+    }
 
     // ── Layout + edge routing via dagre (with bend-point waypoints) ──────────
     // cytoscape-dagre discards the per-edge bend points dagre computes to route
@@ -752,36 +846,48 @@ function radiusRenderGraph(containerId, resources, options) {
     if (options.enablePopup !== false) {
         var popup = document.createElement('div');
         popup.id = 'node-popup';
-        popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--background-color-default, #fff); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px; padding:12px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:12px; min-width:200px; max-width:320px;';
+        popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface,#ffffff); border:1px solid var(--rad-stroke,#d0d7de); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
         container.appendChild(popup);
+
+        // Monochrome octicon glyphs (currentColor) so links match the flat
+        // white-card node styling instead of the old colored emoji.
+        var ICON_CODE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25Zm6.56 0a.75.75 0 1 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25Z"></path></svg>';
+        var ICON_DEF = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M2 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4Zm0 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8Zm.75 3.25a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75Z"></path></svg>';
+        var ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></path></svg>';
 
         cy.on('tap', 'node', function(e) {
             var node = e.target;
             var d = node.data();
             var links = [];
-            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+            // A link row: monochrome glyph + blue label, with the target URL shown
+            // as a muted subtitle beneath (matches the node popup mock).
+            var linkRow = function(iconSvg, label, href, showUrl) {
+                var sub = showUrl ? '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(href) + '</div>' : '';
+                return '<div style="padding:6px 4px;">' +
+                    '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
+            };
             if (repoUrl && d.codeRef) {
                 var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
-                links.push('<a href="' + codeUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">📄 View code</a>');
+                links.push(linkRow(ICON_CODE, 'Source code', codeUrl, true));
             } else if (repoUrl) {
-                // No precise location discovered — fall back to a repo-scoped code
-                // search for the resource name/type so a code link is always present.
-                var term = (d.label ? d.label.split('\\n')[0] : '') || d.resourceType || '';
-                var searchUrl = repoUrl + '/search?q=' + encodeURIComponent(term) + '&type=code';
-                links.push('<a href="' + searchUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔎 Search code</a>');
+                // No precise location discovered — fall back to a link to the
+                // repo source at the current branch so a code link is always present.
+                var sourceUrl = repoUrl + '/tree/' + branch;
+                links.push(linkRow(ICON_CODE, 'Source code', sourceUrl, true));
             }
             if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
-                links.push('<a href="' + defUrl + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0;">📋 View app definition</a>');
+                links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
             }
             if (diffMode && d.diffStatus) {
                 var statusLabel = d.diffStatus.charAt(0).toUpperCase() + d.diffStatus.slice(1);
-                links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76);">Status: <strong>' + statusLabel + '</strong></div>');
+                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">Status: <strong style="color:var(--rad-text,#1a1a1a);">' + statusLabel + '</strong></div>');
             }
             // Azure portal links for live cloud resources (from the deployed graph).
             function azurePortalUrl(armId) { return 'https://portal.azure.com/#@/resource' + armId + '/overview'; }
             if (d.cloudId) {
-                links.push('<a href="' + escLocal(azurePortalUrl(d.cloudId)) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 View in Azure portal</a>');
+                links.push(linkRow(ICON_LINK, 'View in Azure portal', azurePortalUrl(d.cloudId), false));
             }
             if (d.cloudResources) {
                 try {
@@ -789,13 +895,14 @@ function radiusRenderGraph(containerId, resources, options) {
                     for (var ci = 0; ci < cloudList.length; ci++) {
                         var cr = cloudList[ci];
                         var crLabel = cr.name || (cr.type ? cr.type.split('/').pop() : 'resource');
-                        links.push('<a href="' + escLocal(azurePortalUrl(cr.id)) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-brand, #da4c2a); text-decoration:none; display:block; padding:4px 0; border-bottom:1px solid #eee;">🔗 ' + escLocal(crLabel) + ' in Azure portal</a>');
+                        links.push(linkRow(ICON_LINK, escLocal(crLabel) + ' in Azure portal', azurePortalUrl(cr.id), false));
                     }
                 } catch (err) { /* ignore */ }
             }
-            links.push('<div style="padding:4px 0; color:var(--text-color-muted, #656d76); font-size:11px;">Type: ' + escLocal(d.resourceType || 'unknown') + '</div>');
-            var safeTitle = escLocal((d.label || '').replace('\\n', ' — '));
-            popup.innerHTML = '<div style="font-weight:600; margin-bottom:6px; font-size:13px;">' + safeTitle + '</div>' + links.join('');
+            if (!links.length) {
+                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">No links available.</div>');
+            }
+            popup.innerHTML = links.join('');
             var pos = node.renderedPosition();
             popup.style.left = (pos.x + 20) + 'px';
             popup.style.top = (pos.y - 20) + 'px';
@@ -818,45 +925,30 @@ function radiusRenderGraph(containerId, resources, options) {
         container.parentNode.insertBefore(legend, container);
     } else if (options.showLegend) {
         // Build a resource-type legend from the categories actually present in
-        // the graph. Each category has its own color AND shape (see
-        // radiusGetTypeStyle), so the legend renders a small glyph matching the
-        // node shape. Order is first-seen so it only lists what's on screen.
+        // the graph. Nodes now render as uniform white cards, so category is
+        // conveyed by the icon (owned by the type/recipe pack); the legend shows
+        // that same icon next to the category name. Order is first-seen so it
+        // only lists what's on screen.
         var seen = {};
         var cats = [];
-        function noteCategory(type) {
-            var st = radiusGetTypeStyle(type || '');
+        function noteCategory(r) {
+            var type = (r && (r.type || r.displayType)) || '';
+            var st = radiusGetTypeStyle(type);
             if (!st.category || seen[st.category]) return;
             seen[st.category] = true;
-            cats.push({ name: st.category, bg: st.bg, border: st.border, shape: st.shape });
-        }
-        function legendShapeSvg(shape, bg, border) {
-            var inner;
-            switch (shape) {
-                case 'hexagon':
-                    inner = '<polygon points="4,2 12,2 15,7 12,12 4,12 1,7"/>'; break;
-                case 'cut-rectangle':
-                    inner = '<polygon points="5,2 11,2 14.5,5 14.5,9 11,12 5,12 1.5,9 1.5,5"/>'; break;
-                case 'tag':
-                    inner = '<polygon points="1.5,2 9,2 14.5,7 9,12 1.5,12"/>'; break;
-                case 'barrel':
-                    inner = '<path d="M2,4 C2,2.4 14,2.4 14,4 L14,10 C14,11.6 2,11.6 2,10 Z"/>' +
-                            '<path d="M2,4 C2,5.6 14,5.6 14,4" fill="none"/>'; break;
-                default: // roundrectangle and fallbacks
-                    inner = '<rect x="1.5" y="2" width="13" height="10" rx="2.5"/>';
-            }
-            return '<svg width="16" height="14" viewBox="0 0 16 14" style="vertical-align:middle; fill:' + bg + '; stroke:' + border + '; stroke-width:1.5;">' + inner + '</svg>';
+            cats.push({ name: st.category, icon: radiusResolveIcon(r) });
         }
         for (var li = 0; li < resources.length; li++) {
-            noteCategory(resources[li].type);
+            noteCategory(resources[li]);
             var oR = resources[li].outputResources || [];
-            for (var lo = 0; lo < oR.length; lo++) noteCategory(oR[lo].type || oR[lo].displayType || '');
+            for (var lo = 0; lo < oR.length; lo++) noteCategory(oR[lo]);
         }
         if (cats.length > 0) {
             var legend2 = document.createElement('div');
             legend2.className = 'legend';
             var html = '';
             for (var lc = 0; lc < cats.length; lc++) {
-                html += '<div class="legend-item">' + legendShapeSvg(cats[lc].shape, cats[lc].bg, cats[lc].border) + cats[lc].name + '</div>';
+                html += '<div class="legend-item"><img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(cats[lc].name) + '</div>';
             }
             legend2.innerHTML = html;
             container.parentNode.insertBefore(legend2, container);
