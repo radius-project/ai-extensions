@@ -65,7 +65,7 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extensions/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
 ```
 
 Other useful scripts:

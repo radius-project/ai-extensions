@@ -1,7 +1,7 @@
 {
   "name": "radius-plugins",
   "metadata": {
-    "description": "Radius plugins for GitHub Copilot CLI — model, visualize, and deploy applications with Radius.",
+    "description": "Radius plugins for the GitHub Copilot app and CLI. Model, visualize, and deploy applications with Radius.",
     "version": "0.1.0"
   },
   "owner": {
@@ -11,8 +11,13 @@
   "plugins": [
     {
       "name": "radius",
-      "source": "./plugins/radius",
-      "description": "Model, visualize, and deploy applications with Radius from GitHub Copilot CLI — generate app.bicep, build and diff the application graph, configure cloud credentials, and deploy via GitHub Actions.",
+      "source": {
+        "source": "github",
+        "repo": "radius-project/ai-extensions",
+        "path": "plugins/radius",
+        "ref": "release"
+      },
+      "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI. Analyze your source code, build and diff the application graph, configure cloud environments, and deploy through GitHub Actions.",
       "version": "0.1.0",
       "repository": "https://github.com/radius-project/ai-extensions",
       "license": "Apache-2.0",

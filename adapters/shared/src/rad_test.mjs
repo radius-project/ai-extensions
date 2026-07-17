@@ -173,15 +173,14 @@ describe("expectedDigest", () => {
     });
   });
 
-  it("fails closed when no pin and no published digest are available", () => {
-    // e.g. the matched asset carries no digest field.
-    expect(() => expectedDigest([{ name: ASSET }], ASSET, "v1.2.3")).toThrow(
-      /no published SHA-256 digest/,
-    );
+  it("returns null when no pin and no published digest are available", () => {
+    // e.g. the matched asset carries no digest field — download proceeds
+    // without verification.
+    expect(expectedDigest([{ name: ASSET }], ASSET, "v1.2.3")).toBeNull();
   });
 
-  it("fails closed when the asset is missing from the release", () => {
-    expect(() => expectedDigest([], ASSET, "v1.2.3")).toThrow(/no published SHA-256 digest/);
+  it("returns null when the asset is missing from the release", () => {
+    expect(expectedDigest([], ASSET, "v1.2.3")).toBeNull();
   });
 
   it("still resolves the pin when the asset is missing entirely", () => {

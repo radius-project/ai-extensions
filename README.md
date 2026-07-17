@@ -1,23 +1,20 @@
 # Radius AI Extension
 
 Radius AI Extension is a GitHub Copilot **plugin** for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app)
-and the GitHub Copilot CLI. It lets you define, visualize, and deploy an
+[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
+It lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
 leaving Copilot. Radius is a cloud-native application platform that helps
 developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
-In the **GitHub Copilot app**, open app settings, click **Plugins**, and install
-the `radius` plugin from the `radius-project/ai-extensions` marketplace.
+The Radius canvas runs only in the
+[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app),
+so install the plugin from the app: open app settings, click **Plugins**, add the
+`radius-project/ai-extensions` marketplace, and install the `radius` plugin.
 
-In the **GitHub Copilot CLI**:
-
-```bash
-/plugin marketplace add radius-project/ai-extensions
-/plugin install radius@radius-plugins
-```
+The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to a generated `release` branch, and the marketplace manifest points the plugin at that branch, so installing from the app pulls the skills and canvas automatically. See [`docs/design/2026-07-canvas-bundle-publishing.md`](./docs/design/2026-07-canvas-bundle-publishing.md) for how this works.
 
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
@@ -100,7 +97,7 @@ Build the extension bundle locally:
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extensions/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
 ```
 
 See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development

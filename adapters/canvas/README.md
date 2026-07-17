@@ -21,7 +21,7 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 ## Build
 
 ```bash
-pnpm build:canvas   # esbuild -> plugins/radius/extensions/radius/extension.mjs
+pnpm build:canvas   # esbuild -> plugins/radius/extension.mjs
 ```
 
 `@github/copilot-sdk` is marked external; everything else (the sibling `.mjs`

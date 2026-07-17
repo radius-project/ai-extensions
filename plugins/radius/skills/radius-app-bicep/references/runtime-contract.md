@@ -65,7 +65,7 @@ Model separate web, worker, producer, consumer, and init roles separately even w
 For each required app-native input, choose exactly one supported source:
 
 - explicit `env.value` from a literal, a verified nonsecret resource output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
-- `valueFrom.secretKeyRef` using an exact recipe-generated managed secret resource and key;
+- `valueFrom.secretKeyRef` binding a secret resource and key: a recipe-generated managed secret via the owner's read-only `<resource>.properties.secrets.name`, or an authored `Radius.Security/secrets` (app secrets/config files, or a schema-required `secretName`);
 - runtime composition from previously bound values when the app requires a larger URL/config value; or
 - a generic Radius connection only when the source parses the exact connection projection supplied by the configured Radius version.
 

@@ -98,5 +98,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `plugins/radius/extensions/radius/extension.mjs` — environment creation (`/api/create-environment`), verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`.
+- `plugins/radius/extension.mjs` — environment creation (`/api/create-environment`), verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`.
 - The verification workflow templates are the canonical `verify-aws.yml` / `verify-azure.yml` (both named `Radius - Verify Credentials`) hosted in `radius-project/radius` at `.github/extension/`. The extension fetches the matching provider template from there at commit time (with a bundled fallback) and commits it into the target user repo at `.github/workflows/verify-<provider>.yml`, then dispatches it.

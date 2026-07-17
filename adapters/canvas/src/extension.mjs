@@ -6,6 +6,8 @@
 // no product logic — only the SDK surface and process-lifecycle hardening.
 
 import { execFile } from "node:child_process";
+import { existsSync, statSync, watch as fsWatch } from "node:fs";
+import { dirname, join } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
@@ -23,6 +25,7 @@ import {
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import { servers, getOrCreateServer, getLastWebviewActivityAt, setAppBicepHandoff } from "./server.mjs";
 import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
+import { radiusAppBicepSkill } from "./skill.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -347,7 +350,7 @@ const session = await joinSession({
         },
         {
             name: "radius_generate_app",
-            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns instructions for the agent to produce the bicep file with correct Radius.* namespace types.",
+            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
             parameters: {
                 type: "object",
                 properties: {
@@ -355,13 +358,7 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                return `Author .radius/app.bicep for the repository at ${args.repoPath || "the current workspace"} by following the radius-app-bicep skill, then SAVE the file to disk.
-
-The radius-app-bicep skill is the single source of truth for the model — resource types and API versions, extensions, structure, naming, secrets, and containerImages build.source. Analyze the repo (Dockerfiles, compose/config files, source, and dependency manifests) to identify the resources, then produce and SAVE .radius/app.bicep exactly as the skill instructs.
-
-Guardrails:
-- Use ONLY Radius.* namespaces — never Applications.*.
-- Recipes come from recipe packs registered on the environment at deploy time; do not author singleton recipes for custom types. If a required type has no recipe, stop and report it.`;
+                return radiusAppBicepSkill(args.repoPath);
             },
         },
         {
@@ -693,3 +690,52 @@ const keepaliveTimer = setInterval(async () => {
 // Don't let the keepalive timer itself hold the process open if everything else
 // has settled and the host wants to shut us down.
 try { keepaliveTimer.unref?.(); } catch {}
+
+// ─── Dev self-reload ───────────────────────────────────────────────────────────
+// In development we want a fresh build to hot-reload without a manual reload. We
+// watch the installed extension.mjs and, when it changes, gracefully shut down so
+// the host respawns a fresh process with the new code. This uses the SAME safe
+// graceful-shutdown path as a host SIGTERM (close servers, leave the session),
+// which is important: it lets the host deregister our tools/canvas cleanly so the
+// respawn doesn't clash or leave the session looking unresponsive.
+//
+// Opt-in and inert in production: it only arms when RADIUS_CANVAS_DEV=1 or a
+// `.dev-reload` sentinel file sits next to the installed extension.
+//
+// NOTE: the installed extension.mjs is shared by every session on this machine
+// (user-scoped), so a rebuild reloads the extension in ALL sessions, not just the
+// one under test. Each reload is a brief (~1s) reconnect. Do your interactive
+// canvas testing in a session separate from the one you're editing in.
+(function setupDevSelfReload() {
+    try {
+        const extPath = process.env.EXTENSION_PATH || "";
+        if (!extPath || !existsSync(extPath)) return;
+        const extDir = dirname(extPath);
+        const sentinel = join(extDir, ".dev-reload");
+        const enabled = process.env.RADIUS_CANVAS_DEV === "1" || existsSync(sentinel);
+        if (!enabled) return;
+        let lastSize = -1;
+        try { lastSize = statSync(extPath).size; } catch {}
+        let debounce = null;
+        let triggered = false;
+        const trigger = () => {
+            if (triggered || shuttingDown) return;
+            let size = lastSize;
+            try { size = statSync(extPath).size; } catch {}
+            if (size === lastSize) return;
+            lastSize = size;
+            triggered = true;
+            try { console.error("[radius][dev] extension.mjs changed — restarting for hot reload…"); } catch {}
+            setTimeout(() => { gracefulShutdown("DEV_RELOAD"); }, 250);
+        };
+        const watcher = fsWatch(extDir, { persistent: false }, (_evt, filename) => {
+            if (filename && filename !== "extension.mjs") return;
+            if (debounce) clearTimeout(debounce);
+            debounce = setTimeout(trigger, 300);
+        });
+        try { watcher.unref?.(); } catch {}
+        try { console.error(`[radius][dev] self-reload armed (watching ${extPath})`); } catch {}
+    } catch (e) {
+        try { console.error(`[radius][dev] self-reload setup failed (ignored): ${e?.message || e}`); } catch {}
+    }
+})();
