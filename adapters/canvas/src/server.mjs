@@ -23,7 +23,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitRadiusScaffold, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
@@ -1812,7 +1812,6 @@ function createRequestHandler(instanceId) {
                     entry.state.envName = data.environment;
                     entry.state.deployProvider = data.provider;
                     entry.state.deployingRepo = data.targetRepo;
-                    entry.state.deployingBranch = data.branch || 'main';
                     entry.state.appFile = data.appFile;
 
                     // Snapshot the planned graph (nodes start as pending). If the
@@ -1831,7 +1830,16 @@ function createRequestHandler(instanceId) {
                     entry.state.deployRunId = null;
 
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
-                    const branch = data.branch || entry.state.deployingBranch || 'main';
+                    // Resolve the branch to deploy. When the client doesn't specify
+                    // one, fall back to the repo's real default branch (which may be
+                    // master/develop, not main) so the dispatch --ref and the
+                    // "branch not pushed" guard below target a branch that exists.
+                    let branch = data.branch || '';
+                    if (!branch) {
+                        const detectedDefault = (await runCommand('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '') || '').trim();
+                        branch = detectedDefault || 'main';
+                    }
+                    entry.state.deployingBranch = branch;
                     const provider = data.provider || 'azure';
                     // Bounded ring buffer: a verbose deploy can stream tens of
                     // thousands of recipe/terraform log lines. Keeping them all in
@@ -1908,7 +1916,9 @@ function createRequestHandler(instanceId) {
                         // the workflow on `branch` so it checks out and `rad deploy`s
                         // that branch's app.bicep — the same file the params below are
                         // computed from — instead of always deploying the default branch.
-                        const deployRef = branch || 'main';
+                        // `branch` is already resolved to the selected branch or the
+                        // repo's real default above, so it's never empty here.
+                        const deployRef = branch;
 
                         // Fail fast (with clear, actionable guidance) when the
                         // selected branch hasn't been pushed to the remote yet. A

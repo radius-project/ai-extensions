@@ -268,13 +268,3 @@ export function createPullRequestApi(repo, head, base, title, prBody, timeout = 
         try { child.stdin?.end(body); } catch { /* best-effort */ }
     });
 }
-
-// Commit the Radius scaffold to `.radius/` on a branch, in the order the offline
-// graph needs it: bicepconfig.json FIRST (so the extension registry exists),
-// then app.bicep. Idempotent — safe to call when the files already exist.
-export async function commitRadiusScaffold(repo, branch, bicepContent, { log = () => {} } = {}) {
-    log(`Committing .radius/bicepconfig.json to ${branch}...`);
-    await commitFileToRepo(repo, ".radius/bicepconfig.json", RADIUS_BICEP_CONFIG_JSON, branch, "Add bicepconfig.json for Radius extension support");
-    log(`Committing .radius/app.bicep to ${branch}...`);
-    await commitFileToRepo(repo, ".radius/app.bicep", bicepContent, branch, "Generate Radius app.bicep from repository structure");
-}
