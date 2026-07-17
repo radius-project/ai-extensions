@@ -1,14 +1,16 @@
 // app-graph.json → canvas resources.
 //
 // `rad app graph <app.bicep>` writes an ApplicationGraphResponse
-// (`{ resources: [...] }`) that is the serialized output of the same
-// modeled-graph builder ported in model.ts. `applicationGraphToResources`
-// adapts that payload into the resource-node array the canvas UI and the diff
-// algorithm expect: it normalizes connections, enriches each node with the
-// `definitionFile` (rad does not know the repo layout), and preserves the
-// stable `diffHash` rad already computed. Pure: no shell/HTTP/DOM.
+// (`{ resources: [...] }`) with the full graph and diff hashes.
+// `applicationGraphToResources` adapts that payload into the resource-node
+// array the canvas UI and the diff algorithm expect: it normalizes
+// connections, enriches each node with the `definitionFile` (rad does not
+// know the repo layout), and preserves the stable `diffHash` rad already
+// computed. Pure: no shell/HTTP/DOM.
 
-import { addInboundConnections, computeDiffHash } from "./model.js";
+import { addInboundConnections } from "./model.js";
+
+const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 /**
  * applicationGraphToResources - convert a rad `app-graph.json` payload into the
@@ -39,19 +41,13 @@ export function applicationGraphToResources(
 
     // Keep only outbound edges; inbound edges are rebuilt below and the full
     // connection list is sorted deterministically inside addInboundConnections,
-    // so the shape matches the modeled-graph builder exactly.
+    // so the shape is stable regardless of rad's edge ordering.
     const connections: any[] = [];
     for (const c of (Array.isArray(r.connections) ? r.connections : [])) {
       if (!c || !c.id) continue;
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
     }
-    const properties =
-      r.properties && typeof r.properties === "object" && !Array.isArray(r.properties) ? r.properties : {};
-    // Fall back to the modeled-builder hash inputs when rad did not supply a
-    // diffHash: include the resource's own dependsOn if present so the computed
-    // hash matches what the modeled builder would produce for the same resource.
-    const dependsOn = Array.isArray(r.dependsOn) ? r.dependsOn : [];
 
     resources.push({
       id,
@@ -60,7 +56,7 @@ export function applicationGraphToResources(
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
       outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
-      diffHash: r.diffHash || computeDiffHash(properties, dependsOn),
+      diffHash: validateDiffHash(r.diffHash, r.name || id),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
       codeReference: r.codeReference || "",
@@ -69,4 +65,21 @@ export function applicationGraphToResources(
 
   addInboundConnections({ resources });
   return resources;
+}
+
+/**
+ * Validate that a diffHash from rad output is present and well-formed.
+ * The rad CLI is the single source of truth for diff hashes — if one is
+ * missing, the caller is likely using an incompatible rad version or
+ * hand-constructing resources without a hash, which would silently break
+ * property-change detection in computeGraphDiff.
+ */
+function validateDiffHash(hash: unknown, resourceName: string): string {
+  if (typeof hash === "string" && DIFF_HASH_PATTERN.test(hash)) {
+    return hash;
+  }
+  throw new Error(
+    `Resource "${resourceName}" is missing a valid diffHash (expected "sha256:" followed by 64 lowercase hexadecimal characters from rad CLI output). ` +
+    `Ensure you are using a compatible version of the rad CLI that includes diff hashes in its graph output.`,
+  );
 }
