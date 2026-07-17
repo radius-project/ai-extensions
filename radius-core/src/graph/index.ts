@@ -3,6 +3,9 @@
 
 export {
   addInboundConnections,
+  MODELED_GRAPH_DEFAULTS,
+  buildResourceID,
+  stripAPIVersion,
 } from "./model.js";
 export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";

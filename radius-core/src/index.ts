@@ -15,6 +15,9 @@ export {
   addInboundConnections,
   applicationGraphToResources,
   computeGraphDiff,
+  MODELED_GRAPH_DEFAULTS,
+  buildResourceID,
+  stripAPIVersion,
 } from "./graph/index.js";
 export {
   parseTerraformResources,
