@@ -9,7 +9,7 @@ Radius treats this as optional metadata that a developer would normally hand-add
 The reference surfaces on the graph node as `codeRef` and is sourced from the resource's `codeReference` value:
 
 - **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside a resource's `properties`. `rad app graph` preserves it and the canvas renders the link. When authoring or updating `app.bicep` (see the `radius-app-bicep` skill), populate `codeReference` for every non-application resource you can locate.
-- **At graph-build time** — the runtime auto-fills `codeReference` for any resource that is still missing one (`discoverSourceCodeRefs` in `radius-core/src/modeling/repo.ts`). Authoring it into `app.bicep` is preferred because it is durable and higher quality; the runtime pass is the fallback.
+- **At graph-build time** — the AI agent (this skill) discovers `codeReference` for any resource that is still missing one, using the heuristics below. Authoring it into `app.bicep` is preferred because it is durable and higher quality; the agent pass is the fallback.
 
 `applications` resources never get a source reference — skip them.
 

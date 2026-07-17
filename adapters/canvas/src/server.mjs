@@ -12,7 +12,6 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
   computeGraphDiff,
-  discoverSourceCodeRefs,
   fetchBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
@@ -23,7 +22,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
@@ -31,9 +30,9 @@ import {
   defaultBranchForState,
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
-  fetchWorkspaceTree,
   isWorkspaceSelection,
 } from "./workspace.mjs";
+import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
@@ -190,20 +189,21 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
     return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
-async function fetchTreeForSelection(entry, repo, branch) {
-    const access = accessForSelection(entry, repo, branch);
-    if (access.useWorkspace) {
-        const localTree = await fetchWorkspaceTree(entry.state, repo, access.branch);
-        if (localTree !== null) return localTree;
-    }
-    return await fetchRepoTree(repo, access.branch);
-}
-
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
         const url = new URL(req.url, `http://localhost`);
         const pathname = url.pathname;
+        const requestedPage = url.searchParams.get("page");
+        const canvasEntry = servers.get(instanceId);
+        if (canvasEntry && requestedPage) {
+            canvasEntry.page = requestedPage;
+            if (requestedPage === "graph") canvasEntry.state.activeGraphView = "graph";
+            else if (requestedPage === "planned") canvasEntry.state.activeGraphView = "planned";
+            else if (requestedPage === "graph-diff" || requestedPage === "graphDiff") {
+                canvasEntry.state.activeGraphView = "diff";
+            }
+        }
 
         // Lightweight liveness probe used by the client-side heartbeat so pages
         // can detect when the server has come back after an idle respawn.
@@ -989,6 +989,9 @@ function createRequestHandler(instanceId) {
             const repo = url.searchParams.get('repo') || '';
             const entry = servers.get(instanceId);
             const branch = url.searchParams.get('branch') || defaultBranchForState(entry?.state);
+            const sourceRefContext = entry
+                ? prepareSourceRefResources(entry, "graph", { repo, branch })
+                : null;
 
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
@@ -1026,22 +1029,16 @@ function createRequestHandler(instanceId) {
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
-                // Discover source code references for resources missing codeReference
-                const needsSourceDiscovery = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSourceDiscovery) {
-                    sendProgress('Scanning repository for source code references...');
-                    let repoTree = null;
-                    try { repoTree = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (repoTree && repoTree.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, repoTree, repo, branch);
-                    }
-                }
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.graphResources = resources;
+                    if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
+                        sendDone({ stale: true });
+                        return;
+                    }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    entry.state.activeGraphView = "graph";
                 }
 
                 sendDone({ reload: true });
@@ -1131,6 +1128,9 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: 'Please select a repository.' }));
                     return;
                 }
+                const sourceRefContext = entry
+                    ? prepareSourceRefResources(entry, "graph", { repo, branch })
+                    : null;
 
                 function addProgress(msg) {
                     if (entry) {
@@ -1160,22 +1160,18 @@ function createRequestHandler(instanceId) {
                 }
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Discover source code references
-                const needsSourceDiscovery2 = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSourceDiscovery2) {
-                    addProgress('Scanning repository for source code references...');
-                    let repoTree2 = null;
-                    try { repoTree2 = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (repoTree2 && repoTree2.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, repoTree2, repo, branch);
-                    }
-                }
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.graphResources = resources;
+                    if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    entry.state.activeGraphView = "graph";
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1631,6 +1627,9 @@ function createRequestHandler(instanceId) {
                 const entry = servers.get(instanceId);
                 const branch = data.branch || defaultBranchForState(entry?.state);
                 const provider = data.provider || 'azure';
+                const sourceRefContext = entry
+                    ? prepareSourceRefResources(entry, "planned", { repo, branch })
+                    : null;
 
                 function addProgress(msg) {
                     if (entry) {
@@ -1658,16 +1657,6 @@ function createRequestHandler(instanceId) {
                 addProgress('Found app.bicep — parsing resources...');
 
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
-                // Discover source code references for planned graph
-                const needsSrcDisc = resources.some(r => !r.codeReference && !r.type.includes('applications'));
-                if (needsSrcDisc) {
-                    addProgress('Scanning repository for source code references...');
-                    let srcTree = null;
-                    try { srcTree = await fetchTreeForSelection(entry, repo, branch); } catch {}
-                    if (srcTree && srcTree.length > 0) {
-                        await discoverSourceCodeRefs(accessForSelection(entry, repo, branch).github, resources, srcTree, repo, branch);
-                    }
-                }
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
                 // Fetch recipes from GitHub (radius-project/resource-types-contrib)
@@ -1682,11 +1671,17 @@ function createRequestHandler(instanceId) {
                 addProgress(`Planned ${plannedResources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.plannedResources = plannedResources;
+                    if (!setSourceRefResources(entry, "planned", plannedResources, { repo, branch }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.plannedRepo = repo;
                     entry.state.plannedBranch = branch;
                     entry.state.plannedProvider = provider;
                     entry.state.resolvedRecipes = recipes;
+                    entry.state.activeGraphView = "planned";
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1750,7 +1745,13 @@ function createRequestHandler(instanceId) {
                 const data = JSON.parse(body);
                 const repo = data.repo || '';
                 const entry = servers.get(instanceId);
+                let sourceRefContext = null;
                 if (entry) {
+                    sourceRefContext = prepareSourceRefResources(entry, "diff", {
+                        repo,
+                        baseBranch: data.base,
+                        headBranch: data.head,
+                    });
                     entry.state.diffBase = data.base;
                     entry.state.diffHead = data.head;
                     entry.state.diffTargetRepo = repo;
@@ -1783,10 +1784,20 @@ function createRequestHandler(instanceId) {
                 const diffResources = computeGraphDiff(baseResources, headResources);
 
                 if (entry) {
-                    entry.state.diffResources = diffResources;
+                    if (!setSourceRefResources(entry, "diff", diffResources, {
+                        repo,
+                        baseBranch: data.base,
+                        headBranch: data.head,
+                    }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.diffBaseGenerated = false;
                     entry.state.diffHeadGenerated = false;
                     entry.state.page = 'graphDiff';
+                    entry.state.activeGraphView = "diff";
                 }
 
                 res.setHeader("Content-Type", "application/json");
@@ -1885,6 +1896,7 @@ function createRequestHandler(instanceId) {
                         // Build the planned graph if it wasn't resolved beforehand.
                         if (resources.length === 0) {
                             addLog('Resolving planned application graph for ' + repo + '...');
+                            const sourceRefContext = prepareSourceRefResources(entry, "planned", { repo, branch });
                             try {
                                 const content = await fetchBicepForSelection(entry, repo, branch);
                                 if (content) {
@@ -1892,8 +1904,11 @@ function createRequestHandler(instanceId) {
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
-                                    entry.state.plannedResources = planned;
-                                    entry.state.plannedRepo = repo;
+                                    const committed = setSourceRefResources(entry, "planned", planned, {
+                                        repo,
+                                        branch,
+                                    }, sourceRefContext.token);
+                                    if (committed) entry.state.plannedRepo = repo;
                                     resources = planned;
                                     entry.state.deployingResources = resources;
                                     addLog('Planned ' + planned.length + ' resource(s).');
@@ -2492,7 +2507,6 @@ function createRequestHandler(instanceId) {
         await ensureVendorScripts();
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         const entry = servers.get(instanceId);
-        const requestedPage = url.searchParams.get("page");
         let page = requestedPage || entry?.page || "environment";
         const state = entry?.state || {};
         // While a deployment is actively in progress, an IMPLICIT landing on the
