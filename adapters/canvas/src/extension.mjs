@@ -356,11 +356,15 @@ const session = await joinSession({
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId);
+                        const contextToken = ctx.input?.contextToken;
+                        if (!contextToken || typeof contextToken !== "string") {
+                            return { error: "contextToken is required", updated: 0, queued: 0, skipped: 0 };
+                        }
                         const refs = ctx.input?.refs;
                         if (!Array.isArray(refs) || refs.length === 0) {
-                            return { error: "refs array is required", updated: 0 };
+                            return { error: "refs array is required", updated: 0, queued: 0, skipped: 0 };
                         }
-                        const result = updateSourceRefs(entry, ctx.input?.contextToken, refs);
+                        const result = updateSourceRefs(entry, contextToken, refs);
                         if (result.error) return result;
                         const page = result.view === "diff" ? "graph-diff" : result.view;
                         entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
