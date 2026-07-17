@@ -672,11 +672,10 @@ function radiusRenderGraph(containerId, resources, options) {
     // node stays sized as an invisible hit-target, so edges, dagre spacing and
     // the click-to-open popup all keep working unchanged. If the extension fails
     // to load, the graph falls back to the native drawn nodes above.
-    if (typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
+    if (!diffMode && typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
         try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
     }
-    if (typeof cy.nodeHtmlLabel === 'function') {
-        cy.style()
+    if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
             .selector('node').style({
                 'width': 220,
                 'height': 92,
