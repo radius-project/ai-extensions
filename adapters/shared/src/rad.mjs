@@ -446,9 +446,12 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
       });
     });
     const outFile = path.join(cwd, "app-graph.json");
-    const raw = fs.readFileSync(outFile, "utf8");
-    if (saveGraphJsonTo) saveGraphJson(saveGraphJsonTo, raw, log);
-    return JSON.parse(raw);
+const raw = fs.readFileSync(outFile, "utf8");
+if (saveGraphJsonTo) {
+  if (path.isAbsolute(saveGraphJsonTo)) saveGraphJson(saveGraphJsonTo, raw, log);
+  else log(`Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`);
+}
+return JSON.parse(raw);
   } catch (err) {
     const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
     const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
