@@ -454,14 +454,16 @@ function radiusRenderGraph(containerId, resources, options) {
     var lineType = options.lineType || options.curveStyle || 'taxi';
     var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
-    // Build the "View source code" URL for a node from its discovered code
-    // reference (falling back to the repo tree at the current branch). Empty when
-    // no repo context is available. Mirrors the popup's link logic so the in-card
-    // link and the popup point to the same place.
+    // Build the "View source code" URL for a node. When a precise code reference
+    // was discovered, deep-link straight to that file (and line). Otherwise fall
+    // back to the repo tree at the current branch so the link always resolves to
+    // a real page instead of a dead affordance. Empty only when there is no repo
+    // context at all.
     function buildSourceUrl(codeRef) {
         if (!repoUrl) return '';
         if (codeRef) {
             var path = codeRef.split('#')[0];
+            if (path.charAt(0) === '/') path = path.slice(1);
             var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
             return repoUrl + '/blob/' + branch + '/' + path + frag;
         }
@@ -715,17 +717,18 @@ function radiusRenderGraph(containerId, resources, options) {
                 var icon = data.icon
                     ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
                     : '';
-                // Figma renders "</> View source code" inside each node card, on
-                // its own row below the type label. Render it here (not just in the
-                // click popup) so the card matches the design.
+                // Figma renders "</> View source code" inside each node card
+                // (own row below the type) plus a "•••" button. When we have a
+                // precise source URL the link navigates directly; otherwise it's
+                // a span that opens the node popup (via card-click delegation).
+                var srcInner = '<span class="rad-node__source-glyph">&lt;/&gt;</span><span>View source code</span>';
                 var srcRow = data.sourceUrl
-                    ? '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer">'
-                        + '<span class="rad-node__source-glyph">&lt;/&gt;</span>'
-                        + '<span>View source code</span></a>'
-                    : '';
-                return '<div class="rad-node" style="box-sizing:border-box;background:'
+                    ? '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();">' + srcInner + '</a>'
+                    : '<span class="rad-node__source" role="button">' + srcInner + '</span>';
+                return '<div class="rad-node" data-node-id="' + String(data.id).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" style="box-sizing:border-box;background:'
                     + (data.bgColor || '#ffffff') + ';border-color:'
                     + (data.borderColor || '#d0d7de') + ';">'
+                    + '<button type="button" class="rad-node__dots" aria-label="Show details">&#8226;&#8226;&#8226;</button>'
                     + '<div class="rad-node__head">' + icon
                     + '<span class="rad-node__title">' + radEsc(data.nodeName) + '</span></div>'
                     + '<div class="rad-node__type">' + radEsc(data.typeLabel) + '</div>'
@@ -875,12 +878,17 @@ function radiusRenderGraph(containerId, resources, options) {
 
         // Monochrome octicon glyphs (currentColor) so links match the flat
         // white-card node styling instead of the old colored emoji.
-        var ICON_CODE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25Zm6.56 0a.75.75 0 1 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25Z"></path></svg>';
         var ICON_DEF = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M2 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4Zm0 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8Zm.75 3.25a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75Z"></path></svg>';
         var ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></path></svg>';
 
-        cy.on('tap', 'node', function(e) {
-            var node = e.target;
+        cy.on('tap', 'node', function(e) { openNodePopup(e.target); });
+
+        // Build + show the links popup for a node. Extracted so the HTML node
+        // cards' "•••" button (and card body) can open the same popup — the
+        // node-html-label overlay captures pointer events, so cytoscape's own
+        // node 'tap' never fires for those clicks.
+        function openNodePopup(node) {
+            if (!node) return;
             var d = node.data();
             var links = [];
             // A link row: monochrome glyph + blue label, with the target URL shown
@@ -891,15 +899,9 @@ function radiusRenderGraph(containerId, resources, options) {
                     '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
-            if (repoUrl && d.codeRef) {
-                var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
-                links.push(linkRow(ICON_CODE, 'Source code', codeUrl, true));
-            } else if (repoUrl) {
-                // No precise location discovered — fall back to a link to the
-                // repo source at the current branch so a code link is always present.
-                var sourceUrl = repoUrl + '/tree/' + branch;
-                links.push(linkRow(ICON_CODE, 'Source code', sourceUrl, true));
-            }
+            // The in-card "</> View source code" link already deep-links to the
+            // source, so the popup (opened by the "•••" button) focuses on the
+            // app-definition and any live cloud-resource links (matches Figma).
             if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
                 links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
@@ -931,6 +933,17 @@ function radiusRenderGraph(containerId, resources, options) {
             popup.style.left = (pos.x + 20) + 'px';
             popup.style.top = (pos.y - 20) + 'px';
             popup.style.display = '';
+        }
+
+        // Delegate clicks from the HTML node cards: the "•••" button (or the card
+        // body) opens the popup; the "View source code" anchor navigates on its
+        // own (it stops propagation), so it's excluded here.
+        container.addEventListener('click', function(e) {
+            if (e.target.closest && e.target.closest('.rad-node__source')) return;
+            var card = e.target.closest && e.target.closest('.rad-node[data-node-id]');
+            if (!card) return;
+            var node = cy.getElementById(card.getAttribute('data-node-id'));
+            if (node && node.length) openNodePopup(node);
         });
 
         cy.on('tap', function(e) {

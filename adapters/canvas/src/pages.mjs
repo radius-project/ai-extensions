@@ -247,6 +247,7 @@ export function pageShell(title, bodyContent, activeNav) {
     position: relative; width: 220px; min-height: 104px;
     background: var(--rad-surface); border: 1px solid var(--rad-stroke);
     border-radius: 16px; padding: 16px 18px;
+    pointer-events: auto; cursor: pointer;
   }
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
   .rad-node__icon { width: 32px; height: 32px; flex: none; }
@@ -254,10 +255,18 @@ export function pageShell(title, bodyContent, activeNav) {
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
   .rad-node__source {
     display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
-    font-size: 12px; font-weight: 500; color: #1f6feb; text-decoration: none; cursor: pointer;
+    font-size: 12px; font-weight: 500; color: #1565c0; text-decoration: none; cursor: pointer;
+    pointer-events: auto; background: none; border: none; padding: 0; font-family: inherit;
   }
   .rad-node__source:hover { text-decoration: underline; }
   .rad-node__source-glyph { font-family: var(--rad-mono); font-weight: 600; }
+  .rad-node__dots {
+    position: absolute; right: 10px; bottom: 10px; margin: 0; padding: 2px 4px;
+    font-size: 12px; font-weight: 700; letter-spacing: 1px; line-height: 1;
+    color: #808791; background: none; border: none; border-radius: 4px;
+    cursor: pointer; pointer-events: auto;
+  }
+  .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }
