@@ -244,7 +244,7 @@ export function pageShell(title, bodyContent, activeNav) {
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
   .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
   .rad-node {
-    position: relative; width: 220px; min-height: 92px;
+    position: relative; width: 220px; min-height: 104px;
     background: var(--rad-surface); border: 1px solid var(--rad-stroke);
     border-radius: 16px; padding: 16px 18px;
   }
@@ -252,6 +252,12 @@ export function pageShell(title, bodyContent, activeNav) {
   .rad-node__icon { width: 32px; height: 32px; flex: none; }
   .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
+  .rad-node__source {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-size: 12px; font-weight: 500; color: #1f6feb; text-decoration: none; cursor: pointer;
+  }
+  .rad-node__source:hover { text-decoration: underline; }
+  .rad-node__source-glyph { font-family: var(--rad-mono); font-weight: 600; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }

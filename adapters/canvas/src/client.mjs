@@ -454,6 +454,20 @@ function radiusRenderGraph(containerId, resources, options) {
     var lineType = options.lineType || options.curveStyle || 'taxi';
     var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
+    // Build the "View source code" URL for a node from its discovered code
+    // reference (falling back to the repo tree at the current branch). Empty when
+    // no repo context is available. Mirrors the popup's link logic so the in-card
+    // link and the popup point to the same place.
+    function buildSourceUrl(codeRef) {
+        if (!repoUrl) return '';
+        if (codeRef) {
+            var path = codeRef.split('#')[0];
+            var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
+            return repoUrl + '/blob/' + branch + '/' + path + frag;
+        }
+        return repoUrl + '/tree/' + branch;
+    }
+
     function getNodeColors(r, typeStyle) {
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
@@ -517,6 +531,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 nodeName: r.name,
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
+                sourceUrl: buildSourceUrl(r.codeReference || ''),
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
                 resourceType: r.type || '',
@@ -679,8 +694,8 @@ function radiusRenderGraph(containerId, resources, options) {
     if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
         cy.style()
             .selector('node').style({
-                'width': 220,
-                'height': 92,
+                'width': 224,
+                'height': 108,
                 'background-opacity': 0,
                 'border-width': 0,
                 'background-image': 'none',
@@ -700,12 +715,21 @@ function radiusRenderGraph(containerId, resources, options) {
                 var icon = data.icon
                     ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
                     : '';
+                // Figma renders "</> View source code" inside each node card, on
+                // its own row below the type label. Render it here (not just in the
+                // click popup) so the card matches the design.
+                var srcRow = data.sourceUrl
+                    ? '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer">'
+                        + '<span class="rad-node__source-glyph">&lt;/&gt;</span>'
+                        + '<span>View source code</span></a>'
+                    : '';
                 return '<div class="rad-node" style="box-sizing:border-box;background:'
                     + (data.bgColor || '#ffffff') + ';border-color:'
                     + (data.borderColor || '#d0d7de') + ';">'
                     + '<div class="rad-node__head">' + icon
                     + '<span class="rad-node__title">' + radEsc(data.nodeName) + '</span></div>'
                     + '<div class="rad-node__type">' + radEsc(data.typeLabel) + '</div>'
+                    + srcRow
                     + '</div>';
             }
         }]);
