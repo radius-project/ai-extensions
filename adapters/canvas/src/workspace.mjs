@@ -160,6 +160,18 @@ export async function fetchWorkspaceFile(state, repo, branch, repoPath) {
     return await readWorkspaceFile(state.workspacePath, repoPath);
 }
 
+// Absolute path to `.radius/app-graph.json` inside the local workspace when the
+// current selection resolves to that workspace, else "". Callers pass this to
+// buildGraphViaRad so the raw rad CLI graph is persisted next to app.bicep.
+export function workspaceGraphJsonPath(state, repo, branch) {
+    if (!isWorkspaceSelection(state, repo, branch)) return "";
+    try {
+        return safeWorkspacePath(state.workspacePath, ".radius/app-graph.json");
+    } catch {
+        return "";
+    }
+}
+
 async function walkWorkspace(workspacePath, dir = "", results = []) {
     const absoluteDir = safeWorkspacePath(workspacePath, dir || ".");
     const entries = await fs.readdir(absoluteDir, { withFileTypes: true });

@@ -341,8 +341,13 @@ export function ensureRadBinary({ log = noop } = {}) {
 /**
  * runRadAppGraph - run `rad app graph <file>.bicep` in a throwaway working dir
  * and return the parsed app-graph.json it writes there.
+ *
+ * When `saveGraphJsonTo` is an absolute path, the raw app-graph.json produced by
+ * the rad CLI is also copied there (parent directories created as needed) so the
+ * generated graph is persisted alongside the app.bicep it was built from. A
+ * failure to save is logged but never fails the graph build.
  */
-export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 120000 } = {}) {
+export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 120000, saveGraphJsonTo = "" } = {}) {
   const radPath = await ensureRadBinary({ log });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
@@ -442,6 +447,7 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
     });
     const outFile = path.join(cwd, "app-graph.json");
     const raw = fs.readFileSync(outFile, "utf8");
+    if (saveGraphJsonTo) saveGraphJson(saveGraphJsonTo, raw, log);
     return JSON.parse(raw);
   } catch (err) {
     const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
@@ -454,12 +460,32 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
 }
 
 /**
+ * saveGraphJson - persist the raw app-graph.json emitted by `rad app graph` to
+ * `destPath`, creating parent directories as needed. Saving is best-effort: a
+ * failure is logged via the injected `log` and swallowed so it can never fail an
+ * otherwise-successful graph build.
+ */
+function saveGraphJson(destPath, raw, log = noop) {
+  try {
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.writeFileSync(destPath, raw);
+    log(`Saved application graph JSON to ${destPath}`);
+  } catch (err) {
+    log(`Warning: could not save app-graph.json to ${destPath}: ${err.message}`);
+  }
+}
+
+/**
  * buildGraphViaRad - the single graph-assembly entry adapters use. Writes the
  * given Bicep content to a temp file, runs `rad app graph`, and converts the
  * result into the canvas resource array. Throws (surfaced to the UI) on failure
  * — there is no JS fallback.
+ *
+ * `saveGraphJsonTo`, when set to an absolute path, persists the raw
+ * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
+ * `.radius/app-graph.json`, next to the app.bicep it was built from).
  */
-export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop } = {}) {
+export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "" } = {}) {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
   const configFile = path.join(dir, "bicepconfig.json");
@@ -470,7 +496,7 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     // for bicepconfig.json in the same directory as the .bicep file.
     fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
     fs.writeFileSync(bicepFile, content);
-    const appGraph = await runRadAppGraph(bicepFile, { log });
+    const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
     return applicationGraphToResources(appGraph, definitionFile);
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }

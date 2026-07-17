@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { resolveWorktreePath, parseRepoFromRemote } from "./workspace.mjs";
+import path from "node:path";
+import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath } from "./workspace.mjs";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must
@@ -42,6 +43,26 @@ describe("resolveWorktreePath", () => {
 
     it("returns empty string when there are no candidates", async () => {
         expect(await resolveWorktreePath({}, {}, async () => false)).toBe("");
+    });
+});
+
+describe("workspaceGraphJsonPath", () => {
+    const WORKTREE = "C:/repos/worktrees/app/feature-branch";
+    const state = {
+        workspacePath: WORKTREE,
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "feature-branch",
+    };
+
+    it("returns the .radius/app-graph.json path for a matching workspace selection", () => {
+        const expected = path.resolve(WORKTREE, ".radius/app-graph.json");
+        expect(workspaceGraphJsonPath(state, "acme/widgets", "feature-branch")).toBe(expected);
+    });
+
+    it("returns empty string when the selection is not the local workspace", () => {
+        expect(workspaceGraphJsonPath(state, "acme/other", "feature-branch")).toBe("");
+        expect(workspaceGraphJsonPath(state, "acme/widgets", "main")).toBe("");
+        expect(workspaceGraphJsonPath({}, "acme/widgets", "feature-branch")).toBe("");
     });
 });
 

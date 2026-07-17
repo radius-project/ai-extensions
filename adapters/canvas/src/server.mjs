@@ -31,6 +31,7 @@ import {
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  workspaceGraphJsonPath,
 } from "./workspace.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
@@ -1028,7 +1029,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
+                const graphJsonPath = entry ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1159,7 +1161,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                const graphJsonPath = entry ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
