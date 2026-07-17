@@ -27,7 +27,6 @@ export {
   parseRecipeResources,
   formatResourceType,
   radiusTypeToContribDir,
-  discoverSourceCodeRefs,
   fetchBicepFromRepo,
   loadRecipeResources,
   fetchRecipesFromGitHub,

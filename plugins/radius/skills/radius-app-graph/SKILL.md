@@ -21,7 +21,7 @@ Build and display the Radius application graph for a repo. The graph is assemble
 2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
 4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
-5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise the runtime auto-discovers it during graph build. See [source-code-references.md](references/source-code-references.md).
+5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise this skill can discover and attach it after the graph builds. See [source-code-references.md](references/source-code-references.md).
 6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
 
 ## Rendering features
@@ -43,9 +43,48 @@ The renderer ports the production improvements from `radius-project/github-exten
 The optional `codeReference` on each resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). It is normally hand-added metadata, but since the app model here is generated, this skill locates it automatically:
 
 - Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-bicep` skill) so the link is durable and high quality.
-- Any resource still missing one is auto-discovered during graph build (`discoverSourceCodeRefs`).
+- Any resource still missing one is discovered by this skill's AI agent at graph-build time, using the heuristics in [source-code-references.md](references/source-code-references.md).
 
 For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
+
+### Agent-driven discovery workflow
+
+After the graph canvas is opened and the graph has been built, discover source-code references for resources that lack them:
+
+1. **Get resources needing references** — call the `get_graph_resources` canvas action to retrieve resources missing `codeReference`:
+
+```
+invoke_canvas_action({
+  instanceId: "radius-panel",
+  actionName: "get_graph_resources",
+  input: { missingOnly: true }
+})
+```
+
+If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
+
+2. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
+3. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
+4. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
+5. **Push discovered references** to the canvas via the `update_source_refs` action:
+
+```
+invoke_canvas_action({
+  instanceId: "radius-panel",
+  actionName: "update_source_refs",
+  input: {
+    contextToken: "<contextToken returned by get_graph_resources>",
+    refs: [
+      { id: "<database resource id>", codeReference: "src/db.js#L14" },
+      { id: "<cache resource id>", codeReference: "src/redis.js#L8" }
+    ]
+  }
+})
+```
+
+Always use the stable `id` and `contextToken` returned by `get_graph_resources`; do not reconstruct them from resource names or types. The action refreshes the active graph URL after applying references. If it reports a stale context, fetch resources again and repeat the search against the newly returned repo/branch context.
+
+Only attach a reference when confident it points to the real initialization/definition site. An empty reference is better than a wrong one.
 
 ## How to invoke
 
@@ -93,7 +132,7 @@ The canvas will:
 - `plugins/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
-- `radius-core/src/modeling/repo.ts` — runtime source-location discovery (`discoverSourceCodeRefs`) and bicep generation that emits `codeReference`; the authoritative source for the heuristics in [source-code-references.md](references/source-code-references.md)
+- `radius-core/src/modeling/repo.ts` — fetches the skill-generated `app.bicep` from the repo (`fetchBicepFromRepo`); source-code reference discovery is now handled by this skill's AI agent (see [source-code-references.md](references/source-code-references.md))
 - `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source
 - `plugins/radius/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
 - `plugins/radius/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
