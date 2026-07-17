@@ -19,7 +19,7 @@ import {
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
 } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/shared";
+import { buildGraphViaRad, buildGraphViaRadWithRaw, saveGraphJson } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
 import { fetchFileFromRepo, github, cliExec, runCommand } from "./gh.mjs";
@@ -189,6 +189,26 @@ async function fetchBicepSelection(entry, repo, branch) {
 
 async function fetchBicepForSelection(entry, repo, branch) {
     return (await fetchBicepSelection(entry, repo, branch)).content;
+}
+
+function beginGraphBuild(entry) {
+    if (!entry) return 0;
+    const generation = (entry.state.graphBuildGeneration || 0) + 1;
+    entry.state.graphBuildGeneration = generation;
+    return generation;
+}
+
+async function isCurrentGraphBuild(entry, generation, selection, repo, branch, content) {
+    if (!entry || entry.state.graphBuildGeneration !== generation) return false;
+    if (!selection.fromWorkspace) return true;
+
+    const currentContent = await fetchWorkspaceFile(
+        entry.state,
+        repo,
+        branch,
+        selection.bicepPath,
+    );
+    return entry.state.graphBuildGeneration === generation && currentContent === content;
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
@@ -1003,6 +1023,7 @@ function createRequestHandler(instanceId) {
             const sourceRefContext = entry
                 ? prepareSourceRefResources(entry, "graph", { repo, branch })
                 : null;
+            const graphBuildGeneration = beginGraphBuild(entry);
 
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
@@ -1041,10 +1062,14 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
+                const { resources, rawGraphJson } = await buildGraphViaRadWithRaw(content, ".radius/app.bicep", { log: sendProgress });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
+                    if (!await isCurrentGraphBuild(entry, graphBuildGeneration, selection, repo, branch, content)) {
+                        sendDone({ stale: true });
+                        return;
+                    }
                     if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
                         sendDone({ stale: true });
                         return;
@@ -1052,6 +1077,7 @@ function createRequestHandler(instanceId) {
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
                     entry.state.activeGraphView = "graph";
+                    if (graphJsonPath) saveGraphJson(graphJsonPath, rawGraphJson, sendProgress);
                 }
 
                 sendDone({ reload: true });
@@ -1144,6 +1170,7 @@ function createRequestHandler(instanceId) {
                 const sourceRefContext = entry
                     ? prepareSourceRefResources(entry, "graph", { repo, branch })
                     : null;
+                const graphBuildGeneration = beginGraphBuild(entry);
 
                 function addProgress(msg) {
                     if (entry) {
@@ -1174,10 +1201,16 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
+                const { resources, rawGraphJson } = await buildGraphViaRadWithRaw(content, ".radius/app.bicep", { log: addProgress });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
+                    if (!await isCurrentGraphBuild(entry, graphBuildGeneration, selection, repo, branch, content)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
                         res.setHeader("Content-Type", "application/json");
                         res.writeHead(409);
@@ -1187,6 +1220,7 @@ function createRequestHandler(instanceId) {
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
                     entry.state.activeGraphView = "graph";
+                    if (graphJsonPath) saveGraphJson(graphJsonPath, rawGraphJson, addProgress);
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
