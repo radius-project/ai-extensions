@@ -452,6 +452,7 @@ function radiusRenderGraph(containerId, resources, options) {
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     var lineType = options.lineType || options.curveStyle || 'taxi';
+    var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
     function getNodeColors(r, typeStyle) {
         if (diffMode && r.diffStatus) {
@@ -857,7 +858,6 @@ function radiusRenderGraph(containerId, resources, options) {
             var node = e.target;
             var d = node.data();
             var links = [];
-            var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
             // A link row: monochrome glyph + blue label, with the target URL shown
             // as a muted subtitle beneath (matches the node popup mock).
             var linkRow = function(iconSvg, label, href, showUrl) {
@@ -948,7 +948,7 @@ function radiusRenderGraph(containerId, resources, options) {
             legend2.className = 'legend';
             var html = '';
             for (var lc = 0; lc < cats.length; lc++) {
-                html += '<div class="legend-item"><img src="' + cats[lc].icon + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + cats[lc].name + '</div>';
+                html += '<div class="legend-item"><img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(cats[lc].name) + '</div>';
             }
             legend2.innerHTML = html;
             container.parentNode.insertBefore(legend2, container);
