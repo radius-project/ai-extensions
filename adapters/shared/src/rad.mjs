@@ -474,7 +474,7 @@ export function saveGraphJson(destPath, raw, log = noop) {
     fs.writeFileSync(destPath, raw);
     log(`Saved application graph JSON to ${destPath}`);
   } catch (err) {
-    log(`Warning: could not save app-graph.json to ${destPath}: ${err.message}`);
+    log(`Warning: could not save app-graph.json to ${destPath}: ${String(err?.message ?? err)}`);
   }
 }
 
