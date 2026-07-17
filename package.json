@@ -13,6 +13,8 @@
     "watch": "node adapters/canvas/build.mjs --watch",
     "build:canvas": "node adapters/canvas/build.mjs",
     "watch:canvas": "node adapters/canvas/build.mjs --watch",
+    "build:install": "node adapters/canvas/build.mjs --install",
+    "watch:dev": "node adapters/canvas/build.mjs --watch --install",
     "typecheck": "pnpm run typecheck:core && pnpm run typecheck:shared && pnpm run typecheck:canvas",
     "typecheck:core": "tsc -p radius-core/tsconfig.json",
     "typecheck:shared": "tsc -p adapters/shared/tsconfig.json",
