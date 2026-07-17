@@ -696,7 +696,7 @@ function radiusRenderGraph(containerId, resources, options) {
             halignBox: 'center', valignBox: 'center',
             tpl: function(data) {
                 var icon = data.icon
-                    ? '<img class="rad-node__icon" src="' + data.icon + '" alt="" />'
+                    ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
                     : '';
                 return '<div class="rad-node" style="box-sizing:border-box;background:'
                     + (data.bgColor || '#ffffff') + ';border-color:'
