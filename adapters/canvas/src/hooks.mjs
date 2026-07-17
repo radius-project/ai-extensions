@@ -25,7 +25,7 @@ export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 const SKILL_HANDOFF =
     "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it commits and pushes .radius/app.bicep, setting the upstream when the branch has none.";
 const GRAPH_SOURCE_NOTE =
-    "The application graph reads .radius/app.bicep from the pushed branch on the remote, so the file must be committed and pushed; a local save is not enough.";
+    "GitHub-backed and PR graph views read .radius/app.bicep from the pushed branch on the remote, so commit and push the file for the graph to resolve reliably; a local workspace may use the on-disk file, but a local save is not visible to those remote views.";
 const RECIPE_PACK_NOTE =
     "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
 
@@ -115,7 +115,7 @@ export async function evaluateAppBicepHook(input, deps) {
 export function appBicepHandoffPrompt(repo, page = "graph") {
     const where = repo ? ` for ${repo}` : "";
     return [
-        `The Radius ${page} view${where} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
+        `The Radius ${page} view${where} can't render yet because its application model isn't available on the branch it reads. If it hasn't been generated, generate it; if it exists locally, make sure it's committed and pushed. Then open the ${page} view again.`,
         "",
         SKILL_HANDOFF,
         GRAPH_SOURCE_NOTE,

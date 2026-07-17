@@ -48,7 +48,7 @@ describe("appBicepHandoffPrompt", () => {
         expect(appBicepHandoffPrompt("acme/widgets")).toContain("Radius graph view");
     });
 
-    it("omits the repo suffix when repo is empty", () => {
+    it("includes the repo suffix only when a repo is provided", () => {
         expect(appBicepHandoffPrompt("acme/widgets")).toContain("view for acme/widgets");
         expect(appBicepHandoffPrompt("")).toContain("Radius graph view can't render");
     });
