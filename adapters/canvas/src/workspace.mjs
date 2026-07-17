@@ -69,10 +69,10 @@ async function isInsideWorkTree(candidate) {
 // real worktree path. The app writes the authoritative checkout to
 // workspace.yaml (git_root/cwd), so those are preferred; session.cwd /
 // session.workspacePath remain as last-resort fallbacks for hosts that don't
-// write a workspace.yaml. We pick the first candidate that is actually inside a
-// git work tree, so a non-repo path (like the state dir) never disables
-// worktree file access — which would silently force every read to GitHub and
-// require the branch to be pushed first.
+// write a workspace.yaml. We pick the first candidate that probe reports is
+// inside a git work tree; if none probe as a work tree, we fall back to the
+// first candidate (to preserve legacy behavior when git probing is
+// unavailable).
 export async function resolveWorktreePath(session, metadata, probe = isInsideWorkTree) {
     const candidates = [
         metadata?.git_root,
