@@ -172,13 +172,22 @@ function repoMatchesWorkspace(state, repo) {
     return !!workspaceRepo && repo === workspaceRepo;
 }
 
-async function fetchBicepForSelection(entry, repo, branch) {
+// Resolves the app.bicep for a selection and reports where it came from.
+// `fromWorkspace` is true only when the local session workspace actually
+// supplied the content (not when we fell back to the remote repo), so callers
+// can decide whether persisting artifacts next to the local file is correct.
+async function fetchBicepSelection(entry, repo, branch) {
     const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
         const local = await fetchWorkspaceBicep(entry.state, repo, access.branch);
-        if (local !== null) return local;
+        if (local !== null) return { content: local, fromWorkspace: true, branch: access.branch };
     }
-    return await fetchBicepFromRepo(github, repo, access.branch);
+    const remote = await fetchBicepFromRepo(github, repo, access.branch);
+    return { content: remote, fromWorkspace: false, branch: access.branch };
+}
+
+async function fetchBicepForSelection(entry, repo, branch) {
+    return (await fetchBicepSelection(entry, repo, branch)).content;
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
@@ -1014,7 +1023,8 @@ function createRequestHandler(instanceId) {
 
             try {
                 sendProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
 
                 if (content) {
                     sendProgress('Found existing app.bicep — parsing resources...');
@@ -1029,7 +1039,7 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const graphJsonPath = entry ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
@@ -1144,7 +1154,8 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
@@ -1161,7 +1172,7 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const graphJsonPath = entry ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 

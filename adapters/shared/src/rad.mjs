@@ -465,7 +465,7 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
  * failure is logged via the injected `log` and swallowed so it can never fail an
  * otherwise-successful graph build.
  */
-function saveGraphJson(destPath, raw, log = noop) {
+export function saveGraphJson(destPath, raw, log = noop) {
   try {
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.writeFileSync(destPath, raw);
