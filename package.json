@@ -18,6 +18,8 @@
     "typecheck:shared": "tsc -p adapters/shared/tsconfig.json",
     "typecheck:canvas": "tsc -p adapters/canvas/tsconfig.json",
     "test": "pnpm -r run --if-present test",
+    "lint:md": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml \"**/*.md\"",
+    "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "pnpm run build"
@@ -26,6 +28,8 @@
     "@changesets/cli": "^2.27.11",
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.1",
+    "markdown-table-formatter": "1.7.0",
+    "markdownlint-cli2": "0.23.0",
     "typescript": "^6.0.3"
   },
   "pnpm": {
