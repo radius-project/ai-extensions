@@ -863,7 +863,7 @@ function radiusRenderGraph(containerId, resources, options) {
             var linkRow = function(iconSvg, label, href, showUrl) {
                 var sub = showUrl ? '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(href) + '</div>' : '';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="' + href + '" onclick="window.open(this.href); return false;" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(href) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
             if (repoUrl && d.codeRef) {
