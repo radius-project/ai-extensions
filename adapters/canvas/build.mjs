@@ -4,7 +4,7 @@
 // UI-agnostic TypeScript core from radius-core) into the single
 // runtime-loadable artifact the Copilot canvas loader runs:
 //
-//   plugins/radius/extensions/radius/extension.mjs
+//   plugins/radius/extension.mjs
 //
 // The Copilot SDK is marked external so its auto-resolved import is preserved in
 // the output (the loader resolves @github/copilot-sdk at runtime).
@@ -31,7 +31,7 @@ const isWatch = process.argv.includes("--watch");
 // edit in, so the reconnect blip never interrupts active canvas use.
 const isInstall = process.argv.includes("--install");
 
-const outfile = join(repoRoot, "plugins", "radius", "extensions", "radius", "extension.mjs");
+const outfile = join(repoRoot, "plugins", "radius", "extension.mjs");
 
 // Where the extension is installed locally. Override with RADIUS_CANVAS_INSTALL_PATH.
 const installPath =
@@ -97,6 +97,6 @@ if (isWatch) {
   console.log("[canvas] watching for changes…");
 } else {
   await esbuild.build(options);
-  console.log("[canvas] built plugins/radius/extensions/radius/extension.mjs");
+  console.log("[canvas] built plugins/radius/extension.mjs");
   if (isInstall) installToLocal();
 }
