@@ -48,21 +48,21 @@ describe("resolveWorktreePath", () => {
 
 describe("workspaceGraphJsonPath", () => {
     const WORKTREE = "C:/repos/worktrees/app/feature-branch";
-    const state = {
-        workspacePath: WORKTREE,
-        workspaceRepo: "acme/widgets",
-        workspaceBranch: "feature-branch",
-    };
+    const state = { workspacePath: WORKTREE };
 
-    it("returns the .radius/app-graph.json path for a matching workspace selection", () => {
+    it("saves next to .radius/app.bicep", () => {
         const expected = path.resolve(WORKTREE, ".radius/app-graph.json");
-        expect(workspaceGraphJsonPath(state, "acme/widgets", "feature-branch")).toBe(expected);
+        expect(workspaceGraphJsonPath(state, ".radius/app.bicep")).toBe(expected);
     });
 
-    it("returns empty string when the selection is not the local workspace", () => {
-        expect(workspaceGraphJsonPath(state, "acme/other", "feature-branch")).toBe("");
-        expect(workspaceGraphJsonPath(state, "acme/widgets", "main")).toBe("");
-        expect(workspaceGraphJsonPath({}, "acme/widgets", "feature-branch")).toBe("");
+    it("saves next to a root app.bicep", () => {
+        const expected = path.resolve(WORKTREE, "app-graph.json");
+        expect(workspaceGraphJsonPath(state, "app.bicep")).toBe(expected);
+    });
+
+    it("returns empty string when there is no workspace or bicep path", () => {
+        expect(workspaceGraphJsonPath({}, ".radius/app.bicep")).toBe("");
+        expect(workspaceGraphJsonPath(state, "")).toBe("");
     });
 });
 

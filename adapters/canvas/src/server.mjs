@@ -28,7 +28,7 @@ import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand,
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
-  fetchWorkspaceBicep,
+  resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
   workspaceGraphJsonPath,
@@ -174,16 +174,17 @@ function repoMatchesWorkspace(state, repo) {
 
 // Resolves the app.bicep for a selection and reports where it came from.
 // `fromWorkspace` is true only when the local session workspace actually
-// supplied the content (not when we fell back to the remote repo), so callers
-// can decide whether persisting artifacts next to the local file is correct.
+// supplied the content (not when we fell back to the remote repo), and
+// `bicepPath` is the repo-relative path of the local file so callers can save
+// sibling artifacts next to the exact app.bicep that was graphed.
 async function fetchBicepSelection(entry, repo, branch) {
     const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
-        const local = await fetchWorkspaceBicep(entry.state, repo, access.branch);
-        if (local !== null) return { content: local, fromWorkspace: true, branch: access.branch };
+        const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
+        if (local) return { content: local.content, fromWorkspace: true, branch: access.branch, bicepPath: local.repoPath };
     }
     const remote = await fetchBicepFromRepo(github, repo, access.branch);
-    return { content: remote, fromWorkspace: false, branch: access.branch };
+    return { content: remote, fromWorkspace: false, branch: access.branch, bicepPath: "" };
 }
 
 async function fetchBicepForSelection(entry, repo, branch) {
@@ -1039,7 +1040,7 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
@@ -1172,7 +1173,7 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, repo, branch) : "";
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
                 const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
