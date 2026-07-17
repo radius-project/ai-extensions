@@ -189,6 +189,12 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
     return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
+function openExternalUrl(target) {
+    if (process.platform === "win32") return runCommand("cmd", ["/c", "start", "", target]);
+    if (process.platform === "darwin") return runCommand("open", [target]);
+    return runCommand("xdg-open", [target]);
+}
+
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
@@ -212,6 +218,30 @@ function createRequestHandler(instanceId) {
             res.setHeader("Cache-Control", "no-store");
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true, instanceId }));
+            return;
+        }
+
+        // Open an external URL in the user's default browser. The canvas iframe
+        // is sandboxed, so anchor clicks (window.open / target=_blank) are
+        // blocked; the client posts here and the host process opens the link.
+        if (pathname === "/api/open-external" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const target = (JSON.parse(body || "{}").url || "").trim();
+                if (!/^https?:\/\//i.test(target)) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ ok: false, error: "invalid url" }));
+                    return;
+                }
+                await openExternalUrl(target);
+                res.writeHead(200);
+                res.end(JSON.stringify({ ok: true }));
+            } catch (err) {
+                res.writeHead(500);
+                res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));
+            }
             return;
         }
 

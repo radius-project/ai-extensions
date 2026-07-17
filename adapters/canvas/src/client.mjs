@@ -849,6 +849,35 @@ function radiusRenderGraph(containerId, resources, options) {
         popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface,#ffffff); border:1px solid var(--rad-stroke,#d0d7de); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
         container.appendChild(popup);
 
+        // The canvas iframe is sandboxed, so anchor navigation (target=_blank /
+        // window.open) is blocked. Intercept link activations and ask the host
+        // process to open the URL in the user's default browser instead.
+        // Cytoscape captures pointer events on the graph container, so a plain
+        // click listener on the popup never fires; use capture-phase listeners
+        // on the document (pointerup + click) scoped to the popup so we win the
+        // event before cytoscape can swallow it.
+        var openPopupLink = function(ev) {
+            var t = ev.target;
+            var a = (t && t.closest) ? t.closest('#node-popup a[href]') : null;
+            if (!a) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            var href = a.getAttribute('href');
+            if (!href) return;
+            try {
+                fetch('/api/open-external', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: href })
+                });
+            } catch (e) {}
+        };
+        if (!document.__radiusPopupLinkBound) {
+            document.__radiusPopupLinkBound = true;
+            document.addEventListener('pointerup', openPopupLink, true);
+            document.addEventListener('click', openPopupLink, true);
+        }
+
         // Monochrome octicon glyphs (currentColor) so links match the flat
         // white-card node styling instead of the old colored emoji.
         var ICON_CODE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25Zm6.56 0a.75.75 0 1 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25Z"></path></svg>';
