@@ -22,7 +22,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
@@ -436,7 +436,7 @@ function createRequestHandler(instanceId) {
                     await runCommand("gh", ["api", "--method", "DELETE", "/repos/" + repo + "/environments/" + encodeURIComponent(envName)], { timeout: 20000 });
                 } catch (e) {
                     res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
+                    res.writeHead(500);
                     res.end(JSON.stringify({ error: "Could not delete environment: " + (e.message || "unknown error") }));
                     return;
                 }

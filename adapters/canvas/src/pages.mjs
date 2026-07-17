@@ -1742,10 +1742,21 @@ function wireRowActions() {
             var envName = this.getAttribute('data-env') || '';
             if (!envName || !confirm('Delete environment "' + envName + '"? This removes the GitHub environment and its Radius configuration.')) return;
             this.disabled = true; this.textContent = 'Deleting…';
+            var delBtn = this;
             fetch('/api/delete-environment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: envName }) })
-                .then(function(r) { return r.json(); })
-                .then(function() { loadEnvTable(); })
-                .catch(function() { loadEnvTable(); });
+                .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+                .then(function(res) {
+                    if (!res.ok) {
+                        delBtn.disabled = false; delBtn.textContent = 'Delete Env';
+                        alert((res.d && res.d.error) || 'Could not delete the environment.');
+                        return;
+                    }
+                    loadEnvTable();
+                })
+                .catch(function() {
+                    delBtn.disabled = false; delBtn.textContent = 'Delete Env';
+                    alert('Could not delete the environment. Please try again.');
+                });
         });
     });
 }
