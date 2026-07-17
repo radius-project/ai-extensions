@@ -57,9 +57,38 @@ async function readSessionWorkspaceMetadata() {
     }
 }
 
+// The default git-worktree probe: returns true when `candidate` is inside a git
+// work tree. Injectable in tests so resolveWorktreePath stays a pure function.
+async function isInsideWorkTree(candidate) {
+    return (await runGit(candidate, ["rev-parse", "--is-inside-work-tree"])) === "true";
+}
+
+// Resolve the git worktree checkout for this session. The SDK's
+// session.workspacePath is the per-session STATE directory
+// (…/session-state/<id>), NOT the git checkout, so it must never win over the
+// real worktree path. The app writes the authoritative checkout to
+// workspace.yaml (git_root/cwd), so those are preferred; session.cwd /
+// session.workspacePath remain as last-resort fallbacks for hosts that don't
+// write a workspace.yaml. We pick the first candidate that probe reports is
+// inside a git work tree; if none probe as a work tree, we fall back to the
+// first candidate (to preserve legacy behavior when git probing is
+// unavailable).
+export async function resolveWorktreePath(session, metadata, probe = isInsideWorkTree) {
+    const candidates = [
+        metadata?.git_root,
+        metadata?.cwd,
+        session?.cwd,
+        session?.workspacePath,
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+        if (await probe(candidate)) return candidate;
+    }
+    return candidates[0] || "";
+}
+
 export async function detectWorkspaceContext(session) {
     const metadata = await readSessionWorkspaceMetadata();
-    const workspacePath = session?.workspacePath || session?.cwd || metadata.git_root || metadata.cwd || "";
+    const workspacePath = await resolveWorktreePath(session, metadata);
     if (!workspacePath) return { workspacePath: "", repo: "", branch: "" };
 
     const [branch, remoteUrl] = await Promise.all([
