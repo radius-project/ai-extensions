@@ -190,7 +190,7 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
 }
 
 function openExternalUrl(target) {
-    if (process.platform === "win32") return runCommand("cmd", ["/c", "start", "", target]);
+    if (process.platform === "win32") return runCommand("start", ["", `"${target}"`]);
     if (process.platform === "darwin") return runCommand("open", [target]);
     return runCommand("xdg-open", [target]);
 }
