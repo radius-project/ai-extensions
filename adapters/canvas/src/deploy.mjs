@@ -35,11 +35,25 @@ export async function findWorkflowRun(repo, workflowFile, sinceMs, knownId) {
 }
 
 export async function getRunDetail(repo, runId) {
-    const data = await ghJson(
+    let data = await ghJson(
         ["run", "view", String(runId), "--json", "status,conclusion,jobs", "--repo", repo],
         null
     );
-    if (!data) return null;
+    // The jobs sub-resource (/actions/runs/<id>/jobs) is intermittently flaky
+    // (HTTP 503) and, when included, fails the whole `gh run view` call — which
+    // would otherwise report the run's status/conclusion just fine. The jobs
+    // (steps) are only needed for progress/failure detail, not for detecting
+    // completion, so fall back to a status-only read when the combined call
+    // fails. This keeps completion detection (e.g. verify-status → success)
+    // working even while the jobs endpoint is unavailable.
+    if (!data) {
+        data = await ghJson(
+            ["run", "view", String(runId), "--json", "status,conclusion", "--repo", repo],
+            null
+        );
+        if (!data) return null;
+        return { status: data.status, conclusion: data.conclusion, jobs: [], steps: [] };
+    }
     const steps = [];
     for (const job of (data.jobs || [])) {
         for (const s of (job.steps || [])) {

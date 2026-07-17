@@ -697,8 +697,9 @@ ${graphHeader('planned')}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
 </div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
@@ -708,6 +709,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim();
     var env = document.getElementById('planned-env').value;
@@ -795,8 +797,9 @@ ${graphHeader('planned')}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
 </div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div class="legend" style="margin-bottom:12px;">
   <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/></svg> Compute</div>
   <div class="legend-item"><svg width="18" height="15" style="vertical-align:middle"><path d="M2 4 a6 2 0 0 1 12 0 v6 a6 2 0 0 1 -12 0 z" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/><ellipse cx="8" cy="4" rx="6" ry="2" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/></svg> Data Store</div>
@@ -815,6 +818,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
     var env = document.getElementById('planned-env').value;
@@ -1296,6 +1300,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
 <!-- Landing: New Environment button + environments table -->
 <div id="env-landing">
+  <div id="env-success-banner" role="status" style="display:none;">
+    <span class="env-success-banner__check" aria-hidden="true">✓</span>
+    <span id="env-success-banner-text" class="env-success-banner__text"></span>
+    <button type="button" id="env-success-banner-close" class="env-success-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -1454,6 +1463,13 @@ document.getElementById('back-btn').addEventListener('click', function() {
 /* Match Figma: the environments table's ACTIONS column is left-aligned. */
 #env-landing .rad-table thead th:last-child { text-align: left; }
 #env-landing .rad-table__actions { justify-content: flex-start; }
+/* Success banner shown above the environments list after a successful create. */
+#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--background-color-default,#fff); border:1px solid var(--border-color-muted,#d8dee4); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#22c580; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--text-color-muted,#4f5966); }
+.env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
+.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
+.env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
 </style>
 
 <script>
@@ -1467,6 +1483,8 @@ var envNameInput = document.getElementById('env-name-input');
 
 function showEnvForm(preset) {
     preset = preset || {};
+    var sb = document.getElementById('env-success-banner');
+    if (sb) sb.style.display = 'none';
     if (preset.name !== undefined) envNameInput.value = preset.name;
     if (preset.provider) {
         var ps = document.getElementById('env-provider-select');
@@ -1482,6 +1500,19 @@ function showEnvLanding() {
     envLanding.style.display = '';
     loadEnvTable();
 }
+function showEnvSuccessBanner(provider, name) {
+    var banner = document.getElementById('env-success-banner');
+    var text = document.getElementById('env-success-banner-text');
+    if (!banner || !text) return;
+    var providerLabel = provider === 'aws' ? 'AWS' : 'Azure';
+    text.innerHTML = 'Successfully created <strong>' + escapeHtmlClient(providerLabel) +
+        '</strong> Environment <strong>' + escapeHtmlClient(name) + '</strong>';
+    banner.style.display = 'flex';
+}
+var envSuccessClose = document.getElementById('env-success-banner-close');
+if (envSuccessClose) envSuccessClose.addEventListener('click', function() {
+    document.getElementById('env-success-banner').style.display = 'none';
+});
 document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 
@@ -1496,8 +1527,7 @@ function loadEnvTable() {
     var body = document.getElementById('env-table-body');
     if (!CTX_REPO) {
         body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-            '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
-        wireEmptyState();
+            '<td class="rad-table__actions"></td></tr>';
         return;
     }
     body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>';
@@ -1507,8 +1537,7 @@ function loadEnvTable() {
             var envs = (data && data.environments) || [];
             if (envs.length === 0) {
                 body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--info js-create-env" style="margin:0;">Create New Environment</button></td></tr>';
-                wireEmptyState();
+                    '<td class="rad-table__actions"></td></tr>';
                 return;
             }
             body.innerHTML = envs.map(function(e) {
@@ -1542,10 +1571,6 @@ function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
         return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
     });
-}
-function wireEmptyState() {
-    var b = document.querySelector('.js-create-env');
-    if (b) b.addEventListener('click', function() { showEnvForm({ name: '' }); });
 }
 function wireRowActions() {
     document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
@@ -1616,23 +1641,15 @@ function populateSelect(selectId, items, placeholder) {
     sel.appendChild(custom);
 }
 
-// Cross-filter the Azure Resource Group and AKS Cluster combos:
-//  - selecting a Resource Group narrows the cluster list to that group
-//  - selecting a cluster narrows the Resource Group box to the cluster's group
+// Selecting an Azure AKS cluster auto-fills its Resource Group for convenience.
+// Both dropdowns always keep their full option lists so the user can freely
+// switch between any resource group or cluster (we never remove options).
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
     var rgSel = document.getElementById('azure-rg-select');
     if (!clusterSel || !rgSel || clusterSel.__filterWired) return;
     clusterSel.__filterWired = true;
 
-    function rebuild(selectId, items, placeholder, keepValue) {
-        populateSelect(selectId, items, placeholder);
-        if (!keepValue) return;
-        var sel = document.getElementById(selectId);
-        for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === keepValue) { sel.value = keepValue; return; }
-        }
-    }
     function findCluster(cid) {
         var list = window.__azureClusters || [];
         for (var i = 0; i < list.length; i++) {
@@ -1641,24 +1658,25 @@ function setupAzureInfraFilter() {
         return null;
     }
 
-    rgSel.addEventListener('change', function() {
-        var rg = rgSel.value;
-        if (rg === '__custom__' || rg === '') {
-            rebuild('azure-cluster-select', window.__azureClusters || [], 'Select AKS cluster...', clusterSel.value);
-            return;
-        }
-        var filtered = (window.__azureClusters || []).filter(function(c) { return c.resourceGroup === rg; });
-        rebuild('azure-cluster-select', filtered, 'Select AKS cluster...', clusterSel.value);
-    });
-
     clusterSel.addEventListener('change', function() {
         var cid = clusterSel.value;
         if (cid === '__custom__' || cid === '') return;
         var cluster = findCluster(cid);
         if (!cluster || !cluster.resourceGroup) return;
-        var matchRg = (window.__azureRgs || []).filter(function(g) { return (g.id || g.name) === cluster.resourceGroup; });
-        if (matchRg.length === 0) matchRg = [{ id: cluster.resourceGroup, name: cluster.resourceGroup }];
-        rebuild('azure-rg-select', matchRg, 'Select resource group...', cluster.resourceGroup);
+        // Make sure the cluster's resource group is present in the (full) list,
+        // then select it — without dropping any of the other groups.
+        var hasRg = false, customOpt = null;
+        for (var i = 0; i < rgSel.options.length; i++) {
+            if (rgSel.options[i].value === cluster.resourceGroup) hasRg = true;
+            if (rgSel.options[i].value === '__custom__') customOpt = rgSel.options[i];
+        }
+        if (!hasRg) {
+            var opt = document.createElement('option');
+            opt.value = cluster.resourceGroup;
+            opt.textContent = cluster.resourceGroup;
+            if (customOpt) rgSel.insertBefore(opt, customOpt); else rgSel.appendChild(opt);
+        }
+        rgSel.value = cluster.resourceGroup;
     });
 }
 
@@ -1734,7 +1752,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
         if (data.error) {
             statusEl.innerHTML = '<span style="color:#cf222e;">❌ ' + data.error + '</span>';
         } else {
-            statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong> — ' + (data.subscriptionName || data.subscriptionId || '') + '</span>';
+            statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong></span>';
             // Auto-fill tenant/sub if returned
             if (data.tenantId && !tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId && !subId) document.getElementById('az-sub-id').value = data.subscriptionId;
@@ -1900,6 +1918,7 @@ document.getElementById('deploy-btn').addEventListener('click', function() {
                             btn.disabled = false;
                             statusEl.style.display = 'none';
                             showEnvLanding();
+                            showEnvSuccessBanner(provider, env);
                             loadEnvTable();
                             return;
                         }
@@ -2149,14 +2168,16 @@ function loadDeployments() {
         .then(function(d) {
             var deps = (d && d.deployments) || [];
             if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
-            var appHref = 'https://github.com/' + CTX_REPO;
             body.innerHTML = deps.map(function(dep) {
                 var statusHtml = statusCell(dep.status);
                 if (dep.runUrl) {
                     statusHtml = '<a class="rad-status-link" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + statusHtml + '</a>';
                 }
+                // The app name routes to the Applications → Deployed tab (the live
+                // deployed app graph) for this environment/application.
+                var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
                 return '<tr>' +
-                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(appHref) + '" target="_blank" rel="noopener noreferrer">↗ ' + escapeHtmlClient(dep.app) + '</a></td>' +
+                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
                     '<td>' + statusHtml + '</td>' +
                     '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
@@ -2227,7 +2248,9 @@ function resetDeployModal() {
 
 // Switch the deploy modal into a "failed" state: swap the spinner for an error
 // icon, show the error message, and offer a button back to the deployments list.
-function showDeployFailed(app, env, errText, runUrl) {
+// The kind argument lets us render a cleaner, tailored panel for well-known
+// failures (e.g. a branch that hasn't been pushed) instead of raw CLI stderr.
+function showDeployFailed(app, env, errText, runUrl, kind, branch) {
     var modal = document.getElementById('deploy-progress-modal');
     var spin = document.getElementById('deploy-progress-spinner');
     var fail = document.getElementById('deploy-progress-failicon');
@@ -2237,16 +2260,43 @@ function showDeployFailed(app, env, errText, runUrl) {
     var failActions = document.getElementById('deploy-progress-fail-actions');
     if (spin) spin.style.display = 'none';
     if (fail) fail.style.display = '';
-    if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
-    if (sub) {
-        var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
-        if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
-        sub.innerHTML = msg;
-        sub.style.color = '#cf222e';
+    if (kind === 'branch-not-pushed') {
+        var br = branch || 'your branch';
+        var pushCmd = 'git push -u origin ' + br;
+        if (title) title.innerHTML = 'Branch not pushed yet';
+        if (sub) {
+            sub.style.color = 'var(--rad-text-secondary)';
+            sub.innerHTML =
+                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\\'t been pushed to GitHub yet, so there\\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
+                '<div style="margin-top:10px; color:var(--rad-text-secondary);">Push it, then deploy again:</div>' +
+                '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-surface-2,#f0f1f2); border:1px solid var(--rad-border,#d0d7de); border-radius:6px; padding:8px 10px;">' +
+                  '<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">' + escapeHtmlClient(pushCmd) + '</code>' +
+                  '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
+                '</div>';
+        }
+    } else {
+        if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
+        if (sub) {
+            var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
+            if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
+            sub.innerHTML = msg;
+            sub.style.color = '#cf222e';
+        }
     }
     if (links) links.style.display = 'none';
     if (failActions) failActions.style.display = 'block';
     if (modal) modal.style.display = 'flex';
+    // Wire the copy button (present only for the branch-not-pushed panel).
+    var copyBtn = document.getElementById('deploy-copy-push');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', function() {
+            var cmd = 'git push -u origin ' + (branch || '');
+            var done = function() { copyBtn.textContent = 'Copied'; setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500); };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(cmd).then(done).catch(function() {});
+            }
+        });
+    }
     deployBtn.disabled = false;
     refreshDeployBtn();
 }
@@ -2304,7 +2354,7 @@ deployBtn.addEventListener('click', function() {
                 }
                 if (d && d.status === 'failed') {
                     clearInterval(wfPoll);
-                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '');
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '');
                     loadDeployments();
                     return;
                 }

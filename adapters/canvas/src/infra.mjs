@@ -172,41 +172,82 @@ export async function generateVerifyWorkflow(env, provider) {
  * there is no bundled fallback, so a fetch failure surfaces as an error.
  */
 export async function generateDeployWorkflow(env, appFile) {
-    const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
+    // Only the dispatcher + the Azure provider workflow are fetched and committed;
+    // the AWS provider workflow is intentionally never fetched or committed. The
+    // dispatcher's `aws:` job (which `uses:` the absent AWS provider file) is
+    // stripped below so GitHub can still parse the committed workflow.
+    const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
     const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
     const templates = {};
     files.forEach((f, i) => {
         templates[f] = bodies[i];
     });
+    // Satisfy core's "all files required" contract without a network lookup for
+    // the AWS template; the generated AWS output is dropped below and never
+    // committed.
+    templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
     const generated = coreGenerateDeployWorkflow(env, appFile, templates);
+    delete generated[DEPLOY_AWS_FILE];
     // Creating an environment should ONLY run the verify-credentials workflow.
     // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
     // trigger once verify completes; strip it so `run-rad-commands` runs only on
     // explicit `workflow_dispatch` (the Deploy button), never on env creation.
     if (generated && typeof generated[DEPLOY_DISPATCHER_FILE] === 'string') {
         generated[DEPLOY_DISPATCHER_FILE] = stripWorkflowRunTrigger(generated[DEPLOY_DISPATCHER_FILE]);
+        generated[DEPLOY_DISPATCHER_FILE] = stripAwsDispatcherJob(generated[DEPLOY_DISPATCHER_FILE]);
     }
     return generated;
 }
 
 /**
- * Generate the application-delete workflow files (dispatcher + both provider
- * workflows). Returns an object mapping bare workflow filename -> YAML content;
- * the caller commits each under `.github/workflows/`. The provider is
- * auto-detected at runtime by the dispatcher, so all files are emitted.
+ * Generate the application-delete workflow files (dispatcher + Azure provider
+ * workflow). Returns an object mapping bare workflow filename -> YAML content;
+ * the caller commits each under `.github/workflows/`. As with deploy, the AWS
+ * provider workflow is never fetched or committed and the dispatcher's `aws:`
+ * job is stripped.
  *
  * The templates + the `delete-resource` composite action they reference live in
  * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
  * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
  */
 export async function generateDeleteWorkflow(env) {
-    const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE];
+    const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
     const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF)));
     const templates = {};
     files.forEach((f, i) => {
         templates[f] = bodies[i];
     });
-    return coreGenerateDeleteWorkflow(env, templates);
+    templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
+    const generated = coreGenerateDeleteWorkflow(env, templates);
+    delete generated[DELETE_AWS_FILE];
+    if (generated && typeof generated[DELETE_APP_DISPATCHER_FILE] === 'string') {
+        generated[DELETE_APP_DISPATCHER_FILE] = stripAwsDispatcherJob(generated[DELETE_APP_DISPATCHER_FILE]);
+    }
+    return generated;
+}
+
+/**
+ * Remove the `aws:` job (and any contiguous comment lines directly above it)
+ * from a dispatcher workflow. The extension only commits the Azure provider
+ * workflow, so the dispatcher's `aws:` job — which `uses:` the never-committed
+ * AWS provider file — would otherwise make GitHub reject the whole workflow with
+ * a parse error (HTTP 422). Jobs are indented two spaces; the block runs until
+ * the next two-space-indented key, a top-level key, or EOF.
+ */
+function stripAwsDispatcherJob(yaml) {
+    const lines = yaml.split('\n');
+    const start = lines.findIndex((l) => /^  aws:\s*$/.test(l));
+    if (start === -1) return yaml;
+    let from = start;
+    while (from > 0 && /^  #/.test(lines[from - 1])) from--;
+    // Drop a single blank separator line above the block, if present.
+    if (from > 0 && lines[from - 1].trim() === '') from--;
+    let to = start + 1;
+    while (to < lines.length && !/^  \S/.test(lines[to]) && !/^\S/.test(lines[to])) {
+        to++;
+    }
+    lines.splice(from, to - from);
+    return lines.join('\n');
 }
 
 /**

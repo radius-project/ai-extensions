@@ -209,3 +209,62 @@ export async function commitFileToRepo(repo, path, content, branch, message, tim
         try { child.stdin?.end(body); } catch { /* best-effort */ }
     });
 }
+
+// Resolve a repo's default branch name (e.g. "main"). Resolves '' on failure.
+export function getDefaultBranch(repo, timeout = 15000) {
+    return new Promise((resolve) => {
+        cliExec("gh", ["api", `/repos/${repo}`, "--jq", ".default_branch"], { timeout }, (err, stdout) => {
+            resolve(err ? "" : (stdout || "").trim());
+        });
+    });
+}
+
+// Get the head commit SHA of a branch. Resolves '' when the branch is absent.
+export function getBranchHeadSha(repo, branch, timeout = 15000) {
+    return new Promise((resolve) => {
+        cliExec("gh", ["api", `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, "--jq", ".object.sha"], { timeout }, (err, stdout) => {
+            resolve(err ? "" : (stdout || "").trim());
+        });
+    });
+}
+
+// Create a new branch ref (refs/heads/<newBranch>) pointing at fromSha.
+// Resolves { ok, stderr }; never rejects.
+export function createBranchRef(repo, newBranch, fromSha, timeout = 20000) {
+    const body = JSON.stringify({ ref: `refs/heads/${newBranch}`, sha: fromSha });
+    return new Promise((resolve) => {
+        const child = cliExec(
+            "gh",
+            ["api", "--method", "POST", `/repos/${repo}/git/refs`, "--input", "-"],
+            { timeout },
+            (err, stdout, stderr) => {
+                resolve({ ok: !err, stderr: ((stderr && stderr.trim()) || err?.message || "").trim() });
+            },
+        );
+        try { child.stdin?.end(body); } catch { /* best-effort */ }
+    });
+}
+
+// Open a pull request from `head` into `base`. Resolves
+// { ok, url, number, stderr }; never rejects. The body is fed over stdin so
+// arbitrary title/body text can't collide with CLI parsing.
+export function createPullRequestApi(repo, head, base, title, prBody, timeout = 20000) {
+    const body = JSON.stringify({ title, head, base, body: prBody || "" });
+    return new Promise((resolve) => {
+        const child = cliExec(
+            "gh",
+            ["api", "--method", "POST", `/repos/${repo}/pulls`, "--input", "-"],
+            { timeout },
+            (err, stdout, stderr) => {
+                if (err) { resolve({ ok: false, stderr: ((stderr && stderr.trim()) || err.message || "").trim() }); return; }
+                try {
+                    const j = JSON.parse(stdout);
+                    resolve({ ok: true, url: j.html_url, number: j.number });
+                } catch (e) {
+                    resolve({ ok: false, stderr: `Could not parse PR response: ${e?.message ?? e}` });
+                }
+            },
+        );
+        try { child.stdin?.end(body); } catch { /* best-effort */ }
+    });
+}

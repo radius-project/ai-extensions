@@ -23,9 +23,9 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand } from "./gh.mjs";
+import { fetchFileFromRepo, fetchRepoTree, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
-import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand } from "./bicep.mjs";
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
@@ -37,8 +37,8 @@ import {
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
-  DEPLOY_DISPATCHER_FILE, DEPLOY_AWS_FILE,
-  DELETE_APP_DISPATCHER_FILE, DELETE_AWS_FILE,
+  DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
+  DELETE_APP_DISPATCHER_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -91,6 +91,13 @@ function triggerAppBicepHandoff(entry, repo, branches, page) {
 // commit so it does not double-trigger alongside the new dispatcher.
 const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
 
+// The workflow that actually runs `rad` deploy commands. The deployments list
+// only surfaces deployment records produced by this workflow — records created
+// by other environment-bound workflows (verify-credentials, delete-application)
+// are not real application deployments and are filtered out.
+const DEPLOY_WORKFLOW_FILE = 'run-rad-commands.yml';
+const DELETE_WORKFLOW_FILE = 'delete-application.yml';
+
 /**
  * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
  * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
@@ -109,7 +116,38 @@ function deleteLegacyDeployWorkflow(targetRepo) {
     });
 }
 
-// Timestamp of the last request served to any canvas webview. Updated by the
+// Ensure the deploy workflow files exist on `branch` so that dispatching
+// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
+// itself and the provider workflow it pulls in via a local-path `uses:`. The
+// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
+// contents API commit is branch-less), so a feature/worktree branch usually
+// lacks them. Missing files are generated from the pinned upstream templates and
+// committed onto `branch`; existing ones are left untouched. Best-effort per
+// file — a commit failure is surfaced by the caller, not thrown here.
+async function ensureDeployWorkflowsOnBranch(repo, branch, envName, log = () => {}) {
+    if (!repo || !branch) return;
+    // Only the dispatcher + the Azure provider workflow are published to target
+    // repos today (the AWS provider file is intentionally withheld, matching the
+    // env-creation commit step), so those are the two a `--ref` dispatch needs.
+    const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+    const existsOnBranch = (file) => new Promise((resolve) => {
+        cliExec('gh', ['api', `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`, '--jq', '.sha'],
+            { timeout: 15000 }, (err, stdout) => resolve(!err && !!(stdout || '').trim()));
+    });
+    const presence = await Promise.all(wanted.map(existsOnBranch));
+    const missing = wanted.filter((_, i) => !presence[i]);
+    if (missing.length === 0) return;
+    log('Publishing deploy workflow(s) to branch "' + branch + '": ' + missing.join(', '));
+    const generated = await generateDeployWorkflow(envName, '.radius/app.bicep');
+    for (const file of missing) {
+        const content = generated && generated[file];
+        if (!content) continue;
+        await commitFileToRepo(repo, '.github/workflows/' + file, content, branch,
+            'Add Radius deploy workflow (' + file + ') to ' + branch + ' for worktree-consistent deploy');
+    }
+}
+
+
 // request handler and read by the host-channel keepalive via the getter below
 // to tell whether a panel is actively open (so the process isn't idle-reaped).
 let lastWebviewActivityAt = 0;
@@ -527,12 +565,96 @@ function createRequestHandler(instanceId) {
                 });
                 steps.push(`✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`);
 
+                // --- Workflow commit + PR-fallback plumbing ---------------------
+                // Workflow files are normally committed straight to the repo's
+                // default branch via the contents API. When that branch is
+                // protected (or the user otherwise lacks direct-push permission),
+                // the PUT fails; instead of aborting, we lazily create a feature
+                // branch, commit every workflow file there, and open a PR the user
+                // can merge. The PR link is surfaced in `steps`.
+                const { writeFileSync, unlinkSync } = await import("node:fs");
+                const { tmpdir } = await import("node:os");
+                const { join } = await import("node:path");
+
+                // A protected-branch / missing-write-access failure (as opposed to
+                // a missing `workflow` token scope, which a PR can't fix). Kept
+                // deliberately broad; branch creation gates the fallback, so a
+                // genuine no-access repo still surfaces the original error.
+                function isProtectedBranchFailure(stderr) {
+                    const s = stderr || '';
+                    if (needsWorkflowScope(s)) return false;
+                    return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(s);
+                }
+
+                // PR-fallback state; populated lazily on the first protected-branch
+                // failure. Once set, every subsequent workflow commit targets the
+                // PR branch instead of the default branch.
+                let prState = null; // { branch, base }
+                async function beginPrFallback() {
+                    if (prState) return prState;
+                    const base = (await getDefaultBranch(targetRepo)) || 'main';
+                    const baseSha = await getBranchHeadSha(targetRepo, base);
+                    if (!baseSha) throw new Error(`could not resolve head of base branch "${base}"`);
+                    const branch = `radius/setup-${envName}-workflows-${Date.now()}`;
+                    const created = await createBranchRef(targetRepo, branch, baseSha);
+                    if (!created.ok) throw new Error(`could not create branch "${branch}": ${created.stderr}`);
+                    prState = { branch, base };
+                    steps.push(`ℹ️ No permission to push to "${base}" directly — committing workflows to branch "${branch}" and opening a pull request.`);
+                    return prState;
+                }
+
+                // Commit one workflow file via the contents API. `branch === ''`
+                // targets the default branch. Looks up the existing blob SHA on the
+                // same ref so a re-commit is an update rather than a rejected
+                // create. Returns the raw runGhWorkflow result ({ code, stderr }).
+                async function putWorkflowContent(path, contentB64, message, branch) {
+                    const refQ = branch ? ('?ref=' + encodeURIComponent(branch)) : '';
+                    const shaRes = await runGh(['api', '/repos/' + targetRepo + '/contents/' + path + refQ, '--jq', '.sha']);
+                    const sha = shaRes.code === 0 ? shaRes.stdout.trim() : '';
+                    const bodyObj = {
+                        message,
+                        content: contentB64,
+                        ...(branch ? { branch } : {}),
+                        ...(sha ? { sha } : {}),
+                    };
+                    const tmp = join(tmpdir(), 'radius-wf-commit-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.json');
+                    writeFileSync(tmp, JSON.stringify(bodyObj));
+                    const r = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + path, '--input', tmp]);
+                    try { unlinkSync(tmp); } catch {}
+                    return r;
+                }
+
+                // Commit a workflow file, transparently switching to the PR branch
+                // (creating it on first use) when the default branch rejects the
+                // push for permission reasons. Returns { ok, stderr, viaPr }.
+                async function commitWorkflowFileSmart(path, contentB64, message) {
+                    if (prState) {
+                        const r = await putWorkflowContent(path, contentB64, message, prState.branch);
+                        return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
+                    }
+                    const direct = await putWorkflowContent(path, contentB64, message, '');
+                    if (direct.code === 0) return { ok: true, viaPr: false };
+                    if (isProtectedBranchFailure(direct.stderr)) {
+                        try {
+                            await beginPrFallback();
+                        } catch (e) {
+                            return { ok: false, stderr: `${direct.stderr} (PR fallback failed: ${e.message})`, viaPr: false };
+                        }
+                        const r = await putWorkflowContent(path, contentB64, message, prState.branch);
+                        return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
+                    }
+                    return { ok: false, stderr: direct.stderr, viaPr: false };
+                }
+
                 // Step 1: Create the GitHub environment
                 steps.push('Creating GitHub environment "' + envName + '"...');
                 await runGhOrThrow(
                     ['api', '--method', 'PUT', '/repos/' + targetRepo + '/environments/' + envName],
                     'Failed to create GitHub environment "' + envName + '"'
                 );
+                // Tag the environment as Radius-managed so the listing can filter
+                // out environments created outside this extension.
+                await setEnvironmentVariable('RADIUS_MANAGED', 'true');
                 // A new environment invalidates the cached listing for this repo.
                 envListCache.delete(targetRepo);
 
@@ -589,16 +711,34 @@ function createRequestHandler(instanceId) {
                 // JSON secret the deploy workflow reads and expands into
                 // `--parameters name=value` pairs.
                 try {
-                    let paramBranch = data.branch || '';
-                    if (!paramBranch) {
-                        const def = await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '');
-                        paramBranch = (def || '').trim() || 'main';
-                    }
+                    // Detect the repo's real default branch once so both the
+                    // requested-branch resolution and the fallback below use it
+                    // (a repo may default to master/develop, not main).
+                    const detectedDefault = (await runCommand('gh', ['repo', 'view', targetRepo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '') || '').trim();
+                    const defaultBranch = detectedDefault || 'main';
+                    let paramBranch = data.branch || defaultBranch;
                     let bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', paramBranch);
                     let bicepPath = '.radius/app.bicep';
                     if (!bicepSource) {
                         bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', paramBranch);
                         bicepPath = 'app.bicep';
+                    }
+                    // Fall back to the repo default branch if the requested branch
+                    // has no app.bicep (e.g. an unpushed worktree branch). Without
+                    // this, step 2b would silently write neither RADIUS_DEPLOY_PARAMS
+                    // nor RADIUS_RAD_COMMANDS, leaving the deploy with no password
+                    // and a missing rad command.
+                    if (!bicepSource && paramBranch !== defaultBranch) {
+                        const fallbackBranch = defaultBranch;
+                        bicepPath = '.radius/app.bicep';
+                        bicepSource = await fetchFileFromRepo(targetRepo, '.radius/app.bicep', fallbackBranch);
+                        if (!bicepSource) {
+                            bicepSource = await fetchFileFromRepo(targetRepo, 'app.bicep', fallbackBranch);
+                            bicepPath = 'app.bicep';
+                        }
+                        if (bicepSource) {
+                            steps.push(`ℹ️ No app.bicep on "${paramBranch}"; resolved deploy parameters from "${fallbackBranch}".`);
+                        }
                     }
                     if (bicepSource) {
                         const parsed = appParams(bicepSource);
@@ -618,13 +758,23 @@ function createRequestHandler(instanceId) {
                         // applies on both explicit dispatch and the verify→deploy auto
                         // trigger (where inputs are empty). Secret params are appended by
                         // the workflow from RADIUS_DEPLOY_PARAMS.
-                        const radCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
-                        await setEnvironmentVariable('RADIUS_RAD_COMMANDS', radCommand);
+                        //
+                        // Store a JSON array so the deploy also runs `rad app graph`
+                        // after `rad deploy`, matching the dispatch-time path — otherwise
+                        // the verify→deploy auto trigger (which relies on this variable)
+                        // would deploy without rendering the application graph.
+                        const radDeployCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
+                        const radCommands = [radDeployCommand];
+                        const appName = extractAppName(bicepSource);
+                        if (appName) radCommands.push('app graph --application ' + appName + ' --preview');
+                        await setEnvironmentVariable('RADIUS_RAD_COMMANDS', JSON.stringify(radCommands));
 
                         const names = Object.keys(resolved);
                         if (names.length > 0) {
                             steps.push(`Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(', ')}).`);
                         }
+                    } else {
+                        steps.push(`⚠️ Could not read app.bicep on "${paramBranch}" (or the default branch), so RADIUS_DEPLOY_PARAMS / RADIUS_RAD_COMMANDS were not set for "${envName}". Deploys will fail until the branch has a committed .radius/app.bicep.`);
                     }
                 } catch (paramErr) {
                     steps.push('⚠️ Could not resolve application parameters: ' + paramErr.message);
@@ -636,35 +786,21 @@ function createRequestHandler(instanceId) {
                 const verifyContent = Buffer.from(verifyWorkflow).toString('base64');
                 const verifyPath = '.github/workflows/radius-verify-credentials.yml';
 
-                // Check if file exists (get sha for update)
-                const checkResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + verifyPath, '--jq', '.sha']);
-                const existingSha = checkResult.code === 0 ? checkResult.stdout.trim() : '';
+                const verifyCommit = await commitWorkflowFileSmart(
+                    verifyPath,
+                    verifyContent,
+                    'Add Radius verify-credentials workflow for environment ' + envName,
+                );
 
-                const commitBody = JSON.stringify({
-                    message: 'Add Radius verify-credentials workflow for environment ' + envName,
-                    content: verifyContent,
-                    ...(existingSha ? { sha: existingSha } : {})
-                });
-
-                // Write to temp file for stdin
-                const { writeFileSync, unlinkSync } = await import("node:fs");
-                const { tmpdir } = await import("node:os");
-                const { join } = await import("node:path");
-                const tmpFile = join(tmpdir(), 'radius-verify-commit-' + Date.now() + '.json');
-                writeFileSync(tmpFile, commitBody);
-
-                const commitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + verifyPath, '--input', tmpFile]);
-                try { unlinkSync(tmpFile); } catch {}
-
-                if (commitResult.code !== 0) {
+                if (!verifyCommit.ok) {
                     steps.push('❌ Failed to commit verify-credentials workflow.');
-                    const scopeHint = needsWorkflowScope(commitResult.stderr)
+                    const scopeHint = needsWorkflowScope(verifyCommit.stderr)
                         ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
                         : ' Check that you have write access to the repository and that GitHub Actions is enabled.';
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
                     res.end(JSON.stringify({
-                        error: 'Failed to commit the verify-credentials workflow (' + verifyPath + ') to ' + targetRepo + '. ' + ((commitResult.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint,
+                        error: 'Failed to commit the verify-credentials workflow (' + verifyPath + ') to ' + targetRepo + '. ' + ((verifyCommit.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint,
                         steps
                     }));
                     return;
@@ -678,81 +814,54 @@ function createRequestHandler(instanceId) {
                 const deployWorkflows = await generateDeployWorkflow(envName, '.radius/app.bicep');
 
                 for (const [fileName, content] of Object.entries(deployWorkflows)) {
-                    // Only Azure workflows are pushed to the target repo for now.
-                    // The AWS deploy workflow is still generated (code retained)
-                    // but intentionally skipped so it never lands on the branch.
-                    if (fileName === DEPLOY_AWS_FILE) {
-                        steps.push('Skipping AWS deploy workflow (' + fileName + ').');
-                        continue;
-                    }
                     const deployContent = Buffer.from(content).toString('base64');
                     const deployPath = '.github/workflows/' + fileName;
 
-                    const deployCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + deployPath, '--jq', '.sha']);
-                    const deploySha = deployCheckResult.code === 0 ? deployCheckResult.stdout.trim() : '';
+                    const deployCommit = await commitWorkflowFileSmart(
+                        deployPath,
+                        deployContent,
+                        'Add Radius deploy workflow (' + fileName + ') for environment ' + envName,
+                    );
 
-                    const deployCommitBody = JSON.stringify({
-                        message: 'Add Radius deploy workflow (' + fileName + ') for environment ' + envName,
-                        content: deployContent,
-                        ...(deploySha ? { sha: deploySha } : {})
-                    });
-
-                    const tmpFile2 = join(tmpdir(), 'radius-deploy-commit-' + Date.now() + '.json');
-                    writeFileSync(tmpFile2, deployCommitBody);
-
-                    const deployCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + deployPath, '--input', tmpFile2]);
-                    try { unlinkSync(tmpFile2); } catch {}
-
-                    if (deployCommitResult.code !== 0) {
+                    if (!deployCommit.ok) {
                         steps.push('❌ Failed to commit deploy workflow ' + fileName + '.');
-                        const scopeHint2 = needsWorkflowScope(deployCommitResult.stderr)
+                        const scopeHint2 = needsWorkflowScope(deployCommit.stderr)
                             ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
                             : ' Check that you have write access to the repository and that GitHub Actions is enabled.';
                         res.setHeader("Content-Type", "application/json");
                         res.writeHead(200);
                         res.end(JSON.stringify({
-                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommitResult.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint2,
+                            error: 'Failed to commit the deploy workflow (' + deployPath + ') to ' + targetRepo + '. ' + ((deployCommit.stderr || '').trim() || 'The GitHub API request failed.') + scopeHint2,
                             steps
                         }));
                         return;
                     }
                 }
                 // Best-effort: remove the legacy monolithic deploy workflow so it
-                // does not double-trigger alongside the new dispatcher.
-                await deleteLegacyDeployWorkflow(targetRepo);
+                // does not double-trigger alongside the new dispatcher. Skipped in
+                // PR-fallback mode since we can't push to the default branch.
+                if (!prState) await deleteLegacyDeployWorkflow(targetRepo);
                 steps.push('✅ Deploy workflows committed.');
 
                 // Step 4b: Commit the application-delete workflows (dispatcher +
-                // provider workflows) so the Delete Deployment button can dispatch
-                // `rad app delete`. As with deploy, only the Azure workflows are
-                // pushed for now; the AWS provider file is skipped.
+                // Azure provider workflow) so the Delete Deployment button can
+                // dispatch `rad app delete`. Only Azure workflows are generated and
+                // committed; the AWS provider file is never produced.
                 steps.push('Committing delete workflows...');
                 try {
                     const deleteWorkflows = await generateDeleteWorkflow(envName);
                     for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-                        if (fileName === DELETE_AWS_FILE) {
-                            steps.push('Skipping AWS delete workflow (' + fileName + ').');
-                            continue;
-                        }
                         const delContent = Buffer.from(content).toString('base64');
                         const delPath = '.github/workflows/' + fileName;
 
-                        const delCheckResult = await runGh(['api', '/repos/' + targetRepo + '/contents/' + delPath, '--jq', '.sha']);
-                        const delFileSha = delCheckResult.code === 0 ? delCheckResult.stdout.trim() : '';
+                        const delCommit = await commitWorkflowFileSmart(
+                            delPath,
+                            delContent,
+                            'Add Radius delete workflow (' + fileName + ') for environment ' + envName,
+                        );
 
-                        const delCommitBody = JSON.stringify({
-                            message: 'Add Radius delete workflow (' + fileName + ') for environment ' + envName,
-                            content: delContent,
-                            ...(delFileSha ? { sha: delFileSha } : {})
-                        });
-
-                        const tmpFile3 = join(tmpdir(), 'radius-delete-commit-' + Date.now() + '.json');
-                        writeFileSync(tmpFile3, delCommitBody);
-                        const delCommitResult = await runGhWorkflow(['api', '--method', 'PUT', '/repos/' + targetRepo + '/contents/' + delPath, '--input', tmpFile3]);
-                        try { unlinkSync(tmpFile3); } catch {}
-
-                        if (delCommitResult.code !== 0) {
-                            steps.push('⚠️ Could not commit delete workflow ' + fileName + ': ' + ((delCommitResult.stderr || '').trim() || 'GitHub API request failed.'));
+                        if (!delCommit.ok) {
+                            steps.push('⚠️ Could not commit delete workflow ' + fileName + ': ' + ((delCommit.stderr || '').trim() || 'GitHub API request failed.'));
                         }
                     }
                     steps.push('✅ Delete workflows committed.');
@@ -762,50 +871,84 @@ function createRequestHandler(instanceId) {
                     steps.push('⚠️ Could not generate/commit delete workflows: ' + delErr.message);
                 }
 
-                // Step 5: Dispatch the verify workflow
-                steps.push('Dispatching verify-credentials workflow...');
-                // Wait briefly for GitHub to index the workflow
-                await new Promise(r => setTimeout(r, 3000));
-                const dispatchedAt = Date.now();
-                const dispatchDelays = [0, 2000, 5000];
-                let dispatchResult = { code: 1, stdout: '', stderr: '' };
-                for (const delay of dispatchDelays) {
-                    if (delay > 0) await new Promise(r => setTimeout(r, delay));
-                    dispatchResult = await runGhWorkflow(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
-                    if (dispatchResult.code === 0) break;
+                // Step 4c: If any workflow commit fell back to a PR branch, open the
+                // pull request now so the user can merge it. Until it's merged, the
+                // workflows don't exist on the default branch, so we skip dispatching
+                // the verify run (it would 404) and tell the user to merge first.
+                let pullRequestUrl = '';
+                if (prState) {
+                    const prTitle = 'Add Radius deploy workflows for environment ' + envName;
+                    const prBody = [
+                        'This PR adds the GitHub Actions workflows that power the Radius extension for the **' + envName + '** environment:',
+                        '',
+                        '- `.github/workflows/radius-verify-credentials.yml`',
+                        '- Radius deploy workflow(s) under `.github/workflows/`',
+                        '- Radius delete workflow(s) under `.github/workflows/`',
+                        '',
+                        'They were committed to `' + prState.branch + '` because direct pushes to `' + prState.base + '` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas.',
+                    ].join('\n');
+                    const pr = await createPullRequestApi(targetRepo, prState.branch, prState.base, prTitle, prBody);
+                    if (pr.ok) {
+                        pullRequestUrl = pr.url;
+                        steps.push('✅ Opened pull request #' + pr.number + ': ' + pr.url);
+                        steps.push('👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' + prState.base + '".');
+                    } else {
+                        steps.push('⚠️ Committed workflows to branch "' + prState.branch + '" but could not open a pull request automatically: ' + ((pr.stderr || '').trim() || 'GitHub API request failed.') + ' Open one manually from that branch into "' + prState.base + '".');
+                    }
                 }
 
+                // Step 5: Dispatch the verify workflow. Skipped when the workflows
+                // only exist on a PR branch — the workflow file isn't on the
+                // default branch yet, so `workflow run` would 404. It runs
+                // automatically once the PR merges.
                 let verifyRunUrl = '';
                 let verifyRunId = null;
-                if (dispatchResult.code === 0) {
-                    steps.push('✅ Verify workflow dispatched.');
-                    await new Promise(r => setTimeout(r, 5000));
-                    const runsResult = await runGh(['run', 'list', '--workflow=radius-verify-credentials.yml', '--limit', '1', '--json', 'databaseId,status,url', '--repo', targetRepo]);
-                    try {
-                        const runs = JSON.parse(runsResult.stdout);
-                        if (runs.length > 0) {
-                            verifyRunId = runs[0].databaseId;
-                            verifyRunUrl = 'https://github.com/' + targetRepo + '/actions/runs/' + verifyRunId;
-                            steps.push('Verify run: ' + verifyRunUrl);
-                        }
-                    } catch {}
-                    steps.push('Credentials verification dispatched. Deploy your application from the Environments list when ready.');
+                const dispatchedAt = Date.now();
+                if (prState) {
+                    steps.push('Skipping credential verification until the pull request is merged.');
                 } else {
-                    const detail = (dispatchResult.stderr || dispatchResult.stdout || '').trim() || 'The GitHub CLI request failed.';
-                    steps.push('❌ Could not dispatch verify workflow: ' + detail);
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(200);
-                    res.end(JSON.stringify({
-                        error: 'Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. ' + detail,
-                        environment: envName,
-                        provider,
-                        repo: targetRepo,
-                        stateBackend: OCI_STATE_BACKEND,
-                        stateRegistry,
-                        stateArchive: DEFAULT_STATE_ARCHIVE,
-                        steps
-                    }));
-                    return;
+                    steps.push('Dispatching verify-credentials workflow...');
+                    // Wait briefly for GitHub to index the workflow, then dispatch with
+                    // a few retries to ride out indexing/propagation races.
+                    await new Promise(r => setTimeout(r, 3000));
+                    const dispatchDelays = [0, 2000, 5000];
+                    let dispatchResult = { code: 1, stdout: '', stderr: '' };
+                    for (const delay of dispatchDelays) {
+                        if (delay > 0) await new Promise(r => setTimeout(r, delay));
+                        dispatchResult = await runGhWorkflow(['workflow', 'run', 'radius-verify-credentials.yml', '-f', 'environment=' + envName, '--repo', targetRepo]);
+                        if (dispatchResult.code === 0) break;
+                    }
+
+                    if (dispatchResult.code === 0) {
+                        steps.push('✅ Verify workflow dispatched.');
+                        await new Promise(r => setTimeout(r, 5000));
+                        const runsResult = await runGh(['run', 'list', '--workflow=radius-verify-credentials.yml', '--limit', '1', '--json', 'databaseId,status,url', '--repo', targetRepo]);
+                        try {
+                            const runs = JSON.parse(runsResult.stdout);
+                            if (runs.length > 0) {
+                                verifyRunId = runs[0].databaseId;
+                                verifyRunUrl = 'https://github.com/' + targetRepo + '/actions/runs/' + verifyRunId;
+                                steps.push('Verify run: ' + verifyRunUrl);
+                            }
+                        } catch {}
+                        steps.push('Credentials verification dispatched. Deploy your application from the Environments list when ready.');
+                    } else {
+                        const detail = (dispatchResult.stderr || dispatchResult.stdout || '').trim() || 'The GitHub CLI request failed.';
+                        steps.push('❌ Could not dispatch verify workflow: ' + detail);
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            error: 'Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. ' + detail,
+                            environment: envName,
+                            provider,
+                            repo: targetRepo,
+                            stateBackend: OCI_STATE_BACKEND,
+                            stateRegistry,
+                            stateArchive: DEFAULT_STATE_ARCHIVE,
+                            steps
+                        }));
+                        return;
+                    }
                 }
 
                 // Record dispatch markers so the deploy monitor can track the
@@ -830,6 +973,7 @@ function createRequestHandler(instanceId) {
                     stateRegistry,
                     stateArchive: DEFAULT_STATE_ARCHIVE,
                     verifyRunUrl,
+                    pullRequestUrl,
                     steps
                 }));
             } catch (e) {
@@ -947,6 +1091,8 @@ function createRequestHandler(instanceId) {
             const logTotal = logBase + logs.length;
             const status = entry?.state?.deployStatus || 'pending';
             const error = entry?.state?.deployError || null;
+            const errorKind = entry?.state?.deployErrorKind || null;
+            const errorBranch = entry?.state?.deployErrorBranch || null;
             const startedAt = entry?.state?.deployStartedAt || null;
             const finishedAt = entry?.state?.deployFinishedAt || null;
             const deployedGraph = entry?.state?.deployedGraph || null;
@@ -963,9 +1109,9 @@ function createRequestHandler(instanceId) {
             if (Number.isFinite(since)) {
                 const startIdx = Math.max(0, since - logBase);
                 const logsNew = logs.slice(startIdx);
-                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
             } else {
-                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
             }
             return;
         }
@@ -1130,6 +1276,12 @@ function createRequestHandler(instanceId) {
                             ? gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"])
                             : Promise.resolve(""),
                     ]);
+                    // Only surface environments created by this extension. They are
+                    // tagged with a RADIUS_MANAGED variable at creation time; any
+                    // environment without it was created outside Radius and is
+                    // filtered out below.
+                    if (!/^RADIUS_MANAGED$/m.test(varsRaw)) return null;
+
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
@@ -1161,8 +1313,9 @@ function createRequestHandler(instanceId) {
                     return { name, provider, status, webUrl };
                 }));
 
-                respond({ environments });
-                envListCache.set(repo, { at: Date.now(), payload: { environments } });
+                const managedEnvironments = environments.filter(Boolean);
+                respond({ environments: managedEnvironments });
+                envListCache.set(repo, { at: Date.now(), payload: { environments: managedEnvironments } });
             } catch (e) {
                 respond({ environments: [], error: e.message });
             }
@@ -1193,8 +1346,8 @@ function createRequestHandler(instanceId) {
                     if (!raw) continue;
                     let decoded = "";
                     try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
-                    const m = decoded.match(/application\s+['"]([^'"]+)['"]/) || decoded.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
-                    if (m) { appName = m[1]; break; }
+                    const name = extractAppName(decoded);
+                    if (name) { appName = name; break; }
                 }
                 respond({ applications: [{ name: appName }] });
             } catch (e) {
@@ -1218,63 +1371,73 @@ function createRequestHandler(instanceId) {
             const appName = repo.split("/").pop() || repo;
             try {
                 // A "deployment" is the application deployed into a GitHub
-                // Environment. List every deployment record for the repo and
-                // collapse to the latest per environment, mapping its GitHub
-                // deployment-status state to our success/pending/failed model.
+                // Environment by the run-rad-commands workflow. List every
+                // deployment record for the repo (newest-first) and, per
+                // environment, resolve the latest record that was actually
+                // produced by the deploy workflow — skipping records created by
+                // other environment-bound workflows (verify-credentials, etc.).
                 const raw = await gh(["api", "--paginate", `/repos/${repo}/deployments?per_page=100`, "--jq", ".[] | (.id|tostring) + \"\\t\" + (.environment // \"\")"]);
                 const rows = raw ? raw.split("\n").filter(Boolean).map((l) => {
                     const t = l.indexOf("\t");
                     return t === -1 ? { id: l, environment: "" } : { id: l.slice(0, t), environment: l.slice(t + 1) };
                 }) : [];
-                // Latest deployment id per environment (list is newest-first).
-                const latestByEnv = new Map();
+                // Group deployment ids per environment, preserving newest-first order.
+                const idsByEnv = new Map();
                 for (const r of rows) {
                     if (!r.environment) continue;
-                    if (!latestByEnv.has(r.environment)) latestByEnv.set(r.environment, r.id);
+                    if (!idsByEnv.has(r.environment)) idsByEnv.set(r.environment, []);
+                    idsByEnv.get(r.environment).push(r.id);
                 }
-                const deployments = await Promise.all(Array.from(latestByEnv.entries()).map(async ([environment, id]) => {
-                    const [stateRaw, varsRaw] = await Promise.all([
-                        gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]),
-                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]),
-                    ]);
-                    const tab = stateRaw.indexOf("\t");
-                    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-                    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-                    // Link the status to the GitHub Actions run that produced it.
-                    let runUrl = "";
-                    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-                    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-
-                    // Deleting an application dispatches delete-application.yml,
-                    // which (via its environment-bound job) creates a fresh
-                    // deployment record for this environment. So the latest record
-                    // may belong to a delete run, not a deploy. Inspect the run: if
-                    // the app's most recent run is a SUCCESSFUL delete, the app no
-                    // longer exists in that environment, so drop it from the list.
-                    let isDelete = false;
-                    let deleteConclusion = "";
-                    if (m) {
-                        const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-                        const rt = runInfo.indexOf("\t");
-                        const runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-                        deleteConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
-                        isDelete = /(^|\/)delete-application\.yml$/.test(runPath);
-                    }
-                    if (isDelete && deleteConclusion === "success") return null;
-
-                    let status = "pending";
-                    if (isDelete) {
-                        // A delete run that hasn't succeeded (in progress or failed):
-                        // surface it as "deleting" so the row reflects the pending
-                        // teardown rather than a misleading deploy status.
-                        status = "deleting";
-                    } else if (state === "success") status = "success";
-                    else if (state === "failure" || state === "error") status = "failed";
+                const deployments = await Promise.all(Array.from(idsByEnv.entries()).map(async ([environment, ids]) => {
+                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
                     let provider = "";
                     if (/AZURE_/.test(varsRaw)) provider = "azure";
                     else if (/AWS_/.test(varsRaw)) provider = "aws";
-                    return { app: appName, environment, provider, status, deploymentId: id, runUrl };
+
+                    // Walk this environment's deployment records newest-first and
+                    // use the first one whose GitHub Actions run is the deploy
+                    // workflow (run-rad-commands.yml) or a delete of the app. Any
+                    // other workflow's records (e.g. verify-credentials) are
+                    // skipped so they never appear as deployments.
+                    for (const id of ids) {
+                        const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
+                        const tab = stateRaw.indexOf("\t");
+                        const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
+                        const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+                        let runUrl = "";
+                        const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+                        if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
+                        else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
+
+                        // Identify which workflow produced this deployment record.
+                        let runPath = "";
+                        let runConclusion = "";
+                        if (m) {
+                            const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+                            const rt = runInfo.indexOf("\t");
+                            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
+                            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+                        }
+                        const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+                        const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+
+                        // Not a deploy or delete record (e.g. verify-credentials):
+                        // skip it and keep looking further back in history.
+                        if (!isDeploy && !isDelete) continue;
+
+                        // A successful delete means the app no longer exists in this
+                        // environment, so it should not be listed at all.
+                        if (isDelete && runConclusion === "success") return null;
+
+                        let status = "pending";
+                        if (isDelete) {
+                            status = "deleting";
+                        } else if (state === "success") status = "success";
+                        else if (state === "failure" || state === "error") status = "failed";
+                        return { app: appName, environment, provider, status, deploymentId: id, runUrl };
+                    }
+                    // No deploy/delete record for this environment — nothing to show.
+                    return null;
                 }));
                 respond({ deployments: deployments.filter(Boolean) });
             } catch (e) {
@@ -1649,7 +1812,6 @@ function createRequestHandler(instanceId) {
                     entry.state.envName = data.environment;
                     entry.state.deployProvider = data.provider;
                     entry.state.deployingRepo = data.targetRepo;
-                    entry.state.deployingBranch = data.branch || 'main';
                     entry.state.appFile = data.appFile;
 
                     // Snapshot the planned graph (nodes start as pending). If the
@@ -1662,11 +1824,22 @@ function createRequestHandler(instanceId) {
                     entry.state.deployLogBase = 0;
                     entry.state.deployStatus = 'in_progress';
                     entry.state.deployError = null;
+                    entry.state.deployErrorKind = null;
+                    entry.state.deployErrorBranch = null;
                     entry.state.deployRunUrl = null;
                     entry.state.deployRunId = null;
 
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
-                    const branch = data.branch || entry.state.deployingBranch || 'main';
+                    // Resolve the branch to deploy. When the client doesn't specify
+                    // one, fall back to the repo's real default branch (which may be
+                    // master/develop, not main) so the dispatch --ref and the
+                    // "branch not pushed" guard below target a branch that exists.
+                    let branch = data.branch || '';
+                    if (!branch) {
+                        const detectedDefault = (await runCommand('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).catch(() => '') || '').trim();
+                        branch = detectedDefault || 'main';
+                    }
+                    entry.state.deployingBranch = branch;
                     const provider = data.provider || 'azure';
                     // Bounded ring buffer: a verbose deploy can stream tens of
                     // thousands of recipe/terraform log lines. Keeping them all in
@@ -1738,13 +1911,53 @@ function createRequestHandler(instanceId) {
                         // default) rather than relying on a verify → deploy chain.
                         addLog('━━ Deploying Radius application ━━');
                         const envForDeploy = entry.state.envName || data.environment || 'dev';
-                        const deployWorkflowFile = 'run-rad-commands.yml';
+                        const deployWorkflowFile = DEPLOY_WORKFLOW_FILE;
+                        // Deploy the SELECTED branch's code (worktree-consistent): run
+                        // the workflow on `branch` so it checks out and `rad deploy`s
+                        // that branch's app.bicep — the same file the params below are
+                        // computed from — instead of always deploying the default branch.
+                        // `branch` is already resolved to the selected branch or the
+                        // repo's real default above, so it's never empty here.
+                        const deployRef = branch;
+
+                        // Fail fast (with clear, actionable guidance) when the
+                        // selected branch hasn't been pushed to the remote yet. A
+                        // worktree/feature branch that only exists locally has no
+                        // ref on GitHub, so both publishing the workflow files and
+                        // dispatching the run against `--ref <branch>` are doomed.
+                        // We confirm the repo itself is reachable (its default
+                        // branch resolves) before blaming the branch, so a
+                        // transient/auth error isn't misreported as "not pushed".
+                        if (deployRef) {
+                            const refSha = await getBranchHeadSha(repo, deployRef);
+                            if (!refSha) {
+                                const repoDefault = await getDefaultBranch(repo);
+                                if (repoDefault) {
+                                    const pushCmd = 'git push -u origin ' + deployRef;
+                                    addLog('❌ Branch "' + deployRef + '" has not been pushed to ' + repo + '.');
+                                    addLog('   Push it and redeploy:  ' + pushCmd);
+                                    entry.state.deployError = 'The branch "' + deployRef + '" hasn\'t been pushed to ' + repo + ' yet, so there\'s nothing on GitHub to deploy. Push it and try again:\n\n    ' + pushCmd;
+                                    entry.state.deployErrorKind = 'branch-not-pushed';
+                                    entry.state.deployErrorBranch = deployRef;
+                                    entry.state.deployStatus = 'failed';
+                                    return;
+                                }
+                            }
+                        }
                         const runGhDeploy = (args, envOverride) => new Promise((resolve) => {
                             cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
                                 resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                             });
                         });
-                        const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '-f', 'environment=' + envForDeploy, '--repo', repo];
+                        // Like runGhDeploy but feeds a value (e.g. a secret JSON) over
+                        // stdin so it never lands on the argv/process list.
+                        const runGhDeployStdin = (args, stdin, envOverride) => new Promise((resolve) => {
+                            const child = cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
+                                resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                            });
+                            if (stdin !== undefined) child.stdin?.end(stdin);
+                        });
+                        const dispatchArgs = ['workflow', 'run', deployWorkflowFile, '--ref', deployRef, '-f', 'environment=' + envForDeploy, '--repo', repo];
 
                         // Recompute the rad commands from the CURRENT app.bicep at
                         // dispatch time (rather than relying on the RADIUS_RAD_COMMANDS
@@ -1753,6 +1966,13 @@ function createRequestHandler(instanceId) {
                         // `rad app graph` so the deployed application graph is rendered
                         // as part of the run. Secret params are still appended by the
                         // workflow from the RADIUS_DEPLOY_PARAMS secret.
+                        //
+                        // A fatal secret-provisioning problem (the deployed bicep needs a
+                        // secret param the environment can't be made to carry) is recorded
+                        // here and short-circuits the dispatch below, so we never start a
+                        // run that is guaranteed to fail `rad deploy` for a missing
+                        // required parameter.
+                        let deploySecretError = null;
                         try {
                             let bicepPath = '.radius/app.bicep';
                             let bicepSource = await fetchFileForSelection(entry, repo, branch, '.radius/app.bicep');
@@ -1763,12 +1983,54 @@ function createRequestHandler(instanceId) {
                             if (bicepSource) {
                                 const parsed = appParams(bicepSource);
                                 const resolved = resolveDeployParams(parsed);
-                                const { public: publicParams } = partitionParams(parsed, resolved);
+                                const { public: publicParams, secret: secretParams } = partitionParams(parsed, resolved);
+
+                                // Ensure the environment carries the secret params the
+                                // deployed app.bicep needs (e.g. an @secure() password).
+                                // The workflow can ONLY read these from the
+                                // RADIUS_DEPLOY_PARAMS secret — unlike the public rad
+                                // commands, they can't be passed inline as a dispatch input
+                                // — so if the secret is absent the deploy fails for a
+                                // missing required parameter. Env creation seeds it, but
+                                // that step is skipped when app.bicep isn't present yet, so
+                                // reconcile here: provision the secret from the SAME branch
+                                // bicep when the environment has none. If one already
+                                // exists, leave it untouched so an auto-generated value
+                                // stays stable across redeploys (we can't read it back to
+                                // compare).
+                                if (Object.keys(secretParams).length > 0) {
+                                    const deployParamsPresent = async () => {
+                                        const r = await runGhDeploy(['api', `/repos/${repo}/environments/${encodeURIComponent(envForDeploy)}/secrets`, '--jq', '.secrets[].name']);
+                                        return (r.stdout || '').split('\n').map(s => s.trim()).includes('RADIUS_DEPLOY_PARAMS');
+                                    };
+                                    if (!(await deployParamsPresent())) {
+                                        addLog('Provisioning RADIUS_DEPLOY_PARAMS for "' + envForDeploy + '" (' + Object.keys(secretParams).join(', ') + ')...');
+                                        const setArgs = ['secret', 'set', 'RADIUS_DEPLOY_PARAMS', '--env', envForDeploy, '--repo', repo];
+                                        let setRes = await runGhDeployStdin(setArgs, JSON.stringify(secretParams));
+                                        if (setRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
+                                            // The injected OAuth token may lack the scope to
+                                            // write environment secrets; retry with it
+                                            // stripped so gh falls back to the keyring cred.
+                                            const fe = { ...process.env }; delete fe.GH_TOKEN; delete fe.GITHUB_TOKEN;
+                                            const retry = await runGhDeployStdin(setArgs, JSON.stringify(secretParams), fe);
+                                            if (retry.code === 0) setRes = retry;
+                                        }
+                                        if (setRes.code !== 0) {
+                                            deploySecretError = 'Could not provision RADIUS_DEPLOY_PARAMS on environment "' + envForDeploy + '": ' + ((setRes.stderr || '').trim() || 'unknown error') + '. The deploy would fail for a missing required parameter (' + Object.keys(secretParams).join(', ') + '), so it was not started.';
+                                            addLog('❌ ' + deploySecretError);
+                                        } else if (!(await deployParamsPresent())) {
+                                            deploySecretError = 'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' + envForDeploy + '". The deploy would fail for a missing required parameter (' + Object.keys(secretParams).join(', ') + '), so it was not started.';
+                                            addLog('❌ ' + deploySecretError);
+                                        } else {
+                                            addLog('✅ RADIUS_DEPLOY_PARAMS is set on "' + envForDeploy + '".');
+                                        }
+                                    }
+                                }
+
                                 const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
-                                const appMatch = bicepSource.match(/application\s+['"]([^'"]+)['"]/) || bicepSource.match(/name:\s*string\s*=\s*['"]([^'"]+)['"]/);
-                                const appName = appMatch ? appMatch[1] : '';
+                                const appName = extractAppName(bicepSource);
                                 const commands = [deployCmd];
-                                if (appName) commands.push('app graph --application ' + appName);
+                                if (appName) commands.push('app graph --application ' + appName + ' --preview');
                                 const radCommandsInput = JSON.stringify(commands);
                                 dispatchArgs.push('-f', 'rad_commands=' + radCommandsInput);
                                 addLog('Deploying with rad commands: ' + commands.join('  |  '));
@@ -1778,8 +2040,27 @@ function createRequestHandler(instanceId) {
                         } catch (e) {
                             addLog('⚠ Could not compute rad commands from bicep (' + e.message + '); falling back to the environment default.');
                         }
+                        // Fail fast: a required secret param couldn't be provisioned, so
+                        // starting the run would only produce a guaranteed `rad deploy`
+                        // failure. Surface the reason and stop before dispatching.
+                        if (deploySecretError) {
+                            entry.state.deployError = deploySecretError;
+                            entry.state.deployStatus = 'failed';
+                            return;
+                        }
+                        // Make sure the workflow files exist on the branch we're
+                        // about to dispatch on. The env-creation flow only commits
+                        // them to the default branch, so a feature/worktree branch
+                        // usually needs them published first.
+                        try {
+                            await ensureDeployWorkflowsOnBranch(repo, deployRef, envForDeploy, addLog);
+                        } catch (e) {
+                            addLog('⚠ Could not publish deploy workflows to branch "' + deployRef + '": ' + (e.message || e) +
+                                '. The dispatch below will fail if the branch has no run-rad-commands workflow.');
+                        }
+
                         const deployDispatchedAt = Date.now();
-                        addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') for environment "' + envForDeploy + '"...');
+                        addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') on branch "' + deployRef + '" for environment "' + envForDeploy + '"...');
                         let dispatchDeployRes = await runGhDeploy(dispatchArgs);
                         if (dispatchDeployRes.code !== 0 && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) {
                             // The injected OAuth token may lack the `workflow` scope; retry
@@ -1793,9 +2074,21 @@ function createRequestHandler(instanceId) {
                         if (dispatchDeployRes.code !== 0) {
                             const de = (dispatchDeployRes.stderr || '').trim();
                             addLog('❌ Failed to dispatch the run rad commands workflow: ' + de);
+                            // A "No ref found" (or unresolved ref) dispatch error
+                            // means the branch isn't on the remote — surface the same
+                            // clean, actionable "push the branch" guidance/UI.
+                            if (/no ref found|could not resolve|no commit found for the ref/i.test(de)) {
+                                const pushCmd = 'git push -u origin ' + deployRef;
+                                addLog('   Push it and redeploy:  ' + pushCmd);
+                                entry.state.deployError = 'The branch "' + deployRef + '" hasn\'t been pushed to ' + repo + ' yet, so there\'s nothing on GitHub to deploy. Push it and try again:\n\n    ' + pushCmd;
+                                entry.state.deployErrorKind = 'branch-not-pushed';
+                                entry.state.deployErrorBranch = deployRef;
+                                entry.state.deployStatus = 'failed';
+                                return;
+                            }
                             const scopeHint = /workflow.{0,20}scope/i.test(de)
                                 ? ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-                                : ' Ensure ' + deployWorkflowFile + ' exists on the default branch and that GitHub Actions are enabled for ' + repo + '.';
+                                : ' Ensure ' + deployWorkflowFile + ' exists on branch "' + deployRef + '" (push the branch so it carries the app.bicep and workflow files) and that GitHub Actions are enabled for ' + repo + '.';
                             entry.state.deployError = 'Failed to start the run rad commands workflow (' + deployWorkflowFile + ') on ' + repo + '. ' + (de || 'The dispatch request failed.') + scopeHint;
                             entry.state.deployStatus = 'failed';
                             return;
@@ -2199,12 +2492,17 @@ function createRequestHandler(instanceId) {
         await ensureVendorScripts();
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         const entry = servers.get(instanceId);
-        let page = url.searchParams.get("page") || entry?.page || "environment";
+        const requestedPage = url.searchParams.get("page");
+        let page = requestedPage || entry?.page || "environment";
         const state = entry?.state || {};
-        // If a deployment is actively in progress, redirect the environment /
-        // credentials pages to the live deploying page so the user always lands
-        // on the in-flight deployment instead of re-triggering one.
-        if ((page === "environment" || page === "credentials") && state.deployStatus === "in_progress") {
+        // While a deployment is actively in progress, an IMPLICIT landing on the
+        // environment / credentials page (a bare "/" load with no ?page=, e.g. a
+        // panel re-open or a heartbeat reload that lost the query) is redirected
+        // to the live deploying page so the user lands on the in-flight run. An
+        // EXPLICIT navigation — a top-nav "Environments" click or any URL that
+        // carries ?page= — is always honored, so the user can freely leave the
+        // deploying view while a deploy is still being monitored.
+        if (!requestedPage && (page === "environment" || page === "credentials") && state.deployStatus === "in_progress") {
             page = "deploying";
         }
         const renderer = PAGE_RENDERERS[page];
@@ -2229,7 +2527,20 @@ const PAGE_RENDERERS = {
 };
 
 function preferredPortForInstance(instanceId) {
-    const hash = createHash("sha256").update(String(instanceId)).digest();
+    // Namespace the deterministic port by the Copilot session. Every session is
+    // told to open the canvas with the same instanceId ("radius-panel"), so
+    // hashing instanceId alone makes all concurrent sessions resolve to one
+    // global port. Only the first session to bind it wins; the rest fall back to
+    // an ephemeral port (listen(0)) while their webviews keep pinging the shared
+    // port — which is now owned by a different, independently-churning process.
+    // From those webviews' perspective the server appears to flap down/up as the
+    // owning process is reaped/respawned, and the client heartbeat reloads the
+    // page on every recovery — the "page keeps reloading" symptom. Mixing the
+    // session id into the hash gives each session its own stable port. It stays
+    // stable across respawns within the same session, so the heartbeat's
+    // reconnect-and-reload still restores a live page after a genuine restart.
+    const sessionId = process.env.COPILOT_AGENT_SESSION_ID || process.env.SESSION_ID || "";
+    const hash = createHash("sha256").update(sessionId + "\u0000" + String(instanceId)).digest();
     // Map into a high, mostly-unprivileged range (20000–60000) to reduce the
     // chance of clashing with other listeners.
     return 20000 + (hash.readUInt32BE(0) % 40000);
