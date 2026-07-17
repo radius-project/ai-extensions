@@ -860,6 +860,13 @@ function radiusRenderGraph(containerId, resources, options) {
             var t = ev.target;
             var a = (t && t.closest) ? t.closest('#node-popup a[href]') : null;
             if (!a) return;
+
+            // Avoid double-opening: a pointer interaction often triggers both
+            // `pointerup` and a subsequent `click`.
+            var now = Date.now();
+            if (ev.type === 'pointerup') document.__radiusPopupLinkLastPointerUpAt = now;
+            else if (ev.type === 'click' && document.__radiusPopupLinkLastPointerUpAt && (now - document.__radiusPopupLinkLastPointerUpAt) < 500) return;
+
             ev.preventDefault();
             ev.stopPropagation();
             var href = a.getAttribute('href');
