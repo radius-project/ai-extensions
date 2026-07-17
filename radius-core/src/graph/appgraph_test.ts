@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { applicationGraphToResources } from "./appgraph.js";
-import { buildResourceID, computeDiffHash } from "./model.js";
+import { buildResourceID } from "./model.js";
 
 const frontendId = buildResourceID("Radius.Compute/containers", "frontend");
 const cacheId = buildResourceID("Radius.Data/redisCaches", "cache");
 const databaseId = buildResourceID("Radius.Data/postgreSQLDatabases", "database");
+const frontendHash = `sha256:${"a".repeat(64)}`;
+const cacheHash = `sha256:${"b".repeat(64)}`;
+const databaseHash = `sha256:${"c".repeat(64)}`;
+const alternateHash = `sha256:${"d".repeat(64)}`;
 
 function sampleAppGraph() {
   return {
@@ -16,7 +20,7 @@ function sampleAppGraph() {
         provisioningState: "NotSpecified",
         connections: [{ id: cacheId, direction: "Outbound" }],
         outputResources: [],
-        diffHash: "sha256:abc",
+        diffHash: frontendHash,
       },
       {
         id: cacheId,
@@ -25,7 +29,7 @@ function sampleAppGraph() {
         provisioningState: "NotSpecified",
         connections: [],
         outputResources: [],
-        diffHash: "sha256:def",
+        diffHash: cacheHash,
       },
     ],
   };
@@ -39,7 +43,7 @@ describe("applicationGraphToResources", () => {
     expect(frontend.name).toBe("frontend");
     expect(frontend.type).toBe("Radius.Compute/containers");
     expect(frontend.definitionFile).toBe(".radius/app.bicep");
-    expect(frontend.diffHash).toBe("sha256:abc");
+    expect(frontend.diffHash).toBe(frontendHash);
   });
 
   it("preserves outbound edges and rebuilds inbound edges", () => {
@@ -75,7 +79,7 @@ describe("applicationGraphToResources", () => {
       provisioningState: "NotSpecified",
       connections: [],
       outputResources: [],
-      diffHash: "sha256:ghi",
+      diffHash: databaseHash,
     });
 
     const resources = applicationGraphToResources(graph);
@@ -102,17 +106,29 @@ describe("applicationGraphToResources", () => {
     const resources = applicationGraphToResources([
       { name: "no-id", type: "Radius.Compute/containers" },
       { id: "x", name: "no-type" },
-      { id: frontendId, name: "frontend", type: "Radius.Compute/containers" },
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", diffHash: frontendHash },
     ]);
     expect(resources).toHaveLength(1);
     expect(resources[0].id).toBe(frontendId);
   });
 
-  it("computes a diffHash when the input lacks one", () => {
-    const resources = applicationGraphToResources([
+  it("throws when the input lacks a diffHash", () => {
+    expect(() => applicationGraphToResources([
       { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: { image: "node:18" } },
-    ]);
-    expect(resources[0].diffHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    ])).toThrow(/missing a valid diffHash/);
+  });
+
+  it.each([
+    "sha256:",
+    "sha256:abc",
+    `sha256:${"g".repeat(64)}`,
+    `SHA256:${"a".repeat(64)}`,
+    `sha256:${"a".repeat(63)}`,
+    `sha256:${"a".repeat(65)}`,
+  ])("throws when the input has malformed diffHash %s", (diffHash) => {
+    expect(() => applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", diffHash },
+    ])).toThrow(/missing a valid diffHash/);
   });
 
   it("orders synthesized inbound edges deterministically regardless of input order", () => {
@@ -124,14 +140,16 @@ describe("applicationGraphToResources", () => {
         name: "frontend",
         type: "Radius.Compute/containers",
         connections: [{ id: cacheId, direction: "Outbound" }],
+        diffHash: frontendHash,
       },
       {
         id: databaseId,
         name: "database",
         type: "Radius.Data/postgreSQLDatabases",
         connections: [{ id: cacheId, direction: "Outbound" }],
+        diffHash: databaseHash,
       },
-      { id: cacheId, name: "cache", type: "Radius.Data/redisCaches", connections: [] },
+      { id: cacheId, name: "cache", type: "Radius.Data/redisCaches", connections: [], diffHash: cacheHash },
     ]);
     const cache = resources.find((r) => r.id === cacheId);
     const sorted = [...cache.connections].sort((a: any, b: any) =>
@@ -140,20 +158,16 @@ describe("applicationGraphToResources", () => {
     expect(cache.connections).toEqual(sorted);
   });
 
-  it("passes the resource's dependsOn into the fallback diffHash", () => {
-    const properties = { image: "node:18" };
-    const dependsOn = [cacheId, databaseId];
+  it("preserves diffHash from input even when dependsOn is present", () => {
     const resources = applicationGraphToResources([
-      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties, dependsOn },
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: { image: "node:18" }, dependsOn: [cacheId, databaseId], diffHash: alternateHash },
     ]);
-    expect(resources[0].diffHash).toBe(computeDiffHash(properties, dependsOn));
+    expect(resources[0].diffHash).toBe(alternateHash);
   });
 
-  it("treats a non-array dependsOn as empty when computing fallback diffHash", () => {
-    const properties = { image: "node:18" };
-    const resources = applicationGraphToResources([
-      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties, dependsOn: "oops" },
-    ]);
-    expect(resources[0].diffHash).toBe(computeDiffHash(properties, []));
+  it("throws when diffHash is missing even with dependsOn present", () => {
+    expect(() => applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: { image: "node:18" }, dependsOn: [cacheId] },
+    ])).toThrow(/missing a valid diffHash/);
   });
 });

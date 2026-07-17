@@ -12,12 +12,7 @@
 export const RADIUS_CORE_VERSION = "0.1.0";
 
 export {
-  MODELED_GRAPH_DEFAULTS,
-  computeDiffHash,
-  buildModeledGraph,
-  stripAPIVersion,
   addInboundConnections,
-  buildResourceID,
   applicationGraphToResources,
   computeGraphDiff,
 } from "./graph/index.js";
