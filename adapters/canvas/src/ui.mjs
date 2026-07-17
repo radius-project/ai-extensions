@@ -20,8 +20,11 @@ export function radiusMark(size = 28) {
         + `<circle cx="64" cy="64" r="8" fill="#fff"/></svg>`;
 }
 
-// Top-level segmented pill navigation: Applications / Environments / Deployments.
-// `active` is one of: 'applications' | 'environments' | 'deployments'.
+// Top-level navigation: Applications / Environments / Deployments.
+// Flat bar (Figma "TabBar"): each tab is a bordered icon box + label; the active
+// tab has dark bold text + an orange underline along the bottom of the bar,
+// inactive tabs are muted. `active` is one of:
+// 'applications' | 'environments' | 'deployments'.
 export function topNav(active) {
     const tabs = [
         { id: 'applications', label: 'Applications', page: 'graph', icon: iconApplications() },
@@ -29,8 +32,10 @@ export function topNav(active) {
         { id: 'deployments', label: 'Deployments', page: 'deploying', icon: iconDeployments() },
     ];
     const items = tabs.map(t => {
-        const cls = t.id === active ? 'rad-topnav__pill rad-topnav__pill--active' : 'rad-topnav__pill';
-        return `<a href="/?page=${t.page}" class="${cls}">${t.icon}<span>${t.label}</span></a>`;
+        const cls = t.id === active ? 'rad-topnav__tab rad-topnav__tab--active' : 'rad-topnav__tab';
+        return `<a href="/?page=${t.page}" class="${cls}">`
+            + `<span class="rad-topnav__icon">${t.icon}</span>`
+            + `<span class="rad-topnav__label">${t.label}</span></a>`;
     }).join('');
     return `<nav class="rad-topnav">${items}</nav>`;
 }
@@ -74,6 +79,39 @@ export function statusPill(id, kind, html) {
     return `<div id="${id}" class="rad-status rad-status--${kind}">${html}</div>`;
 }
 
+// Floating feedback widget (bottom-right). A dark round chat button that toggles
+// a small popover with "Share feedback" and "Learn about Radius" links. Rendered
+// once in the page shell so it appears on every page.
+export function feedbackWidget() {
+    const chat = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">`
+        + `<path d="M12 3C6.48 3 2 6.94 2 11.5c0 2.3 1.14 4.36 2.98 5.84L4 21l4.2-1.9c1.16.38 2.44.6 3.8.6 5.52 0 10-3.94 10-8.7S17.52 3 12 3z" `
+        + `stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/>`
+        + `<circle cx="8.5" cy="11.5" r="1.1" fill="#fff"/><circle cx="12" cy="11.5" r="1.1" fill="#fff"/><circle cx="15.5" cy="11.5" r="1.1" fill="#fff"/></svg>`;
+    return `<div id="rad-feedback" class="rad-feedback">
+  <div id="rad-feedback-pop" class="rad-feedback__pop" style="display:none;">
+    <a class="rad-feedback__link" href="https://github.com/radius-project/ai-extensions/issues/new" target="_blank" rel="noopener">Share feedback</a>
+    <a class="rad-feedback__link" href="https://radapp.io" target="_blank" rel="noopener">Learn about Radius</a>
+  </div>
+  <button id="rad-feedback-btn" class="rad-feedback__btn" type="button" aria-label="Share feedback" aria-haspopup="dialog" aria-expanded="false">${chat}</button>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('rad-feedback-btn');
+  var pop = document.getElementById('rad-feedback-pop');
+  if (!btn || !pop) return;
+  function toggle(show){
+    var open = show === undefined ? pop.style.display === 'none' : show;
+    pop.style.display = open ? 'flex' : 'none';
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  btn.addEventListener('click', function(e){ e.stopPropagation(); toggle(); });
+  document.addEventListener('click', function(e){
+    if (!document.getElementById('rad-feedback').contains(e.target)) toggle(false);
+  });
+})();
+</script>`;
+}
+
 // A resource node card used in the app graph (icon + title + type label).
 export function nodeCard(title, typeLabel, iconHtml) {
     return `<div class="rad-node">`
@@ -90,12 +128,15 @@ export function nodeCard(title, typeLabel, iconHtml) {
 // 96×96 icons); 'cover' scales to fill the box height and crops transparent
 // side padding (used for the wide 96×48 deployments icon so its glyph renders at
 // the same visual height as the square ones instead of appearing half-size).
-function navIcon(dataUri, size = 22, fit = 'contain') {
+// A nav icon glyph. Painted in the theme's default text color (via a CSS mask)
+// so it stays legible in light/dark and does NOT dim on inactive tabs — only the
+// label changes color for the active/inactive state (matches Figma).
+function navIcon(dataUri, size = 20, fit = 'contain') {
     return `<span aria-hidden="true" style="display:inline-block;width:${size}px;height:${size}px;`
-        + `background-color:currentColor;`
+        + `background-color:var(--rad-text, currentColor);`
         + `-webkit-mask:url(${dataUri}) center/${fit} no-repeat;`
         + `mask:url(${dataUri}) center/${fit} no-repeat;"></span>`;
 }
 function iconApplications() { return navIcon(ICON_APP); }
 function iconEnvironments() { return navIcon(ICON_ENV); }
-function iconDeployments() { return navIcon(ICON_DEP, 22, 'cover'); }
+function iconDeployments() { return navIcon(ICON_DEP, 20, 'cover'); }

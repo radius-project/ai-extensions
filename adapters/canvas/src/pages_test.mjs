@@ -91,6 +91,30 @@ describe("plannedGraphPage", () => {
     });
 });
 
+describe("environmentPage — Credentials/Profiles restructure", () => {
+    it("renders Environments and Credentials subtabs", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain('data-subtab="environments"');
+        expect(html).toContain('data-subtab="credentials"');
+    });
+
+    it("activates the Credentials subtab when state.activeSubtab is 'credentials'", () => {
+        const html = environmentPage({ contextRepo: "octo/app", activeSubtab: "credentials" });
+        // The active pane is the one NOT display:none'd.
+        expect(html).toContain('id="pane-credentials"');
+        expect(html).toContain("Create Credential Profile");
+    });
+
+    it("drives environment creation from a saved credential profile, not inline tenant/sub", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain('id="env-profile-select"');
+        expect(html).toContain("/api/credential-profiles");
+        expect(html).toContain("/api/save-credential-profile");
+        // The old inline provider picker was removed from the env-create form.
+        expect(html).not.toContain('id="env-provider-select"');
+    });
+});
+
 describe("remaining pages smoke-render without removed tokens", () => {
     const cases = [
         ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],

@@ -7,7 +7,7 @@
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
 import { getInlineVendorScripts } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
-import { topNav, radiusMark } from "./ui.mjs";
+import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
 
 // Pick the active top-nav section from a page title.
 function navFromTitle(title) {
@@ -34,8 +34,16 @@ export function pageShell(title, bodyContent, activeNav) {
     color-scheme: light dark;
     --rad-brand: #da4c2a;
     --rad-brand-dark: #bb311e;
-    --rad-primary: #1a7f37;
-    --rad-primary-hover: #218a3f;
+    --rad-primary: #238741;
+    --rad-primary-hover: #1f7539;
+    /* Neutral + danger action buttons (Figma ActionButton / DeleteButton). */
+    --rad-neutral-bg: var(--background-color-segmented, #f2f3f4);
+    --rad-neutral-bg-hover: var(--background-color-segmentedControl-bg-emphasis, #e8eaec);
+    --rad-neutral-border: var(--border-color-default, #d1d5da);
+    --rad-neutral-text: var(--text-color-default, #24292e);
+    --rad-danger-text: #cf3131;
+    --rad-danger-solid: #c72222;
+    --rad-danger-solid-border: #a61a1a;
     --rad-bg: var(--background-color-default, #ffffff);
     --rad-surface: var(--background-color-default, #ffffff);
     --rad-bg-subtle: var(--background-color-segmented, #f1f1f1);
@@ -63,30 +71,40 @@ export function pageShell(title, bodyContent, activeNav) {
     flex-direction: column;
   }
 
-  /* ─── Top segmented pill nav ──────────────────────────────────────────── */
+  /* ─── Top nav (Figma TabBar) ──────────────────────────────────────────── */
   .rad-topnav {
     display: flex;
-    gap: 8px;
-    padding: 12px 16px;
+    align-items: stretch;
+    gap: 40px;
+    padding: 0 20px;
+    background: var(--rad-bg-subtle);
     border-bottom: 1px solid var(--rad-stroke);
     flex: 0 0 auto;
   }
-  .rad-topnav__pill {
+  .rad-topnav__tab {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    border-radius: var(--rad-radius-lg);
-    background: var(--rad-bg-subtle);
-    color: var(--rad-text-secondary);
+    gap: 10px;
+    padding: 12px 4px 11px;
+    color: var(--rad-text-tertiary);
     text-decoration: none;
     font-weight: 600;
-    font-size: 14px;
-    transition: background 0.15s, color 0.15s;
+    font-size: 15px;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s;
   }
-  .rad-topnav__pill:hover { background: var(--rad-bg-selected); }
-  .rad-topnav__pill--active { background: var(--rad-bg-selected); color: var(--rad-text); font-weight: 700; }
-  .rad-topnav__pill svg { flex: 0 0 auto; }
+  .rad-topnav__tab:hover { color: var(--rad-text); }
+  .rad-topnav__tab--active { color: var(--rad-text); font-weight: 700; border-bottom-color: var(--rad-brand); }
+  .rad-topnav__icon {
+    flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px;
+    border: 1px solid var(--rad-stroke);
+    border-radius: 8px;
+    background: var(--rad-surface);
+  }
+  .rad-topnav__label { white-space: nowrap; }
 
   .main-content {
     flex: 1 1 auto;
@@ -157,11 +175,14 @@ export function pageShell(title, bodyContent, activeNav) {
   button:hover, .verify-btn:hover, .rad-btn--primary:hover { background: var(--rad-primary-hover); }
   .rad-btn--brand { background: var(--rad-brand); color: #fff; }
   .rad-btn--brand:hover { background: var(--rad-brand-dark); }
-  .rad-btn--neutral { background: var(--rad-bg-selected); color: var(--rad-text); }
-  .rad-btn--neutral:hover { background: var(--rad-bg-hover); }
+  .rad-btn--neutral { background: var(--rad-neutral-bg); color: var(--rad-neutral-text); border: 1px solid var(--rad-neutral-border); }
+  .rad-btn--neutral:hover { background: var(--rad-neutral-bg-hover); border-color: #bfc4c9; }
   .rad-btn--info { background: #1f6feb; color: #fff; }
-  .rad-btn--danger { background: #c93c37; color: #fff; }
-  .rad-btn--danger:hover { background: #b52f2a; }
+  /* Delete buttons: neutral fill + red text, flip to a solid red on hover (Figma DeleteButton). */
+  .rad-btn--danger,
+  .rad-btn--danger-outline { background: var(--rad-neutral-bg); color: var(--rad-danger-text); border: 1px solid var(--rad-neutral-border); }
+  .rad-btn--danger:hover,
+  .rad-btn--danger-outline:hover { background: var(--rad-danger-solid); border-color: var(--rad-danger-solid-border); color: #fff; }
   .rad-select-wrap { position: relative; display: inline-block; }
   .rad-select-wrap select {
     appearance: none; -webkit-appearance: none; min-width: 230px; padding: 9px 40px 9px 12px;
@@ -207,6 +228,7 @@ export function pageShell(title, bodyContent, activeNav) {
   .rad-table tbody tr:first-child td { border-top: none; }
   .rad-table__env { font-weight: 700; color: var(--rad-text); }
   .rad-table__provider { color: var(--rad-text-tertiary); }
+  .rad-table__creds { color: var(--rad-text-secondary); }
   .rad-table__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
   .rad-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
   .rad-dot--success { background: #1a7f37; }
@@ -235,6 +257,25 @@ export function pageShell(title, bodyContent, activeNav) {
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }
   .field-value { font-family: var(--rad-mono); font-size: 13px; margin-top: 2px; }
   .field-value.placeholder { color: var(--rad-text-tertiary); font-style: italic; }
+
+  /* ─── Feedback widget (Figma feedback-widget) ─────────────────────────── */
+  .rad-feedback { position: fixed; right: 16px; bottom: 16px; z-index: 900; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .rad-feedback__btn {
+    margin: 0; width: 36px; height: 36px; border-radius: 10px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #383d45; border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  .rad-feedback__btn:hover { background: #2b2f36; }
+  .rad-feedback__pop {
+    flex-direction: column; min-width: 180px; background: var(--rad-surface);
+    border: 1px solid var(--rad-stroke); border-radius: 8px; overflow: hidden;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.14);
+  }
+  .rad-feedback__link {
+    padding: 10px 14px; font-size: 13px; color: #1f6feb; text-decoration: none; white-space: nowrap;
+  }
+  .rad-feedback__link + .rad-feedback__link { border-top: 1px solid var(--rad-stroke); }
+  .rad-feedback__link:hover { background: var(--rad-bg-subtle); text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -249,6 +290,7 @@ ${CLIENT_GRAPH_JS}
 <div class="main-content">
 ${bodyContent}
 </div>
+${feedbackWidget()}
 <div id="radius-reconnect-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:color-mix(in srgb, var(--rad-bg) 92%, transparent); align-items:center; justify-content:center; flex-direction:column; gap:12px; font-family:var(--rad-font);">
   <div style="width:28px; height:28px; border:3px solid var(--rad-stroke); border-top-color:var(--rad-brand); border-radius:50%; animation:radius-spin 0.8s linear infinite;"></div>
   <div style="font-size:13px; color:var(--rad-text-tertiary);">Reconnecting to Radius…</div>
@@ -383,7 +425,7 @@ export function graphHeader(activePage) {
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Application Graph</span></h1>
   <p class="rad-lede">
-    Visualize your application as you've designed it (<strong>Modeled</strong>), as you want it deployed (<strong>Planned</strong>), and as it's running in your environments (<strong>Deployed</strong>) &mdash; plus the differences between branches (<strong>Diff</strong>).
+    Visualize your application graph as you've designed it (<strong>Modeled</strong>), as you want it deployed (<strong>Planned</strong>), as it's running in your environments (<strong>Deployed</strong>), or as it differs between branches (<strong>Diff</strong>).
   </p>
 </div>
 <nav id="graph-nav" class="rad-subtabs">
@@ -1029,7 +1071,7 @@ ${graphHeader('deployed')}
     <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
 </div>
-<button id="deployed-delete-btn" class="rad-btn rad-btn--danger" style="margin:0 0 18px;" disabled>Delete Deployment</button>
+<button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0 0 18px;" disabled>Delete Deployment</button>
 
 <div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 
@@ -1051,7 +1093,7 @@ ${graphHeader('deployed')}
     <p id="deployed-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
     <div style="display:flex; justify-content:flex-end; gap:10px;">
       <button id="deployed-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="deployed-delete-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete Deployment</button>
+      <button id="deployed-delete-confirm" class="rad-btn rad-btn--danger-outline" style="margin:0;">Delete Deployment</button>
     </div>
   </div>
 </div>
@@ -1292,12 +1334,20 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
     const ctxRepo = state?.targetRepo || state?.contextRepo || '';
     const ctxBranch = state?.contextBranch || state?.plannedBranch || state?.graphBranch || 'main';
+    const activeSubtab = state?.activeSubtab === 'credentials' ? 'credentials' : 'environments';
 
     return pageShell("Environments", `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Environments</span></h1>
-  <p class="rad-lede">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
 </div>
+<nav class="rad-subtabs" id="env-subtabs">
+  <a href="/?page=environment" data-subtab="environments" class="rad-subtab${activeSubtab === 'environments' ? ' rad-subtab--active' : ''}">Environments</a>
+  <a href="/?page=credentials" data-subtab="credentials" class="rad-subtab${activeSubtab === 'credentials' ? ' rad-subtab--active' : ''}">Credentials</a>
+</nav>
+
+<!-- ══════════════ ENVIRONMENTS SUBTAB ══════════════ -->
+<section id="pane-environments" style="${activeSubtab === 'environments' ? '' : 'display:none;'}">
+<p class="rad-lede" style="margin-bottom:20px;">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
 
 <!-- Landing: New Environment button + environments table -->
 <div id="env-landing">
@@ -1309,9 +1359,9 @@ document.getElementById('back-btn').addEventListener('click', function() {
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
-      <thead><tr><th>Environment</th><th>Status</th><th>Provider</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Environment</th><th>Status</th><th>Provider</th><th>Credentials</th><th>Actions</th></tr></thead>
       <tbody id="env-table-body">
-        <tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>
+        <tr><td colspan="5" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>
       </tbody>
     </table>
   </div>
@@ -1322,124 +1372,183 @@ document.getElementById('back-btn').addEventListener('click', function() {
   <div class="rad-card">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
       <div class="rad-card__title" style="margin:0;">Create Environment</div>
-      <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; color:var(--rad-info,#0969da); cursor:pointer;">← Back to environments</button>
+      <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
     </div>
+
     <div class="rad-section">
-      <div class="rad-field"><label>Provider</label>
-        <select id="env-provider-select" class="rad-select" style="max-width:280px;">
-          <option value="azure" selected>Azure</option>
-        </select>
+      <div class="rad-field">
+        <label>Credential Profile</label>
+        <div class="rad-combo" id="env-profile-combo">
+          <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
+            <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
+            <span class="rad-combo__chevron" aria-hidden="true"></span>
+          </button>
+          <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
+            <div class="rad-combo__options" id="env-profile-options"></div>
+            <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
+            <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
+          </div>
+        </div>
+        <!-- Holds the selected profile name; read by the create flow. -->
+        <input type="hidden" id="env-profile-select" value="" />
+        <div id="env-profile-status" style="margin-top:8px; font-size:13px; display:none;"></div>
       </div>
-      <div class="rad-field" style="margin-top:12px; margin-bottom:20px;"><label>Environment Name</label>
-        <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" style="max-width:280px;" />
+
+      <div class="rad-field" style="margin-top:16px;">
+        <label>Environment Name</label>
+        <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" />
       </div>
+
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
       <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
+      <input type="hidden" id="az-client-id" value="" />
+      <input type="hidden" id="env-selected-provider" value="" />
     </div>
 
-<!-- Azure Panel -->
-<div id="panel-azure" style="${provider === 'azure' ? '' : 'display:none;'}">
-  <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 8px 0; font-size:15px; font-weight:600;">Account</h3>
-    <p style="font-size:12px; color:var(--text-color-muted, #656d76); margin:0 0 10px 0;">
-      Enter your Azure tenant and subscription, then verify your CLI login to ensure you have the necessary credentials.
-    </p>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px;">
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Tenant ID</label>
-        <input id="az-tenant-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.tenantId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
-      </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Subscription ID</label>
-        <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(oidcAzure?.subscriptionId || '')}" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px;" />
-      </div>
-    </div>
-    <input type="hidden" id="az-client-id" value="${escapeHtml(oidcAzure?.clientId || '')}" />
-    <button id="btn-verify-azure" class="rad-btn rad-btn--info" style="margin-top:0; padding:6px 14px; font-size:12px;">Verify Credentials</button>
-    <div id="verify-azure-status" style="margin-top:8px; font-size:12px; display:none;"></div>
-  </div>
+    <div class="rad-section" id="env-infra-section">
+      <div class="rad-section__title">Infrastructure</div>
+      <div class="rad-section__desc">Configure the compute infrastructure for your environment.</div>
 
-  <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 4px 0; font-size:15px; font-weight:600;">Infrastructure</h3>
-    <div id="azure-discover-status" style="font-size:11px; color:var(--text-color-muted, #656d76); margin-bottom:10px;">Discovering resources...</div>
-    <div style="display:flex; flex-direction:column; gap:4px; max-width:410px; margin-bottom:12px;">
-      <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Resource Group</label>
-      <select id="azure-rg-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-        <option value="" disabled selected>Loading...</option>
-      </select>
-      <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
-    </div>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Cluster</label>
-        <select id="azure-cluster-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+      <!-- Azure infra -->
+      <div id="panel-azure">
+        <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
+          <div class="rad-field">
+            <label>Resource Group</label>
+            <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
+          </div>
+          <div class="rad-field">
+            <label>Cluster</label>
+            <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+          </div>
+          <div class="rad-field">
+            <label>Namespace</label>
+            <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+          </div>
+        </div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Namespace</label>
-        <select id="azure-namespace-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
-      </div>
-    </div>
-  </div>
-  </div>
 
-<!-- AWS Panel -->
-<div id="panel-aws" style="${provider === 'aws' ? '' : 'display:none;'}">
-  <div style="margin-bottom:16px; padding:12px 16px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:8px;">
-    <h3 style="margin:0 0 4px 0; font-size:15px; font-weight:600;">Infrastructure</h3>
-    <div id="aws-discover-status" style="font-size:11px; color:var(--text-color-muted, #656d76); margin-bottom:10px;">Discovering resources...</div>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">EKS Cluster</label>
-        <select id="aws-cluster-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+      <!-- AWS infra -->
+      <div id="panel-aws" style="display:none;">
+        <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="rad-field">
+            <label>EKS Cluster</label>
+            <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+          </div>
+          <div class="rad-field">
+            <label>Namespace</label>
+            <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+          </div>
+          <div class="rad-field">
+            <label>VPC</label>
+            <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
+          </div>
+          <div class="rad-field">
+            <label>Subnets</label>
+            <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
+          </div>
+        </div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Namespace</label>
-        <select id="aws-namespace-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+    </div>
+
+    <div id="deploy-status" style="margin-top:12px; display:none;"></div>
+
+    <div class="rad-section">
+      <button id="deploy-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Create Environment</button>
+    </div>
+  </div>
+</div>
+</section>
+<!-- ══════════════ CREDENTIALS SUBTAB ══════════════ -->
+<section id="pane-credentials" style="${activeSubtab === 'credentials' ? '' : 'display:none;'}">
+<p class="rad-lede" style="margin-bottom:20px;">Configure and manage the credentials needed to connect to your cloud account. Each environment requires credentials to deploy infrastructure.</p>
+
+<div id="cred-landing">
+  <div id="cred-success-banner" class="rad-cred-banner" role="status" style="display:none;">
+    <span class="rad-cred-banner__check" aria-hidden="true">✓</span>
+    <span id="cred-success-banner-text" class="rad-cred-banner__text"></span>
+    <button type="button" id="cred-success-banner-close" class="rad-cred-banner__close" aria-label="Dismiss">×</button>
+  </div>
+  <button id="new-cred-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Credential Profile</button>
+  <div class="rad-table-wrap">
+    <table class="rad-table">
+      <thead><tr><th>Profile Name</th><th>Provider</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="cred-table-body">
+        <tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading credential profiles…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div id="cred-form" style="display:none;">
+  <div class="rad-card">
+    <div class="rad-card__title" style="margin:0 0 8px;">Create Credential Profile</div>
+    <div class="rad-section">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <div class="rad-field">
+          <label>Profile Name</label>
+          <input id="cred-name-input" type="text" placeholder="e.g. azure-production" />
+        </div>
+        <div class="rad-field">
+          <label>Provider</label>
+          <div class="rad-select-wrap" style="display:block;">
+            <select id="cred-provider-select" style="width:100%; min-width:0;">
+              <option value="azure">Azure</option>
+              <option value="aws">AWS</option>
+            </select>
+          </div>
+        </div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">VPC</label>
-        <select id="aws-vpc-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+    </div>
+
+    <!-- Azure account -->
+    <div id="cred-panel-azure" class="rad-section">
+      <div class="rad-section__title">Account</div>
+      <div class="rad-section__desc">Enter your Azure tenant and subscription, then verify your CLI login to ensure you have the necessary credentials.</div>
+      <div class="rad-field" style="margin-top:14px;">
+        <label>Tenant ID</label>
+        <input id="az-tenant-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
       </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Subnets</label>
-        <select id="aws-subnets-select" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff);">
-          <option value="" disabled selected>Loading...</option>
-        </select>
-        <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; margin-top:4px;" />
+      <div class="rad-field" style="margin-top:14px;">
+        <label>Subscription ID</label>
+        <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+      </div>
+      <button id="btn-verify-azure" class="rad-btn rad-btn--primary" style="margin-top:16px;">Verify Credentials</button>
+    </div>
+
+    <!-- AWS account -->
+    <div id="cred-panel-aws" class="rad-section" style="display:none;">
+      <div class="rad-section__title">Account</div>
+      <div class="rad-section__desc">Enter your AWS account details, then verify your CLI login to ensure you have the necessary credentials.</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;">
+        <div class="rad-field"><label>Account ID</label><input id="aws-account-id" type="text" placeholder="123456789012" /></div>
+        <div class="rad-field"><label>Region</label><input id="aws-region" type="text" placeholder="us-east-1" /></div>
+      </div>
+      <div class="rad-field" style="margin-top:14px;"><label>Role ARN (optional)</label><input id="aws-role-arn" type="text" placeholder="arn:aws:iam::123456789012:role/radius-deploy" /></div>
+      <button id="btn-verify-aws" class="rad-btn rad-btn--primary" style="margin-top:16px;">Verify Credentials</button>
+    </div>
+
+    <div id="cred-verify-status" class="rad-verified-line" style="margin-top:14px; display:none;"></div>
+
+    <div class="rad-section">
+      <div id="cred-verify-hint" style="font-size:13px; color:var(--rad-text-tertiary); padding:12px 14px; background:var(--rad-bg-subtle); border-radius:8px; margin-bottom:16px;">Verify your credentials above to continue profile setup.</div>
+      <div style="display:flex; align-items:center; gap:16px;">
+        <button id="save-cred-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Save Credential Profile</button>
+        <button id="cancel-cred-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to credentials</button>
       </div>
     </div>
   </div>
 </div>
-
-<div id="deploy-status" style="margin-top:12px; display:none;"></div>
-<div id="deploy-log" style="display:none; margin-top:16px;">
-  <h3 style="font-size:13px; font-weight:600; margin-bottom:8px;">Deployment Log</h3>
-  <div id="log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:350px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
-</div>
-
-<div class="rad-section">
-  <div style="display:flex;">
-    <button id="deploy-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;">Create Environment</button>
-  </div>
-</div>
-  </div>
-</div>
+</section>
 
 <div id="env-creating-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:340px;">
@@ -1461,9 +1570,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
   </div>
 </div>
 <style>@keyframes spin{to{transform:rotate(360deg)}}
-/* Match Figma: the environments table's ACTIONS column is left-aligned. */
-#env-landing .rad-table thead th:last-child { text-align: left; }
-#env-landing .rad-table__actions { justify-content: flex-start; }
+/* Match Figma: the environments/credentials table's ACTIONS column is left-aligned. */
+#env-landing .rad-table thead th:last-child,
+#cred-landing .rad-table thead th:last-child { text-align: left; }
+#env-landing .rad-table__actions,
+#cred-landing .rad-table__actions { justify-content: flex-start; }
 /* Success banner shown above the environments list after a successful create. */
 #env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--background-color-default,#fff); border:1px solid var(--border-color-muted,#d8dee4); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
 .env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#22c580; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
@@ -1471,29 +1582,184 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
 .env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
 .env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
+/* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
+.rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
+.rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
+.rad-cred-banner__text { flex:1 1 auto; font-size:13px; font-weight:600; color:var(--rad-primary); }
+.rad-cred-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-primary); cursor:pointer; }
+/* "Verified · Logged in as …" line (Figma credential-verified). */
+.rad-verified-line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.rad-verified-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid var(--rad-primary); border-radius:8px; color:var(--rad-primary); font-weight:600; font-size:13px; }
+.rad-verified-meta { font-size:13px; color:var(--rad-text-tertiary); }
+.rad-verified-meta strong { color:var(--rad-text); font-weight:600; }
+/* Custom combo dropdown (Figma credential-profile picker with pinned action). */
+.rad-combo { position: relative; }
+.rad-combo__button {
+  margin: 0; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 9px 12px; font-size: 14px; font-weight: 400; text-align: left;
+  background: var(--rad-surface); color: var(--rad-text);
+  border: 1px solid var(--rad-stroke); border-radius: 8px; cursor: pointer;
+}
+.rad-combo__button:hover { background: var(--rad-surface); }
+.rad-combo__value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rad-combo__value.rad-combo__value--placeholder { color: var(--rad-text-tertiary); }
+.rad-combo__chevron {
+  flex: 0 0 auto; width: 8px; height: 8px; margin-right: 2px;
+  border-right: 2px solid var(--rad-text-tertiary); border-bottom: 2px solid var(--rad-text-tertiary);
+  transform: translateY(-2px) rotate(45deg);
+}
+.rad-combo__menu {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 30;
+  background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12); overflow: hidden;
+}
+.rad-combo__option {
+  display: block; width: 100%; text-align: left; margin: 0; padding: 12px 16px;
+  background: none; border: none; font-size: 14px; color: var(--rad-text); cursor: pointer;
+}
+.rad-combo__option:hover, .rad-combo__option--active { background: var(--rad-bg-subtle); }
+.rad-combo__empty { padding: 12px 16px; font-size: 14px; color: var(--rad-text-tertiary); }
+.rad-combo__action {
+  display: block; width: 100%; text-align: left; margin: 0; padding: 12px 16px;
+  background: none; border: none; border-top: 1px solid var(--rad-stroke);
+  font-size: 14px; font-weight: 600; color: var(--rad-primary); cursor: pointer;
+}
+.rad-combo__action:hover { background: var(--rad-bg-subtle); }
+/* Custom credential-profile dropdown (Figma: open panel with options + "+ Create new profile"). */
+.rad-combo { position:relative; }
+.rad-combo__button { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; margin:0; padding:9px 12px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:8px; font-size:14px; font-weight:400; font-family:var(--rad-font); cursor:pointer; }
+.rad-combo__button:hover { background:var(--rad-bg-subtle); }
+.rad-combo--open .rad-combo__button { border-color:var(--rad-brand); }
+.rad-combo__value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rad-combo__value--placeholder { color:var(--rad-text-tertiary); }
+.rad-combo__chevron { flex:0 0 auto; width:8px; height:8px; border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary); transform:translateY(-2px) rotate(45deg); transition:transform 0.15s; }
+.rad-combo--open .rad-combo__chevron { transform:translateY(1px) rotate(-135deg); }
+.rad-combo__menu { margin-top:6px; background:var(--rad-surface); border:1px solid var(--rad-stroke); border-radius:8px; overflow:hidden; box-shadow:0 6px 20px rgba(0,0,0,0.10); }
+.rad-combo__options:empty { display:none; }
+.rad-combo__option { display:block; width:100%; text-align:left; padding:11px 14px; background:none; border:none; margin:0; font-size:14px; color:var(--rad-text); font-family:var(--rad-font); cursor:pointer; }
+.rad-combo__option:hover, .rad-combo__option--active { background:var(--rad-bg-subtle); }
+.rad-combo__empty { padding:14px; font-size:13px; color:var(--rad-text-tertiary); }
+.rad-combo__action { display:block; width:100%; text-align:left; margin:0; padding:12px 14px; background:none; border:none; border-top:1px solid var(--rad-stroke); font-size:13px; font-weight:600; color:var(--rad-primary); font-family:var(--rad-font); cursor:pointer; }
+.rad-combo__action:hover { background:var(--rad-bg-subtle); }
 </style>
 
 <script>
 var CTX_REPO = '${escapeHtml(ctxRepo)}';
 var CTX_BRANCH = '${escapeHtml(ctxBranch)}';
 
-// --- Landing table <-> Create Environment form toggle ---------------------
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+function providerLabel(p) { return p === 'aws' ? 'AWS' : (p === 'azure' ? 'Azure' : (p || '—')); }
+
+// ============================ Subtab switching ============================
+function switchSubtab(name) {
+    var isCred = name === 'credentials';
+    document.getElementById('pane-environments').style.display = isCred ? 'none' : '';
+    document.getElementById('pane-credentials').style.display = isCred ? '' : 'none';
+    var links = document.querySelectorAll('#env-subtabs .rad-subtab');
+    for (var i = 0; i < links.length; i++) {
+        links[i].classList.toggle('rad-subtab--active', links[i].getAttribute('data-subtab') === name);
+    }
+    try { history.replaceState(null, '', '/?page=' + (isCred ? 'credentials' : 'environment')); } catch (e) {}
+    if (isCred) loadCredTable(); else loadEnvTable();
+}
+(function() {
+    var links = document.querySelectorAll('#env-subtabs .rad-subtab');
+    for (var i = 0; i < links.length; i++) {
+        links[i].addEventListener('click', function(e) { e.preventDefault(); switchSubtab(this.getAttribute('data-subtab')); });
+    }
+})();
+
+// ============================ Environments =============================
 var envLanding = document.getElementById('env-landing');
 var envForm = document.getElementById('env-form');
 var envNameInput = document.getElementById('env-name-input');
+var envProfileSelect = document.getElementById('env-profile-select'); // hidden input holding selected name
+var deployBtn = document.getElementById('deploy-btn');
+var PROFILES = [];
+var selectedProfile = null;
+
+function statusCell(status) {
+    var map = { success: ['success','Success'], verified: ['success','Verified'], failed: ['failed','Failed'], pending: ['pending','Pending'], unverified: ['pending','Unverified'] };
+    var m = map[status] || map.pending;
+    return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
+}
+
+var envPollTimer = null;
+function loadEnvTable() {
+    var body = document.getElementById('env-table-body');
+    if (!CTX_REPO) {
+        body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td><td></td><td class="rad-table__actions"></td></tr>';
+        return;
+    }
+    body.innerHTML = '<tr><td colspan="5" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>';
+    fetch('/api/list-environments?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var envs = (data && data.environments) || [];
+            if (envs.length === 0) {
+                body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td><td></td><td class="rad-table__actions"></td></tr>';
+                return;
+            }
+            body.innerHTML = envs.map(function(e) {
+                var prov = e.provider || '—';
+                var creds = e.credentialProfile || '—';
+                var editHref = e.webUrl || ('https://github.com/' + CTX_REPO + '/settings/environments');
+                return '<tr>' +
+                    '<td class="rad-table__env">' + escapeHtmlClient(e.name) + '</td>' +
+                    '<td>' + statusCell(e.status) + '</td>' +
+                    '<td class="rad-table__provider">' + escapeHtmlClient(prov) + '</td>' +
+                    '<td class="rad-table__creds">' + escapeHtmlClient(creds) + '</td>' +
+                    '<td class="rad-table__actions">' +
+                        '<a class="rad-link" href="' + escapeHtmlClient(editHref) + '" target="_blank" rel="noopener noreferrer">edit</a>' +
+                        '<button class="rad-btn rad-btn--neutral js-deploy-apps" data-env="' + escapeHtmlClient(e.name) + '" style="margin:0;">Deploy Apps</button>' +
+                        '<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="' + escapeHtmlClient(e.name) + '" style="margin:0;">Delete Env</button>' +
+                    '</td>' +
+                '</tr>';
+            }).join('');
+            wireRowActions();
+            if (envPollTimer) { clearTimeout(envPollTimer); envPollTimer = null; }
+            if (envs.some(function(e) { return e.status === 'pending'; })) {
+                envPollTimer = setTimeout(loadEnvTable, 10000);
+            }
+        })
+        .catch(function() {
+            body.innerHTML = '<tr><td colspan="5" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
+        });
+}
+function wireRowActions() {
+    document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var envName = this.getAttribute('data-env') || '';
+            window.location.href = '/?page=deploying' + (envName ? '&env=' + encodeURIComponent(envName) : '');
+        });
+    });
+    document.querySelectorAll('.js-delete-env').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var envName = this.getAttribute('data-env') || '';
+            if (!envName || !confirm('Delete environment "' + envName + '"? This removes the GitHub environment and its Radius configuration.')) return;
+            this.disabled = true; this.textContent = 'Deleting…';
+            fetch('/api/delete-environment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: envName }) })
+                .then(function(r) { return r.json(); })
+                .then(function() { loadEnvTable(); })
+                .catch(function() { loadEnvTable(); });
+        });
+    });
+}
 
 function showEnvForm(preset) {
     preset = preset || {};
     var sb = document.getElementById('env-success-banner');
     if (sb) sb.style.display = 'none';
-    if (preset.name !== undefined) envNameInput.value = preset.name;
-    if (preset.provider) {
-        var ps = document.getElementById('env-provider-select');
-        ps.value = preset.provider;
-        applyProvider(preset.provider);
-    }
+    envNameInput.value = preset.name !== undefined ? preset.name : '';
+    document.getElementById('az-client-id').value = '';
+    document.getElementById('deploy-status').style.display = 'none';
     envLanding.style.display = 'none';
     envForm.style.display = '';
+    loadProfilesIntoEnvSelect(preset.profile);
     envNameInput.focus();
 }
 function showEnvLanding() {
@@ -1505,8 +1771,7 @@ function showEnvSuccessBanner(provider, name) {
     var banner = document.getElementById('env-success-banner');
     var text = document.getElementById('env-success-banner-text');
     if (!banner || !text) return;
-    var providerLabel = provider === 'aws' ? 'AWS' : 'Azure';
-    text.innerHTML = 'Successfully created <strong>' + escapeHtmlClient(providerLabel) +
+    text.innerHTML = 'Successfully created <strong>' + escapeHtmlClient(providerLabel(provider)) +
         '</strong> Environment <strong>' + escapeHtmlClient(name) + '</strong>';
     banner.style.display = 'flex';
 }
@@ -1514,120 +1779,118 @@ var envSuccessClose = document.getElementById('env-success-banner-close');
 if (envSuccessClose) envSuccessClose.addEventListener('click', function() {
     document.getElementById('env-success-banner').style.display = 'none';
 });
-document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
-document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 
-// --- Environments table (best-effort real data from GitHub) ---------------
-function statusCell(status) {
-    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'] };
-    var m = map[status] || map.pending;
-    return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
+function findProfile(name) {
+    for (var i = 0; i < PROFILES.length; i++) { if (PROFILES[i].name === name) return PROFILES[i]; }
+    return null;
 }
-var envPollTimer = null;
-function loadEnvTable() {
-    var body = document.getElementById('env-table-body');
-    if (!CTX_REPO) {
-        body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-            '<td class="rad-table__actions"></td></tr>';
-        return;
+
+// --- Custom credential-profile dropdown (Figma: options + pinned action) ---
+var envProfileBtn = document.getElementById('env-profile-button');
+var envProfileMenu = document.getElementById('env-profile-menu');
+var envProfileValue = document.getElementById('env-profile-value');
+var envProfileOptions = document.getElementById('env-profile-options');
+
+function openProfileMenu(open) {
+    var show = open === undefined ? envProfileMenu.style.display === 'none' : open;
+    envProfileMenu.style.display = show ? '' : 'none';
+    envProfileBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+function setProfileValue(name) {
+    envProfileSelect.value = name || '';
+    if (name) {
+        var p = findProfile(name);
+        envProfileValue.textContent = name + (p ? ' (' + providerLabel(p.provider) + ')' : '');
+        envProfileValue.classList.remove('rad-combo__value--placeholder');
+    } else {
+        envProfileValue.textContent = 'Select a credential profile…';
+        envProfileValue.classList.add('rad-combo__value--placeholder');
     }
-    body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading environments…</td></tr>';
-    fetch('/api/list-environments?repo=' + encodeURIComponent(CTX_REPO))
+    onEnvProfileSelected();
+}
+function renderProfileOptions() {
+    envProfileOptions.innerHTML = '';
+    PROFILES.forEach(function(p) {
+        var o = document.createElement('button');
+        o.type = 'button';
+        o.className = 'rad-combo__option';
+        o.setAttribute('role', 'option');
+        o.setAttribute('data-name', p.name);
+        o.textContent = p.name + ' (' + providerLabel(p.provider) + ')';
+        o.addEventListener('click', function() { setProfileValue(this.getAttribute('data-name')); openProfileMenu(false); });
+        envProfileOptions.appendChild(o);
+    });
+    document.getElementById('env-profile-empty').style.display = PROFILES.length ? 'none' : '';
+}
+envProfileBtn.addEventListener('click', function(e) { e.stopPropagation(); openProfileMenu(); });
+document.addEventListener('click', function(e) {
+    var combo = document.getElementById('env-profile-combo');
+    if (combo && !combo.contains(e.target)) openProfileMenu(false);
+});
+
+function loadProfilesIntoEnvSelect(preselectName) {
+    fetch('/api/credential-profiles?repo=' + encodeURIComponent(CTX_REPO))
         .then(function(r) { return r.json(); })
-        .then(function(data) {
-            var envs = (data && data.environments) || [];
-            if (envs.length === 0) {
-                body.innerHTML = '<tr><td class="rad-table__env">No environments created yet.</td><td></td><td></td>' +
-                    '<td class="rad-table__actions"></td></tr>';
-                return;
-            }
-            body.innerHTML = envs.map(function(e) {
-                var prov = e.provider || '—';
-                var editHref = e.webUrl || ('https://github.com/' + CTX_REPO + '/settings/environments');
-                return '<tr>' +
-                    '<td class="rad-table__env">' + escapeHtmlClient(e.name) + '</td>' +
-                    '<td>' + statusCell(e.status) + '</td>' +
-                    '<td class="rad-table__provider">' + escapeHtmlClient(prov) + '</td>' +
-                    '<td class="rad-table__actions">' +
-                        '<a class="rad-link" href="' + escapeHtmlClient(editHref) + '" target="_blank" rel="noopener noreferrer">edit</a>' +
-                        '<button class="rad-btn rad-btn--info js-deploy-apps" data-env="' + escapeHtmlClient(e.name) + '" data-provider="' + escapeHtmlClient(e.provider || '') + '" style="margin:0;">Deploy Apps</button>' +
-                        '<button class="rad-btn rad-btn--danger" style="margin:0;" onclick="return false;">Delete Env</button>' +
-                    '</td>' +
-                '</tr>';
-            }).join('');
-            wireRowActions();
-            // Keep polling while any environment is still pending (its
-            // verify-credentials workflow hasn't finished) so the status flips
-            // to Success/Failed on its own without a manual refresh.
-            if (envPollTimer) { clearTimeout(envPollTimer); envPollTimer = null; }
-            if (envs.some(function(e) { return e.status === 'pending'; })) {
-                envPollTimer = setTimeout(loadEnvTable, 10000);
-            }
+        .then(function(d) {
+            PROFILES = (d && d.profiles) || [];
+            renderProfileOptions();
+            setProfileValue(preselectName && findProfile(preselectName) ? preselectName : '');
         })
         .catch(function() {
-            body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
+            PROFILES = [];
+            renderProfileOptions();
+            setProfileValue('');
         });
 }
-function escapeHtmlClient(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
-    });
+function onEnvProfileSelected() {
+    selectedProfile = findProfile(envProfileSelect.value);
+    var statusEl = document.getElementById('env-profile-status');
+    if (!selectedProfile) {
+        statusEl.style.display = 'none';
+        deployBtn.disabled = true;
+        return;
+    }
+    statusEl.style.display = '';
+    statusEl.innerHTML = '<span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span>' +
+        (selectedProfile.user ? ' <span style="color:var(--rad-text-tertiary);">· Logged in as <strong style="color:var(--rad-text);">' + escapeHtmlClient(selectedProfile.user) + '</strong></span>' : '');
+    var prov = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
+    document.getElementById('env-selected-provider').value = prov;
+    document.getElementById('panel-azure').style.display = prov === 'azure' ? '' : 'none';
+    document.getElementById('panel-aws').style.display = prov === 'aws' ? '' : 'none';
+    deployBtn.disabled = false;
+    discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
 }
-function wireRowActions() {
-    document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var envName = this.dataset.env || '';
-            // Go to the Deployments page with this environment pre-selected —
-            // do NOT start a deployment here.
-            window.location.href = '/?page=deploying' + (envName ? '&env=' + encodeURIComponent(envName) : '');
-        });
-    });
-}
-loadEnvTable();
+document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
+document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
+document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
+    e.preventDefault(); openProfileMenu(false); switchSubtab('credentials'); showCredForm();
+});
 
-// --- Provider dropdown drives which infra panel is shown ------------------
-var activeProvider = '${provider}';
-function applyProvider(p) {
-    activeProvider = p === 'aws' ? 'aws' : 'azure';
-    document.getElementById('panel-azure').style.display = activeProvider === 'azure' ? '' : 'none';
-    document.getElementById('panel-aws').style.display = activeProvider === 'aws' ? '' : 'none';
-}
-document.getElementById('env-provider-select').addEventListener('change', function() { applyProvider(this.value); });
-applyProvider(activeProvider);
-
-// Combo select: show custom input when "__custom__" is chosen
+// combo select: reveal custom input on "__custom__"
 function setupCombo(selectId, customId) {
     var sel = document.getElementById(selectId);
     var inp = document.getElementById(customId);
+    if (!sel || !inp) return;
     sel.addEventListener('change', function() {
         inp.style.display = this.value === '__custom__' ? '' : 'none';
         if (this.value === '__custom__') inp.focus();
     });
 }
-setupCombo('azure-cluster-select', 'azure-cluster-custom');
-setupCombo('azure-rg-select', 'azure-rg-custom');
-setupCombo('azure-namespace-select', 'azure-namespace-custom');
-setupCombo('aws-cluster-select', 'aws-cluster-custom');
-setupCombo('aws-namespace-select', 'aws-namespace-custom');
-setupCombo('aws-vpc-select', 'aws-vpc-custom');
-setupCombo('aws-subnets-select', 'aws-subnets-custom');
+['azure-cluster-select|azure-cluster-custom','azure-rg-select|azure-rg-custom','azure-namespace-select|azure-namespace-custom',
+ 'aws-cluster-select|aws-cluster-custom','aws-namespace-select|aws-namespace-custom','aws-vpc-select|aws-vpc-custom','aws-subnets-select|aws-subnets-custom']
+ .forEach(function(pair) { var p = pair.split('|'); setupCombo(p[0], p[1]); });
 
-// Repository and branch are assumed from the current workspace and provided as
-// hidden inputs (#target-repo, #deploy-branch-select) — no picker needed.
-
-// Populate a select element with discovered items
 function populateSelect(selectId, items, placeholder) {
     var sel = document.getElementById(selectId);
+    if (!sel) return;
     sel.innerHTML = '';
     if (items.length === 0) {
         var opt = document.createElement('option');
-        opt.value = ''; opt.disabled = true; opt.selected = true;
-        opt.textContent = 'No resources found';
+        opt.value = ''; opt.disabled = true; opt.selected = true; opt.textContent = 'No resources found';
         sel.appendChild(opt);
     } else {
         var ph = document.createElement('option');
-        ph.value = ''; ph.disabled = true; ph.selected = true;
-        ph.textContent = placeholder || 'Select...';
+        ph.value = ''; ph.disabled = true; ph.selected = true; ph.textContent = placeholder || 'Select...';
         sel.appendChild(ph);
         for (var i = 0; i < items.length; i++) {
             var o = document.createElement('option');
@@ -1637,35 +1900,24 @@ function populateSelect(selectId, items, placeholder) {
         }
     }
     var custom = document.createElement('option');
-    custom.value = '__custom__';
-    custom.textContent = '+ Enter custom...';
+    custom.value = '__custom__'; custom.textContent = '+ Enter custom...';
     sel.appendChild(custom);
 }
-
-// Selecting an Azure AKS cluster auto-fills its Resource Group for convenience.
-// Both dropdowns always keep their full option lists so the user can freely
-// switch between any resource group or cluster (we never remove options).
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
     var rgSel = document.getElementById('azure-rg-select');
     if (!clusterSel || !rgSel || clusterSel.__filterWired) return;
     clusterSel.__filterWired = true;
-
     function findCluster(cid) {
         var list = window.__azureClusters || [];
-        for (var i = 0; i < list.length; i++) {
-            if ((list[i].id || list[i].name) === cid) return list[i];
-        }
+        for (var i = 0; i < list.length; i++) { if ((list[i].id || list[i].name) === cid) return list[i]; }
         return null;
     }
-
     clusterSel.addEventListener('change', function() {
         var cid = clusterSel.value;
         if (cid === '__custom__' || cid === '') return;
         var cluster = findCluster(cid);
         if (!cluster || !cluster.resourceGroup) return;
-        // Make sure the cluster's resource group is present in the (full) list,
-        // then select it — without dropping any of the other groups.
         var hasRg = false, customOpt = null;
         for (var i = 0; i < rgSel.options.length; i++) {
             if (rgSel.options[i].value === cluster.resourceGroup) hasRg = true;
@@ -1673,132 +1925,52 @@ function setupAzureInfraFilter() {
         }
         if (!hasRg) {
             var opt = document.createElement('option');
-            opt.value = cluster.resourceGroup;
-            opt.textContent = cluster.resourceGroup;
+            opt.value = cluster.resourceGroup; opt.textContent = cluster.resourceGroup;
             if (customOpt) rgSel.insertBefore(opt, customOpt); else rgSel.appendChild(opt);
         }
         rgSel.value = cluster.resourceGroup;
     });
 }
-
-// Discover resources from the cloud provider
-function discoverResources(provider) {
+function discoverResources(provider, subId, tenantId) {
     var payload = { provider: provider };
-    if (provider === 'azure') {
-        var subId = document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '';
-    var tenantId = document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : '';
     if (subId) payload.subscriptionId = subId;
     if (tenantId) payload.tenantId = tenantId;
-}
+    var statusId = provider === 'azure' ? 'azure-discover-status' : 'aws-discover-status';
+    var statusEl = document.getElementById(statusId);
+    if (statusEl) statusEl.textContent = 'Discovering resources…';
     fetch('/api/discover', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) })
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (provider === 'azure') {
-                document.getElementById('azure-discover-status').textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
+                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
                 window.__azureClusters = data.clusters || [];
-                window.__azureRgs = data.resourceGroups || [];
-                populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster...');
-                populateSelect('azure-rg-select', window.__azureRgs, 'Select resource group...');
-                populateSelect('azure-namespace-select', data.namespaces || ['default', 'kube-system', 'radius-system'], 'Select namespace...');
+                populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster…');
+                populateSelect('azure-rg-select', data.resourceGroups || [], 'Select resource group…');
+                populateSelect('azure-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
                 setupAzureInfraFilter();
             } else {
-                document.getElementById('aws-discover-status').textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
-                populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster...');
-                populateSelect('aws-namespace-select', data.namespaces || ['default', 'kube-system', 'radius-system'], 'Select namespace...');
-                populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC...');
-                populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets...');
+                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
+                populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster…');
+                populateSelect('aws-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
+                populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
+                populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets…');
             }
         })
-        .catch(function(e) {
-            if (provider === 'azure') {
-                document.getElementById('azure-discover-status').textContent = 'Discovery error: ' + e.message;
-            } else {
-                document.getElementById('aws-discover-status').textContent = 'Discovery error: ' + e.message;
-            }
-        });
+        .catch(function(e) { if (statusEl) statusEl.textContent = 'Discovery error: ' + e.message; });
 }
-
-// Discovery is intentionally NOT run on load or while typing Tenant/Subscription
-// IDs. It only runs when the user clicks "Verify Azure Login" (see handler below),
-// which keeps the server responsive and avoids firing cloud-CLI calls per keystroke.
-
-// Verify Azure Login button handler
-document.getElementById('btn-verify-azure').addEventListener('click', function() {
-    var btn = this;
-    var statusEl = document.getElementById('verify-azure-status');
-    var tenantId = document.getElementById('az-tenant-id').value.trim();
-    var subId = document.getElementById('az-sub-id').value.trim();
-    var verifyModal = document.getElementById('env-verify-modal');
-
-    if (!tenantId || !subId) {
-        statusEl.style.display = 'block';
-        statusEl.innerHTML = '<span style="color:#cf222e;">❌ Please enter both a Tenant ID and a Subscription ID before verifying.</span>';
-        return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = '⏳ Verifying...';
-    verifyModal.style.display = 'flex';
-    statusEl.style.display = 'block';
-    statusEl.innerHTML = '<span style="color:var(--text-color-muted, #656d76);">Logging into Azure CLI...</span>';
-
-    fetch('/api/verify-azure-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId })
-    }).then(function(r) { return r.json(); }).then(function(data) {
-        verifyModal.style.display = 'none';
-        btn.disabled = false;
-        btn.textContent = 'Verify Credentials';
-        if (data.error) {
-            statusEl.innerHTML = '<span style="color:#cf222e;">❌ ' + data.error + '</span>';
-        } else {
-            statusEl.innerHTML = '<span style="color:#1a7f37;">✅ Logged in as <strong>' + (data.user || 'unknown') + '</strong></span>';
-            // Auto-fill tenant/sub if returned
-            if (data.tenantId && !tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
-            if (data.subscriptionId && !subId) document.getElementById('az-sub-id').value = data.subscriptionId;
-            // Re-discover resources with verified credentials
-            discoverResources('azure');
-        }
-    }).catch(function(err) {
-        verifyModal.style.display = 'none';
-        btn.disabled = false;
-        btn.textContent = 'Verify Credentials';
-        statusEl.innerHTML = '<span style="color:#cf222e;">❌ Error: ' + err.message + '</span>';
-    });
-});
-
 function getComboValue(selectId, customId) {
     var sel = document.getElementById(selectId);
     if (sel.value === '__custom__') return document.getElementById(customId).value;
     return sel.value;
 }
-
-function appendLog(text, color) {
-    var logEl = document.getElementById('log-output');
-    var line = document.createElement('div');
-    line.style.color = color || '#d4d4d4';
-    line.textContent = text;
-    logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
-}
-
-// Creates Azure OIDC credentials (App Registration + federated credential +
-// Contributor role) via the az CLI, then populates the credential fields.
-// Returns a Promise that resolves with the created credentials or rejects with
-// an Error. Invoked as part of the "Create Environment" flow when no client ID
-// has been provided yet.
 function runAzureAutoSetup(params) {
     return fetch('/api/azure-auto-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            repo: params.repo,
-            environment: params.environment,
-            resourceGroup: params.resourceGroup,
-            cluster: params.cluster,
-            subscriptionId: document.getElementById('az-sub-id') ? document.getElementById('az-sub-id').value.trim() : '',
-            tenantId: document.getElementById('az-tenant-id') ? document.getElementById('az-tenant-id').value.trim() : ''
+            repo: params.repo, environment: params.environment,
+            resourceGroup: params.resourceGroup, cluster: params.cluster,
+            subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
         })
     }).then(function(r) { return r.json(); }).then(function(data) {
         if (data.error) {
@@ -1806,147 +1978,302 @@ function runAzureAutoSetup(params) {
             throw new Error(data.error + detail);
         }
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
-        if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
-        if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
         return data;
     });
 }
 
-document.getElementById('deploy-btn').addEventListener('click', function() {
+deployBtn.addEventListener('click', function() {
     var btn = this;
     var statusEl = document.getElementById('deploy-status');
+    function fail(msg) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = msg; }
+    if (!selectedProfile) { fail('Please select a credential profile.'); return; }
     var env = envNameInput.value.trim();
-    if (!env) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please enter an environment name.'; return; }
-    var provider = activeProvider;
-    var appFile = 'app.bicep';
+    if (!env) { fail('Please enter an environment name.'); return; }
+    var provider = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
     var targetRepo = document.getElementById('target-repo').value.trim();
-    if (!targetRepo) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a target repository (owner/repo).'; return; }
+    if (!targetRepo) { fail('Please specify a target repository (owner/repo).'); return; }
     var cluster, namespace, vpc, subnets, resourceGroup;
-
     if (provider === 'azure') {
         cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
         namespace = getComboValue('azure-namespace-select', 'azure-namespace-custom') || 'default';
         resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
-        if (!resourceGroup) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a resource group.'; return; }
-        if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an AKS cluster.'; return; }
+        if (!resourceGroup) { fail('Please specify a resource group.'); return; }
+        if (!cluster) { fail('Please specify an AKS cluster.'); return; }
     } else {
         cluster = getComboValue('aws-cluster-select', 'aws-cluster-custom');
         namespace = getComboValue('aws-namespace-select', 'aws-namespace-custom') || 'default';
         vpc = getComboValue('aws-vpc-select', 'aws-vpc-custom');
         subnets = getComboValue('aws-subnets-select', 'aws-subnets-custom');
-        if (!cluster) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify an EKS cluster.'; return; }
-        if (!vpc) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify a VPC.'; return; }
-        if (!subnets) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = 'Please specify at least one subnet.'; return; }
+        if (!cluster) { fail('Please specify an EKS cluster.'); return; }
     }
 
-    btn.textContent = 'Creating environment...';
+    btn.textContent = 'Creating environment…';
     btn.disabled = true;
     statusEl.style.display = 'none';
-
-    // Show the Figma-style "Creating … Environment …" modal overlay.
     var creatingModal = document.getElementById('env-creating-modal');
     var creatingTitle = document.getElementById('env-creating-title');
-    var providerLabel = provider === 'aws' ? 'AWS' : 'Azure';
-
+    var label = providerLabel(provider);
     function failEnv(msg) {
         creatingModal.style.display = 'none';
-        btn.textContent = 'Create Environment';
-        btn.disabled = false;
-        statusEl.style.display = 'block';
-        statusEl.className = 'status error';
-        statusEl.textContent = msg;
+        btn.textContent = 'Create Environment'; btn.disabled = false;
+        statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = msg;
     }
 
-    // For Azure, create OIDC credentials as part of "Create Environment" when no
-    // client ID has been provided yet (verified/entered manually or from a prior
-    // auto-setup). This folds the old separate "Auto-create credentials" step in.
     var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
     var preflight;
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
-        preflight = runAzureAutoSetup({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster });
+        preflight = runAzureAutoSetup({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster, subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId });
     } else {
-        creatingTitle.innerHTML = 'Creating <strong>' + providerLabel + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
+        creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
         preflight = Promise.resolve(null);
     }
 
     preflight.then(function() {
-        creatingTitle.innerHTML = 'Creating <strong>' + providerLabel + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
-
-        // Build the environment payload with the (possibly just-created) credentials.
-        var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster };
+        creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
+        var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster, namespace: namespace, profileName: selectedProfile.name };
         envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
         if (provider === 'azure') {
             envData.clientId = document.getElementById('az-client-id').value.trim();
-            envData.tenantId = document.getElementById('az-tenant-id').value.trim();
-            envData.subscriptionId = document.getElementById('az-sub-id').value.trim();
+            envData.tenantId = selectedProfile.tenantId || '';
+            envData.subscriptionId = selectedProfile.subscriptionId || '';
             envData.resourceGroup = resourceGroup;
         } else {
-            envData.roleArn = document.querySelector('[data-aws-role-arn]')?.dataset?.awsRoleArn || '';
-            envData.region = document.querySelector('[data-aws-region]')?.dataset?.awsRegion || '';
-            envData.accountId = document.querySelector('[data-aws-account-id]')?.dataset?.awsAccountId || '';
-            envData.vpcId = vpc;
-            envData.subnetIds = subnets;
+            envData.roleArn = selectedProfile.roleArn || '';
+            envData.region = selectedProfile.region || '';
+            envData.accountId = selectedProfile.accountId || '';
+            envData.vpcId = vpc; envData.subnetIds = subnets;
         }
+        return fetch('/api/create-environment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(envData) })
+            .then(function(r) { return r.json(); })
+            .then(function(envResult) {
+                if (envResult.error) { failEnv('Environment setup failed: ' + envResult.error); return; }
+                creatingTitle.innerHTML = 'Verifying credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
+                btn.textContent = 'Verifying credentials…';
+                var pollStart = Date.now();
+                var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
+                function pollVerify() {
+                    fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env))
+                        .then(function(r) { return r.json(); })
+                        .then(function(v) {
+                            if (v.state === 'success') {
+                                creatingModal.style.display = 'none';
+                                btn.textContent = 'Create Environment'; btn.disabled = false;
+                                statusEl.style.display = 'none';
+                                showEnvLanding(); showEnvSuccessBanner(provider, env); loadEnvTable();
+                                return;
+                            }
+                            if (v.state === 'failed') { failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : '')); return; }
+                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.' + (v.runUrl ? ' It may still be running — view it at ' + v.runUrl : '')); return; }
+                            setTimeout(pollVerify, 5000);
+                        })
+                        .catch(function() {
+                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.'); return; }
+                            setTimeout(pollVerify, 5000);
+                        });
+                }
+                pollVerify();
+            });
+    }).catch(function(err) { failEnv('Failed: ' + (err.message || 'unknown error')); });
+});
 
-        return fetch('/api/create-environment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(envData)
-        }).then(function(r) { return r.json(); }).then(function(envResult) {
-            if (envResult.error) {
-                failEnv('Environment setup failed: ' + envResult.error);
+// ============================ Credentials =============================
+var credLanding = document.getElementById('cred-landing');
+var credForm = document.getElementById('cred-form');
+var credProviderSelect = document.getElementById('cred-provider-select');
+var credVerified = null;
+
+function loadCredTable() {
+    var body = document.getElementById('cred-table-body');
+    if (!CTX_REPO) {
+        body.innerHTML = '<tr><td class="rad-table__env">No credential profiles created yet.</td><td></td><td></td><td class="rad-table__actions"></td></tr>';
+        return;
+    }
+    body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading credential profiles…</td></tr>';
+    fetch('/api/credential-profiles?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var profiles = (d && d.profiles) || [];
+            if (profiles.length === 0) {
+                body.innerHTML = '<tr><td class="rad-table__env">No credential profiles created yet.</td><td></td><td></td><td class="rad-table__actions"></td></tr>';
                 return;
             }
-            // Environment (credentials + workflows) is created and the verify
-            // workflow was dispatched. Wait for verification to complete before
-            // returning to the list — the environment isn't "ready" until both
-            // the GitHub environment exists AND credentials verify successfully.
-            creatingTitle.innerHTML = 'Verifying credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
-            btn.textContent = 'Verifying credentials...';
-
-            var pollStart = Date.now();
-            var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
-            function pollVerify() {
-                fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env))
-                    .then(function(r) { return r.json(); })
-                    .then(function(v) {
-                        if (v.state === 'success') {
-                            creatingModal.style.display = 'none';
-                            btn.textContent = 'Create Environment';
-                            btn.disabled = false;
-                            statusEl.style.display = 'none';
-                            showEnvLanding();
-                            showEnvSuccessBanner(provider, env);
-                            loadEnvTable();
-                            return;
-                        }
-                        if (v.state === 'failed') {
-                            failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : ''));
-                            return;
-                        }
-                        if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) {
-                            failEnv('Timed out waiting for credential verification to complete.' + (v.runUrl ? ' It may still be running — view it at ' + v.runUrl : ''));
-                            return;
-                        }
-                        setTimeout(pollVerify, 5000);
-                    })
-                    .catch(function() {
-                        if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) {
-                            failEnv('Timed out waiting for credential verification to complete.');
-                            return;
-                        }
-                        setTimeout(pollVerify, 5000);
-                    });
-            }
-            pollVerify();
+            body.innerHTML = profiles.map(function(p) {
+                return '<tr>' +
+                    '<td class="rad-table__env">' + escapeHtmlClient(p.name) + '</td>' +
+                    '<td class="rad-table__provider">' + escapeHtmlClient(providerLabel(p.provider)) + '</td>' +
+                    '<td>' + statusCell(p.status || 'verified') + '</td>' +
+                    '<td class="rad-table__actions">' +
+                        '<a class="rad-link js-cred-edit" href="#" data-name="' + escapeHtmlClient(p.name) + '">edit</a>' +
+                        '<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="' + escapeHtmlClient(p.name) + '" style="margin:0;">Create Env</button>' +
+                        '<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="' + escapeHtmlClient(p.name) + '" style="margin:0;">Delete Profile</button>' +
+                    '</td>' +
+                '</tr>';
+            }).join('');
+            wireCredRowActions(profiles);
+        })
+        .catch(function() {
+            body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load credential profiles.</td></tr>';
         });
-    }).catch(function(err) {
-        failEnv('Failed: ' + (err.message || 'unknown error'));
+}
+function wireCredRowActions(profiles) {
+    function find(name) { for (var i = 0; i < profiles.length; i++) { if (profiles[i].name === name) return profiles[i]; } return null; }
+    document.querySelectorAll('.js-cred-createenv').forEach(function(btn) {
+        btn.addEventListener('click', function() { switchSubtab('environments'); showEnvForm({ name: '', profile: this.getAttribute('data-name') }); });
     });
+    document.querySelectorAll('.js-cred-edit').forEach(function(a) {
+        a.addEventListener('click', function(e) { e.preventDefault(); showCredForm(find(this.getAttribute('data-name'))); });
+    });
+    document.querySelectorAll('.js-cred-delete').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var name = this.getAttribute('data-name') || '';
+            if (!name || !confirm('Delete credential profile "' + name + '"?')) return;
+            this.disabled = true; this.textContent = 'Deleting…';
+            fetch('/api/delete-credential-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, name: name }) })
+                .then(function(r) { return r.json(); }).then(function() { loadCredTable(); })
+                .catch(function() { loadCredTable(); });
+        });
+    });
+}
+
+function applyCredProvider(p) {
+    var isAws = p === 'aws';
+    document.getElementById('cred-panel-azure').style.display = isAws ? 'none' : '';
+    document.getElementById('cred-panel-aws').style.display = isAws ? '' : 'none';
+}
+credProviderSelect.addEventListener('change', function() { applyCredProvider(this.value); resetCredVerify(); });
+
+function resetCredVerify() {
+    credVerified = null;
+    var st = document.getElementById('cred-verify-status');
+    st.style.display = 'none'; st.innerHTML = '';
+    document.getElementById('cred-verify-hint').style.display = '';
+    document.getElementById('save-cred-btn').disabled = true;
+}
+function showCredForm(profile) {
+    document.getElementById('cred-success-banner').style.display = 'none';
+    var editing = profile && profile.name;
+    document.getElementById('cred-name-input').value = editing ? profile.name : '';
+    credProviderSelect.value = editing ? (profile.provider || 'azure') : 'azure';
+    applyCredProvider(credProviderSelect.value);
+    document.getElementById('az-tenant-id').value = editing ? (profile.tenantId || '') : '';
+    document.getElementById('az-sub-id').value = editing ? (profile.subscriptionId || '') : '';
+    var acc = document.getElementById('aws-account-id'); if (acc) acc.value = editing ? (profile.accountId || '') : '';
+    var reg = document.getElementById('aws-region'); if (reg) reg.value = editing ? (profile.region || '') : '';
+    var role = document.getElementById('aws-role-arn'); if (role) role.value = editing ? (profile.roleArn || '') : '';
+    resetCredVerify();
+    credLanding.style.display = 'none';
+    credForm.style.display = '';
+    document.getElementById('cred-name-input').focus();
+}
+function showCredLanding() {
+    credForm.style.display = 'none';
+    credLanding.style.display = '';
+    loadCredTable();
+}
+function showCredSuccessBanner(name) {
+    var banner = document.getElementById('cred-success-banner');
+    document.getElementById('cred-success-banner-text').innerHTML = 'Successfully created credential profile ' + escapeHtmlClient(name);
+    banner.style.display = 'flex';
+}
+document.getElementById('new-cred-btn').addEventListener('click', function() { showCredForm(); });
+document.getElementById('cancel-cred-btn').addEventListener('click', showCredLanding);
+var credSuccessClose = document.getElementById('cred-success-banner-close');
+if (credSuccessClose) credSuccessClose.addEventListener('click', function() { document.getElementById('cred-success-banner').style.display = 'none'; });
+
+function markVerified(user, extra) {
+    credVerified = extra || {};
+    credVerified.user = user || '';
+    var st = document.getElementById('cred-verify-status');
+    st.style.display = 'flex';
+    st.innerHTML = '<span class="rad-verified-pill">✓ Credentials verified</span>' +
+        (user ? '<span class="rad-verified-meta">Logged in as <strong>' + escapeHtmlClient(user) + '</strong></span>' : '');
+    document.getElementById('cred-verify-hint').style.display = 'none';
+    document.getElementById('save-cred-btn').disabled = false;
+}
+
+function credVerifyError(msg) {
+    var st = document.getElementById('cred-verify-status');
+    st.style.display = 'block';
+    st.innerHTML = '<span style="color:#cf222e;">' + escapeHtmlClient(msg) + '</span>';
+}
+
+document.getElementById('btn-verify-azure').addEventListener('click', function() {
+    var btn = this;
+    var profileName = document.getElementById('cred-name-input').value.trim();
+    var tenantId = document.getElementById('az-tenant-id').value.trim();
+    var subId = document.getElementById('az-sub-id').value.trim();
+    var modal = document.getElementById('env-verify-modal');
+    var titleEl = document.getElementById('env-verify-title');
+    resetCredVerify();
+    if (!profileName) { credVerifyError('Please enter a Profile Name before verifying.'); return; }
+    if (!tenantId || !subId) { credVerifyError('Please enter both a Tenant ID and a Subscription ID before verifying.'); return; }
+    btn.disabled = true; btn.textContent = '⏳ Verifying…';
+    if (titleEl) titleEl.textContent = 'Verifying authentication to Azure…';
+    modal.style.display = 'flex';
+    fetch('/api/verify-azure-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId }) })
+        .then(function(r) { return r.json(); }).then(function(data) {
+            modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
+            if (data.error) { credVerifyError(data.error); return; }
+            if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
+            if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
+            markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId });
+        }).catch(function(err) {
+            modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
+            credVerifyError('Error: ' + err.message);
+        });
 });
+
+var verifyAwsBtn = document.getElementById('btn-verify-aws');
+if (verifyAwsBtn) verifyAwsBtn.addEventListener('click', function() {
+    var btn = this;
+    var profileName = document.getElementById('cred-name-input').value.trim();
+    var accountId = document.getElementById('aws-account-id').value.trim();
+    var region = document.getElementById('aws-region').value.trim();
+    var modal = document.getElementById('env-verify-modal');
+    var titleEl = document.getElementById('env-verify-title');
+    resetCredVerify();
+    if (!profileName) { credVerifyError('Please enter a Profile Name before verifying.'); return; }
+    btn.disabled = true; btn.textContent = '⏳ Verifying…';
+    if (titleEl) titleEl.textContent = 'Verifying authentication to AWS…';
+    modal.style.display = 'flex';
+    fetch('/api/verify-aws-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountId: accountId, region: region }) })
+        .then(function(r) { return r.json(); }).then(function(data) {
+            modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
+            if (data.error) { credVerifyError(data.error); return; }
+            if (data.accountId) document.getElementById('aws-account-id').value = data.accountId;
+            markVerified(data.user || data.arn || '', { accountId: data.accountId || accountId, region: region });
+        }).catch(function(err) {
+            modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
+            credVerifyError('Error: ' + err.message);
+        });
+});
+
+document.getElementById('save-cred-btn').addEventListener('click', function() {
+    var btn = this;
+    var name = document.getElementById('cred-name-input').value.trim();
+    if (!name) { alert('Please enter a profile name.'); return; }
+    if (!credVerified) { alert('Please verify your credentials first.'); return; }
+    var provider = credProviderSelect.value;
+    var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
+    if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; }
+    else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
+        .then(function(r) { return r.json(); }).then(function(d) {
+            btn.disabled = false; btn.textContent = 'Save Credential Profile';
+            if (d && d.error) { alert('Could not save profile: ' + d.error); return; }
+            showCredLanding(); showCredSuccessBanner(name);
+        }).catch(function(err) {
+            btn.disabled = false; btn.textContent = 'Save Credential Profile';
+            alert('Could not save profile: ' + err.message);
+        });
+});
+
+// ============================ Init =============================
+if (document.getElementById('pane-credentials').style.display !== 'none') { loadCredTable(); } else { loadEnvTable(); }
 <\/script>`);
 }
 
@@ -2028,7 +2355,7 @@ function deployLandingView(state) {
     <p id="deploy-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
     <div style="display:flex; justify-content:flex-end; gap:10px;">
       <button id="deploy-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="deploy-delete-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete Deployment</button>
+      <button id="deploy-delete-confirm" class="rad-btn rad-btn--danger-outline" style="margin:0;">Delete Deployment</button>
     </div>
   </div>
 </div>
@@ -2048,8 +2375,8 @@ function deployLandingView(state) {
     border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary);
     transform:translateY(-70%) rotate(45deg); pointer-events:none;
   }
-  .rad-btn--danger { background:#c93c37; color:#fff; }
-  .rad-btn--danger:hover { background:#b52f2a; }
+  .rad-btn--danger, .rad-btn--danger-outline { background:var(--rad-neutral-bg); color:var(--rad-danger-text); border:1px solid var(--rad-neutral-border); }
+  .rad-btn--danger:hover, .rad-btn--danger-outline:hover { background:var(--rad-danger-solid); border-color:var(--rad-danger-solid-border); color:#fff; }
   .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; }
   .rad-deploy-applink:hover { color:#388bfd; }
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
@@ -2178,10 +2505,10 @@ function loadDeployments() {
                 // deployed app graph) for this environment/application.
                 var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
                 return '<tr>' +
-                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + escapeHtmlClient(dep.app) + '</a></td>' +
+                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph"><svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
                     '<td>' + statusHtml + '</td>' +
-                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
+                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
                 '</tr>';
             }).join('');
             wireDeleteButtons();
