@@ -12,14 +12,12 @@
 export const RADIUS_CORE_VERSION = "0.1.0";
 
 export {
-  MODELED_GRAPH_DEFAULTS,
-  computeDiffHash,
-  buildModeledGraph,
-  stripAPIVersion,
   addInboundConnections,
-  buildResourceID,
   applicationGraphToResources,
   computeGraphDiff,
+  MODELED_GRAPH_DEFAULTS,
+  buildResourceID,
+  stripAPIVersion,
 } from "./graph/index.js";
 export {
   parseTerraformResources,
