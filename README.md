@@ -1,11 +1,6 @@
 # Radius Canvas extension
 
-The Radius Canvas extension for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app)
-lets you define, visualize, and deploy an
-application with [Radius](https://github.com/radius-project/radius) without
-leaving Copilot. Radius is a cloud-native application platform that helps
-developers and platform engineers build and manage applications together.
+The Radius Canvas extension for the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app) lets you define, visualize, and deploy an application with [Radius](https://github.com/radius-project/radius) without leaving Copilot. Radius is a cloud-native application platform that helps developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
