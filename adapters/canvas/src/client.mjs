@@ -677,6 +677,7 @@ function radiusRenderGraph(containerId, resources, options) {
         try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
     }
     if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
+        cy.style()
             .selector('node').style({
                 'width': 220,
                 'height': 92,
@@ -863,18 +864,17 @@ function radiusRenderGraph(containerId, resources, options) {
             var linkRow = function(iconSvg, label, href, showUrl) {
                 var sub = showUrl ? '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(href) + '</div>' : '';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="' + escLocal(href) + '" onclick="window.open(this.href); return false;" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
             if (repoUrl && d.codeRef) {
                 var codeUrl = repoUrl + '/blob/' + branch + '/' + d.codeRef.split('#')[0] + (d.codeRef.includes('#L') ? '#L' + d.codeRef.split('#L')[1] : '');
-                links.push(linkRow(ICON_CODE, 'View source code', codeUrl, true));
+                links.push(linkRow(ICON_CODE, 'Source code', codeUrl, true));
             } else if (repoUrl) {
-                // No precise location discovered — fall back to a repo-scoped code
-                // search for the resource name/type so a code link is always present.
-                var term = (d.label ? d.label.split('\\n')[0] : '') || d.resourceType || '';
-                var searchUrl = repoUrl + '/search?q=' + encodeURIComponent(term) + '&type=code';
-                links.push(linkRow(ICON_CODE, 'Search source code', searchUrl, false));
+                // No precise location discovered — fall back to a link to the
+                // repo source at the current branch so a code link is always present.
+                var sourceUrl = repoUrl + '/tree/' + branch;
+                links.push(linkRow(ICON_CODE, 'Source code', sourceUrl, true));
             }
             if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
