@@ -28,9 +28,10 @@ import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand,
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
-  fetchWorkspaceBicep,
+  resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  workspaceGraphJsonPath,
 } from "./workspace.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
@@ -171,13 +172,23 @@ function repoMatchesWorkspace(state, repo) {
     return !!workspaceRepo && repo === workspaceRepo;
 }
 
-async function fetchBicepForSelection(entry, repo, branch) {
+// Resolves the app.bicep for a selection and reports where it came from.
+// `fromWorkspace` is true only when the local session workspace actually
+// supplied the content (not when we fell back to the remote repo), and
+// `bicepPath` is the repo-relative path of the local file so callers can save
+// sibling artifacts next to the exact app.bicep that was graphed.
+async function fetchBicepSelection(entry, repo, branch) {
     const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
-        const local = await fetchWorkspaceBicep(entry.state, repo, access.branch);
-        if (local !== null) return local;
+        const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
+        if (local) return { content: local.content, fromWorkspace: true, branch: access.branch, bicepPath: local.repoPath };
     }
-    return await fetchBicepFromRepo(github, repo, access.branch);
+    const remote = await fetchBicepFromRepo(github, repo, access.branch);
+    return { content: remote, fromWorkspace: false, branch: access.branch, bicepPath: "" };
+}
+
+async function fetchBicepForSelection(entry, repo, branch) {
+    return (await fetchBicepSelection(entry, repo, branch)).content;
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
@@ -1013,7 +1024,8 @@ function createRequestHandler(instanceId) {
 
             try {
                 sendProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
 
                 if (content) {
                     sendProgress('Found existing app.bicep — parsing resources...');
@@ -1028,7 +1040,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1142,7 +1155,8 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
@@ -1159,7 +1173,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
