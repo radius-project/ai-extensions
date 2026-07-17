@@ -49,4 +49,9 @@ describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () 
     it("gates the app definition link on a repo URL and a defFile only", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (repoUrl && d.defFile)");
     });
+
+    it("opens external links through the open-external fetch bridge", () => {
+        expect(CLIENT_GRAPH_JS).toContain("/api/open-external");
+        expect(CLIENT_GRAPH_JS).toContain("fetch('/api/open-external'");
+    });
 });
