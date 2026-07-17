@@ -21,7 +21,18 @@ import {
     parseRepoFromRemote,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
-import { servers, getOrCreateServer, getLastWebviewActivityAt, setAppBicepHandoff } from "./server.mjs";
+import {
+    servers,
+    getOrCreateServer,
+    getLastWebviewActivityAt,
+    setAppBicepHandoff,
+} from "./server.mjs";
+import {
+    getSourceRefResources,
+    prepareSourceRefResources,
+    setSourceRefResources,
+    updateSourceRefs,
+} from "./source-refs.mjs";
 import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
 
@@ -179,9 +190,14 @@ const session = await joinSession({
                         // app.bicep — matching the open() handler.
                         Object.assign(entry.state, await workspaceState());
                         if (ctx.input?.resources) {
-                            entry.state.graphResources = ctx.input.resources;
-                            entry.state.plannedResources = ctx.input.resources;
+                            const context = {
+                                repo: entry.state.contextRepo || entry.state.workspaceRepo || "",
+                                branch: entry.state.contextBranch || entry.state.workspaceBranch || "",
+                            };
+                            setSourceRefResources(entry, "graph", ctx.input.resources, context);
+                            setSourceRefResources(entry, "planned", ctx.input.resources, context);
                         }
+                        entry.state.activeGraphView = "graph";
                         entry.url = `${entry.baseUrl}/?page=graph`;
                         return { message: "Graph rendered", url: entry.url };
                     },
@@ -194,7 +210,11 @@ const session = await joinSession({
                         properties: {
                             baseResources: { type: "array", description: "Base branch resources", items: { type: "object" } },
                             headResources: { type: "array", description: "Head branch resources", items: { type: "object" } },
+                            repo: { type: "string", description: "Repository in owner/repo format" },
+                            baseBranch: { type: "string", description: "Base branch represented by baseResources" },
+                            headBranch: { type: "string", description: "Head branch represented by headResources" },
                         },
+                        required: ["baseResources", "headResources", "repo", "baseBranch", "headBranch"],
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId, "graph-diff");
@@ -202,8 +222,16 @@ const session = await joinSession({
                         if (ctx.input?.baseResources && ctx.input?.headResources) {
                             // Compute diff using the shared algorithm (see computeGraphDiff).
                             const diffResources = computeGraphDiff(ctx.input.baseResources, ctx.input.headResources);
-                            entry.state.diffResources = diffResources;
+                            setSourceRefResources(entry, "diff", diffResources, {
+                                repo: ctx.input.repo,
+                                baseBranch: ctx.input.baseBranch,
+                                headBranch: ctx.input.headBranch,
+                            });
+                            entry.state.diffTargetRepo = ctx.input.repo;
+                            entry.state.diffBase = ctx.input.baseBranch;
+                            entry.state.diffHead = ctx.input.headBranch;
                         }
+                        entry.state.activeGraphView = "diff";
                         entry.url = `${entry.baseUrl}/?page=graph-diff`;
                         return { message: "Diff graph rendered", url: entry.url };
                     },
@@ -272,50 +300,59 @@ const session = await joinSession({
                                 type: "boolean",
                                 description: "If true (default), return only resources missing codeReference. If false, return all resources.",
                             },
+                            view: {
+                                type: "string",
+                                enum: ["graph", "planned", "diff"],
+                                description: "Graph view to inspect. Defaults to the active canvas page.",
+                            },
                         },
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId);
-                        const allResources = entry.state.graphResources
-                            || entry.state.plannedResources
-                            || entry.state.diffResources
-                            || [];
-                        if (allResources.length === 0) {
+                        const result = getSourceRefResources(entry, ctx.input?.view);
+                        if (!result.ready) {
                             return { ready: false, resources: [], message: "Graph has not been built yet. Open the graph page and wait for it to load, then try again." };
                         }
                         const missingOnly = ctx.input?.missingOnly !== false;
                         const resources = missingOnly
-                            ? allResources.filter(r => !r.codeReference && !r.type?.toLowerCase().includes('applications'))
-                            : allResources;
+                            ? result.resources.filter(r => !r.codeReference && !r.type?.toLowerCase().includes('applications'))
+                            : result.resources;
                         return {
                             ready: true,
-                            repo: entry.state.graphTargetRepo || entry.state.plannedRepo || entry.state.contextRepo || '',
-                            branch: entry.state.graphBranch || entry.state.plannedBranch || entry.state.contextBranch || '',
+                            view: result.view,
+                            contextToken: result.context.token,
+                            repo: result.context.repo,
+                            branch: result.context.branch || null,
+                            baseBranch: result.context.baseBranch || null,
+                            headBranch: result.context.headBranch || null,
                             resources: resources.map(r => ({ name: r.name, type: r.type, id: r.id, codeReference: r.codeReference || null })),
                         };
                     },
                 },
                 {
                     name: "update_source_refs",
-                    description: "Attach source-code references to graph resources so nodes deep-link to their definition/initialization site. Call after discovering source locations via get_graph_resources + repo search. If the graph hasn't built yet, refs are queued and applied when it arrives.",
+                    description: "Attach source-code references to the exact graph context returned by get_graph_resources so nodes deep-link to their definition/initialization site.",
                     inputSchema: {
                         type: "object",
                         properties: {
                             refs: {
                                 type: "array",
-                                description: "Array of {name, type, codeReference} objects. codeReference is a repo-relative path, optionally with #L<line> (e.g. 'src/db.js#L14').",
+                                description: "Array of {id, codeReference} objects. codeReference is a repo-relative path, optionally with #L<line> (e.g. 'src/db.js#L14').",
                                 items: {
                                     type: "object",
                                     properties: {
-                                        name: { type: "string", description: "Resource name" },
-                                        type: { type: "string", description: "Radius resource type" },
+                                        id: { type: "string", description: "Stable resource ID returned by get_graph_resources" },
                                         codeReference: { type: "string", description: "Repo-relative path with optional #L<line>" },
                                     },
-                                    required: ["name", "type", "codeReference"],
+                                    required: ["id", "codeReference"],
                                 },
                             },
+                            contextToken: {
+                                type: "string",
+                                description: "Graph context token returned by get_graph_resources",
+                            },
                         },
-                        required: ["refs"],
+                        required: ["contextToken", "refs"],
                     },
                     handler: async (ctx) => {
                         const entry = await getOrCreateServer(ctx.instanceId);
@@ -323,33 +360,22 @@ const session = await joinSession({
                         if (!Array.isArray(refs) || refs.length === 0) {
                             return { error: "refs array is required", updated: 0 };
                         }
-                        // Queue refs so they survive if the graph hasn't built yet
-                        if (!entry.state.pendingSourceRefs) entry.state.pendingSourceRefs = [];
-                        entry.state.pendingSourceRefs.push(...refs);
-                        // Apply immediately to any resource arrays that exist
-                        const refMap = new Map(refs.map(r => [`${r.name}||${r.type}`, r.codeReference]));
-                        let updated = 0;
-                        for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
-                            if (!Array.isArray(bucket)) continue;
-                            for (const r of bucket) {
-                                const key = `${r.name}||${r.type}`;
-                                if (refMap.has(key) && !r.codeReference) {
-                                    r.codeReference = refMap.get(key);
-                                    updated++;
-                                }
-                            }
-                        }
-                        const queued = refs.length - updated;
-                        const parts = [`Updated ${updated} resource(s) with source references.`];
-                        if (queued > 0) parts.push(`${queued} ref(s) queued for when the graph builds.`);
-                        if (updated > 0) parts.push(`Refresh the graph page to see the updated links.`);
-                        return { message: parts.join(' '), updated, queued };
+                        const result = updateSourceRefs(entry, ctx.input?.contextToken, refs);
+                        if (result.error) return result;
+                        const page = result.view === "diff" ? "graph-diff" : result.view;
+                        entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
+                        return {
+                            ...result,
+                            message: `Updated ${result.updated} resource(s); queued ${result.queued}; skipped ${result.skipped}.`,
+                            url: entry.url,
+                        };
                     },
                 },
             ],
             open: async (ctx) => {
                 const page = ctx.input?.page || "environment";
                 const entry = await getOrCreateServer(ctx.instanceId, page);
+                entry.state.activeGraphView = page === "graph-diff" ? "diff" : page === "planned" ? "planned" : page === "graph" ? "graph" : entry.state.activeGraphView;
                 const workspace = await workspaceState();
                 Object.assign(entry.state, workspace);
                 // If a repo is passed in input, set it as context for all pages
@@ -376,9 +402,21 @@ const session = await joinSession({
                     } catch (e) { /* ignore */ }
                 }
 
+                if (page === "graph" || page === "planned") {
+                    prepareSourceRefResources(entry, page, {
+                        repo: entry.state.contextRepo || "",
+                        branch: entry.state.contextBranch || "",
+                    });
+                }
+
                 // Auto-compare when baseBranch and headBranch are provided (PR diff mode)
                 if (page === "graph-diff" && ctx.input?.baseBranch && ctx.input?.headBranch) {
                     const repo = entry.state.contextRepo || ctx.input?.repo || '';
+                    const sourceRefContext = prepareSourceRefResources(entry, "diff", {
+                        repo,
+                        baseBranch: ctx.input.baseBranch,
+                        headBranch: ctx.input.headBranch,
+                    });
                     entry.state.diffBase = ctx.input.baseBranch;
                     entry.state.diffHead = ctx.input.headBranch;
                     entry.state.diffTargetRepo = repo;
@@ -394,7 +432,11 @@ const session = await joinSession({
                         const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                         // Compute diff using the shared algorithm (see computeGraphDiff).
                         const diffResources = computeGraphDiff(baseResources, headResources);
-                        entry.state.diffResources = diffResources;
+                        setSourceRefResources(entry, "diff", diffResources, {
+                            repo,
+                            baseBranch: ctx.input.baseBranch,
+                            headBranch: ctx.input.headBranch,
+                        }, sourceRefContext.token);
                         // Flag if no changes detected
                         const hasChanges = diffResources.some(r => r.diffStatus !== 'unchanged');
                         entry.state.diffNoChanges = !hasChanges;
@@ -469,8 +511,11 @@ const session = await joinSession({
                 properties: {
                     baseResources: { type: "array", description: "Base branch resources", items: { type: "object" } },
                     headResources: { type: "array", description: "Head branch resources", items: { type: "object" } },
+                    repo: { type: "string", description: "Repository in owner/repo format" },
+                    baseBranch: { type: "string", description: "Base branch represented by baseResources" },
+                    headBranch: { type: "string", description: "Head branch represented by headResources" },
                 },
-                required: ["baseResources", "headResources"],
+                required: ["baseResources", "headResources", "repo", "baseBranch", "headBranch"],
             },
             handler: async (args) => {
                 // Compute diff using the shared algorithm (see computeGraphDiff).
@@ -478,7 +523,7 @@ const session = await joinSession({
                 return JSON.stringify({
                     message: `Diff computed: ${diffResources.filter(r=>r.diffStatus==='added').length} added, ${diffResources.filter(r=>r.diffStatus==='removed').length} removed, ${diffResources.filter(r=>r.diffStatus==='modified').length} modified`,
                     resources: diffResources,
-                    instruction: "Use invoke_canvas_action with actionName 'render_graph_diff' and these resources to display the diff graph.",
+                    instruction: `Use invoke_canvas_action with actionName 'render_graph_diff' and pass these resources with repo '${args.repo}', baseBranch '${args.baseBranch}', and headBranch '${args.headBranch}'.`,
                 });
             },
         },

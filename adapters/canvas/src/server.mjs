@@ -32,6 +32,7 @@ import {
   fetchWorkspaceFile,
   isWorkspaceSelection,
 } from "./workspace.mjs";
+import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
@@ -150,32 +151,21 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
     return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
-// Merge any pending source-code references into the current graph resource
-// arrays. Called both when the agent pushes refs (they may arrive before the
-// graph) and when graph resources are assigned (so queued refs are applied).
-function applyPendingSourceRefs(entry) {
-    const pending = entry?.state?.pendingSourceRefs;
-    if (!Array.isArray(pending) || pending.length === 0) return 0;
-    const refMap = new Map(pending.map(r => [`${r.name}||${r.type}`, r.codeReference]));
-    let updated = 0;
-    for (const bucket of [entry.state.graphResources, entry.state.plannedResources, entry.state.diffResources]) {
-        if (!Array.isArray(bucket)) continue;
-        for (const r of bucket) {
-            const key = `${r.name}||${r.type}`;
-            if (refMap.has(key) && !r.codeReference) {
-                r.codeReference = refMap.get(key);
-                updated++;
-            }
-        }
-    }
-    return updated;
-}
-
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
         const url = new URL(req.url, `http://localhost`);
         const pathname = url.pathname;
+        const requestedPage = url.searchParams.get("page");
+        const canvasEntry = servers.get(instanceId);
+        if (canvasEntry && requestedPage) {
+            canvasEntry.page = requestedPage;
+            if (requestedPage === "graph") canvasEntry.state.activeGraphView = "graph";
+            else if (requestedPage === "planned") canvasEntry.state.activeGraphView = "planned";
+            else if (requestedPage === "graph-diff" || requestedPage === "graphDiff") {
+                canvasEntry.state.activeGraphView = "diff";
+            }
+        }
 
         // Lightweight liveness probe used by the client-side heartbeat so pages
         // can detect when the server has come back after an idle respawn.
@@ -855,6 +845,9 @@ function createRequestHandler(instanceId) {
             const repo = url.searchParams.get('repo') || '';
             const entry = servers.get(instanceId);
             const branch = url.searchParams.get('branch') || defaultBranchForState(entry?.state);
+            const sourceRefContext = entry
+                ? prepareSourceRefResources(entry, "graph", { repo, branch })
+                : null;
 
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
@@ -895,51 +888,19 @@ function createRequestHandler(instanceId) {
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.graphResources = resources;
+                    if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
+                        sendDone({ stale: true });
+                        return;
+                    }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
-                    applyPendingSourceRefs(entry);
+                    entry.state.activeGraphView = "graph";
                 }
 
                 sendDone({ reload: true });
             } catch (e) {
                 sendDone({ error: e.message });
             }
-            return;
-        }
-
-        // Agent-driven source-code reference enrichment: accepts an array of
-        // {name, type, codeReference} objects and merges them into the current
-        // graph/planned/diff resources so nodes gain "View code" deep links
-        // without a hard-coded pattern table. If the graph hasn't been built yet,
-        // refs are queued in pendingSourceRefs and merged when the graph arrives.
-        if (pathname === "/api/update-source-refs" && req.method === "POST") {
-            const entry = servers.get(instanceId);
-            if (!entry) { res.writeHead(404); res.end('{}'); return; }
-            let body = '';
-            req.on('data', c => body += c);
-            await new Promise(r => req.on('end', r));
-            let parsed;
-            try { parsed = JSON.parse(body || '{}'); } catch {
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: "Invalid JSON" }));
-                return;
-            }
-            const { refs } = parsed;
-            if (!Array.isArray(refs) || refs.length === 0) {
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: "refs array is required" }));
-                return;
-            }
-            // Always store in pendingSourceRefs so late-arriving graphs pick them up
-            if (!entry.state.pendingSourceRefs) entry.state.pendingSourceRefs = [];
-            entry.state.pendingSourceRefs.push(...refs);
-            const updated = applyPendingSourceRefs(entry);
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(JSON.stringify({ updated }));
             return;
         }
 
@@ -1021,6 +982,9 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: 'Please select a repository.' }));
                     return;
                 }
+                const sourceRefContext = entry
+                    ? prepareSourceRefResources(entry, "graph", { repo, branch })
+                    : null;
 
                 function addProgress(msg) {
                     if (entry) {
@@ -1053,10 +1017,15 @@ function createRequestHandler(instanceId) {
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.graphResources = resources;
+                    if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
-                    applyPendingSourceRefs(entry);
+                    entry.state.activeGraphView = "graph";
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1495,6 +1464,9 @@ function createRequestHandler(instanceId) {
                 const entry = servers.get(instanceId);
                 const branch = data.branch || defaultBranchForState(entry?.state);
                 const provider = data.provider || 'azure';
+                const sourceRefContext = entry
+                    ? prepareSourceRefResources(entry, "planned", { repo, branch })
+                    : null;
 
                 function addProgress(msg) {
                     if (entry) {
@@ -1536,12 +1508,17 @@ function createRequestHandler(instanceId) {
                 addProgress(`Planned ${plannedResources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
-                    entry.state.plannedResources = plannedResources;
+                    if (!setSourceRefResources(entry, "planned", plannedResources, { repo, branch }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.plannedRepo = repo;
                     entry.state.plannedBranch = branch;
                     entry.state.plannedProvider = provider;
                     entry.state.resolvedRecipes = recipes;
-                    applyPendingSourceRefs(entry);
+                    entry.state.activeGraphView = "planned";
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -1605,7 +1582,13 @@ function createRequestHandler(instanceId) {
                 const data = JSON.parse(body);
                 const repo = data.repo || '';
                 const entry = servers.get(instanceId);
+                let sourceRefContext = null;
                 if (entry) {
+                    sourceRefContext = prepareSourceRefResources(entry, "diff", {
+                        repo,
+                        baseBranch: data.base,
+                        headBranch: data.head,
+                    });
                     entry.state.diffBase = data.base;
                     entry.state.diffHead = data.head;
                     entry.state.diffTargetRepo = repo;
@@ -1638,10 +1621,20 @@ function createRequestHandler(instanceId) {
                 const diffResources = computeGraphDiff(baseResources, headResources);
 
                 if (entry) {
-                    entry.state.diffResources = diffResources;
+                    if (!setSourceRefResources(entry, "diff", diffResources, {
+                        repo,
+                        baseBranch: data.base,
+                        headBranch: data.head,
+                    }, sourceRefContext.token)) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     entry.state.diffBaseGenerated = false;
                     entry.state.diffHeadGenerated = false;
                     entry.state.page = 'graphDiff';
+                    entry.state.activeGraphView = "diff";
                 }
 
                 res.setHeader("Content-Type", "application/json");
@@ -1730,6 +1723,7 @@ function createRequestHandler(instanceId) {
                         // Build the planned graph if it wasn't resolved beforehand.
                         if (resources.length === 0) {
                             addLog('Resolving planned application graph for ' + repo + '...');
+                            const sourceRefContext = prepareSourceRefResources(entry, "planned", { repo, branch });
                             try {
                                 const content = await fetchBicepForSelection(entry, repo, branch);
                                 if (content) {
@@ -1737,9 +1731,11 @@ function createRequestHandler(instanceId) {
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
-                                    entry.state.plannedResources = planned;
-                                    entry.state.plannedRepo = repo;
-                                    applyPendingSourceRefs(entry);
+                                    const committed = setSourceRefResources(entry, "planned", planned, {
+                                        repo,
+                                        branch,
+                                    }, sourceRefContext.token);
+                                    if (committed) entry.state.plannedRepo = repo;
                                     resources = planned;
                                     entry.state.deployingResources = resources;
                                     addLog('Planned ' + planned.length + ' resource(s).');

@@ -21,7 +21,7 @@ Build and display the Radius application graph for a repo. The graph is assemble
 2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
 4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
-5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise the runtime auto-discovers it during graph build. See [source-code-references.md](references/source-code-references.md).
+5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise this skill can discover and attach it after the graph builds. See [source-code-references.md](references/source-code-references.md).
 6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
 
 ## Rendering features
@@ -61,7 +61,7 @@ invoke_canvas_action({
 })
 ```
 
-If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes `repo`, `branch`, and `resources` (each with `name`, `type`, `id`).
+If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
 2. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
 3. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
@@ -73,15 +73,16 @@ invoke_canvas_action({
   instanceId: "radius-panel",
   actionName: "update_source_refs",
   input: {
+    contextToken: "<contextToken returned by get_graph_resources>",
     refs: [
-      { name: "db", type: "Radius.Datastores/sqlDatabases", codeReference: "src/db.js#L14" },
-      { name: "cache", type: "Radius.Datastores/redisCaches", codeReference: "src/redis.js#L8" }
+      { id: "<database resource id>", codeReference: "src/db.js#L14" },
+      { id: "<cache resource id>", codeReference: "src/redis.js#L8" }
     ]
   }
 })
 ```
 
-Refs are queued if the graph hasn't built yet and applied automatically when it arrives. If the graph is already rendered, tell the user to refresh the graph page to see the updated links.
+Always use the stable `id` and `contextToken` returned by `get_graph_resources`; do not reconstruct them from resource names or types. The action refreshes the active graph URL after applying references. If it reports a stale context, fetch resources again and repeat the search against the newly returned repo/branch context.
 
 Only attach a reference when confident it points to the real initialization/definition site. An empty reference is better than a wrong one.
 
