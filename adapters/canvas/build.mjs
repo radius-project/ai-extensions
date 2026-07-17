@@ -84,7 +84,7 @@ const options = {
   target: "node18",
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
-  // Inline the radius-app-bicep skill Markdown (SKILL.md + references) as text
+  // Inline the radius-app-modeling skill Markdown (SKILL.md + references) as text
   // so the extension ships the authoritative skill content even when installed
   // without the sibling plugins/radius/skills/ tree. See src/skill.mjs.
   loader: { ".md": "text" },

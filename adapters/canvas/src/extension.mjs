@@ -452,7 +452,7 @@ const session = await joinSession({
                     entry.state.diffTargetRepo = repo;
                     try {
                         // Fetch the committed/persisted app.bicep on each branch.
-                        // Generation is owned by the radius-app-bicep skill.
+                        // Generation is owned by the radius-app-modeling skill.
                         let [baseContent, headContent] = await Promise.all([
                             fetchBicepForBranch(repo, ctx.input.baseBranch, entry.state),
                             fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
@@ -506,7 +506,7 @@ const session = await joinSession({
         },
         {
             name: "radius_generate_app",
-            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
+            description: "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-modeling skill. Returns the full radius-app-modeling skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
             parameters: {
                 type: "object",
                 properties: {
@@ -588,7 +588,7 @@ const session = await joinSession({
                     ]);
 
                     if (!baseContent && !headContent) {
-                        return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
+                        return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-modeling skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
                     }
 
                     const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(state, repo, baseBranch), state, github, repo, branch: baseBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
@@ -635,7 +635,7 @@ const session = await joinSession({
                     const fromFile = resolveExistingRadiusArtifact(workspacePath, args.manifestPath, ".radius/custom-types.yaml");
                     const target = resolveRadiusArtifactTarget(workspacePath, args.targetPath, ".radius/custom-types.tgz");
                     if (!existsSync(fromFile)) {
-                        return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                        return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-modeling custom-resource-types reference), then re-run this tool.`;
                     }
                     await runRadBicepPublishExtension({ fromFile, target, log: (m) => { try { session.log(m); } catch {} } });
                     return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
@@ -662,7 +662,7 @@ const session = await joinSession({
                     if (targetError) return targetError;
                     const file = resolveExistingRadiusArtifact(workspacePath, args.file, null);
                     if (!existsSync(file)) {
-                        return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                        return `Recipe file not found at ${file}. Author it first (see the radius-app-modeling custom-resource-types reference), then re-run this tool.`;
                     }
                     const target = String(args.target).trim();
                     const published = await withGhcrDockerConfig((env) =>
@@ -678,7 +678,7 @@ const session = await joinSession({
     hooks: {
         // Guard the graph-generating tool calls: if a graph page is opened (or a
         // PR graph diff is generated) while no .radius/app.bicep exists, deny the
-        // call and instruct the agent to author + SAVE it via the radius-app-bicep
+        // call and instruct the agent to author + SAVE it via the radius-app-modeling
         // skill first. The extension never writes bicep itself; it only triggers
         // the skill. Fail open — a hook error must never break tool execution.
         onPreToolUse: async (input) => {
@@ -707,7 +707,7 @@ The PR description will show the app graph diff inline on GitHub, and the canvas
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
-2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
+2. If it does not, author it using the radius_generate_app tool (the radius-app-modeling skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
 3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
 The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page instead compares two branches, so each branch being compared must already contain the committed model.
@@ -722,7 +722,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-modeling skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`
             };
         },
     },
@@ -739,7 +739,7 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 
 // Wire the server-side app.bicep handoff to the SDK session. Graph/generate
 // routes fire when a repo/branch is selected (not just on canvas open), so this
-// is how selection changes trigger the radius-app-bicep skill automatically.
+// is how selection changes trigger the radius-app-modeling skill automatically.
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
 
 // Wire the "View source code" / "View app definition" click for local-workspace

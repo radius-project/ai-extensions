@@ -17,7 +17,7 @@ describe("appBicepReminder", () => {
     it("names the file, the skill/tool, the repo, and points to the working tree", () => {
         const msg = appBicepReminder("acme/widgets");
         expect(msg).toContain(".radius/app.bicep");
-        expect(msg).toContain("radius-app-bicep");
+        expect(msg).toContain("radius-app-modeling");
         expect(msg).toContain("radius_generate_app");
         expect(msg).toContain("acme/widgets");
         expect(msg).toContain("working tree");
@@ -53,7 +53,7 @@ describe("appBicepHandoffPrompt", () => {
         const msg = appBicepHandoffPrompt("acme/widgets", "graph");
         expect(msg).toContain("acme/widgets");
         expect(msg).toContain("radius_generate_app");
-        expect(msg).toContain("radius-app-bicep");
+        expect(msg).toContain("radius-app-modeling");
         expect(msg).toContain(".radius/app.bicep");
         expect(msg).toContain("working tree");
         expect(msg).toContain("graph");
@@ -235,7 +235,7 @@ describe("evaluateAppBicepHook", () => {
             deps,
         );
         expect(out?.permissionDecision).toBe("deny");
-        expect(out?.permissionDecisionReason).toContain("radius-app-bicep");
+        expect(out?.permissionDecisionReason).toContain("radius-app-modeling");
         expect(out?.additionalContext).toContain(".radius/app.bicep");
         expect(out?.additionalContext).toContain("a/b");
     });

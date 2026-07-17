@@ -2,7 +2,7 @@
 "@radius-project/canvas": patch
 ---
 
-Bundle the full `radius-app-bicep` skill (SKILL.md and all reference files) into
+Bundle the full `radius-app-modeling` skill (SKILL.md and all reference files) into
 the canvas extension so `radius_generate_app` returns the authoritative,
 schema-accurate guidance even when the extension is installed on its own,
 without the sibling `plugins/radius/skills/` tree.

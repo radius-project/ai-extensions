@@ -68,7 +68,7 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
 
         // Match a recipe from the default recipe pack by resource type (try both
         // normalized and raw). Recipe resolution for custom/unlisted types is
-        // owned by recipe packs at deploy time and the radius-app-bicep skill —
+        // owned by recipe packs at deploy time and the radius-app-modeling skill —
         // this modeling code no longer fabricates outputs when nothing matches.
         const matchingRecipe = recipes.find(r => r.resourceType === baseType) ||
                                recipes.find(r => r.resourceType === rawType);

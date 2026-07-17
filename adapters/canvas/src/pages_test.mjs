@@ -1,6 +1,6 @@
 // Tests for the server-side HTML page renderers. Focus: the recipe-pack
 // refactor removed all singleton-recipe / on-demand-bicep UI, and app.bicep is
-// now authored solely by the Radius app-bicep skill. These tests assert the
+// now authored solely by the Radius app-modeling skill. These tests assert the
 // changed pages surface the skill/needsAppBicep messaging and no longer emit
 // the removed generated-bicep state, while smoke-rendering every page so the
 // module's branches stay exercised.
@@ -78,7 +78,7 @@ describe("graphPage — with resources branch", () => {
     it("handles needsAppBicep and error from /api/load-graph", () => {
         expect(html).toContain("d.needsAppBicep");
         expect(html).toContain("Error: ");
-        expect(html).toContain("Radius app-bicep skill");
+        expect(html).toContain("Radius app-modeling skill");
     });
 
     it("renders the graph via radiusRenderGraph with the serialized resources", () => {

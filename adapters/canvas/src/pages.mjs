@@ -653,7 +653,7 @@ function generateGraph() {
                 setTimeout(function() { window.location.reload(); }, 600);
             } else if (d.needsAppBicep) {
                 container.innerHTML = '';
-                if (statusEl) { statusEl.textContent = 'Generating app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
+                if (statusEl) { statusEl.textContent = 'Generating app.bicep with the Radius app-modeling skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
             } else if (d.error) {
                 container.innerHTML = '';
                 if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
@@ -743,7 +743,7 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             if (d.reload) { window.location.reload(); }
-            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved.</div>'; }
+            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-modeling skill\u2026 the graph will appear once it is saved.</div>'; }
             else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
         })
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
@@ -935,7 +935,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             btn.textContent = 'Re-Plan';
             btn.disabled = false;
             if (d.reload) { window.location.reload(); }
-            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
+            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-modeling skill\u2026 the planned graph will appear once it is saved.</div>'; }
             else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
         });
 });
@@ -1015,7 +1015,7 @@ function runDiff() {
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-modeling skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
             else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
@@ -1105,7 +1105,7 @@ function runDiff() {
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-modeling skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
             else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }

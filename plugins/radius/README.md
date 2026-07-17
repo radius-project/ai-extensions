@@ -29,7 +29,7 @@ extension become available.
 
 | Skill | Use it when you want to… |
 | ----- | ------------------------- |
-| `radius-app-bicep` | Generate or update the `.radius/app.bicep` manifest from a repo's contents. |
+| `radius-app-modeling` | Generate or update the `.radius/app.bicep` manifest from a repo's contents. |
 | `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
 | `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
 | `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |

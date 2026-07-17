@@ -24,7 +24,7 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Data flow
 
-1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes an `app.bicep` from the selected branch — committed for a non-workspace branch, or present in the working tree when the selected branch is the current workspace branch. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet).
+1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-modeling` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes an `app.bicep` from the selected branch — committed for a non-workspace branch, or present in the working tree when the selected branch is the current workspace branch. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet).
 2. The shared graph runner inside the Radius extension invokes offline `rad app graph <app.bicep> --include-icons` and writes `app-graph.json` locally. The modeled Bicep path must not use `--preview`: that flag switches the CLI to the deployed-application API and does not write `app-graph.json`. The required `--include-icons` flag embeds the resource icon metadata used by the canvas. The runner honors an existing `RADIUS_RAD_BINARY`; otherwise it uses the managed binary under `~/.radius/ai-extensions/bin`, downloading it when absent and upgrading it when older than the latest release. It never resolves `rad` from `PATH` or `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
 4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
@@ -48,7 +48,7 @@ The renderer ports the production improvements from `radius-project/github-exten
 
 The optional `codeReference` on each resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). It is normally hand-added metadata, but since the app model here is generated, this skill locates it automatically:
 
-- Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-bicep` skill) so the link is durable and high quality.
+- Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-modeling` skill) so the link is durable and high quality.
 - Any resource still missing one is discovered by this skill's AI agent at graph-build time, using the heuristics in [source-code-references.md](references/source-code-references.md).
 
 For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
@@ -120,11 +120,11 @@ The canvas will:
 
 - Build the graph from the committed `.radius/app.bicep` or `app.bicep` on the selected branch.
 - Use `rad app graph <app.bicep> --include-icons` as the modeled graph assembly source of truth, matching the CLI model instead of maintaining a separate parser. Do not pass `--preview` with a Bicep file.
-- Show "no app.bicep found" (`needsAppBicep`) when no committed app definition exists on the branch. It does not infer one from the repo — it hands off to Copilot to generate one with the `radius-app-bicep` skill, then refresh the graph. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet) for where that generated model needs to land.
+- Show "no app.bicep found" (`needsAppBicep`) when no committed app definition exists on the branch. It does not infer one from the repo — it hands off to Copilot to generate one with the `radius-app-modeling` skill, then refresh the graph. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet) for where that generated model needs to land.
 
 ## Rendering a branch that has no model yet
 
-When the selected branch has no committed `.radius/app.bicep` (or `app.bicep`), the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill (via the `radius_generate_app` tool). That skill models the working tree, so where the resulting file needs to be committed depends on which branch was selected:
+When the selected branch has no committed `.radius/app.bicep` (or `app.bicep`), the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-modeling` skill (via the `radius_generate_app` tool). That skill models the working tree, so where the resulting file needs to be committed depends on which branch was selected:
 
 - **Selected branch is the current workspace branch:** writing `.radius/app.bicep` to the working tree is enough — the graph, planned, and PR-diff-preview views render straight from the on-disk worktree checkout, so no commit or push is required to preview the graph.
 - **Selected branch is a different branch:** the skill must model that branch's code (not the current worktree's), and the resulting `.radius/app.bicep` must be committed and pushed to that branch before the graph can render there. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
@@ -133,13 +133,13 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 
 ## Prerequisites
 
-- For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, author one with the `radius-app-bicep` skill first — the canvas will not generate it.
+- For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, author one with the `radius-app-modeling` skill first — the canvas will not generate it.
 - For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json --preview --include-icons`.
 - `RADIUS_RAD_BINARY` may override the binary path. Without that override, extension startup downloads `rad` into `~/.radius/ai-extensions/bin` when absent or upgrades it when older than the latest release. `RADIUS_RAD_SHA256` may pin the checksum of the managed download.
 
 ## Troubleshooting
 
-- **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
+- **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-modeling` skill and commit it, then refresh.
 - **Graph build fails**: inspect the Radius extension log and verify that its managed binary under `~/.radius/ai-extensions/bin` was checked, downloaded or upgraded as needed, and is executable. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension runs its managed `rad.exe` detached to avoid a known `rad`/Bicep hang under Node's default job object.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.

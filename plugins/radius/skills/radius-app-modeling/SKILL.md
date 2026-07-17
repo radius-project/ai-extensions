@@ -1,5 +1,5 @@
 ---
-name: radius-app-bicep
+name: radius-app-modeling
 description: >
   Analyze a source code repository and generate a Radius application
   definition (.radius/app.bicep) that models the app's compute and backing

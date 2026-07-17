@@ -1,6 +1,6 @@
-# Contributing to Radius AI Extension
+# Contributing to Radius Canvas extension
 
-Radius AI Extension is in preview and under active development. We welcome
+The Radius Canvas extension is in preview and under active development. We welcome
 feedback in the form of issues along with code contributions that
 follow the guidelines below.
 
@@ -56,7 +56,7 @@ platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
 Agentic skills live in [`plugins/radius/skills/`](./plugins/radius/skills), one directory
 per skill, each with a `SKILL.md` (name + description frontmatter and guidance)
-and optional `references/`. The skills (`radius-app-bicep`, `radius-app-graph`,
+and optional `references/`. The skills (`radius-app-modeling`, `radius-app-graph`,
 `radius-environment`, `radius-deploy`) drive the same workflows the canvas
 actions and tools expose. When you change a canvas action, tool, or workflow
 behavior, update the matching skill so the agent's guidance stays in sync.

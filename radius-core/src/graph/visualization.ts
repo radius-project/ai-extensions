@@ -26,7 +26,7 @@ const CONTAINER_IMAGE_TYPE = "radius.compute/containerimages";
 const SECRET_TYPE = "radius.security/secrets";
 // The registry-push Secret paired with a containerImages build has a fixed,
 // reserved name — it must match the recipe pack's `containerImagesRegistrySecretName`.
-// `radius-ghcr-registry-creds` is the name the app-bicep skill authors;
+// `radius-ghcr-registry-creds` is the name the app-modeling skill authors;
 // `ghcr-registry-creds` is the shorthand used in the tracking issues. We match
 // either exactly (not as a loose substring, so an unrelated secret whose name
 // merely contains this text is never hidden), tolerating a namespace prefix such

@@ -141,7 +141,7 @@ async function ensureWorkflowsCurrent(repo, environment, provider, only, working
 
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
-// agent to run the radius-app-bicep skill. This is what makes branch/repo
+// agent to run the radius-app-modeling skill. This is what makes branch/repo
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff = null;
 export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
@@ -1539,7 +1539,7 @@ function createRequestHandler(instanceId) {
                 } else {
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
                     sendDone({
-                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-modeling skill.`,
                         needsAppBicep: true,
                         repo,
                         branch,
@@ -1677,12 +1677,12 @@ function createRequestHandler(instanceId) {
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
-                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
+                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-modeling skill.');
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
                     res.end(JSON.stringify({
-                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-modeling skill.`,
                         needsAppBicep: true,
                         repo,
                         branch,
@@ -2152,12 +2152,12 @@ function createRequestHandler(instanceId) {
                 const selection = await fetchBicepSelection(entry, repo, branch);
                 const content = selection.content;
                 if (!content) {
-                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
+                    addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-modeling skill.');
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
                     res.end(JSON.stringify({
-                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-modeling skill.`,
                         needsAppBicep: true,
                         repo,
                         branch,
@@ -2282,7 +2282,7 @@ function createRequestHandler(instanceId) {
                 }
 
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
-                // generation is owned by the Radius app-bicep skill, so branches
+                // generation is owned by the Radius app-modeling skill, so branches
                 // without one simply contribute nothing to the diff (added/removed).
                 const [baseSelection, headSelection] = await Promise.all([
                     fetchBicepSelection(entry, repo, data.base),
@@ -2294,7 +2294,7 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
                     res.end(JSON.stringify({
-                        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+                        error: `Copilot is generating .radius/app.bicep with the Radius app-modeling skill.`,
                         needsAppBicep: true,
                         repo,
                     }));
@@ -2441,7 +2441,7 @@ function createRequestHandler(instanceId) {
                                     entry.state.deployingResources = resources;
                                     addLog('Planned ' + planned.length + ' resource(s).');
                                 } else {
-                                    addLog('⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph.');
+                                    addLog('⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-modeling skill to show the planned graph.');
                                 }
                             } catch (e) { addLog('⚠ Could not resolve planned graph: ' + e.message); }
                         }

@@ -1,8 +1,8 @@
-# Radius AI Extension
+# Radius Canvas extension
 
-Radius AI Extension is a GitHub Copilot **plugin** for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
-It lets you define, visualize, and deploy an
+The Radius Canvas extension for the
+[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app)
+lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
 leaving Copilot. Radius is a cloud-native application platform that helps
 developers and platform engineers build and manage applications together.
@@ -19,7 +19,7 @@ The canvas extension is a compiled bundle that is not committed to `main`. CI bu
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
 
-> **NOTE:** Radius AI Extension is in preview. Send us your feedback:
+> **NOTE:** The Radius Canvas extension is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
 > and tell us what you think.
 
@@ -73,7 +73,7 @@ actions and tools:
 
 | Skill                                                              | What it does                                                                                              |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
+| [`radius-app-modeling`](./plugins/radius/skills/radius-app-modeling/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
 | [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
 | [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
 | [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
@@ -112,7 +112,7 @@ adapters.
 - ⚠️ **Found an issue?** - [Open a bug report](https://github.com/radius-project/ai-extensions/issues/new/choose)
 - 💡 **Have a proposal?** - [Open a feature request](https://github.com/radius-project/ai-extensions/issues/new/choose)
 
-## Contributing to Radius AI Extension
+## Contributing to Radius Canvas extension
 
 Visit [Contributing](./CONTRIBUTING.md) for more information on how to build,
 test, and contribute to this repository.

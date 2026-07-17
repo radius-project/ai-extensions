@@ -19,7 +19,7 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 
 Before invoking this skill, all of these must exist:
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
-2. A `.radius/app.bicep` file → use the `radius-app-bicep` skill if missing.
+2. A `.radius/app.bicep` file → use the `radius-app-modeling` skill if missing.
 3. The user's PAT in the extension's storage (auto-seeded from `gh auth token`).
 
 ## How to invoke
@@ -60,7 +60,7 @@ Before troubleshooting, classify the failure, because the fix lives in different
 - **Infrastructure or environment failures** — recipe download or execution, provider mismatch, cluster or credential or connectivity issues, or a pod that never becomes ready (the cases in [Common failure modes](#common-failure-modes)). These are not caused by the app model; handle them here.
 - **Modeling or schema failures** — the error points at `.radius/app.bicep`: unknown resource type or API version, unknown or missing property, invalid reference between resources, wrong credential shape, or a Bicep parse or compile error. These are fixed by editing the app definition, not the deploy pipeline.
 
-For a modeling or schema failure, hand the deploy error and the relevant logs to the `radius-app-bicep` skill to repair `.radius/app.bicep` in place, then redeploy. The `radius-app-bicep` skill owns choosing the fix (including trying a different fix when the same error recurs); the deploy loop only passes it the latest error, redeploys, and counts attempts. Make at most `RETRY_CAP` repair-and-redeploy attempts automatically, stopping early if the deploy succeeds or `radius-app-bicep` reports it has no different fix to try. Once those automatic attempts are used up (or you stop early), do not keep retrying on your own: surface the result to the user and make further attempts only if they explicitly ask you to.
+For a modeling or schema failure, hand the deploy error and the relevant logs to the `radius-app-modeling` skill to repair `.radius/app.bicep` in place, then redeploy. The `radius-app-modeling` skill owns choosing the fix (including trying a different fix when the same error recurs); the deploy loop only passes it the latest error, redeploys, and counts attempts. Make at most `RETRY_CAP` repair-and-redeploy attempts automatically, stopping early if the deploy succeeds or `radius-app-modeling` reports it has no different fix to try. Once those automatic attempts are used up (or you stop early), do not keep retrying on your own: surface the result to the user and make further attempts only if they explicitly ask you to.
 
 ## Common failure modes
 

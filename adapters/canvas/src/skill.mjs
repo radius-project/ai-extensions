@@ -1,8 +1,8 @@
-// Bundled radius-app-bicep skill content.
+// Bundled radius-app-modeling skill content.
 //
 // The extension can be installed on its own (as a Copilot canvas extension)
 // without the sibling `plugins/radius/skills/` being present on disk. When that
-// happens the agent never sees the authoritative `radius-app-bicep` skill, and
+// happens the agent never sees the authoritative `radius-app-modeling` skill, and
 // tools like `radius_generate_app` have to fall back to a hand-maintained
 // summary that inevitably drifts from the real schema rules.
 //
@@ -11,23 +11,23 @@
 // ships the exact skill content it points the agent at — no separate skills
 // install required.
 //
-// Source of truth: plugins/radius/skills/radius-app-bicep/, plus the one
+// Source of truth: plugins/radius/skills/radius-app-modeling/, plus the one
 // cross-skill reference it links to
 // (plugins/radius/skills/radius-app-graph/references/source-code-references.md).
 
-import skillMd from "../../../plugins/radius/skills/radius-app-bicep/SKILL.md";
-import runtimeContract from "../../../plugins/radius/skills/radius-app-bicep/references/runtime-contract.md";
-import componentCatalog from "../../../plugins/radius/skills/radius-app-bicep/references/component-catalog.md";
-import architecturePatterns from "../../../plugins/radius/skills/radius-app-bicep/references/architecture-patterns.md";
-import connectionConventions from "../../../plugins/radius/skills/radius-app-bicep/references/connection-conventions.md";
-import secretsHandling from "../../../plugins/radius/skills/radius-app-bicep/references/secrets-handling.md";
-import bicepStructureRules from "../../../plugins/radius/skills/radius-app-bicep/references/bicep-structure-rules.md";
-import namingConventions from "../../../plugins/radius/skills/radius-app-bicep/references/naming-conventions.md";
+import skillMd from "../../../plugins/radius/skills/radius-app-modeling/SKILL.md";
+import runtimeContract from "../../../plugins/radius/skills/radius-app-modeling/references/runtime-contract.md";
+import componentCatalog from "../../../plugins/radius/skills/radius-app-modeling/references/component-catalog.md";
+import architecturePatterns from "../../../plugins/radius/skills/radius-app-modeling/references/architecture-patterns.md";
+import connectionConventions from "../../../plugins/radius/skills/radius-app-modeling/references/connection-conventions.md";
+import secretsHandling from "../../../plugins/radius/skills/radius-app-modeling/references/secrets-handling.md";
+import bicepStructureRules from "../../../plugins/radius/skills/radius-app-modeling/references/bicep-structure-rules.md";
+import namingConventions from "../../../plugins/radius/skills/radius-app-modeling/references/naming-conventions.md";
 // Cross-skill reference: SKILL.md links the app-graph skill's source-code
 // discovery methodology, so the standalone bundle must inline it too.
 import sourceCodeReferences from "../../../plugins/radius/skills/radius-app-graph/references/source-code-references.md";
-import customResourceTypes from "../../../plugins/radius/skills/radius-app-bicep/references/custom-resource-types.md";
-import todoListAppExample from "../../../plugins/radius/skills/radius-app-bicep/references/todo-list-app-example.md";
+import customResourceTypes from "../../../plugins/radius/skills/radius-app-modeling/references/custom-resource-types.md";
+import todoListAppExample from "../../../plugins/radius/skills/radius-app-modeling/references/todo-list-app-example.md";
 
 // Ordered to match the paths referenced from SKILL.md so the inlined content
 // reads the same way the progressive-disclosure skill would.
@@ -72,7 +72,7 @@ function sanitizeRepoPath(repoPath) {
 }
 
 /**
- * Returns the full radius-app-bicep skill (SKILL.md plus every reference file it
+ * Returns the full radius-app-modeling skill (SKILL.md plus every reference file it
  * links to) as a single string, so the agent has the authoritative, schema-
  * accurate, compile-tested guidance even when only the extension is installed.
  *
@@ -82,11 +82,11 @@ function sanitizeRepoPath(repoPath) {
 export function radiusAppBicepSkill(repoPath) {
     const target = sanitizeRepoPath(repoPath);
     const intro =
-        `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +
+        `# radius-app-modeling skill (bundled with the Radius extension)\n\n` +
         `Model the repository at ${target} by following the skill below. This is ` +
         `the authoritative skill content — its SKILL.md and all reference files ` +
         `are inlined here so nothing is lost when the extension is installed on ` +
-        `its own. The referenced files (radius-app-bicep's own \`references/*.md\`, ` +
+        `its own. The referenced files (radius-app-modeling's own \`references/*.md\`, ` +
         `plus the app-graph \`source-code-references.md\` it links to) are appended ` +
         `after SKILL.md under matching \`--- Reference: ... ---\` headers instead of ` +
         `being opened separately.\n\n` +

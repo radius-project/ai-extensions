@@ -1,12 +1,12 @@
 // hooks.mjs — pre-tool-use hook logic for auto-triggering app.bicep creation.
 //
 // With the recipe-pack refactor, .radius/app.bicep is authored exclusively by
-// the radius-app-bicep skill (the agent) — this adapter never fabricates bicep.
+// the radius-app-modeling skill (the agent) — this adapter never fabricates bicep.
 // But the application-graph views require that file to exist. This module holds
 // the decision logic for a pre-tool-use hook that intercepts the tool calls
 // which generate a graph *from* app.bicep — opening a graph canvas page, or
 // producing the PR graph diff markdown — and, when no app.bicep exists yet,
-// denies the call and instructs the agent to run the radius-app-bicep skill to
+// denies the call and instructs the agent to run the radius-app-modeling skill to
 // create and SAVE .radius/app.bicep first, then retry. The extension itself
 // never writes bicep; it only triggers the skill.
 //
@@ -16,16 +16,16 @@
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
-// Shared instruction lines for the two handoff prompts below. The radius-app-bicep
+// Shared instruction lines for the two handoff prompts below. The radius-app-modeling
 // skill owns the full authoring workflow (namespaces, types, structure, and
 // writing the file to the working tree), so these hooks only point the agent at that
 // skill and state the graph's data source. They never restate the skill's steps,
 // so they cannot drift from it or short-circuit it (for example, stopping before
 // the model is written).
 const SKILL_HANDOFF =
-    "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
+    "Author the application model with the radius-app-modeling skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const RECIPE_PACK_NOTE =
-    "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
+    "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-modeling skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
 
 // Turns a branches array (which may contain undefined/empty entries meaning
 // "the default branch for the current state") into a human-readable phrase
@@ -128,7 +128,7 @@ export async function evaluateAppBicepHook(input, deps) {
     return {
         permissionDecision: "deny",
         permissionDecisionReason:
-            "No .radius/app.bicep found — it must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
+            "No .radius/app.bicep found — it must be created and saved by the radius-app-modeling skill before the application graph can be generated.",
         additionalContext: appBicepReminder(repo, targets.branches),
     };
 }
