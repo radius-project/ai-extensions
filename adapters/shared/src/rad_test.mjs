@@ -7,6 +7,7 @@ import {
   RADIUS_BICEP_CONFIG_JSON,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  saveGraphJson,
   normalizeSha256,
   expectedDigest,
   tryAcquireLock,
@@ -118,6 +119,28 @@ describe("buildGraphViaRad", () => {
   it("returns an empty array for empty content without invoking rad", async () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.
     expect(await buildGraphViaRad("")).toEqual([]);
+  });
+});
+
+describe("saveGraphJson", () => {
+  let tmp;
+  beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-save-")); });
+  afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+  it("writes the raw bytes verbatim, creating parent directories", () => {
+    const dest = path.join(tmp, ".radius", "app-graph.json");
+    const raw = '{"resources":[{"id":"a"}]}';
+    saveGraphJson(dest, raw);
+    expect(fs.readFileSync(dest, "utf8")).toBe(raw);
+  });
+
+  it("logs and swallows errors instead of throwing", () => {
+    // A directory where the file should go makes writeFileSync fail.
+    const dest = path.join(tmp, "collide");
+    fs.mkdirSync(dest);
+    const messages = [];
+    expect(() => saveGraphJson(dest, "{}", (m) => messages.push(m))).not.toThrow();
+    expect(messages.some((m) => m.includes("could not save"))).toBe(true);
   });
 });
 

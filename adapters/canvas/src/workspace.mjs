@@ -149,15 +149,47 @@ export async function readWorkspaceFile(workspacePath, repoPath) {
     }
 }
 
-export async function fetchWorkspaceBicep(state, repo, branch) {
+// Candidate locations for a workspace app.bicep, in priority order. The graph
+// JSON is saved next to whichever one is actually found.
+const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];
+
+// Reads the workspace app.bicep and reports which repo-relative path it came
+// from, so callers can persist sibling artifacts (e.g. app-graph.json) next to
+// the exact file that was graphed. Returns null when the selection is not the
+// local workspace or no app.bicep exists.
+export async function resolveWorkspaceBicep(state, repo, branch) {
     if (!isWorkspaceSelection(state, repo, branch)) return null;
-    return await readWorkspaceFile(state.workspacePath, ".radius/app.bicep")
-        || await readWorkspaceFile(state.workspacePath, "app.bicep");
+    for (const repoPath of WORKSPACE_BICEP_PATHS) {
+        const content = await readWorkspaceFile(state.workspacePath, repoPath);
+        if (content) return { content, repoPath };
+    }
+    return null;
+}
+
+export async function fetchWorkspaceBicep(state, repo, branch) {
+    const found = await resolveWorkspaceBicep(state, repo, branch);
+    return found ? found.content : null;
 }
 
 export async function fetchWorkspaceFile(state, repo, branch, repoPath) {
     if (!isWorkspaceSelection(state, repo, branch)) return null;
     return await readWorkspaceFile(state.workspacePath, repoPath);
+}
+
+// Absolute path to the app-graph.json that should sit next to the given
+// repo-relative app.bicep path inside the local workspace (e.g.
+// `.radius/app.bicep` -> `.radius/app-graph.json`, root `app.bicep` ->
+// `app-graph.json`). Returns "" when there is no workspace or the path escapes.
+export function workspaceGraphJsonPath(state, bicepRepoPath) {
+    if (!state?.workspacePath || !bicepRepoPath) return "";
+    const normalized = bicepRepoPath.replace(/\\/g, "/");
+    const dir = path.posix.dirname(normalized);
+    const rel = dir && dir !== "." ? `${dir}/app-graph.json` : "app-graph.json";
+    try {
+        return safeWorkspacePath(state.workspacePath, rel);
+    } catch {
+        return "";
+    }
 }
 
 async function walkWorkspace(workspacePath, dir = "", results = []) {
