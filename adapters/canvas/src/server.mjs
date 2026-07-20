@@ -31,12 +31,14 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  toSafeRepoRelPath,
   workspaceGraphJsonPath,
 } from "./workspace.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
+  syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
   DELETE_APP_DISPATCHER_FILE,
 } from "./infra.mjs";
@@ -61,6 +63,41 @@ export const servers = new Map();
 const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map(); // repo -> { at, payload }
 
+// Throttle for the background workflow drift-sync kicked off from the
+// environments listing: repo -> last-attempt epoch ms. Keeps the sync from
+// re-running on every page load / poll while still self-healing stale workflows.
+const WORKFLOW_SYNC_TTL_MS = 5 * 60 * 1000;
+const workflowSyncState = new Map(); // `${repo}\0${workingBranch}` -> lastAttemptAt
+
+// Fire-and-forget: re-sync the repo's committed Radius workflow files with the
+// upstream templates when they've drifted. Runs in the background so it never
+// delays the environments listing, and is throttled per repo. Managed
+// environments (name + provider) are required to regenerate the expected
+// content, so this is only called on the fresh-compute path. `workingBranch` is
+// the session worktree branch (when it matches the repo) so the sync updates
+// both the default branch and the branch a worktree-consistent deploy runs.
+function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
+    if (!repo || !managedEnvironments || managedEnvironments.length === 0) return;
+    // Throttle per repo+branch so switching the working branch triggers a fresh
+    // sync instead of waiting out a repo-wide cooldown.
+    const key = `${repo}\u0000${workingBranch || ""}`;
+    const last = workflowSyncState.get(key) || 0;
+    if (Date.now() - last < WORKFLOW_SYNC_TTL_MS) return;
+    workflowSyncState.set(key, Date.now());
+    syncRepoWorkflows(repo, managedEnvironments, {
+        workingBranch: workingBranch || "",
+        log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`),
+    })
+        .then((r) => {
+            if (r && r.updated && r.updated.length) {
+                console.error(
+                    `[radius workflow-sync] ${repo}: updated ${r.updated.length} workflow file(s) across ${(r.branches || []).join(", ")}: ${r.updated.join(", ")}`,
+                );
+            }
+        })
+        .catch((e) => console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`));
+}
+
 // Handoff callback registered by the SDK entry (extension.mjs). The server has
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
@@ -68,6 +105,13 @@ const envListCache = new Map(); // repo -> { at, payload }
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff = null;
 export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
+
+// Handler registered by the SDK entry (extension.mjs) that opens a repo file in
+// the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
+// access, so the webview's "View source code" click (for local-workspace graphs)
+// reaches the SDK through this hook. Mirrors setAppBicepHandoff.
+let openSourceHandler = null;
+export function setOpenSourceHandler(fn) { openSourceHandler = fn; }
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
@@ -223,6 +267,49 @@ function createRequestHandler(instanceId) {
             res.setHeader("Cache-Control", "no-store");
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true, instanceId }));
+            return;
+        }
+
+        // Open a source file from the local workspace in the Copilot editor
+        // canvas (side pane). Only the webview for a local-workspace graph calls
+        // this (client passes localSource); the actual open is delegated to the
+        // SDK session via the handler registered in extension.mjs. Status codes
+        // are meaningful so the webview can flag a failed open to the user:
+        // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
+        if (pathname === "/api/open-source" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            res.setHeader("Content-Type", "application/json");
+            res.setHeader("Cache-Control", "no-store");
+            let relPath = "";
+            // `line` is reserved: the editor canvas has no line-selection input
+            // yet, so it is validated and threaded through but not acted on. When
+            // the canvas gains line support, the handler can start honoring it.
+            let line = 0;
+            try {
+                const data = JSON.parse(body || "{}");
+                relPath = toSafeRepoRelPath(data.path);
+                const lineRaw = Number.parseInt(data.line, 10);
+                line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
+            } catch {
+                res.writeHead(400);
+                res.end(JSON.stringify({ ok: false, error: "invalid path" }));
+                return;
+            }
+            if (typeof openSourceHandler !== "function") {
+                res.writeHead(503);
+                res.end(JSON.stringify({ ok: false, error: "unavailable" }));
+                return;
+            }
+            try {
+                const entry = servers.get(instanceId);
+                await Promise.resolve(openSourceHandler({ path: relPath, line, instanceId, state: entry?.state }));
+                res.writeHead(200);
+                res.end(JSON.stringify({ ok: true }));
+            } catch (e) {
+                res.writeHead(500);
+                res.end(JSON.stringify({ ok: false, error: (e && e.message) ? e.message : "failed" }));
+            }
             return;
         }
 
@@ -1173,7 +1260,7 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1306,7 +1393,7 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1468,6 +1555,17 @@ function createRequestHandler(instanceId) {
                 const managedEnvironments = environments.filter(Boolean);
                 respond({ environments: managedEnvironments });
                 envListCache.set(repo, { at: Date.now(), payload: { environments: managedEnvironments } });
+                // Background self-heal: update any committed workflow files that
+                // have drifted from the upstream Radius templates. Also target the
+                // session worktree branch (when it's this repo's) so a
+                // worktree-consistent deploy runs the up-to-date workflows, not
+                // just the default branch. Fire-and-forget so it never blocks.
+                const syncEntry = servers.get(instanceId);
+                const workingBranch =
+                    syncEntry?.state?.workspaceBranch && repoMatchesWorkspace(syncEntry.state, repo)
+                        ? syncEntry.state.workspaceBranch
+                        : "";
+                kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
             } catch (e) {
                 respond({ environments: [], error: e.message });
             }
@@ -1796,7 +1894,8 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
                 if (!content) {
                     addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
@@ -1812,7 +1911,7 @@ function createRequestHandler(instanceId) {
                 }
                 addProgress('Found app.bicep — parsing resources...');
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
                 // Fetch recipes from GitHub (radius-project/resource-types-contrib)
@@ -1916,12 +2015,12 @@ function createRequestHandler(instanceId) {
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
                 // generation is owned by the Radius app-bicep skill, so branches
                 // without one simply contribute nothing to the diff (added/removed).
-                const [baseContent, headContent] = await Promise.all([
-                    fetchBicepForSelection(entry, repo, data.base),
-                    fetchBicepForSelection(entry, repo, data.head)
+                const [baseSelection, headSelection] = await Promise.all([
+                    fetchBicepSelection(entry, repo, data.base),
+                    fetchBicepSelection(entry, repo, data.head)
                 ]);
 
-                if (!baseContent && !headContent) {
+                if (!baseSelection.content && !headSelection.content) {
                     triggerAppBicepHandoff(entry, repo, [data.base, data.head], 'graph-diff');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
@@ -1933,8 +2032,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseResources = await buildGraphViaRad(baseContent || '');
-                const headResources = await buildGraphViaRad(headContent || '');
+                const baseResources = await buildGraphViaRad(baseSelection.content || '', baseSelection.bicepPath || ".radius/app.bicep");
+                const headResources = await buildGraphViaRad(headSelection.content || '', headSelection.bicepPath || ".radius/app.bicep");
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
@@ -2054,9 +2153,10 @@ function createRequestHandler(instanceId) {
                             addLog('Resolving planned application graph for ' + repo + '...');
                             const sourceRefContext = prepareSourceRefResources(entry, "planned", { repo, branch });
                             try {
-                                const content = await fetchBicepForSelection(entry, repo, branch);
+                                const selection = await fetchBicepSelection(entry, repo, branch);
+                                const content = selection.content;
                                 if (content) {
-                                    const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
+                                    const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });

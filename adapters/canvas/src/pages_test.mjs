@@ -77,7 +77,42 @@ describe("graphPage — with resources branch", () => {
     });
 });
 
+describe("graphPage — localSource provenance flag", () => {
+    it("passes localSource:true when the graph is the local workspace selection", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+        });
+        expect(html).toContain("localSource: true");
+    });
+
+    it("passes localSource:false for a remote/non-workspace selection", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "main",
+        });
+        expect(html).toContain("localSource: false");
+    });
+});
+
 describe("plannedGraphPage", () => {
+    it("passes localSource:true for the local workspace planned graph", () => {
+        const html = plannedGraphPage({
+            plannedResources: sampleResources,
+            plannedRepo: "octo/app",
+            plannedBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+        });
+        expect(html).toContain("localSource: true");
+    });
+
     it("renders the empty (plan) branch with no removed tokens", () => {
         const html = plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" });
         expect(html).toContain("Plan Deployment");
