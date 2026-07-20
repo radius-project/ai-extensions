@@ -40,7 +40,7 @@ import {
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
+  DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -105,7 +105,37 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
         .catch((e) => console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`));
 }
 
-// Handoff callback registered by the SDK entry (extension.mjs). The server has
+// Bare filename of the shared verify-credentials workflow (matches
+// infra.mjs's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
+const VERIFY_WORKFLOW_FILE = 'radius-verify-credentials.yml';
+
+// Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
+// committed workflow (deploy / delete / verify), ensure that workflow's files
+// are in sync with the upstream Radius templates so the run never executes a
+// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
+// is scoped to just the workflow about to run (`only`) and is awaited so any
+// in-place update lands before the dispatch — but a sync failure never blocks
+// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
+// and delete workflow content is provider-agnostic, so it only matters for
+// verify. `workingBranch` (when it matches the repo) is synced alongside the
+// default branch so a worktree-consistent run uses current files on both.
+async function ensureWorkflowsCurrent(repo, environment, provider, only, workingBranch) {
+    if (!repo || !environment || !only || only.length === 0) return;
+    try {
+        const r = await syncRepoWorkflows(repo, [{ name: environment, provider: provider || "" }], {
+            workingBranch: workingBranch || "",
+            only,
+            log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`),
+        });
+        if (r && r.updated && r.updated.length) {
+            console.error(`[radius workflow-presync] ${repo}: updated ${r.updated.join(", ")} before dispatch`);
+        }
+    } catch (e) {
+        console.error(`[radius workflow-presync] ${repo}: ${e?.message || e}`);
+    }
+}
+
+
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
 // agent to run the radius-app-bicep skill. This is what makes branch/repo
@@ -1785,6 +1815,12 @@ function createRequestHandler(instanceId) {
                 // delete-application.yml workflow. This tears down the Radius
                 // application on the ephemeral control plane while leaving the
                 // GitHub Environment (and its credentials) intact.
+                //
+                // Ensure the delete workflow files are in sync with upstream before
+                // dispatching, so the run never executes a drifted copy. Delete
+                // workflow content is provider-agnostic, and workflow_dispatch runs
+                // from the default branch, so provider/workingBranch aren't needed.
+                await ensureWorkflowsCurrent(repo, environment, "", [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]);
                 const dispatchedAt = Date.now();
                 const dispatch = await ghWorkflow([
                     'workflow', 'run', DELETE_APP_DISPATCHER_FILE,
@@ -2381,6 +2417,13 @@ function createRequestHandler(instanceId) {
                             addLog('⚠ Could not publish deploy workflows to branch "' + deployRef + '": ' + (e.message || e) +
                                 '. The dispatch below will fail if the branch has no run-rad-commands workflow.');
                         }
+
+                        // With the deploy workflows present, ensure they're in sync
+                        // with the upstream Radius templates before running them, so
+                        // the deploy never executes a drifted copy. Syncs the deploy
+                        // files on both the default branch and the branch being
+                        // deployed (deployRef), which a --ref dispatch checks out.
+                        await ensureWorkflowsCurrent(repo, envForDeploy, provider, [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE], deployRef);
 
                         const deployDispatchedAt = Date.now();
                         addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') on branch "' + deployRef + '" for environment "' + envForDeploy + '"...');
