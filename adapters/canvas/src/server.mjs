@@ -1968,12 +1968,12 @@ function createRequestHandler(instanceId) {
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
                 // generation is owned by the Radius app-bicep skill, so branches
                 // without one simply contribute nothing to the diff (added/removed).
-                const [baseContent, headContent] = await Promise.all([
-                    fetchBicepForSelection(entry, repo, data.base),
-                    fetchBicepForSelection(entry, repo, data.head)
+                const [baseSelection, headSelection] = await Promise.all([
+                    fetchBicepSelection(entry, repo, data.base),
+                    fetchBicepSelection(entry, repo, data.head)
                 ]);
 
-                if (!baseContent && !headContent) {
+                if (!baseSelection.content && !headSelection.content) {
                     triggerAppBicepHandoff(entry, repo, [data.base, data.head], 'graph-diff');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
@@ -1985,8 +1985,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseResources = await buildGraphViaRad(baseContent || '');
-                const headResources = await buildGraphViaRad(headContent || '');
+                const baseResources = await buildGraphViaRad(baseSelection.content || '', baseSelection.bicepPath || ".radius/app.bicep");
+                const headResources = await buildGraphViaRad(headSelection.content || '', headSelection.bicepPath || ".radius/app.bicep");
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
