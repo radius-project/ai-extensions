@@ -200,8 +200,6 @@ export function pageShell(title, bodyContent, activeNav) {
   .rad-btn--info:hover { background: #388bfd; }
   button:disabled, .rad-btn:disabled { opacity: 0.6; cursor: default; }
   .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
-  .rad-status-link { text-decoration: none; color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
-  .rad-status-link:hover .rad-status-label { text-decoration: underline; }
   .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
 
   /* ─── Cards, sections, tables (Environments/Deployments) ──────────────── */
@@ -2347,9 +2345,9 @@ function deployLandingView(state) {
 
 <div class="rad-table-wrap">
   <table class="rad-table">
-    <thead><tr><th>Application</th><th>Environment</th><th>Status</th><th>Action</th></tr></thead>
+    <thead><tr><th>Application</th><th>Environment</th><th>Status</th><th>Deployment</th><th>Workflow</th><th>Action</th></tr></thead>
     <tbody id="deploy-table-body">
-      <tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>
+      <tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>
     </tbody>
   </table>
 </div>
@@ -2413,8 +2411,13 @@ function deployLandingView(state) {
   }
   .rad-btn--danger, .rad-btn--danger-outline { background:var(--rad-neutral-bg); color:var(--rad-danger-text); border:1px solid var(--rad-neutral-border); }
   .rad-btn--danger:hover, .rad-btn--danger-outline:hover { background:var(--rad-danger-solid); border-color:var(--rad-danger-solid-border); color:#fff; }
+  .rad-btn--danger-solid { background:var(--rad-danger-solid); color:#fff; border:1px solid var(--rad-danger-solid-border); }
+  .rad-btn--danger-solid:hover { background:var(--rad-danger-solid-border); border-color:var(--rad-danger-solid-border); color:#fff; }
   .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; }
   .rad-deploy-applink:hover { color:#388bfd; }
+  .rad-monitor-link { color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; cursor:pointer; }
+  .rad-monitor-link:hover { color:#388bfd; }
+  .rad-cell-empty { color:var(--rad-text-tertiary); }
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -2525,31 +2528,39 @@ function statusCell(status) {
 
 function loadDeployments() {
     var body = document.getElementById('deploy-table-body');
-    if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
-    body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
+    if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+    body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
     fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var deps = (d && d.deployments) || [];
-            if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="4">No application deployments yet.</td></tr>'; return; }
+            if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+            var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
             body.innerHTML = deps.map(function(dep) {
                 var statusHtml = statusCell(dep.status);
-                if (dep.runUrl) {
-                    statusHtml = '<a class="rad-status-link" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + statusHtml + '</a>';
-                }
-                // The app name routes to the Applications → Deployed tab (the live
-                // deployed app graph) for this environment/application.
+                // The app name and the "Monitor Graph" link both route to the
+                // Applications → Deployed tab (the live deployed app graph).
                 var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
+                var monitorCell = '<a class="rad-monitor-link" href="' + escapeHtmlClient(deployedHref) + '" title="Monitor the deployed application graph">Monitor Graph</a>';
+                // Workflow → the GitHub Actions run that produced this deployment.
+                var workflowCell = dep.runUrl
+                    ? '<a class="rad-deploy-applink" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + arrowSvg + 'View Run</a>'
+                    : '<span class="rad-cell-empty">—</span>';
+                // Failed deployments get a filled (solid) delete button; all
+                // others use the subtle outline variant.
+                var delClass = dep.status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
                 return '<tr>' +
-                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph"><svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' + escapeHtmlClient(dep.app) + '</a></td>' +
+                    '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
                     '<td>' + statusHtml + '</td>' +
-                    '<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
+                    '<td>' + monitorCell + '</td>' +
+                    '<td>' + workflowCell + '</td>' +
+                    '<td class="rad-table__actions"><button class="rad-btn ' + delClass + ' js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
                 '</tr>';
             }).join('');
             wireDeleteButtons();
         })
-        .catch(function() { body.innerHTML = '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
+        .catch(function() { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
 // --- Delete deployment modal ---
