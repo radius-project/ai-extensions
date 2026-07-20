@@ -38,6 +38,7 @@ import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
+  syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
   DELETE_APP_DISPATCHER_FILE,
 } from "./infra.mjs";
@@ -61,6 +62,41 @@ export const servers = new Map();
 // and deploy pages snappy. Invalidated on environment creation.
 const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map(); // repo -> { at, payload }
+
+// Throttle for the background workflow drift-sync kicked off from the
+// environments listing: repo -> last-attempt epoch ms. Keeps the sync from
+// re-running on every page load / poll while still self-healing stale workflows.
+const WORKFLOW_SYNC_TTL_MS = 5 * 60 * 1000;
+const workflowSyncState = new Map(); // `${repo}\0${workingBranch}` -> lastAttemptAt
+
+// Fire-and-forget: re-sync the repo's committed Radius workflow files with the
+// upstream templates when they've drifted. Runs in the background so it never
+// delays the environments listing, and is throttled per repo. Managed
+// environments (name + provider) are required to regenerate the expected
+// content, so this is only called on the fresh-compute path. `workingBranch` is
+// the session worktree branch (when it matches the repo) so the sync updates
+// both the default branch and the branch a worktree-consistent deploy runs.
+function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
+    if (!repo || !managedEnvironments || managedEnvironments.length === 0) return;
+    // Throttle per repo+branch so switching the working branch triggers a fresh
+    // sync instead of waiting out a repo-wide cooldown.
+    const key = `${repo}\u0000${workingBranch || ""}`;
+    const last = workflowSyncState.get(key) || 0;
+    if (Date.now() - last < WORKFLOW_SYNC_TTL_MS) return;
+    workflowSyncState.set(key, Date.now());
+    syncRepoWorkflows(repo, managedEnvironments, {
+        workingBranch: workingBranch || "",
+        log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`),
+    })
+        .then((r) => {
+            if (r && r.updated && r.updated.length) {
+                console.error(
+                    `[radius workflow-sync] ${repo}: updated ${r.updated.length} workflow file(s) across ${(r.branches || []).join(", ")}: ${r.updated.join(", ")}`,
+                );
+            }
+        })
+        .catch((e) => console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`));
+}
 
 // Handoff callback registered by the SDK entry (extension.mjs). The server has
 // no access to the SDK `session`, so when a graph/generate route finds no
@@ -1519,6 +1555,17 @@ function createRequestHandler(instanceId) {
                 const managedEnvironments = environments.filter(Boolean);
                 respond({ environments: managedEnvironments });
                 envListCache.set(repo, { at: Date.now(), payload: { environments: managedEnvironments } });
+                // Background self-heal: update any committed workflow files that
+                // have drifted from the upstream Radius templates. Also target the
+                // session worktree branch (when it's this repo's) so a
+                // worktree-consistent deploy runs the up-to-date workflows, not
+                // just the default branch. Fire-and-forget so it never blocks.
+                const syncEntry = servers.get(instanceId);
+                const workingBranch =
+                    syncEntry?.state?.workspaceBranch && repoMatchesWorkspace(syncEntry.state, repo)
+                        ? syncEntry.state.workspaceBranch
+                        : "";
+                kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
             } catch (e) {
                 respond({ environments: [], error: e.message });
             }
