@@ -25,7 +25,7 @@ export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 const SKILL_HANDOFF =
     "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const GRAPH_SOURCE_NOTE =
-    "The application graph renders from the on-disk working tree, so writing .radius/app.bicep to the workspace is enough to preview it; modeling does not push, and pushing to a remote is a deployment concern.";
+    "For the current workspace repo and branch, the application graph renders from the on-disk working tree, so writing .radius/app.bicep to the workspace is enough to preview it (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so the file must be committed and pushed there.";
 const RECIPE_PACK_NOTE =
     "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
 
@@ -119,7 +119,7 @@ export function appBicepHandoffPrompt(repo, page = "graph") {
         "",
         SKILL_HANDOFF,
         GRAPH_SOURCE_NOTE,
-        `Once the model is written, open the Radius ${page} view again so it loads from the working tree.`,
+        `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");

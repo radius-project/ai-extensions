@@ -689,7 +689,7 @@ The PR description will show the app graph diff inline on GitHub, and the canvas
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
 2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
-3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }). The graph and planned pages render from the on-disk working tree, so no push is needed; modeling does not push, and pushing to a remote is a deployment concern.
+3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
 The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page instead compares two branches, so each branch being compared must already contain the committed model.
 
