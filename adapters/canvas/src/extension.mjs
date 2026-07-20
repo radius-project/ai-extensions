@@ -21,6 +21,7 @@ import {
     fetchWorkspaceBicep,
     isWorkspaceSelection,
     parseRepoFromRemote,
+    toSafeRepoRelPath,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
@@ -28,6 +29,7 @@ import {
     getOrCreateServer,
     getLastWebviewActivityAt,
     setAppBicepHandoff,
+    setOpenSourceHandler,
 } from "./server.mjs";
 import {
     getSourceRefResources,
@@ -711,6 +713,38 @@ When a recipe is not found for a resource type during planned graph resolution, 
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
 setAppBicepHandoff(({ repo, page }) => session.send(appBicepHandoffPrompt(repo, page)));
+
+// Wire the "View source code" click for local-workspace graphs to the Copilot
+// editor canvas (side pane). The graph + line numbers are generated from the
+// on-disk worktree checkout, so opening the repo-relative file there always
+// matches what was graphed (including uncommitted edits) — unlike a GitHub blob
+// URL, which 404s for an unpushed worktree branch. A stable instanceId means
+// every click reuses one editor panel instead of stacking new ones. Errors are
+// re-thrown (after logging) so the /api/open-source caller returns a non-2xx and
+// the webview can flag the failed open to the user instead of dead-clicking.
+setOpenSourceHandler(async ({ path: relPath }) => {
+    // Re-validate independently of the server route: reject absolute / drive /
+    // UNC / traversal paths so this stays safe even if reused by another caller.
+    // toSafeRepoRelPath is OS-independent, so the same rules hold on Win/macOS/Linux.
+    let safe = "";
+    try {
+        safe = toSafeRepoRelPath(relPath);
+        await session.rpc.canvas.open({
+            canvasId: "editor",
+            instanceId: "radius-source",
+            input: {
+                scope: "repo",
+                path: safe,
+                title: safe.split("/").pop() || safe,
+                placement: { focus: true },
+                createIfMissing: false,
+            },
+        });
+    } catch (e) {
+        try { session.log(`Radius: could not open ${safe || relPath} in the editor canvas: ${e && e.message ? e.message : e}`, { level: "warning" }); } catch {}
+        throw e;
+    }
+});
 
 // The extension runs as a long-lived Node process that registers canvases/tools
 // with the host. Two failure modes were observed:

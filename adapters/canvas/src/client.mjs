@@ -451,6 +451,7 @@ function radiusRenderGraph(containerId, resources, options) {
     var diffMode = options.diffMode || false;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
+    var localSource = !!options.localSource;
     var lineType = options.lineType || options.curveStyle || 'taxi';
     var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
@@ -462,12 +463,71 @@ function radiusRenderGraph(containerId, resources, options) {
     function buildSourceUrl(codeRef) {
         if (!repoUrl) return '';
         if (codeRef) {
-            var path = codeRef.split('#')[0];
+            var path = codeRef.split('#')[0].replace(/\\/g, '/');
             if (path.charAt(0) === '/') path = path.slice(1);
             var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
             return repoUrl + '/blob/' + branch + '/' + path + frag;
         }
         return repoUrl + '/tree/' + branch;
+    }
+
+    // Split a codeReference ("path#L31") into its repo-relative path and line.
+    // Used when localSource is set to open the on-disk file in the editor canvas.
+    // Backslashes are normalized so a Windows-generated codeReference is
+    // consistent in the DOM, in transport, and with the POSIX server contract.
+    function srcPathFromRef(codeRef) {
+        if (!codeRef) return '';
+        var p = codeRef.split('#')[0].replace(/\\/g, '/');
+        if (p.charAt(0) === '/') p = p.slice(1);
+        return p;
+    }
+    function srcLineFromRef(codeRef) {
+        if (!codeRef || codeRef.indexOf('#L') === -1) return 0;
+        return parseInt(codeRef.split('#L')[1], 10) || 0;
+    }
+    // Transient error banner for a failed local open (file moved/deleted, editor
+    // canvas unavailable, etc.) so a click is never silently dropped. Defined once
+    // on window and auto-hidden after a few seconds.
+    if (!window.radiusFlash) {
+        window.radiusFlash = function(message) {
+            try {
+                var el = document.getElementById('rad-flash');
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = 'rad-flash';
+                    el.setAttribute('role', 'alert');
+                    el.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);max-width:80%;background:#cf222e;color:#fff;padding:8px 14px;border-radius:6px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.25);z-index:99999;';
+                    document.body.appendChild(el);
+                }
+                el.textContent = message;
+                el.style.display = '';
+                clearTimeout(window.__radFlashTimer);
+                window.__radFlashTimer = setTimeout(function() { if (el) el.style.display = 'none'; }, 4000);
+            } catch (e) {}
+        };
+    }
+    // Ask the local server to open a repo file in the Copilot editor canvas
+    // (side pane). Defined once on window so every render/card shares it. Inspects
+    // the response so a failed open (400/500/503 or network error) surfaces a
+    // banner instead of a dead click.
+    if (!window.radiusOpenLocalSource) {
+        window.radiusOpenLocalSource = function(path, line) {
+            if (!path) return false;
+            var fail = function() { if (window.radiusFlash) window.radiusFlash("Couldn't open this file. It may have moved or been deleted."); };
+            try {
+                fetch('/api/open-source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path, line: line || 0 })
+                }).then(function(res) {
+                    if (!res.ok) { fail(); return null; }
+                    return res.json().catch(function() { return null; });
+                }).then(function(json) {
+                    if (json && json.ok === false) fail();
+                }).catch(function() { fail(); });
+            } catch (e) { fail(); }
+            return false;
+        };
     }
 
     function getNodeColors(r, typeStyle) {
@@ -534,6 +594,8 @@ function radiusRenderGraph(containerId, resources, options) {
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
                 sourceUrl: buildSourceUrl(r.codeReference || ''),
+                srcPath: srcPathFromRef(r.codeReference || ''),
+                srcLine: srcLineFromRef(r.codeReference || ''),
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
                 resourceType: r.type || '',
@@ -718,13 +780,26 @@ function radiusRenderGraph(containerId, resources, options) {
                     ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
                     : '';
                 // Figma renders "</> View source code" inside each node card
-                // (own row below the type) plus a "•••" button. When we have a
-                // precise source URL the link navigates directly; otherwise it's
-                // a span that opens the node popup (via card-click delegation).
+                // (own row below the type) plus a "•••" button. Provenance decides
+                // the target: for a local workspace graph the link opens the
+                // on-disk file in the editor canvas (via the container click
+                // delegation below). A local node WITHOUT a discovered reference
+                // renders a disabled row rather than falling through to a GitHub
+                // URL that 404s on an unpushed branch. Otherwise a precise GitHub
+                // source URL navigates directly, and with neither it's a span.
                 var srcInner = '<span class="rad-node__source-glyph">&lt;/&gt;</span><span>View source code</span>';
-                var srcRow = data.sourceUrl
-                    ? '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();">' + srcInner + '</a>'
-                    : '<span class="rad-node__source" role="button">' + srcInner + '</span>';
+                var srcRow;
+                if (localSource) {
+                    if (data.srcPath) {
+                        srcRow = '<a class="rad-node__source" href="#" role="button" data-local-src="1" data-src-path="' + String(data.srcPath).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') + '" data-src-line="' + (data.srcLine || 0) + '">' + srcInner + '</a>';
+                    } else {
+                        srcRow = '<span class="rad-node__source" role="button" aria-disabled="true" title="No source reference found" style="opacity:0.5;cursor:default;">' + srcInner + '</span>';
+                    }
+                } else if (data.sourceUrl) {
+                    srcRow = '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();">' + srcInner + '</a>';
+                } else {
+                    srcRow = '<span class="rad-node__source" role="button">' + srcInner + '</span>';
+                }
                 return '<div class="rad-node" data-node-id="' + String(data.id).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" style="box-sizing:border-box;background:'
                     + (data.bgColor || '#ffffff') + ';border-color:'
                     + (data.borderColor || '#d0d7de') + ';">'
@@ -899,10 +974,22 @@ function radiusRenderGraph(containerId, resources, options) {
                     '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
+            // Like linkRow but opens a repo-relative file in the editor canvas
+            // (side pane) instead of navigating — used for local workspace graphs
+            // where a GitHub blob URL would 404 on an unpushed worktree branch.
+            var localLinkRow = function(iconSvg, label, path, line) {
+                var sub = '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(path) + (line ? ':' + line : '') + '</div>';
+                return '<div style="padding:6px 4px;">' +
+                    '<a href="#" class="rad-local-link" data-src-path="' + escLocal(path) + '" data-src-line="' + (line || 0) + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
+            };
             // The in-card "</> View source code" link already deep-links to the
             // source, so the popup (opened by the "•••" button) focuses on the
             // app-definition and any live cloud-resource links (matches Figma).
-            if (repoUrl && d.defFile) {
+            // For a local workspace graph the app definition opens locally too.
+            if (localSource && d.defFile) {
+                links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine));
+            } else if (repoUrl && d.defFile) {
                 var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
                 links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
             }
@@ -936,15 +1023,33 @@ function radiusRenderGraph(containerId, resources, options) {
         }
 
         // Delegate clicks from the HTML node cards: the "•••" button (or the card
-        // body) opens the popup; the "View source code" anchor navigates on its
-        // own (it stops propagation), so it's excluded here.
-        container.addEventListener('click', function(e) {
+        // body) opens the popup; a remote "View source code" anchor navigates on
+        // its own (it stops propagation), so it's excluded here. Local "open in
+        // editor canvas" links (source card + popup app definition) are handled
+        // here via their data-* attributes.
+        //
+        // radiusRenderGraph can run more than once against the same container
+        // (refresh, deployed-graph rerenders). Removing the previously-stored
+        // handler before adding the current one keeps exactly ONE listener that
+        // always closes over the latest cy / openNodePopup — otherwise stale
+        // closures would stack and a single click would open the editor twice.
+        if (container._radiusClickHandler) {
+            container.removeEventListener('click', container._radiusClickHandler);
+        }
+        container._radiusClickHandler = function(e) {
+            var localEl = e.target.closest && e.target.closest('[data-local-src], .rad-local-link');
+            if (localEl) {
+                e.preventDefault();
+                window.radiusOpenLocalSource(localEl.getAttribute('data-src-path'), parseInt(localEl.getAttribute('data-src-line'), 10) || 0);
+                return;
+            }
             if (e.target.closest && e.target.closest('.rad-node__source')) return;
             var card = e.target.closest && e.target.closest('.rad-node[data-node-id]');
             if (!card) return;
             var node = cy.getElementById(card.getAttribute('data-node-id'));
             if (node && node.length) openNodePopup(node);
-        });
+        };
+        container.addEventListener('click', container._radiusClickHandler);
 
         cy.on('tap', function(e) {
             if (e.target === cy) popup.style.display = 'none';
