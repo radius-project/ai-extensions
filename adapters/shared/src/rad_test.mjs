@@ -159,6 +159,12 @@ describe("saveGraphJson", () => {
     expect(() => saveGraphJson(dest, "{}", (m) => messages.push(m))).not.toThrow();
     expect(messages.some((m) => m.includes("could not save"))).toBe(true);
   });
+
+  it("ignores and warns when destPath is not absolute", () => {
+    const messages = [];
+    expect(() => saveGraphJson("relative/path.json", "{}", (m) => messages.push(m))).not.toThrow();
+    expect(messages.some((m) => m.includes("must be absolute"))).toBe(true);
+  });
 });
 
 describe("normalizeSha256", () => {
