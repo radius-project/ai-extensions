@@ -1679,8 +1679,16 @@ function createRequestHandler(instanceId) {
                         // environment, so it should not be listed at all.
                         if (isDelete && runConclusion === "success") return null;
 
+                        // A delete run that finished WITHOUT success (failed,
+                        // cancelled, timed out, …) did not remove the app, so the
+                        // deployment still exists. Skip this delete record and keep
+                        // walking to the underlying deploy record, so the row shows
+                        // the app's real status instead of a stuck "Deleting…".
+                        if (isDelete && runConclusion && runConclusion !== "success") continue;
+
                         let status = "pending";
                         if (isDelete) {
+                            // Delete run is still in progress (no conclusion yet).
                             status = "deleting";
                         } else if (state === "success") status = "success";
                         else if (state === "failure" || state === "error") status = "failed";
