@@ -476,7 +476,13 @@ export function saveGraphJson(destPath, raw, log = noop) {
       `.${path.basename(destPath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
     );
     fs.writeFileSync(tempPath, raw);
-    fs.renameSync(tempPath, destPath);
+    try {
+      fs.renameSync(tempPath, destPath);
+    } catch {
+      // Windows cannot rename over an existing destination; fall back to replace.
+      try { fs.rmSync(destPath, { force: true }); } catch { /* best-effort */ }
+      fs.renameSync(tempPath, destPath);
+    }
     tempPath = "";
     log(`Saved application graph JSON to ${destPath}`);
   } catch (err) {
