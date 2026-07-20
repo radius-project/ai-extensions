@@ -129,6 +129,27 @@ export function defaultBranchForState(state) {
     return state?.contextBranch || state?.workspaceBranch || "main";
 }
 
+// Validate and normalize a repo-relative path that arrived from the webview
+// before it is used to open a file in the editor canvas. Returns a forward-slash,
+// repo-relative path, or throws on anything that is not safely repo-relative.
+// OS-independent by design (pure string checks, no process.platform): it rejects
+// Windows drive ("C:\\x", "C:/x", "C:x") and UNC ("\\\\srv", "//srv") forms plus
+// parent traversal ("..") and NUL on EVERY platform, and neutralizes leading
+// slashes to repo-root-relative. A path with no ".." always resolves inside the
+// repo root, so a Windows-style absolute path is rejected even on macOS/Linux.
+export function toSafeRepoRelPath(input) {
+    const raw = String(input == null ? "" : input);
+    if (!raw || raw.indexOf("\0") !== -1) throw new Error("invalid path");
+    if (/^[A-Za-z]:/.test(raw) || /^[\\/]{2}/.test(raw)) {
+        throw new Error("absolute path not allowed");
+    }
+    const rel = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!rel || rel.split("/").some((seg) => seg === "..")) {
+        throw new Error("invalid path");
+    }
+    return rel;
+}
+
 function safeWorkspacePath(workspacePath, repoPath) {
     if (!workspacePath || !repoPath) return "";
     const normalizedRel = repoPath.replace(/\\/g, "/").replace(/^\/+/, "");

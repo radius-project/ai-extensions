@@ -8,6 +8,7 @@ import { escapeHtml, sharedCredentials } from "./shared.mjs";
 import { getInlineVendorScripts } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
+import { isWorkspaceSelection } from "./workspace.mjs";
 
 // Pick the active top-nav section from a page title.
 function navFromTitle(title) {
@@ -458,6 +459,10 @@ export function graphPage(state) {
     const resourcesJson = JSON.stringify(resources);
     const targetRepo = state?.graphTargetRepo || state?.contextRepo || '';
     const graphBranch = state?.graphBranch || state?.contextBranch || 'main';
+    // Local-workspace graphs are built from the on-disk worktree checkout, so the
+    // "View source code" link should open the local file in the editor canvas
+    // rather than a GitHub blob URL (which 404s for an unpushed worktree branch).
+    const localSource = isWorkspaceSelection(state, targetRepo, graphBranch);
 
     if (resources.length === 0) {
         return pageShell("Application Graph", `
@@ -718,7 +723,8 @@ var repoUrl = 'https://github.com/' + document.getElementById('graph-repo').valu
 var branch = document.getElementById('graph-branch').value.trim() || 'main';
 radiusRenderGraph('graph-container', resources, {
     repoUrl: repoUrl,
-    branch: branch
+    branch: branch,
+    localSource: ${localSource ? 'true' : 'false'}
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -730,6 +736,9 @@ export function plannedGraphPage(state) {
     const plannedResources = state?.plannedResources || [];
     const graphBranch = state?.plannedBranch || state?.contextBranch || 'main';
     const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
+    // Same provenance rule as graphPage: open local files in the editor canvas
+    // when the planned graph was resolved against the local workspace checkout.
+    const localSource = isWorkspaceSelection(state, targetRepo, graphBranch);
 
     const resourcesJson = JSON.stringify(plannedResources);
 
@@ -902,7 +911,8 @@ document.getElementById('plan-btn').addEventListener('click', function() {
 var resources = ${resourcesJson};
 radiusRenderGraph('graph-container', resources, {
     repoUrl: 'https://github.com/' + CONTEXT_REPO,
-    branch: CONTEXT_BRANCH
+    branch: CONTEXT_BRANCH,
+    localSource: ${localSource ? 'true' : 'false'}
 });
 <\/script>
 ${graphHeaderClose()}`);

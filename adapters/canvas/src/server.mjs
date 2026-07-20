@@ -31,6 +31,7 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  toSafeRepoRelPath,
   workspaceGraphJsonPath,
 } from "./workspace.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
@@ -104,6 +105,13 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff = null;
 export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
+
+// Handler registered by the SDK entry (extension.mjs) that opens a repo file in
+// the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
+// access, so the webview's "View source code" click (for local-workspace graphs)
+// reaches the SDK through this hook. Mirrors setAppBicepHandoff.
+let openSourceHandler = null;
+export function setOpenSourceHandler(fn) { openSourceHandler = fn; }
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
@@ -259,6 +267,49 @@ function createRequestHandler(instanceId) {
             res.setHeader("Cache-Control", "no-store");
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true, instanceId }));
+            return;
+        }
+
+        // Open a source file from the local workspace in the Copilot editor
+        // canvas (side pane). Only the webview for a local-workspace graph calls
+        // this (client passes localSource); the actual open is delegated to the
+        // SDK session via the handler registered in extension.mjs. Status codes
+        // are meaningful so the webview can flag a failed open to the user:
+        // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
+        if (pathname === "/api/open-source" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            res.setHeader("Content-Type", "application/json");
+            res.setHeader("Cache-Control", "no-store");
+            let relPath = "";
+            // `line` is reserved: the editor canvas has no line-selection input
+            // yet, so it is validated and threaded through but not acted on. When
+            // the canvas gains line support, the handler can start honoring it.
+            let line = 0;
+            try {
+                const data = JSON.parse(body || "{}");
+                relPath = toSafeRepoRelPath(data.path);
+                const lineRaw = Number.parseInt(data.line, 10);
+                line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
+            } catch {
+                res.writeHead(400);
+                res.end(JSON.stringify({ ok: false, error: "invalid path" }));
+                return;
+            }
+            if (typeof openSourceHandler !== "function") {
+                res.writeHead(503);
+                res.end(JSON.stringify({ ok: false, error: "unavailable" }));
+                return;
+            }
+            try {
+                const entry = servers.get(instanceId);
+                await Promise.resolve(openSourceHandler({ path: relPath, line, instanceId, state: entry?.state }));
+                res.writeHead(200);
+                res.end(JSON.stringify({ ok: true }));
+            } catch (e) {
+                res.writeHead(500);
+                res.end(JSON.stringify({ ok: false, error: (e && e.message) ? e.message : "failed" }));
+            }
             return;
         }
 
@@ -1209,7 +1260,7 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1342,7 +1393,7 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1843,7 +1894,8 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
                 if (!content) {
                     addProgress('.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.');
                     triggerAppBicepHandoff(entry, repo, branch, 'graph');
@@ -1859,7 +1911,7 @@ function createRequestHandler(instanceId) {
                 }
                 addProgress('Found app.bicep — parsing resources...');
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
                 // Fetch recipes from GitHub (radius-project/resource-types-contrib)
@@ -1963,12 +2015,12 @@ function createRequestHandler(instanceId) {
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
                 // generation is owned by the Radius app-bicep skill, so branches
                 // without one simply contribute nothing to the diff (added/removed).
-                const [baseContent, headContent] = await Promise.all([
-                    fetchBicepForSelection(entry, repo, data.base),
-                    fetchBicepForSelection(entry, repo, data.head)
+                const [baseSelection, headSelection] = await Promise.all([
+                    fetchBicepSelection(entry, repo, data.base),
+                    fetchBicepSelection(entry, repo, data.head)
                 ]);
 
-                if (!baseContent && !headContent) {
+                if (!baseSelection.content && !headSelection.content) {
                     triggerAppBicepHandoff(entry, repo, [data.base, data.head], 'graph-diff');
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
@@ -1980,8 +2032,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseResources = await buildGraphViaRad(baseContent || '');
-                const headResources = await buildGraphViaRad(headContent || '');
+                const baseResources = await buildGraphViaRad(baseSelection.content || '', baseSelection.bicepPath || ".radius/app.bicep");
+                const headResources = await buildGraphViaRad(headSelection.content || '', headSelection.bicepPath || ".radius/app.bicep");
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
@@ -2101,9 +2153,10 @@ function createRequestHandler(instanceId) {
                             addLog('Resolving planned application graph for ' + repo + '...');
                             const sourceRefContext = prepareSourceRefResources(entry, "planned", { repo, branch });
                             try {
-                                const content = await fetchBicepForSelection(entry, repo, branch);
+                                const selection = await fetchBicepSelection(entry, repo, branch);
+                                const content = selection.content;
                                 if (content) {
-                                    const parsed = await buildGraphViaRad(content, ".radius/app.bicep", { log: addLog });
+                                    const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
                                     const recipes = await fetchRecipesFromGitHub(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });

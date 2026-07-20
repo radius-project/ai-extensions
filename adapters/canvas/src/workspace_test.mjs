@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath } from "./workspace.mjs";
+import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath, toSafeRepoRelPath, isWorkspaceSelection } from "./workspace.mjs";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must
@@ -75,5 +75,62 @@ describe("parseRepoFromRemote", () => {
     it("returns empty for non-GitHub or empty remotes", () => {
         expect(parseRepoFromRemote("")).toBe("");
         expect(parseRepoFromRemote("https://example.com/foo/bar.git")).toBe("");
+    });
+});
+
+// The /api/open-source route and the extension handler both funnel through
+// toSafeRepoRelPath, so it is the single security boundary for opening a file in
+// the editor canvas. It must behave identically on Windows, macOS and Linux.
+describe("toSafeRepoRelPath", () => {
+    it("returns a normal repo-relative path unchanged", () => {
+        expect(toSafeRepoRelPath("src/persistence/mysql.js")).toBe("src/persistence/mysql.js");
+    });
+
+    it("normalizes backslashes to forward slashes (Windows-generated refs)", () => {
+        expect(toSafeRepoRelPath("src\\persistence\\mysql.js")).toBe("src/persistence/mysql.js");
+    });
+
+    it("neutralizes a single leading slash to repo-root-relative", () => {
+        expect(toSafeRepoRelPath("/src/db.js")).toBe("src/db.js");
+    });
+
+    it("rejects Windows drive-letter absolute paths on every platform", () => {
+        expect(() => toSafeRepoRelPath("C:\\Windows\\win.ini")).toThrow();
+        expect(() => toSafeRepoRelPath("C:/Windows/win.ini")).toThrow();
+        expect(() => toSafeRepoRelPath("C:config")).toThrow();
+    });
+
+    it("rejects UNC paths", () => {
+        expect(() => toSafeRepoRelPath("\\\\server\\share\\x")).toThrow();
+        expect(() => toSafeRepoRelPath("//server/share/x")).toThrow();
+    });
+
+    it("rejects parent traversal, empty, and NUL", () => {
+        expect(() => toSafeRepoRelPath("../../etc/passwd")).toThrow();
+        expect(() => toSafeRepoRelPath("a/../b")).toThrow();
+        expect(() => toSafeRepoRelPath("")).toThrow();
+        expect(() => toSafeRepoRelPath("src/db\0.js")).toThrow();
+    });
+});
+
+// Provenance controls whether a graph node opens the local file (editor canvas)
+// or a GitHub URL. It must be true ONLY for this session's own worktree branch.
+describe("isWorkspaceSelection", () => {
+    const state = { workspacePath: "C:/wt/app", workspaceRepo: "acme/app", workspaceBranch: "feature-x" };
+
+    it("is true for the workspace repo + branch", () => {
+        expect(isWorkspaceSelection(state, "acme/app", "feature-x")).toBe(true);
+    });
+
+    it("is false for the workspace repo on a DIFFERENT branch", () => {
+        expect(isWorkspaceSelection(state, "acme/app", "main")).toBe(false);
+    });
+
+    it("is false for a different repo", () => {
+        expect(isWorkspaceSelection(state, "acme/other", "feature-x")).toBe(false);
+    });
+
+    it("is false when no workspace path is set", () => {
+        expect(isWorkspaceSelection({ workspaceRepo: "acme/app", workspaceBranch: "feature-x" }, "acme/app", "feature-x")).toBe(false);
     });
 });
