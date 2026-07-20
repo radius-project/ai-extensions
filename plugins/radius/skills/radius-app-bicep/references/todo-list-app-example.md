@@ -2,7 +2,9 @@
 
 This example records the reasoning and acceptance checks rather than a complete
 `app.bicep`, so its resource names and values are not copied into unrelated
-applications.
+applications. It is illustrative reasoning only: even when the target repository
+is this same demo app, derive every value from the actual pinned source rather
+than assuming the example matches.
 
 ## Selected profile
 
