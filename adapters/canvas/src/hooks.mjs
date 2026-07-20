@@ -16,29 +16,30 @@
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
-// Shared instruction lines for the two handoff prompts below (kept in one place
-// so the guidance is not restated). The radius-app-bicep skill holds the full
-// authoring reference — these are only the pointers the hooks need to inject.
-const SKILL_STEP_ANALYZE =
-    "1. Call the radius_generate_app tool (or follow the radius-app-bicep skill) to analyze the repository and author the application model.";
-const SKILL_STEP_NAMESPACES =
-    "2. Use ONLY Radius.* namespaces (e.g. Radius.Compute/containers, Radius.Data/mySqlDatabases, Radius.Security/secrets) — never Applications.*.";
+// Shared instruction lines for the two handoff prompts below. The radius-app-bicep
+// skill owns the full authoring workflow (namespaces, types, structure, and
+// committing + pushing the file), so these hooks only point the agent at that
+// skill and state the graph's data source. They never restate the skill's steps,
+// so they cannot drift from it or short-circuit it (for example, stopping at a
+// local save before the push).
+const SKILL_HANDOFF =
+    "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it commits and pushes .radius/app.bicep, setting the upstream when the branch has none.";
+const GRAPH_SOURCE_NOTE =
+    "GitHub-backed and PR graph views read .radius/app.bicep from the pushed branch on the remote, so commit and push the file for the graph to resolve reliably; a local workspace may use the on-disk file, but a local save is not visible to those remote views.";
 const RECIPE_PACK_NOTE =
     "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
 
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
-// to SAVE the file — never to fabricate a graph or singleton recipes.
+// to push the file, never to fabricate a graph or singleton recipes.
 export function appBicepReminder(repo) {
     const where = repo ? ` for ${repo}` : "";
     return [
         `No .radius/app.bicep exists${where}, so the application graph cannot be generated yet.`,
         "",
-        "Create it now with the radius-app-bicep skill before retrying:",
-        SKILL_STEP_ANALYZE,
-        SKILL_STEP_NAMESPACES,
-        "3. SAVE the result to .radius/app.bicep in the repository (write the file to disk; commit it if the user wants it persisted).",
-        "4. Then retry the original action — the graph renders from the saved app.bicep.",
+        `Create it now before retrying. ${SKILL_HANDOFF}`,
+        GRAPH_SOURCE_NOTE,
+        "After the push succeeds, retry the original action.",
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
@@ -107,19 +108,18 @@ export async function evaluateAppBicepHook(input, deps) {
 }
 
 // Prompt injected as a new user turn (via session.send) when a Radius graph
-// canvas is opened but no .radius/app.bicep exists. The built-in open_canvas
-// tool is not gated by onPreToolUse, so this is how the extension hands the work
-// off to the agent/skill instead of leaving the user staring at an error.
+// canvas is opened but no .radius/app.bicep exists on the branch. Because it is
+// surfaced as a visible turn, keep it free of internal tool mechanics and
+// agent-only meta-instructions; it points the agent at the skill and states the
+// graph's data source, nothing more.
 export function appBicepHandoffPrompt(repo, page = "graph") {
     const where = repo ? ` for ${repo}` : "";
     return [
-        `The Radius ${page} canvas was opened but no .radius/app.bicep exists${where}, so the application graph cannot render yet. Generate it now — do not tell the user to do it manually.`,
+        `The Radius ${page} view${where} can't render yet because its application model isn't available on the branch it reads. If it hasn't been generated, generate it; if it exists locally, make sure it's committed and pushed. Then open the ${page} view again.`,
         "",
-        "Steps:",
-        SKILL_STEP_ANALYZE,
-        SKILL_STEP_NAMESPACES,
-        "3. SAVE the result to .radius/app.bicep in the repository.",
-        `4. Re-open the Radius canvas (open_canvas with canvasId "radius", instanceId "radius-panel", input.page "${page}") so it loads the saved app.bicep.`,
+        SKILL_HANDOFF,
+        GRAPH_SOURCE_NOTE,
+        `Once the push succeeds, open the Radius ${page} view again so it loads the pushed model.`,
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
