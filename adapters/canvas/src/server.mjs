@@ -21,16 +21,17 @@ import {
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
-import { escapeHtml, sharedCredentials, saveCredentials } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand } from "./gh.mjs";
+import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
-  fetchWorkspaceBicep,
+  resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  workspaceGraphJsonPath,
 } from "./workspace.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
@@ -171,13 +172,23 @@ function repoMatchesWorkspace(state, repo) {
     return !!workspaceRepo && repo === workspaceRepo;
 }
 
-async function fetchBicepForSelection(entry, repo, branch) {
+// Resolves the app.bicep for a selection and reports where it came from.
+// `fromWorkspace` is true only when the local session workspace actually
+// supplied the content (not when we fell back to the remote repo), and
+// `bicepPath` is the repo-relative path of the local file so callers can save
+// sibling artifacts next to the exact app.bicep that was graphed.
+async function fetchBicepSelection(entry, repo, branch) {
     const access = accessForSelection(entry, repo, branch);
     if (access.useWorkspace) {
-        const local = await fetchWorkspaceBicep(entry.state, repo, access.branch);
-        if (local !== null) return local;
+        const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
+        if (local) return { content: local.content, fromWorkspace: true, branch: access.branch, bicepPath: local.repoPath };
     }
-    return await fetchBicepFromRepo(github, repo, access.branch);
+    const remote = await fetchBicepFromRepo(github, repo, access.branch);
+    return { content: remote, fromWorkspace: false, branch: access.branch, bicepPath: "" };
+}
+
+async function fetchBicepForSelection(entry, repo, branch) {
+    return (await fetchBicepSelection(entry, repo, branch)).content;
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
@@ -324,6 +335,130 @@ function createRequestHandler(instanceId) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ error: 'Azure CLI verification failed: ' + e.message }));
+            }
+            return;
+        }
+
+        // Verify an AWS CLI session for a credential profile. Like the Azure
+        // verify, we do NOT log in interactively — we check the caller's existing
+        // `aws sts get-caller-identity` and (optionally) note the requested region.
+        if (pathname === "/api/verify-aws-login" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body || "{}");
+                let ident;
+                try {
+                    const out = await runCommand("aws", ["sts", "get-caller-identity", "--output", "json"], { timeout: 15000 });
+                    ident = JSON.parse(out);
+                } catch (e) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ error: 'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.' }));
+                    return;
+                }
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                    success: true,
+                    accountId: ident.Account || data.accountId || '',
+                    arn: ident.Arn || '',
+                    user: ident.Arn ? String(ident.Arn).split('/').pop() : (ident.Account || ''),
+                    region: data.region || '',
+                }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: 'AWS CLI verification failed: ' + e.message }));
+            }
+            return;
+        }
+
+        // List the saved credential profiles for a repo.
+        if (pathname === "/api/credential-profiles" && req.method === "GET") {
+            const repo = url.searchParams.get("repo") || "";
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(200);
+            res.end(JSON.stringify({ profiles: repo ? listCredentialProfiles(repo) : [] }));
+            return;
+        }
+
+        // Create / update a credential profile (already verified client-side).
+        if (pathname === "/api/save-credential-profile" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body || "{}");
+                const repo = (data.repo || "").trim();
+                const name = (data.name || "").trim();
+                if (!repo || !name) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "repo and name are required." }));
+                    return;
+                }
+                const saved = saveCredentialProfile(repo, data);
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, profile: saved }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message }));
+            }
+            return;
+        }
+
+        // Delete a credential profile.
+        if (pathname === "/api/delete-credential-profile" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body || "{}");
+                const repo = (data.repo || "").trim();
+                const name = (data.name || "").trim();
+                const removed = deleteCredentialProfile(repo, name);
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, removed }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message }));
+            }
+            return;
+        }
+
+        // Delete a GitHub environment (from the Environments table "Delete Env").
+        if (pathname === "/api/delete-environment" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body || "{}");
+                const repo = (data.repo || "").trim();
+                const envName = (data.environment || "").trim();
+                if (!repo || !envName) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "repo and environment are required." }));
+                    return;
+                }
+                try {
+                    await runCommand("gh", ["api", "--method", "DELETE", "/repos/" + repo + "/environments/" + encodeURIComponent(envName)], { timeout: 20000 });
+                } catch (e) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: "Could not delete environment: " + (e.message || "unknown error") }));
+                    return;
+                }
+                envListCache.delete(repo);
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message }));
             }
             return;
         }
@@ -664,6 +799,12 @@ function createRequestHandler(instanceId) {
                 await setEnvironmentVariable('RADIUS_STATE_ARCHIVE', DEFAULT_STATE_ARCHIVE);
                 steps.push(`✅ Radius state package configured with archive tag "${DEFAULT_STATE_ARCHIVE}".`);
 
+                // Record the credential profile this environment was created from
+                // so the Environments listing can show it in the Credentials column.
+                if (data.profileName) {
+                    await setEnvironmentVariable('RADIUS_CREDENTIAL_PROFILE', data.profileName);
+                }
+
                 // Step 2: Set environment variables and secrets based on provider
                 steps.push('Setting environment variables and secrets...');
                 // Fall back to shared credentials for values not provided in the request
@@ -683,8 +824,9 @@ function createRequestHandler(instanceId) {
                     await setEnvironmentVariable('AZURE_RESOURCE_GROUP', rg);
                     await setEnvironmentVariable('AZURE_AKS_CLUSTER_NAME', k8s);
                     await setEnvironmentVariable('AZURE_LOCATION', data.location);
+                    await setEnvironmentVariable('RADIUS_NAMESPACE', data.namespace);
 
-                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location].filter(Boolean).length;
+                    const setCount = [clientId, tenantId, subscriptionId, rg, k8s, data.location, data.namespace].filter(Boolean).length;
                     steps.push(`Set ${setCount} environment value(s) for Azure.`);
                     if (!clientId || !tenantId || !subscriptionId) {
                         steps.push('⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually.');
@@ -701,6 +843,7 @@ function createRequestHandler(instanceId) {
                     await setEnvironmentVariable('AWS_EKS_CLUSTER_NAME', k8s);
                     await setEnvironmentVariable('RADIUS_VPC_ID', data.vpcId);
                     await setEnvironmentVariable('RADIUS_SUBNET_IDS', data.subnetIds);
+                    await setEnvironmentVariable('RADIUS_NAMESPACE', data.namespace);
                 }
 
                 // Step 2b: Provision application parameters. Parse the app.bicep the
@@ -1013,7 +1156,8 @@ function createRequestHandler(instanceId) {
 
             try {
                 sendProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
 
                 if (content) {
                     sendProgress('Found existing app.bicep — parsing resources...');
@@ -1028,7 +1172,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress });
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1142,7 +1287,8 @@ function createRequestHandler(instanceId) {
                 if (entry) entry.state.progressMessages = [];
 
                 addProgress(`Checking ${repo} for existing app.bicep...`);
-                const content = await fetchBicepForSelection(entry, repo, branch);
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                const content = selection.content;
                 if (content) {
                     addProgress('Found existing app.bicep — parsing resources...');
                 } else {
@@ -1159,7 +1305,8 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress });
+                const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
+                const resources = await buildGraphViaRad(content, ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -1267,20 +1414,29 @@ function createRequestHandler(instanceId) {
                     // The variables (provider) and deployments (status) lookups are
                     // independent, so fire them together.
                     const [varsRaw, depIdsRaw] = await Promise.all([
-                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[].name"]),
+                        gh(["api", `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`, "--jq", ".variables[] | .name + \"\\t\" + (.value // \"\")"]),
                         verifyRuns.size > 0
                             ? gh(["api", `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`, "--jq", ".[].id"])
                             : Promise.resolve(""),
                     ]);
-                    // Only surface environments created by this extension. They are
-                    // tagged with a RADIUS_MANAGED variable at creation time; any
-                    // environment without it was created outside Radius and is
-                    // filtered out below.
-                    if (!/^RADIUS_MANAGED$/m.test(varsRaw)) return null;
+                    // Parse the "name<TAB>value" variable lines into a map. Only
+                    // surface environments created by this extension (tagged with a
+                    // RADIUS_MANAGED variable at creation time); anything without it
+                    // was created outside Radius and is filtered out below.
+                    const vars = {};
+                    for (const line of (varsRaw ? varsRaw.split("\n").filter(Boolean) : [])) {
+                        const tab = line.indexOf("\t");
+                        if (tab === -1) { vars[line] = ""; continue; }
+                        vars[line.slice(0, tab)] = line.slice(tab + 1);
+                    }
+                    if (!("RADIUS_MANAGED" in vars)) return null;
 
                     let provider = "";
-                    if (/AZURE_/.test(varsRaw)) provider = "azure";
-                    else if (/AWS_/.test(varsRaw)) provider = "aws";
+                    const varNames = Object.keys(vars).join("\n");
+                    if (/AZURE_/.test(varNames)) provider = "azure";
+                    else if (/AWS_/.test(varNames)) provider = "aws";
+
+                    const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 
                     // Status reflects the verify-credentials workflow only:
                     // pending while it runs, success when it passes, failed if it
@@ -1306,7 +1462,7 @@ function createRequestHandler(instanceId) {
                     const webUrl = id
                         ? `https://github.com/${repo}/settings/environments/${id}/edit`
                         : `https://github.com/${repo}/settings/environments`;
-                    return { name, provider, status, webUrl };
+                    return { name, provider, status, webUrl, credentialProfile };
                 }));
 
                 const managedEnvironments = environments.filter(Boolean);
@@ -2520,6 +2676,11 @@ function createRequestHandler(instanceId) {
             page = "deploying";
         }
         const renderer = PAGE_RENDERERS[page];
+        // Tell the Environments renderer which subtab to activate (Environments vs
+        // Credentials) so a direct ?page=credentials load lands on that subtab.
+        if (page === "credentials" || page === "environment") {
+            state.activeSubtab = page === "credentials" ? "credentials" : "environments";
+        }
         if (renderer) {
             res.writeHead(200);
             res.end(renderer(state));
