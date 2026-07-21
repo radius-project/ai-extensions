@@ -116,7 +116,11 @@ export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
 }
 
 export function buildAppGraphRadCommand(appName) {
-  return `app graph --application ${appName} --preview --include-icons`;
+  const safe = String(appName || "").trim();
+  if (!safe || /[\s"'\\]/.test(safe)) {
+    throw new Error(`Invalid application name for rad command: ${JSON.stringify(safe)}`);
+  }
+  return `app graph --application ${safe} --preview --include-icons`;
 }
 
 // Extract the Radius application name from an app.bicep source. The name is
