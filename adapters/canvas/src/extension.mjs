@@ -39,6 +39,7 @@ import {
 } from "./source-refs.mjs";
 import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
+import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -372,6 +373,7 @@ const session = await joinSession({
                         if (result.error) return result;
                         const page = result.view === "diff" ? "graph-diff" : result.view;
                         entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
+                        await reloadCanvasInstance(session, ctx, { page });
                         return {
                             ...result,
                             message: `Updated ${result.updated} resource(s); queued ${result.queued}; skipped ${result.skipped}.`,
