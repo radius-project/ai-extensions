@@ -31,6 +31,7 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  resolveSessionId,
   toSafeRepoRelPath,
   workspaceGraphJsonPath,
 } from "./workspace.mjs";
@@ -2801,7 +2802,7 @@ const PAGE_RENDERERS = {
     "deploying": deployingPage,
 };
 
-function preferredPortForInstance(instanceId) {
+async function preferredPortForInstance(instanceId) {
     // Namespace the deterministic port by the Copilot session. Every session is
     // told to open the canvas with the same instanceId ("radius-panel"), so
     // hashing instanceId alone makes all concurrent sessions resolve to one
@@ -2814,7 +2815,7 @@ function preferredPortForInstance(instanceId) {
     // session id into the hash gives each session its own stable port. It stays
     // stable across respawns within the same session, so the heartbeat's
     // reconnect-and-reload still restores a live page after a genuine restart.
-    const sessionId = process.env.COPILOT_AGENT_SESSION_ID || process.env.SESSION_ID || "";
+    const sessionId = await resolveSessionId();
     const hash = createHash("sha256").update(sessionId + "\u0000" + String(instanceId)).digest();
     // Map into a high, mostly-unprivileged range (20000–60000) to reduce the
     // chance of clashing with other listeners.
@@ -2843,7 +2844,7 @@ async function startServer(instanceId, page = "environment") {
     let port = 0;
     // Try the stable, instanceId-derived port first; fall back to an ephemeral
     // port (listen(0)) only if it's already taken/unavailable.
-    const preferred = preferredPortForInstance(instanceId);
+    const preferred = await preferredPortForInstance(instanceId);
     try {
         await listenOn(server, preferred);
         port = preferred;
