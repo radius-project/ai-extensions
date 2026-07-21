@@ -26,14 +26,20 @@ export function applicationGraphToResources(
   appGraph: any,
   definitionFile = ".radius/app.bicep",
 ): any[] {
-  const icons = !Array.isArray(appGraph) && appGraph && typeof appGraph.icons === "object"
-    ? appGraph.icons
-    : {};
-  const resolveIcon = (resource: any): string =>
-    resource?.icon ||
-    (resource?.iconHash && typeof icons[resource.iconHash] === "string"
-      ? icons[resource.iconHash]
-      : "");
+  const icons =
+    !Array.isArray(appGraph) &&
+    appGraph &&
+    appGraph.icons &&
+    typeof appGraph.icons === "object" &&
+    !Array.isArray(appGraph.icons)
+      ? appGraph.icons
+      : {};
+
+  const resolveIcon = (resource: any): string => {
+    if (typeof resource?.icon === "string" && resource.icon) return resource.icon;
+    const hash = resource?.iconHash;
+    return typeof hash === "string" && typeof icons[hash] === "string" ? icons[hash] : "";
+  };
   const raw = Array.isArray(appGraph)
     ? appGraph
     : appGraph && Array.isArray(appGraph.resources)
