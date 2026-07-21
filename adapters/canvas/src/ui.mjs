@@ -89,7 +89,7 @@ export function feedbackWidget() {
         + `<circle cx="8.5" cy="11.5" r="1.1" fill="#fff"/><circle cx="12" cy="11.5" r="1.1" fill="#fff"/><circle cx="15.5" cy="11.5" r="1.1" fill="#fff"/></svg>`;
     return `<div id="rad-feedback" class="rad-feedback">
   <div id="rad-feedback-pop" class="rad-feedback__pop" style="display:none;">
-    <a class="rad-feedback__link" href="https://github.com/radius-project/ai-extensions/issues/new" target="_blank" rel="noopener">Share feedback</a>
+    <a class="rad-feedback__link" href="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml" target="_blank" rel="noopener">Share feedback</a>
     <a class="rad-feedback__link" href="https://radapp.io" target="_blank" rel="noopener">Learn about Radius</a>
   </div>
   <button id="rad-feedback-btn" class="rad-feedback__btn" type="button" aria-label="Share feedback" aria-haspopup="dialog" aria-expanded="false">${chat}</button>
