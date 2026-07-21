@@ -2468,6 +2468,12 @@ var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
 var HAS_APPS = false;
 var HAS_ENVS = false;
+// Optimistic per-row status overrides for in-flight operations, keyed by
+// "app\\u0000env" → 'deleting' | 'pending'. Applied in loadDeployments so a row
+// reflects the action just taken even before GitHub's deployment record catches
+// up (or while a cached listing is still warm). Cleared when the op resolves.
+var OP_STATUS = {};
+function opKey(app, env) { return app + '\\u0000' + env; }
 
 // Renders an inline status banner (Figma: green success / red error with a ✓/⚠
 // icon and a dismiss ✕). The message node uses textContent by default so
@@ -2571,18 +2577,24 @@ function statusCell(status) {
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
 
-function loadDeployments() {
+function loadDeployments(fresh) {
     var body = document.getElementById('deploy-table-body');
     if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
     body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
-    fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO))
+    fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + (fresh ? '&fresh=1' : ''))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var deps = (d && d.deployments) || [];
             if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
             var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
             body.innerHTML = deps.map(function(dep) {
-                var statusHtml = statusCell(dep.status);
+                // A GitHub deployment record is only created once the deploy/delete
+                // job starts, so right after dispatch the newest record still shows
+                // the previous state. Force an in-flight op's status until it clears
+                // so the row reflects the action the user just took (Deleting…/Pending).
+                var forced = OP_STATUS[dep.app + '\\u0000' + dep.environment];
+                var status = forced || dep.status;
+                var statusHtml = statusCell(status);
                 // The app name and the "Monitor Graph" link both route to the
                 // Applications → Deployed tab (the live deployed app graph).
                 var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
@@ -2592,15 +2604,17 @@ function loadDeployments() {
                     ? '<a class="rad-deploy-applink" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + arrowSvg + 'View Run</a>'
                     : '<span class="rad-cell-empty">—</span>';
                 // Failed deployments get a filled (solid) delete button; all
-                // others use the subtle outline variant.
-                var delClass = dep.status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
+                // others use the subtle outline variant. A row that's mid-delete
+                // disables its button to prevent a duplicate dispatch.
+                var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
+                var delDisabled = status === 'deleting' ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
                     '<td>' + statusHtml + '</td>' +
                     '<td>' + monitorCell + '</td>' +
                     '<td>' + workflowCell + '</td>' +
-                    '<td class="rad-table__actions"><button class="rad-btn ' + delClass + ' js-del-dep" data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
+                    '<td class="rad-table__actions"><button class="rad-btn ' + delClass + ' js-del-dep"' + delDisabled + ' data-env="' + escapeHtmlClient(dep.environment) + '" data-app="' + escapeHtmlClient(dep.app) + '" style="margin:0;">Delete Deployment</button></td>' +
                 '</tr>';
             }).join('');
             wireDeleteButtons();
@@ -2680,29 +2694,36 @@ function runDelete() {
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
             if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            loadDeployments(); // row → Deleting…
+            // Optimistically show "Deleting…" right away (the delete run's
+            // deployment record doesn't exist yet), and keep it until the row clears.
+            OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
+            loadDeployments(true);
             pollDeleteCompletion(dep.app, dep.environment, 0);
         })
         .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
 }
 
 // Poll the deployments listing until the target app/env is gone (a successful
-// delete removes it), then show the green success banner. Bounded so a stuck or
-// failed delete never polls forever — the row simply stays "Deleting…" (a failed
-// delete falls back to its deploy record, so the deployment remains visible).
+// delete removes it), then show the green success banner. Refreshes the table
+// each cycle so the "Deleting…" status stays visible. Bounded so a stuck or
+// failed delete never polls forever — on timeout the override is cleared and the
+// row reverts to its real status (a failed delete falls back to its deploy
+// record, so the deployment remains visible).
 function pollDeleteCompletion(app, env, tries) {
-    if (tries > 45) return; // ~3 min at 4s intervals
+    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true); return; } // ~3 min at 4s
     setTimeout(function() {
-        fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO))
+        fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + '&fresh=1')
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var deps = (d && d.deployments) || [];
                 var stillThere = deps.some(function(x) { return x.app === app && x.environment === env; });
                 if (!stillThere) {
-                    loadDeployments();
+                    delete OP_STATUS[opKey(app, env)];
+                    loadDeployments(true);
                     showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong> has been successfully deleted.', true);
                     return;
                 }
+                loadDeployments(true); // keep the row showing "Deleting…"
                 pollDeleteCompletion(app, env, tries + 1);
             })
             .catch(function() { pollDeleteCompletion(app, env, tries + 1); });
@@ -2802,6 +2823,11 @@ deployBtn.addEventListener('click', function() {
     if (!CTX_REPO || !env || !app) return;
     var provider = ENV_PROVIDERS[env] || 'azure';
     resetDeployModal();
+    // Optimistically show this row as "Pending" for the duration of the run. A
+    // GitHub deployment record for the new run doesn't exist until the deploy job
+    // starts, so without this the row would keep showing the previous status.
+    OP_STATUS[opKey(app, env)] = 'pending';
+    loadDeployments(true);
     deployBtn.disabled = true;
     deployBtn.textContent = 'Deploying…';
     var progTitle = document.getElementById('deploy-progress-title');
@@ -2831,17 +2857,19 @@ deployBtn.addEventListener('click', function() {
                     wfLink.setAttribute('href', d.deployRunUrl);
                     wfLink.style.pointerEvents = '';
                     wfLink.style.color = 'var(--rad-link,#0969da)';
-                    loadDeployments();
+                    loadDeployments(true);
                 }
                 if (d && d.status === 'failed') {
                     clearInterval(wfPoll);
+                    delete OP_STATUS[opKey(app, env)];
                     showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '');
-                    loadDeployments();
+                    loadDeployments(true);
                     return;
                 }
                 if (d && (d.status === 'success' || d.status === 'complete')) {
                     clearInterval(wfPoll);
-                    loadDeployments();
+                    delete OP_STATUS[opKey(app, env)];
+                    loadDeployments(true);
                 }
             })
             .catch(function() {});
@@ -2854,10 +2882,12 @@ deployBtn.addEventListener('click', function() {
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .catch(function() {
           clearInterval(wfPoll);
+          delete OP_STATUS[opKey(app, env)];
           document.getElementById('deploy-progress-modal').style.display = 'none';
           deployBtn.disabled = false;
           refreshDeployBtn();
           showInline('error', 'Could not start the deployment. Please try again.');
+          loadDeployments(true);
       });
 });
 
@@ -2871,7 +2901,7 @@ deployBtn.addEventListener('click', function() {
             resetDeployModal();
             deployBtn.disabled = false;
             refreshDeployBtn();
-            loadDeployments();
+            loadDeployments(true);
         }
     });
 })();

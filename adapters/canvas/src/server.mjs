@@ -1655,8 +1655,11 @@ function createRequestHandler(instanceId) {
 
             // (A) Serve a fresh cached listing when available. The fan-out below
             // is expensive, so a short TTL keeps re-opens and the workflow poll
-            // snappy without showing stale state for long.
-            const cachedDeploys = deployListCache.get(repo);
+            // snappy without showing stale state for long. `?fresh=1` bypasses the
+            // cache read so active status pollers (a running deploy/delete) always
+            // see live status rather than a value cached before the transition.
+            const freshDeploys = url.searchParams.get("fresh") === "1";
+            const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
             if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) { respond(cachedDeploys.payload); return; }
 
             const gh = (args, timeout = 12000) => new Promise((resolve) => {
