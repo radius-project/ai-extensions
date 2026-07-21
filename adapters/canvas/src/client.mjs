@@ -463,7 +463,7 @@ function radiusRenderGraph(containerId, resources, options) {
     function buildSourceUrl(codeRef) {
         if (!repoUrl) return '';
         if (codeRef) {
-            var path = codeRef.split('#')[0].replace(/\\/g, '/');
+            var path = codeRef.split('#')[0].replace(/\\\\/g, '/');
             if (path.charAt(0) === '/') path = path.slice(1);
             var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
             return repoUrl + '/blob/' + branch + '/' + path + frag;
@@ -477,7 +477,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // consistent in the DOM, in transport, and with the POSIX server contract.
     function srcPathFromRef(codeRef) {
         if (!codeRef) return '';
-        var p = codeRef.split('#')[0].replace(/\\/g, '/');
+        var p = codeRef.split('#')[0].replace(/\\\\/g, '/');
         if (p.charAt(0) === '/') p = p.slice(1);
         return p;
     }
@@ -755,17 +755,17 @@ function radiusRenderGraph(containerId, resources, options) {
     if (!diffMode && typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
         try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
     }
+    var htmlLabelsApplied = false;
     if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
+        // Keep the native Cytoscape node visible behind the HTML card. The label
+        // plugin creates overlays on a later render event; if that event is
+        // delayed or never fires, hiding the native node leaves a blank graph.
+        // A successfully rendered card is opaque and covers this fallback.
         cy.style()
             .selector('node').style({
                 'width': 224,
-                'height': 108,
-                'background-opacity': 0,
-                'border-width': 0,
-                'background-image': 'none',
-                'text-opacity': 0
+                'height': 108
             })
-            .selector('node.hover').style({ 'border-width': 0 })
             .update();
         var radEsc = function(s) {
             return String(s == null ? '' : s)
@@ -811,6 +811,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     + '</div>';
             }
         }]);
+        htmlLabelsApplied = true;
     }
 
     // ── Layout + edge routing via dagre (with bend-point waypoints) ──────────
@@ -944,6 +945,29 @@ function radiusRenderGraph(containerId, resources, options) {
         cy.fit(undefined, 40);
     } catch (err) { try { cy.fit(undefined, 40); } catch (e2) {} }
 
+    // cytoscape-node-html-label builds its DOM cards on a single one-shot
+    // "render" event ('_cy.one(render...)') registered when nodeHtmlLabel([...])
+    // was called. All node positioning above happens synchronously, so if that
+    // one render never fires after setup the cards (and their in-card links)
+    // never materialize, leaving only the native canvas nodes — which cannot
+    // host clickable links. Force a repaint on the next frames so the one-shot
+    // fires and the cards are built.
+    if (htmlLabelsApplied) {
+        var forceHtmlLabelRender = function() {
+            try { cy.resize(); } catch (e) {}
+            try { cy.style().update(); } catch (e) {}
+        };
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function() {
+                forceHtmlLabelRender();
+                requestAnimationFrame(forceHtmlLabelRender);
+            });
+        } else {
+            setTimeout(forceHtmlLabelRender, 0);
+            setTimeout(forceHtmlLabelRender, 32);
+        }
+    }
+
     // Node click popup
     if (options.enablePopup !== false) {
         var popup = document.createElement('div');
@@ -955,6 +979,7 @@ function radiusRenderGraph(containerId, resources, options) {
         // white-card node styling instead of the old colored emoji.
         var ICON_DEF = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M2 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4Zm0 4a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8Zm.75 3.25a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75Z"></path></svg>';
         var ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></path></svg>';
+        var ICON_SRC = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215Zm-6.56 0a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"></path></svg>';
 
         cy.on('tap', 'node', function(e) { openNodePopup(e.target); });
 
@@ -983,10 +1008,21 @@ function radiusRenderGraph(containerId, resources, options) {
                     '<a href="#" class="rad-local-link" data-src-path="' + escLocal(path) + '" data-src-line="' + (line || 0) + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
-            // The in-card "</> View source code" link already deep-links to the
-            // source, so the popup (opened by the "•••" button) focuses on the
-            // app-definition and any live cloud-resource links (matches Figma).
-            // For a local workspace graph the app definition opens locally too.
+            // The in-card "</> View source code" link deep-links to the source,
+            // but the HTML card overlay is optional (it falls back to native
+            // canvas nodes, which cannot host links). So the popup carries both a
+            // "View source code" and a "View app definition" link, giving a
+            // reliable link surface on any plain node click regardless of whether
+            // the card overlay rendered. For a local workspace graph both open the
+            // on-disk file in the editor canvas instead of a GitHub blob URL that
+            // would 404 on an unpushed worktree branch.
+            if (localSource) {
+                if (d.srcPath) {
+                    links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine));
+                }
+            } else if (d.sourceUrl) {
+                links.push(linkRow(ICON_SRC, 'View source code', d.sourceUrl, true));
+            }
             if (localSource && d.defFile) {
                 links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine));
             } else if (repoUrl && d.defFile) {
