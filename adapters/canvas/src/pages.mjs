@@ -2397,10 +2397,6 @@ function deployLandingView(state) {
     <div style="min-width:0; flex:1;">
       <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
       <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
-      <div id="deploy-progress-links" style="margin-top:12px; display:flex; flex-direction:column; gap:6px;">
-        <a id="deploy-view-graph" href="#" style="font-size:13px; color:var(--rad-link,#0969da); text-decoration:none; font-weight:500;">View App Graph</a>
-        <a id="deploy-view-workflow" href="#" target="_blank" rel="noopener noreferrer" style="font-size:13px; color:var(--rad-text-tertiary); text-decoration:none; font-weight:500; pointer-events:none;">Resolving workflow run…</a>
-      </div>
       <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
         <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
       </div>
@@ -2866,37 +2862,36 @@ deployBtn.addEventListener('click', function() {
     loadDeployments(true);
     deployBtn.disabled = true;
     deployBtn.textContent = 'Deploying…';
+
+    // Briefly acknowledge the deploy, then auto-dismiss. Progress (status,
+    // Monitor Graph, View Run) is tracked in the deployments list below, so the
+    // dialog no longer links out to the app graph or the workflow run.
     var progTitle = document.getElementById('deploy-progress-title');
     progTitle.innerHTML = 'Deploying <strong>' + escapeHtmlClient(app) + '</strong> to environment <strong>' + escapeHtmlClient(env) + '</strong>';
-    // "View App Graph" routes to the Applications → Deployed tab (graph + logs).
-    var graphLink = document.getElementById('deploy-view-graph');
-    graphLink.setAttribute('href', '/?page=deployed&environment=' + encodeURIComponent(env) + '&application=' + encodeURIComponent(app));
-    // "View Workflow in GitHub" resolves once the dispatched run is detected.
-    var wfLink = document.getElementById('deploy-view-workflow');
-    wfLink.textContent = 'Resolving workflow run…';
-    wfLink.removeAttribute('href');
-    wfLink.style.pointerEvents = 'none';
-    wfLink.style.color = 'var(--rad-text-tertiary)';
-    document.getElementById('deploy-progress-modal').style.display = 'flex';
+    var progSub = document.getElementById('deploy-progress-subtitle');
+    if (progSub) progSub.textContent = 'Track progress in the deployments list below.';
+    var progModal = document.getElementById('deploy-progress-modal');
+    progModal.style.display = 'flex';
+    // Green confirmation banner (matches the delete-success notification).
+    showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> to environment <strong>' + escapeHtmlClient(env) + '</strong> has started.', true);
+    // Auto-dismiss the transient dialog after a couple of seconds. The deploy
+    // keeps running (tracked in the list), so the button returns to normal.
+    var autoHide = setTimeout(function() {
+        progModal.style.display = 'none';
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+    }, 2500);
 
-    // Poll deploy-status until the workflow run URL is available, then wire the
-    // "View Workflow in GitHub" link. We stay on the Deployments page; the dialog
-    // persists so the user can open either link at their convenience.
-    var wfResolved = false;
+    // Poll deploy-status to clear the optimistic "Pending" once the run resolves,
+    // and to surface a failure dialog if the deploy can't start (e.g. an unpushed
+    // branch). We stay on the Deployments page throughout.
     var wfPoll = setInterval(function() {
         fetch('/api/deploy-status')
             .then(function(r) { return r.json(); })
             .then(function(d) {
-                if (!wfResolved && d && d.deployRunUrl) {
-                    wfResolved = true;
-                    wfLink.textContent = 'View Workflow in GitHub ↗';
-                    wfLink.setAttribute('href', d.deployRunUrl);
-                    wfLink.style.pointerEvents = '';
-                    wfLink.style.color = 'var(--rad-link,#0969da)';
-                    loadDeployments(true);
-                }
                 if (d && d.status === 'failed') {
                     clearInterval(wfPoll);
+                    clearTimeout(autoHide);
                     delete OP_STATUS[opKey(app, env)];
                     showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '');
                     loadDeployments(true);
@@ -2918,6 +2913,7 @@ deployBtn.addEventListener('click', function() {
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .catch(function() {
           clearInterval(wfPoll);
+          clearTimeout(autoHide);
           delete OP_STATUS[opKey(app, env)];
           document.getElementById('deploy-progress-modal').style.display = 'none';
           deployBtn.disabled = false;
