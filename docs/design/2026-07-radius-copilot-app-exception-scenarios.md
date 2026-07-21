@@ -1,8 +1,9 @@
-# Feature Specification: Radius Copilot App Integration Exception Scenarios
+# Radius Copilot app integration exception scenarios
 
 - **Author**: Zach Casper (@zachcasper)
+- **Date**: 2026-07
 
-## Summary
+## Overview
 
 This document describes the error and exception scenarios for the Radius integration in the GitHub Copilot app, the user experience when each occurs, and how the user recovers or corrects the problem. It is scoped to the MVP (the initial public preview) of the integration.
 
@@ -12,7 +13,7 @@ The integration has three components, defined in the terms below: the **Radius s
 
 The MVP does not support repositories without a containerized workload, preview deployments via the planned application graph view, or deployments to targets other than AWS or Azure. Where a user attempts one of these, Radius tells them clearly that the configuration is unsupported rather than letting them proceed into an ambiguous failure.
 
-## Definition of terms
+## Terms and definitions
 
 - **Canvas**: The GitHub Copilot app's extension framework, which renders extensions in the sidebar. Canvas is a Copilot capability, not a Radius component.
 - **Radius Canvas extension**: The Canvas extension, built on the Canvas framework, that powers the Radius side panel.
@@ -57,7 +58,7 @@ The Radius plugin is already installed and working, and the user starts an updat
 
 ## Part 1: Clone the repo, invoke the Radius skill, and open the Radius side panel
 
-Before any Assembly analysis can begin, the repository must be brought into the session and checked out as a worktree, the Radius skill must fire and enable the repository for Radius, and the Radius side panel must come up in the sidebar. Bringing the repository in is a Copilot app prerequisite. Committing the Repo Radius workflow files into `.github/workflows` is what enables the repository for Radius, since Repo Radius runs every operation as a GitHub Actions workflow that must be committed before it can run; that commit happens as part of the deployment step. The exceptions here are the repository not being available (1.1), the skill not being invoked (1.2), the enablement workflow files not committing to the default branch (1.3), and the Radius side panel not coming up (1.4). All are pre-flight, so nothing has been analyzed or deployed yet, and the user recovers by correcting the cause and re-invoking the skill with no cleanup.
+Before any Assembly analysis can begin, the repository must be brought into the session and checked out as a worktree, the Radius skill must fire and enable the repository for Radius, and the Radius side panel must come up in the sidebar. Bringing the repository in is a Copilot app prerequisite. Committing the Repo Radius workflow files into `.github/workflows` is what enables the repository for Radius, since Repo Radius runs every operation as a GitHub Actions workflow that must be committed before it can run; that commit happens as part of the environment creation step. The exceptions here are the repository not being available (1.1), the skill not being invoked (1.2), the enablement workflow files not committing to the default branch (1.3), and the Radius side panel not coming up (1.4). All are pre-flight, so nothing has been analyzed or deployed yet, and the user recovers by correcting the cause and re-invoking the skill with no cleanup.
 
 ### Exception 1.1: Repository not available in the session
 
@@ -77,7 +78,7 @@ The session is ready with a repository attached, and the user asks Copilot somet
 
 The Repo Radius workflow files must be on the default branch before Repo Radius can run them, so the Radius Canvas extension attempts to commit them straight to the default branch during environment creation. It writes them server-side through the GitHub API, so this never touches the local worktree. When it cannot push directly to the default branch, because the session lacks write permission or the branch is protected, it falls back to committing the files to a new remote branch and offering to open a pull request for the user to merge. This only affects a repository that has not been enabled yet; one enabled on an earlier session already has the workflow files, so a read-only user working with an already-enabled repository never reaches this exception.
 
-- **What the user sees:** In the normal case the commit to the default branch succeeds silently. If the extension cannot push directly, it commits the files to a new branch and opens a pull request, responding in chat: "I couldn't push the workflow files to the default branch of <repository> directly, so I committed them to <branch> and opened a pull request: <pull request link>. Merge it to finish setting up the repository."
+- **What the user sees:** In the normal case the commit to the default branch succeeds silently. If the extension cannot push directly, it commits the files to a new branch and opens a pull request, responding in chat: "I couldn't push the workflow files to the default branch of `<repository>` directly, so I committed them to `<branch>` and opened a pull request: `<pull request link>`. Merge it to finish setting up the repository."
 - **Recovery:** The user merges the pull request the extension opened. If the extension could not open the pull request either (for example, no write access to the repository at all), the user forks the repository or gets write access, adds it to the session, and re-invokes the skill.
 
 ### Exception 1.4: Radius side panel does not open in the sidebar
@@ -132,7 +133,7 @@ The only failure in this part is that the local write of the `.radius` files to 
 
 After the Assembly analysis writes the `.radius` directory, Copilot compiles `app.bicep` to generate the modeled application graph view. If the generated `app.bicep` does not compile, the view cannot be generated, and Copilot reports the compile error instead of showing the graph.
 
-- **What the user sees:** Nothing. Copilot identifies that the app.bicep file is not well formed and continues to modify it until the compilation completes successfully.
+- **What the user sees:** Nothing. Copilot identifies that the `app.bicep` file is not well-formed and continues to modify it until the compilation completes successfully.
 
 ## Part 3: View the application graph
 
@@ -174,7 +175,7 @@ The user is guided through configuring OIDC, then enters the cloud account and c
 
 Once the user provides all required data in the proper format and clicks **Verify Credentials**, the Radius Canvas extension creates a GitHub Environment and sets its environment variables through multiple GitHub API calls, then dispatches the `radius-verify-cloud-auth` workflow. These are two layers of protection. First, if any of the API calls returns an error (a network error, rate limiting, etc.), the extension retries that call with backoff, so a transient GitHub API failure is corrected before verification even runs. Second, once the writes succeed, the verify workflow confirms every required variable is present: if it finds one absent, the `verify-cloud-auth-result` artifact includes a **Required setting missing** error. That result is the backstop signal that the setup did not fully complete despite the writes appearing to succeed, and the correct response is to re-run the setup rather than ask the user to clean up.
 
-- **What the user sees:** After clicking the **Verify Credentials** button, the user is shown a modal status box: "Verifying authentication to <cloud provider>. This may take a few moments." Retries on individual GitHub API errors happen silently during setup. If the verify workflow still returns **Required setting missing** after the writes appeared to succeed, the extension automatically re-runs the GitHub Environment setup and re-verifies, without involving the user. Only if the setup still fails after the retries are exhausted does the Radius side panel surface an error: "I couldn't finish setting up the GitHub Environment for <cloud provider>. GitHub may be temporarily unavailable. Try **Verify Credentials** again in a few minutes."
+- **What the user sees:** After clicking the **Verify Credentials** button, the user is shown a modal status box: "Verifying authentication to `<cloud provider>`. This may take a few moments." Retries on individual GitHub API errors happen silently during setup. If the verify workflow still returns **Required setting missing** after the writes appeared to succeed, the extension automatically re-runs the GitHub Environment setup and re-verifies, without involving the user. Only if the setup still fails after the retries are exhausted does the Radius side panel surface an error: "I couldn't finish setting up the GitHub Environment for `<cloud provider>`. GitHub may be temporarily unavailable. Try **Verify Credentials** again in a few minutes."
 - **Recovery:** None is required in the common case; the extension retries failed GitHub API calls with backoff, then re-runs the environment setup and re-verifies if the verify workflow reports a setting missing. If the retries are exhausted, the user waits and clicks **Verify Credentials** again.
 
 ### Exception 4.3: Cloud provider does not trust GitHub
@@ -188,7 +189,7 @@ The Radius Canvas extension guides the user through configuring the OIDC trust r
 
 After the user clicks **Verify Credentials**, the verify workflow checks that the identity (the AWS IAM role or the Azure identity) has sufficient permissions in the cloud provider to manage application resources. If any permissions are missing, the verify workflow returns an "Identity lacks required permissions" error in the `verify-cloud-auth-result` artifact.
 
-- **What the user sees:** When the verify workflow fails, the Radius side panel reads the `verify-cloud-auth-result` artifact and shows: "The following recommended permissions are missing on the identity: <list of permissions>. Are you sure you want to create this environment without the recommended permissions?" The user is presented with two buttons: **Re-verify Credentials** to run the verify workflow again after correcting permissions, and **Create Environment** to bypass the permissions check.
+- **What the user sees:** When the verify workflow fails, the Radius side panel reads the `verify-cloud-auth-result` artifact and shows: "The following recommended permissions are missing on the identity: `<list of permissions>`. Are you sure you want to create this environment without the recommended permissions?" The user is presented with two buttons: **Re-verify Credentials** to run the verify workflow again after correcting permissions, and **Create Environment** to bypass the permissions check.
 - **Recovery:** The user adds the missing permissions and re-verifies, or bypasses the check and creates the environment anyway (for example, when permissions are managed elsewhere).
 
 ### Exception 4.5: Cluster or cloud provider cannot be reached
@@ -236,7 +237,7 @@ The deployment ran to completion and provisioned resources, but afterward the re
 
 Deploying dispatches a GitHub Actions workflow against a branch and reads `.radius/app.bicep` from that branch on the remote, so the file must already be pushed there. Because the Assembly analysis only writes and stages the file on the local worktree (Exception 2.5), the deploy cannot find it when the worktree branch was never pushed, or when the user selects a branch that does not contain `.radius/app.bicep`. This is a pre-flight check that fails before any cloud resource is touched, so nothing is provisioned.
 
-- **What the user sees:** The deployment does not start, and Copilot responds in chat. When the branch was never pushed: "The branch \"<branch>\" hasn't been pushed to <repository> yet, so there's nothing on GitHub to deploy. Push it and try again." When the selected branch does not contain the definition: "I couldn't find `.radius/app.bicep` on the branch \"<branch>\". Push the branch that has your application definition, or pick the branch that contains it, and try again."
+- **What the user sees:** The deployment does not start, and Copilot responds in chat. When the branch was never pushed: "The branch \"`<branch>`\" hasn't been pushed to `<repository>` yet, so there's nothing on GitHub to deploy. Push it and try again." When the selected branch does not contain the definition: "I couldn't find `.radius/app.bicep` on the branch \"`<branch>`\". Push the branch that has your application definition, or pick the branch that contains it, and try again."
 - **Recovery:** The user pushes the worktree branch that carries `.radius/app.bicep` (`git push`), or selects the branch that already contains it, then deploys again.
 
 ## Part 6: Modify the app to add a cache and open a PR
@@ -254,14 +255,14 @@ The user asks Copilot to make a change, for example adding a cache, and Copilot 
 
 Copilot has made the change in the worktree and the user asks it to open a pull request, but pushing the change or opening the pull request is rejected (a rejected push or insufficient permission). No pull request is opened.
 
-- **What the user sees:** Copilot responds in chat: "I made the change, but I couldn't open the pull request: <push or PR error>. That usually means I don't have permission to push to <repository>. Give me write access, or point me at a fork you can write to, and I'll open it."
+- **What the user sees:** Copilot responds in chat: "I made the change, but I couldn't open the pull request: `<push or PR error>`. That usually means I don't have permission to push to `<repository>`. Give me write access, or point me at a fork you can write to, and I'll open it."
 - **Recovery:** The user grants write access, or adds a fork they can write to, then asks Copilot to open the pull request again.
 
 ### Exception 6.3: Application graph diff cannot be computed
 
 A pull request is open and the user asks to see how the application graph changed. Copilot opens the Radius side panel, which compares the modeled application graph on the main branch with the one on the pull request branch. The comparison cannot be produced when the modeled application graph is not available on one of the branches, so there is nothing to compare on that side. The code changes already in the pull request are unaffected.
 
-- **What the user sees:** The Radius side panel, where the graph diff would render, shows an error state: "The application graph for <branch> is not available, so the change could not be compared."
+- **What the user sees:** The Radius side panel, where the graph diff would render, shows an error state: "The application graph for `<branch>` is not available, so the change could not be compared."
 - **Recovery:** The side panel regenerates the modeled application graph for the branch that is missing it (as in Exception 3.1), then compares again.
 
 ### Exception 6.4: Stale application graph after merge
