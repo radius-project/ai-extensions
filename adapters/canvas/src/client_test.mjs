@@ -81,6 +81,14 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
         expect(CLIENT_GRAPH_JS).toContain('data-local-src="1"');
     });
 
+    it("makes the in-card local source link open the file directly via an inline handler", () => {
+        // Self-contained onclick so the link works without relying on the
+        // container click delegation (the node-html-label overlay can otherwise
+        // route the click to the card/popup). dataset.* avoids nested quotes.
+        expect(CLIENT_GRAPH_JS).toContain("window.radiusOpenLocalSource(this.dataset.srcPath,parseInt(this.dataset.srcLine,10)||0)");
+        expect(CLIENT_GRAPH_JS).toContain("event.preventDefault();event.stopPropagation();");
+    });
+
     it("renders a disabled source row for a local node with no reference (no GitHub fallback)", () => {
         expect(CLIENT_GRAPH_JS).toContain('aria-disabled="true" title="No source reference found"');
     });
