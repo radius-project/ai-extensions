@@ -68,7 +68,7 @@ function sessionWorkspaceFile(home, sessionId) {
 // so callers that only need a stable id (e.g. port hashing) still get one.
 export async function resolveSessionId(
     env = process.env,
-    home = process.env.USERPROFILE || os.homedir(),
+    home = env.USERPROFILE || os.homedir(),
     exists = pathExists,
 ) {
     const candidates = [env.COPILOT_AGENT_SESSION_ID, env.SESSION_ID].filter(Boolean);
