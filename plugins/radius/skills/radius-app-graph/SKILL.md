@@ -5,7 +5,7 @@ description: Build and visualize the Radius application graph for a repository. 
 
 # Radius — App Graph
 
-Build and display the Radius application graph for a repo. The graph is assembled from `app.bicep` with the same `rad app graph <app.bicep>` path used by the Radius CLI, then rendered in the `radius` canvas using Cytoscape.
+Build and display the Radius application graph for a repo. The graph is assembled from `app.bicep` with the same `rad app graph <app.bicep> --include-icons` path used by the Radius CLI, then rendered in the `radius` canvas using Cytoscape.
 
 ## When to use this skill
 
@@ -18,11 +18,11 @@ Build and display the Radius application graph for a repo. The graph is assemble
 ## Data flow
 
 1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes a committed `app.bicep`.
-2. The shared graph runner invokes offline `rad app graph <app.bicep>` and writes `app-graph.json` locally. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
+2. The shared graph runner invokes offline `rad app graph <app.bicep> --include-icons` and writes `app-graph.json` locally. The modeled Bicep path must not use `--preview`: that flag switches the CLI to the deployed-application API and does not write `app-graph.json`. The required `--include-icons` flag embeds the resource icon metadata used by the canvas. It locates `rad` from `RADIUS_RAD_BINARY`, then `PATH`, then `~/.rad/bin`; if missing, it downloads and caches the release binary in `~/.rad/bin`.
 3. `radius-core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
 4. The graph, planned graph, auto-open graph diff, `radius_render_graph_diff`, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
 5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined/initialized in the repo. When authoring `app.bicep`, populate it; otherwise this skill can discover and attach it after the graph builds. See [source-code-references.md](references/source-code-references.md).
-6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json` for deployed-resource status views.
+6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json --preview --include-icons` for deployed-resource status views. The deployed path requires both `--preview` and `--include-icons`.
 
 ## Rendering features
 
@@ -53,7 +53,7 @@ After the graph canvas is opened and the graph has been built, discover source-c
 
 1. **Get resources needing references** — call the `get_graph_resources` canvas action to retrieve resources missing `codeReference`:
 
-```
+```javascript
 invoke_canvas_action({
   instanceId: "radius-panel",
   actionName: "get_graph_resources",
@@ -63,12 +63,12 @@ invoke_canvas_action({
 
 If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
-2. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
-3. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
-4. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
-5. **Push discovered references** to the canvas via the `update_source_refs` action:
+1. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
+2. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
+3. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
+4. **Push discovered references** to the canvas via the `update_source_refs` action:
 
-```
+```javascript
 invoke_canvas_action({
   instanceId: "radius-panel",
   actionName: "update_source_refs",
@@ -90,7 +90,7 @@ Only attach a reference when confident it points to the real initialization/defi
 
 When the user asks to see, build, refresh, or compare the application graph, **open the canvas straight to the graph view**:
 
-```
+```javascript
 open_canvas({
   canvasId: "radius",
   instanceId: "radius-panel",
@@ -100,7 +100,7 @@ open_canvas({
 
 For PR diff mode:
 
-```
+```javascript
 open_canvas({
   canvasId: "radius",
   instanceId: "radius-panel",
@@ -109,20 +109,21 @@ open_canvas({
 ```
 
 The canvas will:
+
 - Build the graph from the committed `.radius/app.bicep` or `app.bicep` on the selected branch.
-- Use `rad app graph <app.bicep>` as the graph assembly source of truth, matching the CLI model instead of maintaining a separate parser.
+- Use `rad app graph <app.bicep> --include-icons` as the modeled graph assembly source of truth, matching the CLI model instead of maintaining a separate parser. Do not pass `--preview` with a Bicep file.
 - Show "no app.bicep found" (`needsAppBicep`) when no committed app definition exists on the branch. It does not infer one from the repo — prompt the user to create the definition with the `radius-app-bicep` skill, then refresh the graph.
 
 ## Prerequisites
 
 - For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, author one with the `radius-app-bicep` skill first — the canvas will not generate it.
-- For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json`.
+- For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json --preview --include-icons`.
 - The first graph build may download `rad` into `~/.rad/bin`. Set `RADIUS_RAD_BINARY` to force a specific binary, or `RADIUS_RAD_SHA256` to pin the downloaded binary checksum.
 
 ## Troubleshooting
 
 - **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
-- **Graph build fails**: verify `rad app graph <app.bicep>` succeeds locally, or check that the cached/downloaded `rad` binary is executable. On Windows, the runner starts `rad` detached so the embedded Bicep child process does not hang in Node's default job object.
+- **Graph build fails**: verify `rad app graph <app.bicep> --include-icons` succeeds locally, or check that the cached/downloaded `rad` binary is executable. Do not add `--preview` to this modeled command. On Windows, the runner starts `rad` detached so the embedded Bicep child process does not hang in Node's default job object.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.
 
@@ -130,7 +131,7 @@ The canvas will:
 
 - `plugins/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
 - `plugins/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
-- `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep>` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
+- `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
 - `radius-core/src/modeling/repo.ts` — fetches the skill-generated `app.bicep` from the repo (`fetchBicepFromRepo`); source-code reference discovery is now handled by this skill's AI agent (see [source-code-references.md](references/source-code-references.md))
 - `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source

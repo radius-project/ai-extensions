@@ -26,6 +26,14 @@ export function applicationGraphToResources(
   appGraph: any,
   definitionFile = ".radius/app.bicep",
 ): any[] {
+  const icons = !Array.isArray(appGraph) && appGraph && typeof appGraph.icons === "object"
+    ? appGraph.icons
+    : {};
+  const resolveIcon = (resource: any): string =>
+    resource?.icon ||
+    (resource?.iconHash && typeof icons[resource.iconHash] === "string"
+      ? icons[resource.iconHash]
+      : "");
   const raw = Array.isArray(appGraph)
     ? appGraph
     : appGraph && Array.isArray(appGraph.resources)
@@ -55,11 +63,18 @@ export function applicationGraphToResources(
       type,
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
-      outputResources: Array.isArray(r.outputResources) ? r.outputResources : [],
+      outputResources: Array.isArray(r.outputResources)
+        ? r.outputResources.map((output: any) => ({
+            ...output,
+            icon: resolveIcon(output),
+          }))
+        : [],
       diffHash: validateDiffHash(r.diffHash, r.name || id),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
       codeReference: r.codeReference || "",
+      iconHash: r.iconHash || "",
+      icon: resolveIcon(r),
     });
   }
 

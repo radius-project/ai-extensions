@@ -9,8 +9,12 @@ const frontendHash = `sha256:${"a".repeat(64)}`;
 const cacheHash = `sha256:${"b".repeat(64)}`;
 const databaseHash = `sha256:${"c".repeat(64)}`;
 const alternateHash = `sha256:${"d".repeat(64)}`;
+const frontendIconHash = `sha256:${"e".repeat(64)}`;
+const frontendIcon = "<svg><path d=\"M0 0h16v16H0z\"/></svg>";
+const outputIconHash = `sha256:${"f".repeat(64)}`;
+const outputIcon = "<svg><circle cx=\"8\" cy=\"8\" r=\"8\"/></svg>";
 
-function sampleAppGraph() {
+function sampleAppGraph(): { resources: any[]; icons: Record<string, string> } {
   return {
     resources: [
       {
@@ -19,8 +23,16 @@ function sampleAppGraph() {
         type: "Radius.Compute/containers",
         provisioningState: "NotSpecified",
         connections: [{ id: cacheId, direction: "Outbound" }],
-        outputResources: [],
+        outputResources: [
+          {
+            id: `${frontendId}/output`,
+            name: "frontend-output",
+            type: "Microsoft.App/containerApps",
+            iconHash: outputIconHash,
+          },
+        ],
         diffHash: frontendHash,
+        iconHash: frontendIconHash,
       },
       {
         id: cacheId,
@@ -32,6 +44,10 @@ function sampleAppGraph() {
         diffHash: cacheHash,
       },
     ],
+    icons: {
+      [frontendIconHash]: frontendIcon,
+      [outputIconHash]: outputIcon,
+    },
   };
 }
 
@@ -44,6 +60,9 @@ describe("applicationGraphToResources", () => {
     expect(frontend.type).toBe("Radius.Compute/containers");
     expect(frontend.definitionFile).toBe(".radius/app.bicep");
     expect(frontend.diffHash).toBe(frontendHash);
+    expect(frontend.iconHash).toBe(frontendIconHash);
+    expect(frontend.icon).toBe(frontendIcon);
+    expect(frontend.outputResources[0].icon).toBe(outputIcon);
   });
 
   it("preserves outbound edges and rebuilds inbound edges", () => {

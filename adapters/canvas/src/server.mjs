@@ -24,7 +24,7 @@ import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
 import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
-import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, extractAppName } from "./bicep.mjs";
+import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, buildAppGraphRadCommand, extractAppName } from "./bicep.mjs";
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
@@ -996,7 +996,7 @@ function createRequestHandler(instanceId) {
                         const radDeployCommand = buildDeployRadCommand(bicepPath, envName, publicParams);
                         const radCommands = [radDeployCommand];
                         const appName = extractAppName(bicepSource);
-                        if (appName) radCommands.push('app graph --application ' + appName + ' --preview');
+                        if (appName) radCommands.push(buildAppGraphRadCommand(appName));
                         await setEnvironmentVariable('RADIUS_RAD_COMMANDS', JSON.stringify(radCommands));
 
                         const names = Object.keys(resolved);
@@ -2301,7 +2301,7 @@ function createRequestHandler(instanceId) {
                                 const deployCmd = buildDeployRadCommand(bicepPath, envForDeploy, publicParams);
                                 const appName = extractAppName(bicepSource);
                                 const commands = [deployCmd];
-                                if (appName) commands.push('app graph --application ' + appName + ' --preview');
+                                if (appName) commands.push(buildAppGraphRadCommand(appName));
                                 const radCommandsInput = JSON.stringify(commands);
                                 dispatchArgs.push('-f', 'rad_commands=' + radCommandsInput);
                                 addLog('Deploying with rad commands: ' + commands.join('  |  '));

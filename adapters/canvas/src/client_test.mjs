@@ -19,6 +19,12 @@ describe("client.mjs exports", () => {
         expect(CLIENT_GRAPH_JS.length).toBeGreaterThan(0);
         expect(CLIENT_HEARTBEAT_JS.length).toBeGreaterThan(0);
     });
+
+    it("emits syntactically valid browser scripts", () => {
+        expect(() => new Function(CLIENT_REPO_BRANCH_JS)).not.toThrow();
+        expect(() => new Function(CLIENT_GRAPH_JS)).not.toThrow();
+        expect(() => new Function(CLIENT_HEARTBEAT_JS)).not.toThrow();
+    });
 });
 
 describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
@@ -58,6 +64,13 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
         expect(CLIENT_GRAPH_JS).toContain("srcLine: srcLineFromRef(r.codeReference || '')");
     });
 
+    describe("CLIENT_GRAPH_JS — HTML card fallback", () => {
+        it("keeps native Cytoscape nodes visible while HTML labels initialize", () => {
+            expect(CLIENT_GRAPH_JS).not.toContain("'background-opacity': 0");
+            expect(CLIENT_GRAPH_JS).not.toContain("'text-opacity': 0");
+        });
+    });
+
     it("defines a window helper that POSTs the file to /api/open-source", () => {
         expect(CLIENT_GRAPH_JS).toContain("window.radiusOpenLocalSource");
         expect(CLIENT_GRAPH_JS).toContain("/api/open-source");
@@ -75,6 +88,17 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
     it("opens the app definition locally for a workspace graph before falling back to GitHub", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (localSource && d.defFile)");
         expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine)");
+    });
+
+    it("also exposes a source-code link in the node popup so links work without the HTML card overlay", () => {
+        expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine)");
+        expect(CLIENT_GRAPH_JS).toContain("linkRow(ICON_SRC, 'View source code', d.sourceUrl, true)");
+    });
+
+    it("forces a render after layout so the node-html-label one-shot builds its cards", () => {
+        expect(CLIENT_GRAPH_JS).toContain("htmlLabelsApplied = true;");
+        expect(CLIENT_GRAPH_JS).toContain("if (htmlLabelsApplied) {");
+        expect(CLIENT_GRAPH_JS).toContain("requestAnimationFrame(forceHtmlLabelRender)");
     });
 
     it("intercepts local links in the card click delegation instead of navigating", () => {

@@ -115,6 +115,10 @@ export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
   return parts.join(" ");
 }
 
+export function buildAppGraphRadCommand(appName) {
+  return `app graph --application ${appName} --preview --include-icons`;
+}
+
 // Extract the Radius application name from an app.bicep source. The name is
 // declared as `name: '<app>'` on the single `Radius.Core/applications` resource
 // (e.g. `resource app 'Radius.Core/applications@2025-08-01-preview' = { name:
