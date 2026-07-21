@@ -233,6 +233,7 @@ export function pageShell(title, bodyContent, activeNav) {
   .rad-dot--success { background: #1a7f37; }
   .rad-dot--failed { background: #cf222e; }
   .rad-dot--pending { background: var(--rad-text-tertiary); }
+  .rad-dot--deleting { background: #d29922; }
   .rad-status-label { vertical-align: middle; }
 
   /* ─── Graph + node cards ──────────────────────────────────────────────── */
@@ -2341,7 +2342,7 @@ function deployLandingView(state) {
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
 
-<div id="deploy-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
+<div id="deploy-inline-status" class="rad-inline" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
 
 <div class="rad-table-wrap">
   <table class="rad-table">
@@ -2371,26 +2372,21 @@ function deployLandingView(state) {
   </div>
 </div>
 
-<!-- Deleting (transition) modal -->
-<div id="deploy-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
-    <div class="rad-spinner-lg" aria-hidden="true"></div>
-    <div>
-      <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;">Deleting Deployment…</div>
-      <div id="deploy-deleting-text" style="font-size:13px; color:var(--rad-text-secondary);"></div>
-    </div>
-  </div>
-</div>
-
-<!-- Delete confirmation modal -->
+<!-- Delete confirmation dialog (Figma 3-step type-to-confirm flow). The
+     "deleting" transition is shown inline on the row (status → Deleting…),
+     not as a blocking modal. -->
 <div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:460px; width:90%; margin:0;">
-    <div class="rad-card__title" style="margin-bottom:8px;">Delete Deployment</div>
-    <p id="deploy-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
-    <div style="display:flex; justify-content:flex-end; gap:10px;">
-      <button id="deploy-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="deploy-delete-confirm" class="rad-btn rad-btn--danger-outline" style="margin:0;">Delete Deployment</button>
+  <div class="rad-ddlg" role="dialog" aria-modal="true" aria-labelledby="deploy-delete-title">
+    <div class="rad-ddlg__header">
+      <span class="rad-ddlg__title" id="deploy-delete-title">Delete Deployment</span>
+      <button type="button" class="rad-ddlg__close" id="deploy-delete-close" aria-label="Close">✕</button>
     </div>
+    <div class="rad-ddlg__info">
+      <span class="rad-ddlg__info-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+      <span class="rad-ddlg__app" id="deploy-delete-app"></span>
+      <span class="rad-ddlg__env">Environment: <strong id="deploy-delete-env"></strong></span>
+    </div>
+    <div class="rad-ddlg__content" id="deploy-delete-body"></div>
   </div>
 </div>
 
@@ -2418,6 +2414,39 @@ function deployLandingView(state) {
   .rad-monitor-link { color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; cursor:pointer; }
   .rad-monitor-link:hover { color:#388bfd; }
   .rad-cell-empty { color:var(--rad-text-tertiary); }
+  /* Inline status banner (Figma: green success / red error with dismiss). */
+  .rad-inline { align-items:center; gap:12px; }
+  .rad-inline__icon { flex:0 0 auto; font-size:16px; line-height:1; }
+  .rad-inline__msg { flex:1 1 auto; min-width:0; line-height:1.4; }
+  .rad-inline__close { flex:0 0 auto; background:none; border:none; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:inherit; opacity:0.65; }
+  .rad-inline__close:hover { opacity:1; }
+  .rad-inline--success { background:#edfaed; border:1px solid #66cc66; color:#262626; }
+  .rad-inline--success .rad-inline__icon { color:#33a633; font-weight:700; }
+  .rad-inline--error { background:#ffebe9; border:1px solid #cf222e; color:#82071e; }
+  .rad-inline--error .rad-inline__icon { color:#cf222e; }
+  /* Delete confirmation dialog (Figma type-to-confirm flow). */
+  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface,#fff); border:1px solid var(--rad-stroke,#d1d5da); border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,0.11); overflow:hidden; }
+  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke,#d1d5da); }
+  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text,#24292e); }
+  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary,#6e6e6e); padding:6px; border-radius:6px; }
+  .rad-ddlg__close:hover { background:var(--rad-neutral-bg,#f2f3f4); }
+  .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
+  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text,#24292e); }
+  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text,#24292e); }
+  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary,#586069); }
+  .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
+  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); margin:0; }
+  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke,#d1d5da); background:#f6f8fa; color:var(--rad-text,#1a1a1a); }
+  .rad-ddlg__btn:hover { background:#eef1f4; }
+  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:#fff5b1; border:1px solid #ffe082; border-radius:6px; padding:12px; color:#735c0f; font-size:14px; line-height:1.4; }
+  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); }
+  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke,#d1d5da); border-radius:1px; }
+  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text,#24292e); margin:0; }
+  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke,#d1d5da); border-radius:6px; font-size:14px; color:var(--rad-text,#24292e); background:var(--rad-surface,#fff); }
+  .rad-ddlg__input:focus { outline:none; border-color:#0366d6; box-shadow:0 0 0 3px rgba(3,102,214,0.2); }
+  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:#d73a49; cursor:pointer; }
+  .rad-ddlg__delete:hover { background:#b31d28; }
+  .rad-ddlg__delete:disabled { background:#e9a1a8; cursor:default; }
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -2440,14 +2469,30 @@ var ENV_PROVIDERS = {};
 var HAS_APPS = false;
 var HAS_ENVS = false;
 
-// Renders an inline status message. Defaults to textContent so server-provided
-// strings (e.g. error text) can never inject HTML. Pass isHtml=true only for
-// intentionally-built, escaped markup (see the delete-success link below).
+// Renders an inline status banner (Figma: green success / red error with a ✓/⚠
+// icon and a dismiss ✕). The message node uses textContent by default so
+// server-provided strings can never inject HTML; pass isHtml=true only for
+// intentionally-built, escaped markup (see the delete-success banner below).
 function showInline(kind, msg, isHtml) {
-    inlineStatus.style.display = 'block';
-    if (isHtml) inlineStatus.innerHTML = msg; else inlineStatus.textContent = msg;
-    if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
-    else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
+    inlineStatus.style.display = 'flex';
+    inlineStatus.className = 'rad-inline rad-inline--' + (kind === 'error' ? 'error' : 'success');
+    inlineStatus.innerHTML = '';
+    var icon = document.createElement('span');
+    icon.className = 'rad-inline__icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = kind === 'error' ? '⚠' : '✓';
+    var body = document.createElement('span');
+    body.className = 'rad-inline__msg';
+    if (isHtml) body.innerHTML = msg; else body.textContent = msg;
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'rad-inline__close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '✕';
+    close.addEventListener('click', function() { inlineStatus.style.display = 'none'; });
+    inlineStatus.appendChild(icon);
+    inlineStatus.appendChild(body);
+    inlineStatus.appendChild(close);
 }
 
 function refreshDeployBtn() {
@@ -2521,7 +2566,7 @@ function loadEnvironmentsDropdown() {
 }
 
 function statusCell(status) {
-    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'], deleting: ['pending','Deleting…'] };
+    var map = { success: ['success','Success'], failed: ['failed','Failed'], pending: ['pending','Pending'], deleting: ['deleting','Deleting…'] };
     var m = map[status] || map.pending;
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
@@ -2563,45 +2608,106 @@ function loadDeployments() {
         .catch(function() { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
-// --- Delete deployment modal ---
+// --- Delete deployment: 3-step type-to-confirm dialog (Figma) ---
 var delModal = document.getElementById('deploy-delete-modal');
-var delText = document.getElementById('deploy-delete-text');
-var delConfirm = document.getElementById('deploy-delete-confirm');
-var delCancel = document.getElementById('deploy-delete-cancel');
+var delBody = document.getElementById('deploy-delete-body');
+var delAppEl = document.getElementById('deploy-delete-app');
+var delEnvEl = document.getElementById('deploy-delete-env');
+var delClose = document.getElementById('deploy-delete-close');
 var pendingDelete = null;
+var delStep = 1;
+
+function closeDeleteModal() { delModal.style.display = 'none'; pendingDelete = null; delStep = 1; delBody.innerHTML = ''; }
+
+// Render the current step's body. Steps escalate the confirmation:
+//   1) intent, 2) acknowledge the irreversible effects, 3) type "app/env".
+function renderDeleteStep() {
+    if (!pendingDelete) return;
+    var app = pendingDelete.app, env = pendingDelete.environment;
+    if (delStep === 1) {
+        delBody.innerHTML =
+            '<p class="rad-ddlg__text">Deleting this deployment will tear down running containers and resources. To proceed, please confirm your intention.</p>' +
+            '<button type="button" class="rad-ddlg__btn" id="del-step1-btn">I want to delete this deployment</button>';
+        document.getElementById('del-step1-btn').addEventListener('click', function() { delStep = 2; renderDeleteStep(); });
+    } else if (delStep === 2) {
+        delBody.innerHTML =
+            '<div class="rad-ddlg__warn"><span aria-hidden="true">⚠</span><span>This action cannot be undone. Please read carefully!</span></div>' +
+            '<div class="rad-ddlg__bullet"><span>This will permanently delete the deployment of <strong>' + escapeHtmlClient(app) + '</strong> from environment <strong>' + escapeHtmlClient(env) + '</strong>, including all associated resources.</span></div>' +
+            '<button type="button" class="rad-ddlg__btn" id="del-step2-btn">I have read and understand these effects</button>';
+        document.getElementById('del-step2-btn').addEventListener('click', function() { delStep = 3; renderDeleteStep(); });
+    } else {
+        var token = app + '/' + env;
+        delBody.innerHTML =
+            '<p class="rad-ddlg__confirm-label">To confirm, type "' + escapeHtmlClient(token) + '" in the box below</p>' +
+            '<input type="text" class="rad-ddlg__input" id="del-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="' + escapeHtmlClient(token) + '">' +
+            '<button type="button" class="rad-ddlg__delete" id="del-confirm-btn" disabled>Delete this deployment</button>';
+        var input = document.getElementById('del-confirm-input');
+        var btn = document.getElementById('del-confirm-btn');
+        var matches = function() { return input.value.trim() === token; };
+        input.addEventListener('input', function() { btn.disabled = !matches(); });
+        input.addEventListener('keydown', function(e) { if (e.key === 'Enter' && matches()) runDelete(); });
+        btn.addEventListener('click', function() { if (matches()) runDelete(); });
+        input.focus();
+    }
+}
+
+function openDeleteModal(app, env) {
+    pendingDelete = { app: app, environment: env };
+    delStep = 1;
+    delAppEl.textContent = app;
+    delEnvEl.textContent = env;
+    renderDeleteStep();
+    delModal.style.display = 'flex';
+}
 
 function wireDeleteButtons() {
     document.querySelectorAll('.js-del-dep').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            pendingDelete = { environment: this.dataset.env, app: this.dataset.app };
-            delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(pendingDelete.app) + '</strong> in environment <strong>' + escapeHtmlClient(pendingDelete.environment) + '</strong>?';
-            delModal.style.display = 'flex';
-        });
+        btn.addEventListener('click', function() { openDeleteModal(this.dataset.app, this.dataset.env); });
     });
 }
-delCancel.addEventListener('click', function() { delModal.style.display = 'none'; pendingDelete = null; });
-delModal.addEventListener('click', function(e) { if (e.target === delModal) { delModal.style.display = 'none'; pendingDelete = null; } });
-delConfirm.addEventListener('click', function() {
+
+delClose.addEventListener('click', closeDeleteModal);
+delModal.addEventListener('click', function(e) { if (e.target === delModal) closeDeleteModal(); });
+
+// Dispatch the delete, then let the row reflect "Deleting…" while the workflow
+// runs. When the deployment finally clears from the listing, show the green
+// "successfully deleted" banner (Figma deployments-deleted state).
+function runDelete() {
     if (!pendingDelete) return;
     var dep = pendingDelete;
-    delModal.style.display = 'none';
-    document.getElementById('deploy-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(dep.app) + '</strong> from <strong>' + escapeHtmlClient(dep.environment) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
-    document.getElementById('deploy-deleting-modal').style.display = 'flex';
+    closeDeleteModal();
     fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
-            document.getElementById('deploy-deleting-modal').style.display = 'none';
-            pendingDelete = null;
             if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            showInline('success', 'Delete workflow started' + (res.d && res.d.runUrl ? ' — <a href="' + escapeHtmlClient(res.d.runUrl) + '" target="_blank" rel="noopener noreferrer">view run ↗</a>' : '') + '.', true);
-            loadDeployments();
+            loadDeployments(); // row → Deleting…
+            pollDeleteCompletion(dep.app, dep.environment, 0);
         })
-        .catch(function() {
-            document.getElementById('deploy-deleting-modal').style.display = 'none';
-            pendingDelete = null;
-            showInline('error', 'Could not delete the deployment. Please try again.');
-        });
-});
+        .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
+}
+
+// Poll the deployments listing until the target app/env is gone (a successful
+// delete removes it), then show the green success banner. Bounded so a stuck or
+// failed delete never polls forever — the row simply stays "Deleting…" (a failed
+// delete falls back to its deploy record, so the deployment remains visible).
+function pollDeleteCompletion(app, env, tries) {
+    if (tries > 45) return; // ~3 min at 4s intervals
+    setTimeout(function() {
+        fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var deps = (d && d.deployments) || [];
+                var stillThere = deps.some(function(x) { return x.app === app && x.environment === env; });
+                if (!stillThere) {
+                    loadDeployments();
+                    showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong> has been successfully deleted.', true);
+                    return;
+                }
+                pollDeleteCompletion(app, env, tries + 1);
+            })
+            .catch(function() { pollDeleteCompletion(app, env, tries + 1); });
+    }, 4000);
+}
 
 appSelect.addEventListener('change', refreshDeployBtn);
 envSelect.addEventListener('change', refreshDeployBtn);
