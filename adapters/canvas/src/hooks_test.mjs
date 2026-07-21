@@ -14,13 +14,13 @@ describe("GRAPH_PAGES", () => {
 });
 
 describe("appBicepReminder", () => {
-    it("names the file, the skill/tool, the repo, and requires a push", () => {
+    it("names the file, the skill/tool, the repo, and points to the working tree", () => {
         const msg = appBicepReminder("acme/widgets");
         expect(msg).toContain(".radius/app.bicep");
         expect(msg).toContain("radius-app-bicep");
         expect(msg).toContain("radius_generate_app");
         expect(msg).toContain("acme/widgets");
-        expect(msg).toContain("push");
+        expect(msg).toContain("working tree");
     });
 
     it("omits the repo suffix when repo is empty", () => {
@@ -29,13 +29,13 @@ describe("appBicepReminder", () => {
 });
 
 describe("appBicepHandoffPrompt", () => {
-    it("directs the agent to generate and push app.bicep, without leaking tool mechanics", () => {
+    it("directs the agent to generate app.bicep into the working tree, without leaking tool mechanics", () => {
         const msg = appBicepHandoffPrompt("acme/widgets", "graph");
         expect(msg).toContain("acme/widgets");
         expect(msg).toContain("radius_generate_app");
         expect(msg).toContain("radius-app-bicep");
         expect(msg).toContain(".radius/app.bicep");
-        expect(msg).toContain("push");
+        expect(msg).toContain("working tree");
         expect(msg).toContain("graph");
         // Injected as a visible user turn, so it must not leak internal
         // tool-call mechanics or agent-only meta-instructions.
