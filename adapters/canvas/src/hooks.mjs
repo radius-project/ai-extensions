@@ -18,20 +18,20 @@ export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
 // skill owns the full authoring workflow (namespaces, types, structure, and
-// committing + pushing the file), so these hooks only point the agent at that
+// writing the file to the working tree), so these hooks only point the agent at that
 // skill and state the graph's data source. They never restate the skill's steps,
-// so they cannot drift from it or short-circuit it (for example, stopping at a
-// local save before the push).
+// so they cannot drift from it or short-circuit it (for example, stopping before
+// the model is written).
 const SKILL_HANDOFF =
-    "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it commits and pushes .radius/app.bicep, setting the upstream when the branch has none.";
+    "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const GRAPH_SOURCE_NOTE =
-    "GitHub-backed and PR graph views read .radius/app.bicep from the pushed branch on the remote, so commit and push the file for the graph to resolve reliably; a local workspace may use the on-disk file, but a local save is not visible to those remote views.";
+    "For the current workspace repo and branch, the application graph renders from the on-disk working tree, so writing .radius/app.bicep to the workspace is enough to preview it (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so the file must be committed and pushed there.";
 const RECIPE_PACK_NOTE =
     "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
 
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
-// to push the file, never to fabricate a graph or singleton recipes.
+// to write the file, never to fabricate a graph or singleton recipes.
 export function appBicepReminder(repo) {
     const where = repo ? ` for ${repo}` : "";
     return [
@@ -39,7 +39,7 @@ export function appBicepReminder(repo) {
         "",
         `Create it now before retrying. ${SKILL_HANDOFF}`,
         GRAPH_SOURCE_NOTE,
-        "After the push succeeds, retry the original action.",
+        "After the file is written, retry the original action.",
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
@@ -115,11 +115,11 @@ export async function evaluateAppBicepHook(input, deps) {
 export function appBicepHandoffPrompt(repo, page = "graph") {
     const where = repo ? ` for ${repo}` : "";
     return [
-        `The Radius ${page} view${where} can't render yet because its application model isn't available on the branch it reads. If it hasn't been generated, generate it; if it exists locally, make sure it's committed and pushed. Then open the ${page} view again.`,
+        `The Radius ${page} view${where} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
         "",
         SKILL_HANDOFF,
         GRAPH_SOURCE_NOTE,
-        `Once the push succeeds, open the Radius ${page} view again so it loads the pushed model.`,
+        `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
