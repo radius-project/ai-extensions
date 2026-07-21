@@ -1380,6 +1380,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <span id="env-success-banner-text" class="env-success-banner__text"></span>
     <button type="button" id="env-success-banner-close" class="env-success-banner__close" aria-label="Dismiss">×</button>
   </div>
+  <div id="env-error-banner" role="alert" style="display:none;">
+    <span class="env-error-banner__icon" aria-hidden="true">⚠</span>
+    <span id="env-error-banner-text" class="env-error-banner__text"></span>
+    <button type="button" id="env-error-banner-close" class="env-error-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -1606,6 +1611,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
 .env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
 .env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
+#env-error-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:#ffebe9; border:1px solid #cf222e; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+.env-error-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#cf222e; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-error-banner__text { flex:1 1 auto; font-size:13px; color:#82071e; line-height:1.4; }
+.env-error-banner__text strong { font-weight:600; }
+.env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:#82071e; cursor:pointer; }
+.env-error-banner__close:hover { color:#5a0410; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -1772,6 +1783,15 @@ function wireRowActions() {
                 .then(function(res) {
                     if (!res.ok) {
                         delBtn.disabled = false; delBtn.textContent = 'Delete Env';
+                        // An environment can't be deleted while an app is still
+                        // deployed to it — show the error and send the user to the
+                        // application-deletion flow (Deployments page) to remove it.
+                        if (res.d && res.d.code === 'app-deployed') {
+                            showEnvError((res.d.error || 'Delete the application deployment first.') + ' Redirecting you to delete the application…');
+                            var target = (res.d && res.d.redirect) || '/?page=deploying';
+                            setTimeout(function() { window.location.href = target; }, 2000);
+                            return;
+                        }
                         alert((res.d && res.d.error) || 'Could not delete the environment.');
                         return;
                     }
@@ -1813,6 +1833,22 @@ function showEnvSuccessBanner(provider, name) {
 var envSuccessClose = document.getElementById('env-success-banner-close');
 if (envSuccessClose) envSuccessClose.addEventListener('click', function() {
     document.getElementById('env-success-banner').style.display = 'none';
+});
+
+// Show a red error banner on the environments landing (e.g. when an environment
+// can't be deleted because an app is still deployed to it). Message may contain
+// intentionally-built escaped markup from the caller.
+function showEnvError(msg) {
+    var banner = document.getElementById('env-error-banner');
+    var text = document.getElementById('env-error-banner-text');
+    if (!banner || !text) return;
+    text.textContent = msg;
+    banner.style.display = 'flex';
+    banner.scrollIntoView({ block: 'nearest' });
+}
+var envErrorClose = document.getElementById('env-error-banner-close');
+if (envErrorClose) envErrorClose.addEventListener('click', function() {
+    document.getElementById('env-error-banner').style.display = 'none';
 });
 
 function findProfile(name) {

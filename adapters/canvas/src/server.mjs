@@ -179,6 +179,50 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
 const DEPLOY_WORKFLOW_FILE = 'run-rad-commands.yml';
 const DELETE_WORKFLOW_FILE = 'delete-application.yml';
 
+// Determine whether an application is currently deployed to `environment`.
+// Walks the environment's GitHub deployment records newest-first and mirrors the
+// selection rules used by /api/list-deployments: a successful delete means the
+// app is gone (returns null); a deploy record — or a delete that didn't succeed
+// — means an application is still present (returns its info). Used to block
+// environment deletion until the app deployment is torn down first.
+async function environmentActiveApp(repo, environment) {
+    const gh = (args, timeout = 12000) => new Promise((resolve) => {
+        cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
+    });
+    const appName = repo.split("/").pop() || repo;
+    // Newest-first deployment records scoped to this environment.
+    const raw = await gh(["api", `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(environment)}`, "--jq", ".[].id"]);
+    const ids = raw ? raw.split("\n").filter(Boolean) : [];
+    for (const id of ids) {
+        const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
+        const tab = stateRaw.indexOf("\t");
+        const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
+        const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+        const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+        let runPath = "";
+        let runConclusion = "";
+        if (m) {
+            const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const rt = runInfo.indexOf("\t");
+            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
+            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+        }
+        const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+        const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+        if (!isDeploy && !isDelete) continue;
+        // Successful delete → app removed → environment is free to delete.
+        if (isDelete && runConclusion === "success") return null;
+        // A delete that didn't succeed (in progress or failed) → app still exists.
+        if (isDelete) return { app: appName, environment, status: runConclusion ? "delete-failed" : "deleting" };
+        // Deploy record (success/failed/pending) → app is deployed.
+        let status = "pending";
+        if (state === "success") status = "success";
+        else if (state === "failure" || state === "error") status = "failed";
+        return { app: appName, environment, status };
+    }
+    return null;
+}
+
 /**
  * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
  * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
@@ -566,6 +610,32 @@ function createRequestHandler(instanceId) {
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: "repo and environment are required." }));
                     return;
+                }
+                // Guard: an environment must not be deleted while an application is
+                // still deployed to it (its cloud resources would be orphaned).
+                // Require the app deployment to be torn down first and point the
+                // client at the app-deletion flow.
+                try {
+                    const active = await environmentActiveApp(repo, envName);
+                    if (active) {
+                        const deleting = active.status === "deleting";
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({
+                            error: deleting
+                                ? `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+                                : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
+                            code: "app-deployed",
+                            app: active.app,
+                            environment: envName,
+                            redirect: `/?page=deploying&app=${encodeURIComponent(active.app)}&env=${encodeURIComponent(envName)}`,
+                        }));
+                        return;
+                    }
+                } catch (e) {
+                    // If the check itself fails, fall through and attempt the delete
+                    // rather than blocking the user on a transient GitHub error.
+                    console.error(`[radius delete-environment] active-app check failed for ${repo}/${envName}: ${e?.message || e}`);
                 }
                 try {
                     await runCommand("gh", ["api", "--method", "DELETE", "/repos/" + repo + "/environments/" + encodeURIComponent(envName)], { timeout: 20000 });
