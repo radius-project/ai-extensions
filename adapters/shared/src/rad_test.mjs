@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   RADIUS_BICEP_CONFIG,
   RADIUS_BICEP_CONFIG_JSON,
+  MODELED_APP_GRAPH_FLAGS,
   resolveExistingRadBinary,
   buildGraphViaRad,
   saveGraphJson,
@@ -29,6 +30,12 @@ describe("RADIUS_BICEP_CONFIG", () => {
   it("exposes the config as pretty-printed JSON that round-trips", () => {
     expect(RADIUS_BICEP_CONFIG_JSON).toBe(JSON.stringify(RADIUS_BICEP_CONFIG, null, 2));
     expect(JSON.parse(RADIUS_BICEP_CONFIG_JSON)).toEqual(RADIUS_BICEP_CONFIG);
+  });
+});
+
+describe("MODELED_APP_GRAPH_FLAGS", () => {
+  it("requests icon metadata without switching to the deployed preview runner", () => {
+    expect(MODELED_APP_GRAPH_FLAGS).toEqual(["--include-icons"]);
   });
 });
 

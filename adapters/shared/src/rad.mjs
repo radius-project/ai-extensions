@@ -1,6 +1,7 @@
 // Node-runtime `rad` CLI graph builder.
 //
-// Builds application graphs by running the real `rad app graph <app.bicep>`
+// Builds modeled application graphs by running the real
+// `rad app graph <app.bicep> --include-icons`
 // command, which compiles Bicep with rad's embedded Bicep and writes
 // `app-graph.json` entirely client-side (no Radius control plane). This module
 // owns every impure, Node-only step that the pure `@radius-project/core`
@@ -51,6 +52,7 @@ export const RADIUS_BICEP_CONFIG = {
   extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" },
 };
 export const RADIUS_BICEP_CONFIG_JSON = JSON.stringify(RADIUS_BICEP_CONFIG, null, 2);
+export const MODELED_APP_GRAPH_FLAGS = Object.freeze(["--include-icons"]);
 
 // Serializes concurrent ensureRadBinary() callers so only one download runs.
 let ensurePromise = null;
@@ -339,8 +341,10 @@ export function ensureRadBinary({ log = noop } = {}) {
 }
 
 /**
- * runRadAppGraph - run `rad app graph <file>.bicep` in a throwaway working dir
- * and return the parsed app-graph.json it writes there.
+ * runRadAppGraph - run
+ * `rad app graph <file>.bicep --include-icons` in a throwaway working dir and
+ * return the parsed app-graph.json it writes there. The modeled command must not
+ * use `--preview`, which switches rad to the deployed-application API path.
  *
  * When `saveGraphJsonTo` is an absolute path, the raw app-graph.json produced by
  * the rad CLI is also copied there (parent directories created as needed) so the
@@ -364,7 +368,7 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
       //     rad+bicep tree via the negative pid (see killChildTree).
       // We keep the child reference (no unref) so Node still awaits it and reads
       // the app-graph.json it wrote.
-      const child = spawn(radPath, ["app", "graph", absoluteBicep], {
+      const child = spawn(radPath, ["app", "graph", absoluteBicep, ...MODELED_APP_GRAPH_FLAGS], {
         cwd,
         // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
         // committing to the radius-graph orphan branch. stdin is ignored so rad
