@@ -21,6 +21,9 @@ import connectionConventions from "../../../plugins/radius/skills/radius-app-bic
 import secretsHandling from "../../../plugins/radius/skills/radius-app-bicep/references/secrets-handling.md";
 import bicepStructureRules from "../../../plugins/radius/skills/radius-app-bicep/references/bicep-structure-rules.md";
 import namingConventions from "../../../plugins/radius/skills/radius-app-bicep/references/naming-conventions.md";
+// Cross-skill reference: SKILL.md links the app-graph skill's source-code
+// discovery methodology, so the standalone bundle must inline it too.
+import sourceCodeReferences from "../../../plugins/radius/skills/radius-app-graph/references/source-code-references.md";
 import todoListAppExample from "../../../plugins/radius/skills/radius-app-bicep/references/todo-list-app-example.md";
 
 // Ordered to match the paths referenced from SKILL.md so the inlined content
@@ -33,6 +36,9 @@ const REFERENCES = [
     ["references/secrets-handling.md", secretsHandling],
     ["references/bicep-structure-rules.md", bicepStructureRules],
     ["references/naming-conventions.md", namingConventions],
+    // Keyed by the exact path SKILL.md links (a sibling skill), so the agent can
+    // correlate the in-text link with the appended section.
+    ["../radius-app-graph/references/source-code-references.md", sourceCodeReferences],
     ["references/todo-list-app-example.md", todoListAppExample],
 ];
 
@@ -76,8 +82,9 @@ export function radiusAppBicepSkill(repoPath) {
         `Model the repository at ${target} by following the skill below. This is ` +
         `the authoritative skill content — its SKILL.md and all reference files ` +
         `are inlined here so nothing is lost when the extension is installed on ` +
-        `its own. The referenced files (\`references/*.md\`) are appended after ` +
-        `SKILL.md under matching \`--- Reference: ... ---\` headers instead of ` +
+        `its own. The referenced files (radius-app-bicep's own \`references/*.md\`, ` +
+        `plus the app-graph \`source-code-references.md\` it links to) are appended ` +
+        `after SKILL.md under matching \`--- Reference: ... ---\` headers instead of ` +
         `being opened separately.\n\n` +
         `Do not stop at "looks correct": the skill requires compiling the ` +
         `generated \`.radius/app.bicep\` with the configured Radius extension ` +
