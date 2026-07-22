@@ -16,17 +16,19 @@ import { execFile, execFileSync } from "node:child_process";
 // still used.
 let _ghKeyringChecked = false;
 let _ghHasKeyring = false;
+
+function ghExecutable() {
+    return process.platform === "win32" ? "gh.exe" : "gh";
+}
+
 function ghHasKeyringLogin() {
     if (_ghKeyringChecked) return _ghHasKeyring;
     _ghKeyringChecked = true;
     try {
-        const isWindows = process.platform === "win32";
-        const file = isWindows ? "cmd.exe" : "gh";
-        const args = isWindows ? ["/c", "gh", "auth", "token"] : ["auth", "token"];
         const env = { ...process.env };
         delete env.GH_TOKEN;
         delete env.GITHUB_TOKEN;
-        const out = execFileSync(file, args, {
+        const out = execFileSync(ghExecutable(), ["auth", "token"], {
             env,
             stdio: ["ignore", "pipe", "ignore"],
             timeout: 5000,
@@ -54,16 +56,16 @@ function ghChildEnv(baseEnv) {
     return env;
 }
 
-// Run a CLI (gh/az/aws) without a shell so that argument values (repo/env names,
-// API paths, …) are passed verbatim as argv and can never be interpreted as
-// shell syntax. On Windows these CLIs are usually `.cmd` shims that cannot be
-// spawned directly, so we invoke them via `cmd.exe /c` — but the arguments are
-// still passed as a separate argv array (never concatenated into a single
-// string), which preserves per-argument escaping and avoids command injection.
+// Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
+// executable directly: passing it through cmd.exe would let metacharacters in an
+// API path (for example, '&' in a query string) be interpreted as shell syntax.
+// Other Windows CLIs may only provide `.cmd` shims, so retain the existing
+// cmd.exe wrapper for those commands.
 export function cliExec(cmd, args, opts, cb) {
     const isWindows = process.platform === "win32";
-    const file = isWindows ? "cmd.exe" : cmd;
-    const finalArgs = isWindows ? ["/c", cmd, ...args] : args;
+    const isWindowsGh = isWindows && cmd === "gh";
+    const file = isWindowsGh ? ghExecutable() : isWindows ? "cmd.exe" : cmd;
+    const finalArgs = isWindows && !isWindowsGh ? ["/c", cmd, ...args] : args;
     const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
     if (cmd === "gh") execOpts.env = ghChildEnv(execOpts.env);
     return execFile(file, finalArgs, execOpts, cb);
