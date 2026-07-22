@@ -124,4 +124,13 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
         expect(CLIENT_GRAPH_JS).toContain("container.removeEventListener('click', container._radiusClickHandler)");
         expect(CLIENT_GRAPH_JS).toContain("container._radiusClickHandler = function(e)");
     });
+
+    it("only opens the popup on a node tap for native nodes, not rendered HTML cards", () => {
+        // In card mode the popup is driven solely by the container delegation
+        // (••• / card body), which excludes the in-card "View source code" link
+        // so it navigates on its own. Gating the cytoscape node-tap on
+        // !htmlLabelsApplied stops the source link from ALSO opening the popup.
+        expect(CLIENT_GRAPH_JS).toContain("if (!htmlLabelsApplied) {");
+        expect(CLIENT_GRAPH_JS).toContain("cy.on('tap', 'node', function(e) { openNodePopup(e.target); });");
+    });
 });
