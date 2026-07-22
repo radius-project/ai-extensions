@@ -179,46 +179,92 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
 const DEPLOY_WORKFLOW_FILE = 'run-rad-commands.yml';
 const DELETE_WORKFLOW_FILE = 'delete-application.yml';
 
-// Determine whether an application is currently deployed to `environment`.
-// Walks the environment's GitHub deployment records newest-first and mirrors the
-// selection rules used by /api/list-deployments: a successful delete means the
-// app is gone (returns null); a deploy record — or a delete that didn't succeed
-// — means an application is still present (returns its info). Used to block
-// environment deletion until the app deployment is torn down first.
-async function environmentActiveApp(repo, environment) {
-    const gh = (args, timeout = 12000) => new Promise((resolve) => {
-        cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
+// gh runner that REJECTS on failure, so callers can fail closed instead of
+// silently treating a GitHub outage or timeout as "no data". Used by the
+// deployment-resolution paths where an empty result must not be mistaken for a
+// definitive answer (e.g. "no app is deployed" → allow environment deletion).
+function ghOrThrow(args, timeout = 12000) {
+    return new Promise((resolve, reject) => {
+        cliExec("gh", args, { timeout }, (err, stdout) => {
+            if (err) reject(err instanceof Error ? err : new Error(String((err && err.message) || "gh command failed")));
+            else resolve((stdout || "").trim());
+        });
     });
+}
+
+// How many of an environment's newest deployment records to resolve
+// concurrently before falling back to a serial walk. The relevant deploy/delete
+// record is almost always in the newest handful.
+const DEPLOY_MAX_PARALLEL_RECORDS = 10;
+
+// Resolve the CURRENT application deployment for a single environment, or null
+// when no application is deployed (no deploy/delete record, or the latest delete
+// succeeded). Scoped to the environment's OWN deployment history (the GitHub
+// `environment=` filter) so a busy environment can never crowd another's latest
+// record out of a shared, repo-wide page. Rejects on any GitHub error so callers
+// fail closed rather than mistaking an outage for "nothing deployed". Returns
+// `{ app, environment, provider, status, deploymentId, runUrl }`.
+async function resolveEnvDeployment(repo, environment) {
     const appName = repo.split("/").pop() || repo;
-    // Newest-first deployment records scoped to this environment.
-    const raw = await gh(["api", `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(environment)}`, "--jq", ".[].id"]);
-    const ids = raw ? raw.split("\n").filter(Boolean) : [];
-    for (const id of ids) {
-        const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
+    // Provider is cosmetic (drives portal links only), so a lookup failure here
+    // must not block the whole resolution — soft-fail to an empty provider.
+    let provider = "";
+    try {
+        const varsRaw = await ghOrThrow(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
+        if (/AZURE_/.test(varsRaw)) provider = "azure";
+        else if (/AWS_/.test(varsRaw)) provider = "aws";
+    } catch { /* provider stays "" */ }
+
+    // Newest-first deployment records for THIS environment only.
+    const idsRaw = await ghOrThrow(["api", `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(environment)}`, "--jq", ".[].id"]);
+    const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
+
+    const resolveRecord = async (id) => {
+        const stateRaw = await ghOrThrow(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
         const tab = stateRaw.indexOf("\t");
         const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
         const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+        let runUrl = "";
         const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+        if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
+        else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
         let runPath = "";
         let runConclusion = "";
         if (m) {
-            const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
             const rt = runInfo.indexOf("\t");
             runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
             runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
         }
         const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
         const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-        if (!isDeploy && !isDelete) continue;
-        // Successful delete → app removed → environment is free to delete.
-        if (isDelete && runConclusion === "success") return null;
-        // A delete that didn't succeed (in progress or failed) → app still exists.
-        if (isDelete) return { app: appName, environment, status: runConclusion ? "delete-failed" : "deleting" };
-        // Deploy record (success/failed/pending) → app is deployed.
+        return { id, state, runUrl, isDeploy, isDelete, runConclusion };
+    };
+
+    // Apply the selection rules to a resolved record:
+    //   'skip'  → not relevant (verify-credentials, or a failed delete); keep walking
+    //   null    → app deleted; environment has no active deployment
+    //   object  → the deployment row for this environment
+    const decide = (rec) => {
+        if (!rec.isDeploy && !rec.isDelete) return 'skip';
+        if (rec.isDelete && rec.runConclusion === "success") return null;
+        if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
         let status = "pending";
-        if (state === "success") status = "success";
-        else if (state === "failure" || state === "error") status = "failed";
-        return { app: appName, environment, status };
+        if (rec.isDelete) status = "deleting"; // delete still in progress
+        else if (rec.state === "success") status = "success";
+        else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
+    };
+
+    // Resolve the newest batch concurrently, then apply the rules newest-first.
+    const batch = ids.slice(0, DEPLOY_MAX_PARALLEL_RECORDS);
+    const resolved = await Promise.all(batch.map(resolveRecord));
+    for (const rec of resolved) { const r = decide(rec); if (r === 'skip') continue; return r; }
+    // Rare fallback: nothing decisive in the newest batch — walk the rest serially.
+    for (const id of ids.slice(DEPLOY_MAX_PARALLEL_RECORDS)) {
+        const r = decide(await resolveRecord(id));
+        if (r === 'skip') continue;
+        return r;
     }
     return null;
 }
@@ -615,27 +661,33 @@ function createRequestHandler(instanceId) {
                 // still deployed to it (its cloud resources would be orphaned).
                 // Require the app deployment to be torn down first and point the
                 // client at the app-deletion flow.
+                let active = null;
                 try {
-                    const active = await environmentActiveApp(repo, envName);
-                    if (active) {
-                        const deleting = active.status === "deleting";
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(409);
-                        res.end(JSON.stringify({
-                            error: deleting
-                                ? `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
-                                : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
-                            code: "app-deployed",
-                            app: active.app,
-                            environment: envName,
-                            redirect: `/?page=deploying&app=${encodeURIComponent(active.app)}&env=${encodeURIComponent(envName)}`,
-                        }));
-                        return;
-                    }
+                    active = await resolveEnvDeployment(repo, envName);
                 } catch (e) {
-                    // If the check itself fails, fall through and attempt the delete
-                    // rather than blocking the user on a transient GitHub error.
+                    // Fail closed: if we can't confirm whether an app is still
+                    // deployed (e.g. GitHub is unavailable), do NOT delete — that
+                    // could orphan the application's cloud resources.
                     console.error(`[radius delete-environment] active-app check failed for ${repo}/${envName}: ${e?.message || e}`);
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(503);
+                    res.end(JSON.stringify({ error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${e?.message || "unknown error"}). The environment was not deleted — please try again.` }));
+                    return;
+                }
+                if (active) {
+                    const deleting = active.status === "deleting";
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(409);
+                    res.end(JSON.stringify({
+                        error: deleting
+                            ? `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+                            : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
+                        code: "app-deployed",
+                        app: active.app,
+                        environment: envName,
+                        redirect: `/?page=deploying&app=${encodeURIComponent(active.app)}&env=${encodeURIComponent(envName)}`,
+                    }));
+                    return;
                 }
                 try {
                     await runCommand("gh", ["api", "--method", "DELETE", "/repos/" + repo + "/environments/" + encodeURIComponent(envName)], { timeout: 20000 });
@@ -1732,117 +1784,22 @@ function createRequestHandler(instanceId) {
             const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
             if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) { respond(cachedDeploys.payload); return; }
 
-            const gh = (args, timeout = 12000) => new Promise((resolve) => {
-                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
-            });
-            const appName = repo.split("/").pop() || repo;
-            // Cap how many of an environment's newest deployment records we resolve
-            // concurrently. The relevant deploy/delete record is almost always in
-            // the newest handful; a rare miss falls back to a serial walk below.
-            const MAX_PARALLEL_RECORDS = 10;
             try {
-                // A "deployment" is the application deployed into a GitHub
-                // Environment by the run-rad-commands workflow. List the repo's
-                // most recent deployment records (newest-first) and, per
-                // environment, resolve the latest record that was actually
-                // produced by the deploy workflow — skipping records created by
-                // other environment-bound workflows (verify-credentials, etc.).
-                // (B) No --paginate: the newest 100 records are more than enough
-                // to find the latest deploy/delete per environment, and skipping
-                // pagination avoids several sequential round trips over the full
-                // (verify-credentials-heavy) deployment history.
-                const raw = await gh(["api", `/repos/${repo}/deployments?per_page=100`, "--jq", ".[] | (.id|tostring) + \"\\t\" + (.environment // \"\")"]);
-                const rows = raw ? raw.split("\n").filter(Boolean).map((l) => {
-                    const t = l.indexOf("\t");
-                    return t === -1 ? { id: l, environment: "" } : { id: l.slice(0, t), environment: l.slice(t + 1) };
-                }) : [];
-                // Group deployment ids per environment, preserving newest-first order.
-                const idsByEnv = new Map();
-                for (const r of rows) {
-                    if (!r.environment) continue;
-                    if (!idsByEnv.has(r.environment)) idsByEnv.set(r.environment, []);
-                    idsByEnv.get(r.environment).push(r.id);
-                }
-
-                // Resolve a single deployment record into a descriptor: its state,
-                // originating run URL, which workflow produced it, and that run's
-                // conclusion. The two `gh` calls are inherently sequential (the run
-                // lookup needs the run id from the status), but resolving different
-                // records concurrently is what removes the serial-walk latency.
-                const resolveRecord = async (environment, id) => {
-                    const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
-                    const tab = stateRaw.indexOf("\t");
-                    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-                    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-                    let runUrl = "";
-                    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-                    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-
-                    let runPath = "";
-                    let runConclusion = "";
-                    if (m) {
-                        const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-                        const rt = runInfo.indexOf("\t");
-                        runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-                        runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
-                    }
-                    const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-                    const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-                    return { id, environment, state, runUrl, isDeploy, isDelete, runConclusion };
-                };
-
-                // Apply the selection rules to a resolved record. Returns:
-                //   'skip'  → not relevant (or a failed delete); keep walking older records
-                //   null    → app deleted; drop this environment from the listing
-                //   object  → the deployment row to show for this environment
-                const decide = (rec) => {
-                    // Not a deploy or delete record (e.g. verify-credentials).
-                    if (!rec.isDeploy && !rec.isDelete) return 'skip';
-                    // A successful delete means the app no longer exists here.
-                    if (rec.isDelete && rec.runConclusion === "success") return null;
-                    // A delete that finished WITHOUT success did not remove the app,
-                    // so the deployment still exists — fall back to the underlying
-                    // deploy record instead of a stuck "Deleting…".
-                    if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
-                    let status = "pending";
-                    if (rec.isDelete) status = "deleting"; // delete still in progress
-                    else if (rec.state === "success") status = "success";
-                    else if (rec.state === "failure" || rec.state === "error") status = "failed";
-                    return { app: appName, environment: rec.environment, provider: rec.provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
-                };
-
-                const deployments = await Promise.all(Array.from(idsByEnv.entries()).map(async ([environment, ids]) => {
-                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
-                    let provider = "";
-                    if (/AZURE_/.test(varsRaw)) provider = "azure";
-                    else if (/AWS_/.test(varsRaw)) provider = "aws";
-
-                    const pick = (rec) => decide({ ...rec, provider });
-
-                    // (C) Resolve the newest batch of records concurrently, then
-                    // apply the rules in newest-first order.
-                    const batch = ids.slice(0, MAX_PARALLEL_RECORDS);
-                    const resolved = await Promise.all(batch.map((id) => resolveRecord(environment, id)));
-                    for (const rec of resolved) {
-                        const r = pick(rec);
-                        if (r === 'skip') continue;
-                        return r; // deployment row or null (deleted)
-                    }
-                    // Rare fallback: nothing decisive in the newest batch. Walk the
-                    // remaining older records serially so correctness is preserved.
-                    for (const id of ids.slice(MAX_PARALLEL_RECORDS)) {
-                        const r = pick(await resolveRecord(environment, id));
-                        if (r === 'skip') continue;
-                        return r;
-                    }
-                    // No deploy/delete record for this environment — nothing to show.
-                    return null;
-                }));
-                const payload = { deployments: deployments.filter(Boolean) };
+                // Resolve the current deployment per environment from each
+                // environment's OWN history (see resolveEnvDeployment). Querying
+                // per environment — rather than a single repo-wide, capped page —
+                // means a busy environment can never crowd another's latest
+                // deploy/delete record out of the results.
+                const envNamesRaw = await ghOrThrow(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[].name"]);
+                const envNames = envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
+                const resolved = await Promise.all(envNames.map((name) => resolveEnvDeployment(repo, name)));
+                const payload = { deployments: resolved.filter(Boolean) };
                 deployListCache.set(repo, { at: Date.now(), payload });
                 respond(payload);
             } catch (e) {
+                // A GitHub failure surfaces as an error (not a silently-empty list)
+                // so the client keeps its current view / keeps polling rather than
+                // treating an incomplete listing as the truth.
                 respond({ deployments: [], error: e.message });
             }
             return;

@@ -2616,6 +2616,10 @@ function loadDeployments(fresh) {
     fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + (fresh ? '&fresh=1' : ''))
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            // A transient GitHub failure returns { deployments: [], error }. Don't
+            // render that as "no deployments" (which would hide real rows); show a
+            // load-error row and leave any previous state to the next refresh.
+            if (d && d.error) { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
             var deps = (d && d.deployments) || [];
             if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
             var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -2745,10 +2749,18 @@ function pollDeleteCompletion(app, env, tries) {
     if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true); return; } // ~3 min at 4s
     setTimeout(function() {
         fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + '&fresh=1')
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                var deps = (d && d.deployments) || [];
-                var stillThere = deps.some(function(x) { return x.app === app && x.environment === env; });
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(res) {
+                var d = res.d || {};
+                // Only trust a complete, successful listing. A transient GitHub
+                // failure comes back as { deployments: [], error } (or a non-array
+                // deployments field); treating that empty list as "row gone" would
+                // wrongly report a successful delete, so keep polling instead.
+                if (!res.ok || d.error || !Array.isArray(d.deployments)) {
+                    pollDeleteCompletion(app, env, tries + 1);
+                    return;
+                }
+                var stillThere = d.deployments.some(function(x) { return x.app === app && x.environment === env; });
                 if (!stillThere) {
                     delete OP_STATUS[opKey(app, env)];
                     loadDeployments(true);
