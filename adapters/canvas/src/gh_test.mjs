@@ -63,6 +63,41 @@ describe.sequential("cliExec", () => {
         );
     });
 
+    it("treats 'gh.exe' as a gh invocation on Windows (no cmd.exe wrapper)", async () => {
+        const { cliExec } = await loadGh("win32");
+        const callback = vi.fn();
+        const apiPath = "/repos/acme/widgets/deployments?environment=test&per_page=10";
+
+        cliExec("gh.exe", ["api", apiPath, "--jq", ".[].id"], {}, callback);
+
+        const [file, args] = childProcess.execFile.mock.calls[0];
+        expect(file).toBe("gh.exe");
+        expect(args).toEqual(["api", apiPath, "--jq", ".[].id"]);
+    });
+
+    it("treats a full path to gh.exe as a gh invocation on Windows (no cmd.exe wrapper)", async () => {
+        const { cliExec } = await loadGh("win32");
+        const callback = vi.fn();
+
+        cliExec("C:\\Program Files\\gh\\bin\\gh.exe", ["auth", "status"], {}, callback);
+
+        const [file, args] = childProcess.execFile.mock.calls[0];
+        expect(file).toBe("gh.exe");
+        expect(args).toEqual(["auth", "status"]);
+    });
+
+    it("strips ambient tokens for a full-path gh invocation", async () => {
+        const { cliExec } = await loadGh("linux", "stored-token\n");
+        const callback = vi.fn();
+
+        cliExec("/usr/local/bin/gh", ["auth", "status"], {
+            env: { GH_TOKEN: "tok", KEEP_ME: "yes" },
+        }, callback);
+
+        const [, , options] = childProcess.execFile.mock.calls[0];
+        expect(options.env).toEqual({ KEEP_ME: "yes" });
+    });
+
     it("retains the Windows cmd wrapper for non-gh CLIs", async () => {
         const { cliExec } = await loadGh("win32");
         const callback = vi.fn();

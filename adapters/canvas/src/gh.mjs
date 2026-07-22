@@ -56,6 +56,12 @@ function ghChildEnv(baseEnv) {
     return env;
 }
 
+// Returns true when cmd refers to the gh CLI regardless of whether the caller
+// passes "gh", "gh.exe", or an absolute path to the executable.
+function isGhCmd(cmd) {
+    return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
+}
+
 // Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
 // executable directly: passing it through cmd.exe would let metacharacters in an
 // API path (for example, '&' in a query string) be interpreted as shell syntax.
@@ -63,11 +69,11 @@ function ghChildEnv(baseEnv) {
 // cmd.exe wrapper for those commands.
 export function cliExec(cmd, args, opts, cb) {
     const isWindows = process.platform === "win32";
-    const isWindowsGh = isWindows && cmd === "gh";
+    const isWindowsGh = isWindows && isGhCmd(cmd);
     const file = isWindowsGh ? ghExecutable() : isWindows ? "cmd.exe" : cmd;
     const finalArgs = isWindows && !isWindowsGh ? ["/c", cmd, ...args] : args;
     const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
-    if (cmd === "gh") execOpts.env = ghChildEnv(execOpts.env);
+    if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
     return execFile(file, finalArgs, execOpts, cb);
 }
 
