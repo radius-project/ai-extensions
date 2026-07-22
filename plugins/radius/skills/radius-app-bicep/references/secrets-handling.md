@@ -11,7 +11,7 @@ For every secret, inspect:
 3. the exact `Radius.Security/secrets` and `Radius.Compute/containers` schemas for authored-secret and `secretKeyRef` support; and
 4. the application source for the final native variable/configuration name and required format.
 
-Also preserve any explicit profile requirement that a particular native key use `secretKeyRef`. Binding the same value under a helper name does not satisfy a workload that reads the required key directly.
+Preserve any explicit profile requirement that a Recipe-generated managed secret reach a particular native key through `secretKeyRef`. Binding it under a helper name does not satisfy a workload that reads the required key directly. A developer-supplied credential remains a direct `@secure()` `env.value` binding.
 
 Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs. Radius carries a `@secure()` parameter to a sensitive resource property and, when the parameter is assigned to a container `env.value`, injects it into the container without materializing it into plain state.
 
@@ -116,14 +116,28 @@ Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the env
 
 Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion does not encode them; use application logic or a verified runtime helper. If safe encoding cannot be guaranteed, do not generate a fragile connection string.
 
+Do not assume an unconstrained developer-supplied password is URL-safe, recommend a restricted character set as a workaround, or treat shell expansion as encoding. Prefer source-native decomposed host, port, database, username, password, and TLS flags or fields when the application safely assembles the final client value.
+
+### Authored secrets are not composition engines
+
+`Radius.Security/secrets` can carry an exact application secret, but it does not turn Bicep interpolation into runtime composition. Never manufacture an aggregate credential-bearing URL or configuration in authored `data.value`, regardless of whether its other parts come from outputs, parameters, variables, or literals.
+
+When the application accepts only one credential-bearing value, choose one proven path:
+
+1. Bind an exact, source-compatible connection string from schema-declared managed-secret metadata.
+2. Bind the parts separately and use a verified application, entrypoint, or helper that safely encodes and composes them at runtime.
+
+If neither path exists, report the schema/application contract gap and do not emit a definition described as deployable.
+
 ## Checklist
 
 - The input property, secret resource, managed-secret path, and key all exist in the exact configured schemas and recipe.
 - Every container variable uses the exact native name and format read by source.
-- Every profile-required secret environment key uses `valueFrom.secretKeyRef` on that exact key.
+- Every Recipe-generated managed secret environment key uses `valueFrom.secretKeyRef` on the exact app-native key.
 - Recipe-generated secrets bind directly from the exact declared managed-secret name and key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
-- No secret is hardcoded, interpolated into a plain Bicep value, or assumed to appear in generic connection variables.
-- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` binds a secret resource into the container: a recipe-generated managed secret through the owner's read-only `<resource>.properties.secrets.name`, or an authored `Radius.Security/secrets`. Author a secret only for genuine application secrets/config files or a type whose schema requires `secretName`, never to wrap a recipe output.
+- No authored secret `data.value` interpolates an aggregate credential-bearing URL/config.
+- No secret is hardcoded, assumed URL-safe, or assumed to appear in generic connection variables.
+- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` is reserved for a Recipe-generated managed secret through the owner's read-only `<resource>.properties.secrets.name`. Author a secret only for genuine application secrets/config files delivered through a schema-supported mount or for a type whose schema requires `secretName`, never to wrap a Recipe output.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
-- A final credential-bearing URL/config is either bound directly from a matching managed secret or composed at runtime from secret references; it is never reconstructed in Bicep plain state.
+- A final credential-bearing URL/config is bound from a matching managed secret or safely composed at runtime; it is never reconstructed in Bicep or an authored secret.

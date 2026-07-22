@@ -87,10 +87,12 @@ export function feedbackWidget() {
         + `<path d="M12 3C6.48 3 2 6.94 2 11.5c0 2.3 1.14 4.36 2.98 5.84L4 21l4.2-1.9c1.16.38 2.44.6 3.8.6 5.52 0 10-3.94 10-8.7S17.52 3 12 3z" `
         + `stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/>`
         + `<circle cx="8.5" cy="11.5" r="1.1" fill="#fff"/><circle cx="12" cy="11.5" r="1.1" fill="#fff"/><circle cx="15.5" cy="11.5" r="1.1" fill="#fff"/></svg>`;
+    const feedbackUrl = 'https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml';
+    const learnUrl = 'https://radapp.io';
     return `<div id="rad-feedback" class="rad-feedback">
   <div id="rad-feedback-pop" class="rad-feedback__pop" style="display:none;">
-    <a class="rad-feedback__link" href="https://github.com/radius-project/ai-extensions/issues/new" target="_blank" rel="noopener">Share feedback</a>
-    <a class="rad-feedback__link" href="https://radapp.io" target="_blank" rel="noopener">Learn about Radius</a>
+    <a class="rad-feedback__link" href="${feedbackUrl}" target="_blank" rel="noopener noreferrer" title="${feedbackUrl}">Share feedback</a>
+    <a class="rad-feedback__link" href="${learnUrl}" target="_blank" rel="noopener noreferrer" title="${learnUrl}">Learn about Radius</a>
   </div>
   <button id="rad-feedback-btn" class="rad-feedback__btn" type="button" aria-label="Share feedback" aria-haspopup="dialog" aria-expanded="false">${chat}</button>
 </div>
@@ -131,7 +133,7 @@ export function nodeCard(title, typeLabel, iconHtml) {
 // A nav icon glyph. Painted in the theme's default text color (via a CSS mask)
 // so it stays legible in light/dark and does NOT dim on inactive tabs — only the
 // label changes color for the active/inactive state (matches Figma).
-function navIcon(dataUri, size = 20, fit = 'contain') {
+function navIcon(dataUri, size = 28, fit = 'contain') {
     return `<span aria-hidden="true" style="display:inline-block;width:${size}px;height:${size}px;`
         + `background-color:var(--rad-text, currentColor);`
         + `-webkit-mask:url(${dataUri}) center/${fit} no-repeat;`
@@ -139,4 +141,4 @@ function navIcon(dataUri, size = 20, fit = 'contain') {
 }
 function iconApplications() { return navIcon(ICON_APP); }
 function iconEnvironments() { return navIcon(ICON_ENV); }
-function iconDeployments() { return navIcon(ICON_DEP, 20, 'cover'); }
+function iconDeployments() { return navIcon(ICON_DEP, 28, 'cover'); }

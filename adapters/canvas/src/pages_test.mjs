@@ -31,6 +31,20 @@ describe("pageShell", () => {
         expect(html).toContain("My Title — Radius");
         expect(html).toContain("<p>hello</p>");
     });
+
+    it("previews feedback link destinations in native tooltips", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain('title="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"');
+        expect(html).toContain('title="https://radapp.io"');
+    });
+
+    it("renders larger top-navigation icons without a border or filled background", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        const iconStyles = html.match(/\.rad-topnav__icon\s*\{([^}]*)\}/)?.[1];
+        expect(html).toContain("width:28px;height:28px");
+        expect(iconStyles).toContain("background: transparent");
+        expect(iconStyles).not.toContain("border:");
+    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
