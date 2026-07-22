@@ -44,14 +44,49 @@ function parseWorkspaceYaml(content) {
     return result;
 }
 
+async function pathExists(candidate) {
+    try {
+        await fs.access(candidate);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function sessionWorkspaceFile(home, sessionId) {
+    return path.join(home, ".copilot", "session-state", sessionId, "workspace.yaml");
+}
+
+// Resolve this session's id robustly. COPILOT_AGENT_SESSION_ID is checked before
+// SESSION_ID, but the former is sometimes a W3C traceparent
+// ("00-<trace>-<span>-00") rather than a session UUID. A traceparent yields a
+// bogus session-state/<id> path whose workspace.yaml does not exist, which
+// previously produced empty metadata (and, downstream, an empty workspaceRepo /
+// workspaceBranch and a broken worktree fallback). We therefore try each
+// candidate in priority order and pick the first whose workspace.yaml actually
+// exists on disk. When none exists we fall back to the first non-empty candidate
+// so callers that only need a stable id (e.g. port hashing) still get one.
+export async function resolveSessionId(
+    env = process.env,
+    home = env.USERPROFILE || os.homedir(),
+    exists = pathExists,
+) {
+    const candidates = [env.COPILOT_AGENT_SESSION_ID, env.SESSION_ID].filter(Boolean);
+    if (home) {
+        for (const id of candidates) {
+            if (await exists(sessionWorkspaceFile(home, id))) return id;
+        }
+    }
+    return candidates[0] || "";
+}
+
 async function readSessionWorkspaceMetadata() {
-    const sessionId = process.env.COPILOT_AGENT_SESSION_ID || process.env.SESSION_ID || "";
-    if (!sessionId) return {};
     const home = process.env.USERPROFILE || os.homedir();
     if (!home) return {};
-    const workspaceFile = path.join(home, ".copilot", "session-state", sessionId, "workspace.yaml");
+    const sessionId = await resolveSessionId(process.env, home);
+    if (!sessionId) return {};
     try {
-        return parseWorkspaceYaml(await fs.readFile(workspaceFile, "utf8"));
+        return parseWorkspaceYaml(await fs.readFile(sessionWorkspaceFile(home, sessionId), "utf8"));
     } catch {
         return {};
     }

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath, toSafeRepoRelPath, isWorkspaceSelection } from "./workspace.mjs";
+import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath, toSafeRepoRelPath, isWorkspaceSelection, resolveSessionId } from "./workspace.mjs";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must
@@ -132,5 +132,39 @@ describe("isWorkspaceSelection", () => {
 
     it("is false when no workspace path is set", () => {
         expect(isWorkspaceSelection({ workspaceRepo: "acme/app", workspaceBranch: "feature-x" }, "acme/app", "feature-x")).toBe(false);
+    });
+});
+
+// COPILOT_AGENT_SESSION_ID is sometimes a W3C traceparent ("00-<trace>-<span>-00")
+// instead of a session UUID. That value builds a bogus session-state path whose
+// workspace.yaml does not exist, so resolveSessionId must skip it and fall
+// through to SESSION_ID (whose workspace.yaml is real). Otherwise the canvas
+// reads empty metadata and loses its workspace repo/branch.
+describe("resolveSessionId", () => {
+    const HOME = "C:/Users/dev";
+    const REAL_ID = "e40edfce-64f9-4717-8296-96fea82c4760";
+    const TRACEPARENT = "00-29c84416000000000000000000000000-0000000000000000-00";
+    const yamlFor = (id) => `${HOME}/.copilot/session-state/${id}/workspace.yaml`.replace(/\//g, path.sep);
+
+    const existsFor = (validId) => async (candidate) =>
+        path.normalize(candidate) === path.normalize(yamlFor(validId));
+
+    it("skips a traceparent COPILOT_AGENT_SESSION_ID and uses SESSION_ID when its workspace.yaml exists", async () => {
+        const env = { COPILOT_AGENT_SESSION_ID: TRACEPARENT, SESSION_ID: REAL_ID };
+        expect(await resolveSessionId(env, HOME, existsFor(REAL_ID))).toBe(REAL_ID);
+    });
+
+    it("prefers COPILOT_AGENT_SESSION_ID when its own workspace.yaml exists", async () => {
+        const env = { COPILOT_AGENT_SESSION_ID: REAL_ID, SESSION_ID: "other" };
+        expect(await resolveSessionId(env, HOME, existsFor(REAL_ID))).toBe(REAL_ID);
+    });
+
+    it("falls back to the first candidate when no workspace.yaml exists", async () => {
+        const env = { COPILOT_AGENT_SESSION_ID: TRACEPARENT, SESSION_ID: REAL_ID };
+        expect(await resolveSessionId(env, HOME, async () => false)).toBe(TRACEPARENT);
+    });
+
+    it("returns empty string when no candidate env vars are set", async () => {
+        expect(await resolveSessionId({}, HOME, async () => false)).toBe("");
     });
 });
