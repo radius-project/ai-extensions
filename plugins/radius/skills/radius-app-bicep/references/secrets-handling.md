@@ -95,7 +95,7 @@ Applications often require one URL or config value that embeds a secret. Bicep i
 
 1. Bind the secret into a helper environment variable: from the `@secure()` parameter via `env.value` for a developer-supplied credential, or via `secretKeyRef` from `<resource>.properties.secrets.name` for a recipe-generated output.
 2. Bind nonsecret host, port, database, and username values from verified outputs or literals.
-3. Declare the helper before dependent values when the runtime requires ordering.
+3. Prefer having the application or entrypoint compose the final value, because `env` is an object map with no guaranteed key ordering.
 4. Compose the final app-native value in the container runtime or let the application construct it. The final key and syntax must exactly match the selected pinned-source contract.
 
 For a non-URL format, the pattern can look like:
@@ -112,7 +112,7 @@ env: {
 }
 ```
 
-Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list. Confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper.
+Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list, but `env` is authored as an object map whose key ordering is not guaranteed, so this expansion order may not be stable. Prefer application or entrypoint composition instead of relying on `$(VAR_NAME)` ordering. If you do use it, confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper.
 
 Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion does not encode them; use application logic or a verified runtime helper. If safe encoding cannot be guaranteed, do not generate a fragile connection string.
 
