@@ -728,10 +728,13 @@ function radiusRenderGraph(containerId, resources, options) {
                 'edge-distances': 'node-position',
                 'arrow-scale': 0.8
             }},
-            { selector: 'edge[curveStyle="taxi"]', style: {
+            { selector: 'edge[curveStyle="taxi"], edge[curveStyle="round-taxi"]', style: {
                 'taxi-direction': 'downward',
                 'taxi-turn': '50%',
                 'taxi-turn-min-distance': 10
+            }},
+            { selector: 'edge[curveStyle="round-taxi"]', style: {
+                'taxi-radius': 8
             }},
             { selector: 'edge[lineStyle="dashed"]', style: { 'line-style': 'dashed', 'line-color': '#57606a', 'target-arrow-color': '#57606a' }},
             { selector: 'node:active', style: { 'overlay-opacity': 0.1 }},

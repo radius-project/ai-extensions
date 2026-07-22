@@ -8,7 +8,7 @@
 import https from "node:https";
 
 const VENDOR_URLS = {
-    'cytoscape': 'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js',
+    'cytoscape': 'https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js',
     'dagre': 'https://unpkg.com/dagre@0.8.5/dist/dagre.min.js',
     'cytoscape-dagre': 'https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js',
     'cytoscape-node-html-label': 'https://unpkg.com/cytoscape-node-html-label@1.2.2/dist/cytoscape-node-html-label.js',
