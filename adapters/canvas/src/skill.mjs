@@ -21,6 +21,7 @@ import connectionConventions from "../../../plugins/radius/skills/radius-app-bic
 import secretsHandling from "../../../plugins/radius/skills/radius-app-bicep/references/secrets-handling.md";
 import bicepStructureRules from "../../../plugins/radius/skills/radius-app-bicep/references/bicep-structure-rules.md";
 import namingConventions from "../../../plugins/radius/skills/radius-app-bicep/references/naming-conventions.md";
+import customResourceTypes from "../../../plugins/radius/skills/radius-app-bicep/references/custom-resource-types.md";
 import todoListAppExample from "../../../plugins/radius/skills/radius-app-bicep/references/todo-list-app-example.md";
 
 // Ordered to match the paths referenced from SKILL.md so the inlined content
@@ -33,6 +34,7 @@ const REFERENCES = [
     ["references/secrets-handling.md", secretsHandling],
     ["references/bicep-structure-rules.md", bicepStructureRules],
     ["references/naming-conventions.md", namingConventions],
+    ["references/custom-resource-types.md", customResourceTypes],
     ["references/todo-list-app-example.md", todoListAppExample],
 ];
 

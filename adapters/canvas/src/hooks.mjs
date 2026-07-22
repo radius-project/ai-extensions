@@ -27,7 +27,7 @@ const SKILL_HANDOFF =
 const GRAPH_SOURCE_NOTE =
     "For the current workspace repo and branch, the application graph renders from the on-disk working tree, so writing .radius/app.bicep to the workspace is enough to preview it (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so the file must be committed and pushed there.";
 const RECIPE_PACK_NOTE =
-    "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
+    "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
 
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
