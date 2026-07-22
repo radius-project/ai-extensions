@@ -78,7 +78,15 @@ export function applicationGraphToResources(
       diffHash: validateDiffHash(r.diffHash, r.name || id),
       definitionFile,
       definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
-      codeReference: r.codeReference || "",
+      // Newer `rad app graph` emits the authored codeReference under the
+      // resource's `properties`; older output placed it at the top level. Prefer
+      // the new location and fall back to the legacy one — otherwise the canvas
+      // source links silently disappear even though app.bicep and app-graph.json
+      // carry them.
+      codeReference:
+        (r.properties && typeof r.properties.codeReference === "string" && r.properties.codeReference) ||
+        (typeof r.codeReference === "string" && r.codeReference) ||
+        "",
       iconHash: r.iconHash || "",
       icon: resolveIcon(r),
     });

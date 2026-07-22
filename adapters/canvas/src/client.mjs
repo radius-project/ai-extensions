@@ -728,10 +728,13 @@ function radiusRenderGraph(containerId, resources, options) {
                 'edge-distances': 'node-position',
                 'arrow-scale': 0.8
             }},
-            { selector: 'edge[curveStyle="taxi"]', style: {
+            { selector: 'edge[curveStyle="taxi"], edge[curveStyle="round-taxi"]', style: {
                 'taxi-direction': 'downward',
                 'taxi-turn': '50%',
                 'taxi-turn-min-distance': 10
+            }},
+            { selector: 'edge[curveStyle="round-taxi"]', style: {
+                'taxi-radius': 8
             }},
             { selector: 'edge[lineStyle="dashed"]', style: { 'line-style': 'dashed', 'line-color': '#57606a', 'target-arrow-color': '#57606a' }},
             { selector: 'node:active', style: { 'overlay-opacity': 0.1 }},
@@ -989,7 +992,17 @@ function radiusRenderGraph(containerId, resources, options) {
         var ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></path></svg>';
         var ICON_SRC = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215Zm-6.56 0a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"></path></svg>';
 
-        cy.on('tap', 'node', function(e) { openNodePopup(e.target); });
+        // Native-node fallback only: open the popup on a cytoscape node tap when
+        // the HTML card overlay did NOT render (plain canvas nodes can't host
+        // links or a "•••" button). When cards ARE rendered, the popup is driven
+        // solely by the container click delegation below, which distinguishes the
+        // "•••"/card body (open popup) from the in-card "View source code" link
+        // (navigates on its own). Registering this node-tap in card mode would
+        // make the source link ALSO open the details popup — exactly what the
+        // "•••" button is for — so it is intentionally skipped there.
+        if (!htmlLabelsApplied) {
+            cy.on('tap', 'node', function(e) { openNodePopup(e.target); });
+        }
 
         // Build + show the links popup for a node. Extracted so the HTML node
         // cards' "•••" button (and card body) can open the same popup — the
