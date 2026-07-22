@@ -791,7 +791,15 @@ function radiusRenderGraph(containerId, resources, options) {
                 var srcRow;
                 if (localSource) {
                     if (data.srcPath) {
-                        srcRow = '<a class="rad-node__source" href="#" role="button" data-local-src="1" data-src-path="' + String(data.srcPath).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') + '" data-src-line="' + (data.srcLine || 0) + '">' + srcInner + '</a>';
+                        // Self-contained inline handler so the in-card link opens
+                        // the file on its own — the node-html-label overlay's
+                        // pointer-events/hit-testing can otherwise make a click
+                        // land on the card (opening the "•••" popup) instead of
+                        // reaching the container click delegation. stopPropagation
+                        // keeps that delegation from double-firing; data-local-src
+                        // stays as a fallback if the inline handler is stripped.
+                        // dataset.* avoids nested quotes inside this onclick string.
+                        srcRow = '<a class="rad-node__source" href="#" role="button" data-local-src="1" data-src-path="' + String(data.srcPath).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') + '" data-src-line="' + (data.srcLine || 0) + '" onclick="event.preventDefault();event.stopPropagation();window.radiusOpenLocalSource(this.dataset.srcPath,parseInt(this.dataset.srcLine,10)||0);return false;">' + srcInner + '</a>';
                     } else {
                         srcRow = '<span class="rad-node__source" role="button" aria-disabled="true" title="No source reference found" style="opacity:0.5;cursor:default;">' + srcInner + '</span>';
                     }
