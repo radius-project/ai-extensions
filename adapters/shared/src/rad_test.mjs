@@ -1,20 +1,55 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import https from "node:https";
 import {
   RADIUS_BICEP_CONFIG,
   RADIUS_BICEP_CONFIG_JSON,
   MODELED_APP_GRAPH_FLAGS,
+  MANAGED_RAD_PATH,
   resolveExistingRadBinary,
   buildGraphViaRad,
   saveGraphJson,
   normalizeSha256,
   expectedDigest,
   tryAcquireLock,
+  parseVersion,
+  parseRadVersionOutput,
+  compareVersions,
+  radBinaryVersion,
+  releaseAsset,
+  ensureRadBinary,
 } from "./rad.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
+
+describe("managed rad platform paths", () => {
+  it("uses the platform executable suffix at the stable managed location", () => {
+    expect(MANAGED_RAD_PATH).toBe(
+      path.join(os.homedir(), ".radius", "ai-extensions", "bin", RAD),
+    );
+  });
+
+  it.each([
+    ["win32", "x64", "rad_windows_amd64.exe"],
+    ["win32", "arm64", "rad_windows_amd64.exe"],
+    ["darwin", "x64", "rad_darwin_amd64"],
+    ["darwin", "arm64", "rad_darwin_arm64"],
+    ["linux", "x64", "rad_linux_amd64"],
+    ["linux", "arm64", "rad_linux_arm64"],
+    ["linux", "arm", "rad_linux_arm"],
+  ])("maps %s/%s to %s", (platform, architecture, expected) => {
+    expect(releaseAsset(platform, architecture)).toBe(expected);
+  });
+
+  it("rejects unsupported platform and architecture combinations", () => {
+    expect(() => releaseAsset("freebsd", "x64")).toThrow("Unsupported platform");
+    expect(() => releaseAsset("linux", "ia32")).toThrow("Unsupported platform");
+    expect(() => releaseAsset("win32", "arm")).toThrow("Unsupported platform");
+  });
+});
 
 describe("RADIUS_BICEP_CONFIG", () => {
   it("enables the Bicep extensibility experimental feature", () => {
@@ -42,23 +77,18 @@ describe("MODELED_APP_GRAPH_FLAGS", () => {
 describe("resolveExistingRadBinary", () => {
   let tmp;
   let savedBinaryEnv;
-  let savedPathEnv;
+  let managed;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-resolve-"));
     savedBinaryEnv = process.env.RADIUS_RAD_BINARY;
-    savedPathEnv = process.env.PATH;
-    // Start from a clean slate so a rad already installed on this machine's PATH
-    // or via RADIUS_RAD_BINARY can't influence the resolution order under test.
+    managed = path.join(tmp, "managed", RAD);
     delete process.env.RADIUS_RAD_BINARY;
-    process.env.PATH = "";
   });
 
   afterEach(() => {
     if (savedBinaryEnv === undefined) delete process.env.RADIUS_RAD_BINARY;
     else process.env.RADIUS_RAD_BINARY = savedBinaryEnv;
-    if (savedPathEnv === undefined) delete process.env.PATH;
-    else process.env.PATH = savedPathEnv;
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -66,59 +96,64 @@ describe("resolveExistingRadBinary", () => {
     const bin = path.join(tmp, "custom-rad");
     fs.writeFileSync(bin, "");
     process.env.RADIUS_RAD_BINARY = bin;
-    expect(resolveExistingRadBinary()).toBe(bin);
+    expect(resolveExistingRadBinary(managed)).toBe(bin);
   });
 
-  it("ignores RADIUS_RAD_BINARY when the path does not exist and falls through to PATH", () => {
-    const pathDir = path.join(tmp, "bin");
-    fs.mkdirSync(pathDir);
-    const onPath = path.join(pathDir, RAD);
-    fs.writeFileSync(onPath, "");
+  it("ignores a missing RADIUS_RAD_BINARY and falls through to the managed path", () => {
+    fs.mkdirSync(path.dirname(managed), { recursive: true });
+    fs.writeFileSync(managed, "");
     process.env.RADIUS_RAD_BINARY = path.join(tmp, "does-not-exist");
-    process.env.PATH = pathDir;
-    expect(resolveExistingRadBinary()).toBe(onPath);
+    expect(resolveExistingRadBinary(managed)).toBe(managed);
   });
 
-  it("finds rad on PATH when no env override is set", () => {
-    const pathDir = path.join(tmp, "bin");
+  it("returns the stable managed binary when no override is set", () => {
+    fs.mkdirSync(path.dirname(managed), { recursive: true });
+    fs.writeFileSync(managed, "");
+    expect(resolveExistingRadBinary(managed)).toBe(managed);
+  });
+
+  it("does not use rad from PATH", () => {
+    const pathDir = path.join(tmp, "path-bin");
     fs.mkdirSync(pathDir);
     const onPath = path.join(pathDir, RAD);
     fs.writeFileSync(onPath, "");
+    const savedPath = process.env.PATH;
     process.env.PATH = pathDir;
-    expect(resolveExistingRadBinary()).toBe(onPath);
+    try {
+      expect(resolveExistingRadBinary(managed)).toBeNull();
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+    }
   });
 
-  it("scans every PATH entry and returns the first directory containing rad", () => {
-    const empty = path.join(tmp, "empty");
-    const real = path.join(tmp, "real");
-    fs.mkdirSync(empty);
-    fs.mkdirSync(real);
-    const onPath = path.join(real, RAD);
-    fs.writeFileSync(onPath, "");
-    process.env.PATH = [empty, real].join(path.delimiter);
-    expect(resolveExistingRadBinary()).toBe(onPath);
-  });
-
-  it("prefers RADIUS_RAD_BINARY over a rad found on PATH", () => {
+  it("prefers RADIUS_RAD_BINARY over the managed binary", () => {
     const envBin = path.join(tmp, "env-rad");
     fs.writeFileSync(envBin, "");
-    const pathDir = path.join(tmp, "bin");
-    fs.mkdirSync(pathDir);
-    fs.writeFileSync(path.join(pathDir, RAD), "");
+    fs.mkdirSync(path.dirname(managed), { recursive: true });
+    fs.writeFileSync(managed, "");
     process.env.RADIUS_RAD_BINARY = envBin;
-    process.env.PATH = pathDir;
-    expect(resolveExistingRadBinary()).toBe(envBin);
+    expect(resolveExistingRadBinary(managed)).toBe(envBin);
   });
 
-  it("does not treat a directory named rad on PATH as a usable binary", () => {
-    const pathDir = path.join(tmp, "bin");
-    fs.mkdirSync(pathDir);
-    const dirNamedRad = path.join(pathDir, RAD);
-    fs.mkdirSync(dirNamedRad); // a directory, not an executable file
-    process.env.PATH = pathDir;
-    // Whatever it resolves to (null, or a real ~/.rad/bin install), it must not
-    // be the directory that merely shares rad's name.
-    expect(resolveExistingRadBinary()).not.toBe(dirNamedRad);
+  it("does not treat a directory at the managed path as a usable binary", () => {
+    fs.mkdirSync(managed, { recursive: true });
+    expect(resolveExistingRadBinary(managed)).toBeNull();
+  });
+});
+
+describe("parseRadVersionOutput", () => {
+  it("reads the top-level version emitted by older rad releases with --cli", () => {
+    expect(parseRadVersionOutput('{"release":"stable","version":"v0.54.0"}')).toBe("v0.54.0");
+  });
+
+  it("also accepts the combined output shape from newer rad releases", () => {
+    expect(parseRadVersionOutput('{"cli":{"version":"v0.60.0"}}')).toBe("v0.60.0");
+  });
+
+  it("returns null for invalid or versionless output", () => {
+    expect(parseRadVersionOutput('{"cli":{}}')).toBeNull();
+    expect(parseRadVersionOutput("not-json")).toBeNull();
   });
 });
 
@@ -243,7 +278,7 @@ describe("tryAcquireLock", () => {
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
-  it("writes the owning pid into the lock file", () => {
+  it("writes the current pid into the lock file", () => {
     const release = tryAcquireLock(lockPath);
     try {
       expect(fs.readFileSync(lockPath, "utf8")).toBe(String(process.pid));
@@ -281,5 +316,211 @@ describe("tryAcquireLock", () => {
     const second = tryAcquireLock(lockPath);
     expect(typeof second).toBe("function");
     second();
+  });
+});
+
+describe("parseVersion", () => {
+  it("parses a plain v-prefixed release into its numeric core", () => {
+    expect(parseVersion("v1.2.3")).toEqual([1, 2, 3]);
+  });
+
+  it("accepts a bare (unprefixed) version", () => {
+    expect(parseVersion("0.44.0")).toEqual([0, 44, 0]);
+  });
+
+  it("ignores a prerelease/git-describe suffix", () => {
+    expect(parseVersion("v0.60.0-rc1-1-gdeadbee")).toEqual([0, 60, 0]);
+  });
+
+  it("ignores build metadata after a +", () => {
+    expect(parseVersion("1.2.3+build.7")).toEqual([1, 2, 3]);
+  });
+
+  it("returns null for anything without a numeric major.minor.patch", () => {
+    expect(parseVersion("edge")).toBeNull();
+    expect(parseVersion("v1.2")).toBeNull();
+    expect(parseVersion("")).toBeNull();
+    expect(parseVersion(undefined)).toBeNull();
+  });
+});
+
+describe("compareVersions", () => {
+  it("treats identical versions (with or without the v prefix) as equal", () => {
+    expect(compareVersions("v1.2.3", "1.2.3")).toBe(0);
+  });
+
+  it("orders by major, then minor, then patch", () => {
+    expect(compareVersions("v0.44.0", "v0.45.0")).toBe(-1);
+    expect(compareVersions("v0.45.0", "v0.44.0")).toBe(1);
+    expect(compareVersions("v1.0.0", "v0.99.99")).toBe(1);
+    expect(compareVersions("v1.2.3", "v1.2.4")).toBe(-1);
+  });
+
+  it("preserves a developer build with the same core as the latest release", () => {
+    expect(compareVersions("v0.60.0-rc1-1-gdeadbee", "v0.60.0")).toBe(0);
+    expect(compareVersions("v0.60.0", "v0.60.0-rc1-1-gdeadbee")).toBe(0);
+  });
+
+  it("lets a newer core beat a release regardless of its development suffix", () => {
+    expect(compareVersions("v0.60.0-rc1-1-gdeadbee", "v0.48.0")).toBe(1);
+  });
+
+  it("returns 0 when either version is unparseable so callers don't churn", () => {
+    expect(compareVersions("edge", "v1.2.3")).toBe(0);
+    expect(compareVersions("v1.2.3", "not-a-version")).toBe(0);
+  });
+});
+
+describe("radBinaryVersion", () => {
+  it("resolves to null (never throws) when the binary path does not exist", async () => {
+    const missing = path.join(os.tmpdir(), "definitely-not-rad", `rad-${Date.now()}`);
+    await expect(radBinaryVersion(missing, { timeout: 2000 })).resolves.toBeNull();
+  });
+});
+
+// These reconciliation tests write executable shebang scripts and spawn them as
+// a fake `rad`, which only works on POSIX. Skip (don't silently drop) on Windows
+// so the suite still registers tests rather than erroring as empty.
+const describeReconcile = process.platform === "win32" ? describe.skip : describe;
+describeReconcile("ensureRadBinary version reconciliation", () => {
+  const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
+  const savedEnv = {};
+  let managedBackup = null;
+  let managedMode = null;
+
+  function writeFakeRad(dest, version) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(
+      dest,
+      `#!/usr/bin/env node
+if (process.argv.includes("version")) {
+  process.stdout.write(JSON.stringify({ version: "${version}" }));
+}
+`,
+      "utf8",
+    );
+    fs.chmodSync(dest, 0o755);
+  }
+
+  function mockHttpsGet(responses, calls) {
+    return vi.spyOn(https, "get").mockImplementation((url, options, callback) => {
+      const key = String(url);
+      calls.push(key);
+      const response = responses[key];
+      if (!response) throw new Error(`Unexpected URL: ${key}`);
+
+      const req = new EventEmitter();
+      req.destroy = (err) => { if (err) req.emit("error", err); };
+      req.on = req.addListener.bind(req);
+
+      const resp = new EventEmitter();
+      resp.statusCode = response.statusCode ?? 200;
+      resp.headers = response.headers ?? {};
+      resp.resume = () => {};
+      process.nextTick(() => {
+        callback(resp);
+        if (response.body !== undefined) {
+          resp.emit("data", Buffer.from(response.body));
+        }
+        resp.emit("end");
+      });
+      return req;
+    });
+  }
+
+  beforeEach(() => {
+    savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
+    savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK = process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    if (fs.existsSync(MANAGED_RAD_PATH)) {
+      managedBackup = fs.readFileSync(MANAGED_RAD_PATH);
+      managedMode = fs.statSync(MANAGED_RAD_PATH).mode;
+    } else {
+      managedBackup = null;
+      managedMode = null;
+    }
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+  });
+
+  afterEach(() => {
+    if (savedEnv.RADIUS_RAD_BINARY === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = savedEnv.RADIUS_RAD_BINARY;
+    if (savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK === undefined) delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    else process.env.RADIUS_RAD_SKIP_VERSION_CHECK = savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
+
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+    if (managedBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
+      if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("upgrades an older managed binary to the latest release", async () => {
+    writeFakeRad(MANAGED_RAD_PATH, "v0.1.0");
+    const asset = releaseAsset();
+    const tag = "v0.2.0";
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+    const calls = [];
+    mockHttpsGet({
+      [RELEASES_API]: {
+        body: JSON.stringify({ tag_name: tag, assets: [{ name: asset, digest: "" }] }),
+      },
+      [downloadUrl]: {
+        body: "#!/usr/bin/env node\nprocess.stdout.write('{}');\n",
+      },
+    }, calls);
+
+    const logs = [];
+    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+
+    expect(resolved).toBe(MANAGED_RAD_PATH);
+    expect(calls).toContain(RELEASES_API);
+    expect(calls).toContain(downloadUrl);
+    expect(logs.some((m) => m.includes("upgrading"))).toBe(true);
+  });
+
+  it("warns but does not download when RADIUS_RAD_BINARY is older", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-override-"));
+    const override = path.join(tmp, "rad");
+    writeFakeRad(override, "v0.1.0");
+    process.env.RADIUS_RAD_BINARY = override;
+
+    const asset = releaseAsset();
+    const tag = "v0.2.0";
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+    const calls = [];
+    mockHttpsGet({
+      [RELEASES_API]: {
+        body: JSON.stringify({ tag_name: tag, assets: [{ name: asset, digest: "" }] }),
+      },
+    }, calls);
+
+    const logs = [];
+    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+
+    expect(resolved).toBe(override);
+    expect(calls).toEqual([RELEASES_API]);
+    expect(calls).not.toContain(downloadUrl);
+    expect(logs.some((m) => m.includes("RADIUS_RAD_BINARY") && m.includes("using it anyway"))).toBe(true);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("skips the version check network call when RADIUS_RAD_SKIP_VERSION_CHECK is set", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-skip-check-"));
+    const override = path.join(tmp, "rad");
+    writeFakeRad(override, "v0.1.0");
+    process.env.RADIUS_RAD_BINARY = override;
+    process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+
+    const calls = [];
+    mockHttpsGet({}, calls);
+    const resolved = await ensureRadBinary();
+
+    expect(resolved).toBe(override);
+    expect(calls).toEqual([]);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
