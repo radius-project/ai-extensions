@@ -33,9 +33,11 @@ const isInstall = process.argv.includes("--install");
 const outfile = join(repoRoot, "plugins", "radius", "extension.mjs");
 
 // Where the extension is installed locally. Override with RADIUS_CANVAS_INSTALL_PATH.
+// The host loads this canvas as the "radius" extension (see plugins/radius/package.json),
+// so install into that directory — not a separate "radius-canvas" dir the host never loads.
 const installPath =
   process.env.RADIUS_CANVAS_INSTALL_PATH ||
-  join(homedir(), ".copilot", "extensions", "radius-canvas", "extension.mjs");
+  join(homedir(), ".copilot", "extensions", "radius", "extension.mjs");
 
 function installToLocal() {
   try {

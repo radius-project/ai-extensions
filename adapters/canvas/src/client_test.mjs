@@ -217,11 +217,18 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && r.outputResources && r.outputResources.length > 0)");
     });
 
-    it("projects the recipe-resolved type and icon onto the modeled node", () => {
+    it("relabels the modeled node with the recipe-resolved concrete type", () => {
         expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = plannedMode ? radiusSelectResolvedResource(r) : null;");
-        expect(CLIENT_GRAPH_JS).toContain("var renderedResource = resolvedResource || r;");
         expect(CLIENT_GRAPH_JS).toContain("radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)");
-        expect(CLIENT_GRAPH_JS).toContain("icon: radiusResolveIcon(renderedResource)");
+    });
+
+    it("keeps the modeled resource's own icon rather than the resolved output's glyph", () => {
+        // Planned mode changes ONLY the type label; the icon stays the modeled
+        // resource's (pack-supplied r.icon, or its type glyph). Resolving the icon
+        // from the concrete output would swap e.g. a MySQL barrel for a generic
+        // apps/Deployment box.
+        expect(CLIENT_GRAPH_JS).toContain("icon: radiusResolveIcon(r)");
+        expect(CLIENT_GRAPH_JS).not.toContain("radiusResolveIcon(renderedResource)");
     });
 
     it("preserves the full provider namespace and prefers a top-level concrete resource", () => {

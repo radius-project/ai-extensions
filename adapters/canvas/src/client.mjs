@@ -733,8 +733,13 @@ function radiusRenderGraph(containerId, resources, options) {
         for (var i = 0; i < resList.length; i++) {
             var r = resList[i];
             var colors = getNodeColors(r);
+            // Planned nodes keep the modeled resource's identity — its name, icon,
+            // and everything else — and change ONLY the type label to the concrete
+            // type the recipe pack resolves to (e.g. Data/mySqlDatabases ->
+            // Microsoft.DBforMySQL/flexibleServers). The icon therefore stays the
+            // modeled resource's own (pack-supplied r.icon, or its type glyph), not
+            // the generic glyph of the resolved output.
             var resolvedResource = plannedMode ? radiusSelectResolvedResource(r) : null;
-            var renderedResource = resolvedResource || r;
             var shortType = plannedMode && resolvedResource
                 ? radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)
                 : radiusFormatTypeLabel(r.type);
@@ -755,7 +760,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 borderWidth: diffMode ? 2 : (deployMode ? 3 : 1),
                 borderStyle: plannedMode ? 'dashed' : 'solid',
                 bgColor: colors.bg,
-                icon: radiusResolveIcon(renderedResource),
+                icon: radiusResolveIcon(r),
                 nodeName: r.name,
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
