@@ -41,7 +41,7 @@ import {
   generateVerifyWorkflow, generateDeployWorkflow, generateDeleteWorkflow, generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
+  DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE,
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
@@ -63,6 +63,13 @@ export const servers = new Map();
 // and deploy pages snappy. Invalidated on environment creation.
 const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map(); // repo -> { at, payload }
+
+// Short-lived cache for the /api/list-deployments listing. The listing fans out
+// into many per-record `gh api` calls, so caching keeps the deploy page snappy
+// across re-opens and the workflow poll. Invalidated when a deploy or delete is
+// dispatched (see /api/deploy and /api/delete-deployment).
+const DEPLOY_LIST_TTL_MS = 15000;
+const deployListCache = new Map(); // repo -> { at, payload }
 
 // Throttle for the background workflow drift-sync kicked off from the
 // environments listing: repo -> last-attempt epoch ms. Keeps the sync from
@@ -99,7 +106,37 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
         .catch((e) => console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`));
 }
 
-// Handoff callback registered by the SDK entry (extension.mjs). The server has
+// Bare filename of the shared verify-credentials workflow (matches
+// infra.mjs's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
+const VERIFY_WORKFLOW_FILE = 'radius-verify-credentials.yml';
+
+// Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
+// committed workflow (deploy / delete / verify), ensure that workflow's files
+// are in sync with the upstream Radius templates so the run never executes a
+// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
+// is scoped to just the workflow about to run (`only`) and is awaited so any
+// in-place update lands before the dispatch — but a sync failure never blocks
+// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
+// and delete workflow content is provider-agnostic, so it only matters for
+// verify. `workingBranch` (when it matches the repo) is synced alongside the
+// default branch so a worktree-consistent run uses current files on both.
+async function ensureWorkflowsCurrent(repo, environment, provider, only, workingBranch) {
+    if (!repo || !environment || !only || only.length === 0) return;
+    try {
+        const r = await syncRepoWorkflows(repo, [{ name: environment, provider: provider || "" }], {
+            workingBranch: workingBranch || "",
+            only,
+            log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`),
+        });
+        if (r && r.updated && r.updated.length) {
+            console.error(`[radius workflow-presync] ${repo}: updated ${r.updated.join(", ")} before dispatch`);
+        }
+    } catch (e) {
+        console.error(`[radius workflow-presync] ${repo}: ${e?.message || e}`);
+    }
+}
+
+
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
 // agent to run the radius-app-bicep skill. This is what makes branch/repo
@@ -142,6 +179,123 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = 'radius-deploy.yml';
 // are not real application deployments and are filtered out.
 const DEPLOY_WORKFLOW_FILE = 'run-rad-commands.yml';
 const DELETE_WORKFLOW_FILE = 'delete-application.yml';
+
+// gh runner that REJECTS on failure, so callers can fail closed instead of
+// silently treating a GitHub outage or timeout as "no data". Used by the
+// deployment-resolution paths where an empty result must not be mistaken for a
+// definitive answer (e.g. "no app is deployed" → allow environment deletion).
+function ghOrThrow(args, timeout = 12000) {
+    return new Promise((resolve, reject) => {
+        cliExec("gh", args, { timeout }, (err, stdout) => {
+            if (err) reject(err instanceof Error ? err : new Error(String((err && err.message) || "gh command failed")));
+            else resolve((stdout || "").trim());
+        });
+    });
+}
+
+// How many of an environment's newest deployment records to resolve
+// concurrently before falling back to a serial walk. The relevant deploy/delete
+// record is almost always in the newest handful.
+const DEPLOY_MAX_PARALLEL_RECORDS = 10;
+
+// Resolve the Radius application name for a repo the same way /api/list-applications
+// does: read the name declared in `.radius/app.bicep` (or `app.bicep`) on `branch`,
+// falling back to the repo's short name when it can't be read. A repo hosts a single
+// Radius application in this model. Best-effort — a read failure falls back to the
+// basename rather than throwing, since callers use the name only for display and for
+// targeting the app's deploy/delete, not for the fail-closed deployment check itself.
+async function resolveRepoAppName(repo, branch) {
+    let appName = repo.split("/").pop() || repo;
+    const ref = branch || "main";
+    for (const p of [".radius/app.bicep", "app.bicep"]) {
+        let raw = "";
+        try { raw = await ghOrThrow(["api", `/repos/${repo}/contents/${p}?ref=${ref}`, "--jq", ".content"]); }
+        catch { raw = ""; }
+        if (!raw) continue;
+        let decoded = "";
+        try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
+        const name = extractAppName(decoded);
+        if (name) { appName = name; break; }
+    }
+    return appName;
+}
+
+// Resolve the CURRENT application deployment for a single environment, or null
+// when no application is deployed (no deploy/delete record, or the latest delete
+// succeeded). Scoped to the environment's OWN deployment history (the GitHub
+// `environment=` filter) so a busy environment can never crowd another's latest
+// record out of a shared, repo-wide page. Rejects on any GitHub error so callers
+// fail closed rather than mistaking an outage for "nothing deployed".
+//
+// `appName` is the resolved Radius application name (see resolveRepoAppName); it
+// must be passed in so the returned row targets the real app declared in
+// app.bicep, not the repo basename — the environment-deletion guard dispatches a
+// delete for this name and redirects to it, and the deployments list links to it.
+// Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
+async function resolveEnvDeployment(repo, environment, appName) {
+    appName = appName || repo.split("/").pop() || repo;
+    // Provider is cosmetic (drives portal links only), so a lookup failure here
+    // must not block the whole resolution — soft-fail to an empty provider.
+    let provider = "";
+    try {
+        const varsRaw = await ghOrThrow(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
+        if (/AZURE_/.test(varsRaw)) provider = "azure";
+        else if (/AWS_/.test(varsRaw)) provider = "aws";
+    } catch { /* provider stays "" */ }
+
+    // Newest-first deployment records for THIS environment only.
+    const idsRaw = await ghOrThrow(["api", `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(environment)}`, "--jq", ".[].id"]);
+    const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
+
+    const resolveRecord = async (id) => {
+        const stateRaw = await ghOrThrow(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
+        const tab = stateRaw.indexOf("\t");
+        const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
+        const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
+        let runUrl = "";
+        const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+        if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
+        else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
+        let runPath = "";
+        let runConclusion = "";
+        if (m) {
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const rt = runInfo.indexOf("\t");
+            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
+            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+        }
+        const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+        const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
+        return { id, state, runUrl, isDeploy, isDelete, runConclusion };
+    };
+
+    // Apply the selection rules to a resolved record:
+    //   'skip'  → not relevant (verify-credentials, or a failed delete); keep walking
+    //   null    → app deleted; environment has no active deployment
+    //   object  → the deployment row for this environment
+    const decide = (rec) => {
+        if (!rec.isDeploy && !rec.isDelete) return 'skip';
+        if (rec.isDelete && rec.runConclusion === "success") return null;
+        if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
+        let status = "pending";
+        if (rec.isDelete) status = "deleting"; // delete still in progress
+        else if (rec.state === "success") status = "success";
+        else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
+    };
+
+    // Resolve the newest batch concurrently, then apply the rules newest-first.
+    const batch = ids.slice(0, DEPLOY_MAX_PARALLEL_RECORDS);
+    const resolved = await Promise.all(batch.map(resolveRecord));
+    for (const rec of resolved) { const r = decide(rec); if (r === 'skip') continue; return r; }
+    // Rare fallback: nothing decisive in the newest batch — walk the rest serially.
+    for (const id of ids.slice(DEPLOY_MAX_PARALLEL_RECORDS)) {
+        const r = decide(await resolveRecord(id));
+        if (r === 'skip') continue;
+        return r;
+    }
+    return null;
+}
 
 /**
  * Best-effort delete of the legacy `.github/workflows/radius-deploy.yml` from a
@@ -529,6 +683,44 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: "repo and environment are required." }));
+                    return;
+                }
+                // Guard: an environment must not be deleted while an application is
+                // still deployed to it (its cloud resources would be orphaned).
+                // Require the app deployment to be torn down first and point the
+                // client at the app-deletion flow.
+                let active = null;
+                try {
+                    // Resolve the real app name (from app.bicep) so the guard's
+                    // message, redirect, and delete target the app declared in the
+                    // bicep rather than the repo basename.
+                    const delEntry = servers.get(instanceId);
+                    const delBranch = delEntry?.state?.contextBranch || delEntry?.state?.plannedBranch || delEntry?.state?.graphBranch || "main";
+                    const delAppName = await resolveRepoAppName(repo, delBranch);
+                    active = await resolveEnvDeployment(repo, envName, delAppName);
+                } catch (e) {
+                    // Fail closed: if we can't confirm whether an app is still
+                    // deployed (e.g. GitHub is unavailable), do NOT delete — that
+                    // could orphan the application's cloud resources.
+                    console.error(`[radius delete-environment] active-app check failed for ${repo}/${envName}: ${e?.message || e}`);
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(503);
+                    res.end(JSON.stringify({ error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${e?.message || "unknown error"}). The environment was not deleted — please try again.` }));
+                    return;
+                }
+                if (active) {
+                    const deleting = active.status === "deleting";
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(409);
+                    res.end(JSON.stringify({
+                        error: deleting
+                            ? `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+                            : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
+                        code: "app-deployed",
+                        app: active.app,
+                        environment: envName,
+                        redirect: `/?page=deploying&app=${encodeURIComponent(active.app)}&env=${encodeURIComponent(envName)}`,
+                    }));
                     return;
                 }
                 try {
@@ -1588,24 +1780,13 @@ function createRequestHandler(instanceId) {
                 res.end(JSON.stringify(payload));
             };
             if (!repo) { respond({ applications: [] }); return; }
-            const gh = (args, timeout = 12000) => new Promise((resolve) => {
-                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
-            });
             try {
-                // The application name is defined in the repo's app.bicep. Try to
-                // read it; otherwise fall back to the repo's short name. A repo
-                // hosts a single Radius application in this model.
-                let appName = repo.split("/").pop() || repo;
+                // The application name is defined in the repo's app.bicep (a repo
+                // hosts a single Radius application in this model). Shared with the
+                // deployments/env-deletion paths via resolveRepoAppName.
                 const entry = servers.get(instanceId);
                 const branch = entry?.state?.contextBranch || entry?.state?.plannedBranch || entry?.state?.graphBranch || "main";
-                for (const p of [".radius/app.bicep", "app.bicep"]) {
-                    const raw = await gh(["api", `/repos/${repo}/contents/${p}?ref=${branch}`, "--jq", ".content"]);
-                    if (!raw) continue;
-                    let decoded = "";
-                    try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
-                    const name = extractAppName(decoded);
-                    if (name) { appName = name; break; }
-                }
+                const appName = await resolveRepoAppName(repo, branch);
                 respond({ applications: [{ name: appName }] });
             } catch (e) {
                 respond({ applications: [{ name: repo.split("/").pop() || repo }], error: e.message });
@@ -1622,82 +1803,37 @@ function createRequestHandler(instanceId) {
                 res.end(JSON.stringify(payload));
             };
             if (!repo) { respond({ deployments: [] }); return; }
-            const gh = (args, timeout = 12000) => new Promise((resolve) => {
-                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
-            });
-            const appName = repo.split("/").pop() || repo;
+
+            // (A) Serve a fresh cached listing when available. The fan-out below
+            // is expensive, so a short TTL keeps re-opens and the workflow poll
+            // snappy without showing stale state for long. `?fresh=1` bypasses the
+            // cache read so active status pollers (a running deploy/delete) always
+            // see live status rather than a value cached before the transition.
+            const freshDeploys = url.searchParams.get("fresh") === "1";
+            const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
+            if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) { respond(cachedDeploys.payload); return; }
+
             try {
-                // A "deployment" is the application deployed into a GitHub
-                // Environment by the run-rad-commands workflow. List every
-                // deployment record for the repo (newest-first) and, per
-                // environment, resolve the latest record that was actually
-                // produced by the deploy workflow — skipping records created by
-                // other environment-bound workflows (verify-credentials, etc.).
-                const raw = await gh(["api", "--paginate", `/repos/${repo}/deployments?per_page=100`, "--jq", ".[] | (.id|tostring) + \"\\t\" + (.environment // \"\")"]);
-                const rows = raw ? raw.split("\n").filter(Boolean).map((l) => {
-                    const t = l.indexOf("\t");
-                    return t === -1 ? { id: l, environment: "" } : { id: l.slice(0, t), environment: l.slice(t + 1) };
-                }) : [];
-                // Group deployment ids per environment, preserving newest-first order.
-                const idsByEnv = new Map();
-                for (const r of rows) {
-                    if (!r.environment) continue;
-                    if (!idsByEnv.has(r.environment)) idsByEnv.set(r.environment, []);
-                    idsByEnv.get(r.environment).push(r.id);
-                }
-                const deployments = await Promise.all(Array.from(idsByEnv.entries()).map(async ([environment, ids]) => {
-                    const varsRaw = await gh(["api", `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`, "--jq", ".variables[].name"]);
-                    let provider = "";
-                    if (/AZURE_/.test(varsRaw)) provider = "azure";
-                    else if (/AWS_/.test(varsRaw)) provider = "aws";
-
-                    // Walk this environment's deployment records newest-first and
-                    // use the first one whose GitHub Actions run is the deploy
-                    // workflow (run-rad-commands.yml) or a delete of the app. Any
-                    // other workflow's records (e.g. verify-credentials) are
-                    // skipped so they never appear as deployments.
-                    for (const id of ids) {
-                        const stateRaw = await gh(["api", `/repos/${repo}/deployments/${id}/statuses?per_page=1`, "--jq", "(.[0].state // \"\") + \"\\t\" + (.[0].log_url // .[0].target_url // \"\")"]);
-                        const tab = stateRaw.indexOf("\t");
-                        const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-                        const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-                        let runUrl = "";
-                        const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                        if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-                        else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-
-                        // Identify which workflow produced this deployment record.
-                        let runPath = "";
-                        let runConclusion = "";
-                        if (m) {
-                            const runInfo = await gh(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-                            const rt = runInfo.indexOf("\t");
-                            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-                            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
-                        }
-                        const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-                        const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-
-                        // Not a deploy or delete record (e.g. verify-credentials):
-                        // skip it and keep looking further back in history.
-                        if (!isDeploy && !isDelete) continue;
-
-                        // A successful delete means the app no longer exists in this
-                        // environment, so it should not be listed at all.
-                        if (isDelete && runConclusion === "success") return null;
-
-                        let status = "pending";
-                        if (isDelete) {
-                            status = "deleting";
-                        } else if (state === "success") status = "success";
-                        else if (state === "failure" || state === "error") status = "failed";
-                        return { app: appName, environment, provider, status, deploymentId: id, runUrl };
-                    }
-                    // No deploy/delete record for this environment — nothing to show.
-                    return null;
-                }));
-                respond({ deployments: deployments.filter(Boolean) });
+                // Resolve the current deployment per environment from each
+                // environment's OWN history (see resolveEnvDeployment). Querying
+                // per environment — rather than a single repo-wide, capped page —
+                // means a busy environment can never crowd another's latest
+                // deploy/delete record out of the results.
+                const envNamesRaw = await ghOrThrow(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[].name"]);
+                const envNames = envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
+                // Resolve the real app name once (from app.bicep) so every row targets
+                // the app declared in the bicep, not the repo basename.
+                const listEntry = servers.get(instanceId);
+                const listBranch = listEntry?.state?.contextBranch || listEntry?.state?.plannedBranch || listEntry?.state?.graphBranch || "main";
+                const listAppName = await resolveRepoAppName(repo, listBranch);
+                const resolved = await Promise.all(envNames.map((name) => resolveEnvDeployment(repo, name, listAppName)));
+                const payload = { deployments: resolved.filter(Boolean) };
+                deployListCache.set(repo, { at: Date.now(), payload });
+                respond(payload);
             } catch (e) {
+                // A GitHub failure surfaces as an error (not a silently-empty list)
+                // so the client keeps its current view / keeps polling rather than
+                // treating an incomplete listing as the truth.
                 respond({ deployments: [], error: e.message });
             }
             return;
@@ -1743,6 +1879,12 @@ function createRequestHandler(instanceId) {
                 // delete-application.yml workflow. This tears down the Radius
                 // application on the ephemeral control plane while leaving the
                 // GitHub Environment (and its credentials) intact.
+                //
+                // Ensure the delete workflow files are in sync with upstream before
+                // dispatching, so the run never executes a drifted copy. Delete
+                // workflow content is provider-agnostic, and workflow_dispatch runs
+                // from the default branch, so provider/workingBranch aren't needed.
+                await ensureWorkflowsCurrent(repo, environment, "", [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]);
                 const dispatchedAt = Date.now();
                 const dispatch = await ghWorkflow([
                     'workflow', 'run', DELETE_APP_DISPATCHER_FILE,
@@ -1764,6 +1906,9 @@ function createRequestHandler(instanceId) {
                 let runUrl = "";
                 const runId = await findWorkflowRun(repo, DELETE_APP_DISPATCHER_FILE, dispatchedAt, null);
                 if (runId) runUrl = 'https://github.com/' + repo + '/actions/runs/' + runId;
+                // A delete is now in flight, so the cached listing is stale — drop
+                // it so the next poll reflects the "Deleting…" state immediately.
+                deployListCache.delete(repo);
                 respond(200, { success: true, runUrl });
             } catch (e) {
                 respond(400, { error: e.message });
@@ -2340,6 +2485,13 @@ function createRequestHandler(instanceId) {
                                 '. The dispatch below will fail if the branch has no run-rad-commands workflow.');
                         }
 
+                        // With the deploy workflows present, ensure they're in sync
+                        // with the upstream Radius templates before running them, so
+                        // the deploy never executes a drifted copy. Syncs the deploy
+                        // files on both the default branch and the branch being
+                        // deployed (deployRef), which a --ref dispatch checks out.
+                        await ensureWorkflowsCurrent(repo, envForDeploy, provider, [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE], deployRef);
+
                         const deployDispatchedAt = Date.now();
                         addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') on branch "' + deployRef + '" for environment "' + envForDeploy + '"...');
                         let dispatchDeployRes = await runGhDeploy(dispatchArgs);
@@ -2375,6 +2527,10 @@ function createRequestHandler(instanceId) {
                             return;
                         }
                         addLog('✅ Run rad commands workflow dispatched.');
+                        // A new deploy is in flight, so any cached deployments
+                        // listing is stale — drop it so the deploy page reflects the
+                        // new run on the next poll.
+                        deployListCache.delete(repo);
 
                         // ── Phase 2: Monitor the deploy run ─────────────────────
                         addLog('Waiting for the deploy workflow to start...');
