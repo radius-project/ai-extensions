@@ -1,6 +1,6 @@
 // Canvas adapter — browser-side client JavaScript, served as inline <script>
 // text inside the page shell. Three cohesive blocks: the shared repo/branch
-// dropdown library, the shared cytoscape/dagre graph renderer, and the client
+// dropdown library, the shared React Flow / dagre graph renderer, and the client
 // heartbeat / auto-reconnect watchdog. Authored as ES5 the webview runs
 // directly; embedded verbatim by pageShell. No server-side interpolation here.
 
@@ -250,12 +250,26 @@ function radiusPopulateApplications(repo, selectId) {
 `;
 
 export const CLIENT_GRAPH_JS = `
-// ─── Shared Graph Renderer ───────────────────────────────────────────────────
-if (typeof cytoscape !== 'undefined' && typeof cytoscapeDagre !== 'undefined') {
-    cytoscape.use(cytoscapeDagre);
-}
+// ─── Shared Graph Renderer (React Flow) ──────────────────────────────────────
+// The graph libraries are loaded from a CDN (see vendor.mjs): React, ReactDOM,
+// React Flow (UMD global window.ReactFlow) and dagre. React Flow renders the
+// application graph (modeled / planned / deployed / diff) as pixel-exact
+// .rad-node cards (styled in pages.mjs); dagre computes the top-to-bottom
+// hierarchical layout.
+window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 
-window.__cyInstances = window.__cyInstances || {};
+// Deploy-status → card colors, applied when radiusRenderGraph runs with
+// { deployMode: true } (the live "Deploying" page). Folds what used to be set
+// imperatively onto graph nodes into the declarative React Flow renderer.
+// Keys/colors mirror the deploying page's former STATUS_COLORS map.
+var RADIUS_DEPLOY_STATUS_COLORS = {
+    pending:     { bg: '#f6f8fa', border: '#8b949e' },
+    in_progress: { bg: '#fff8c5', border: '#d29922' },
+    postponed:   { bg: '#fff8c5', border: '#d29922' },
+    waiting:     { bg: '#fff8c5', border: '#d29922' },
+    success:     { bg: '#dcffe4', border: '#1a7f37' },
+    failed:      { bg: '#ffebe9', border: '#cf222e' }
+};
 
 function radiusGetIconSvg(type) {
     if (!type) return '';
@@ -314,17 +328,15 @@ function radiusGetIconSvg(type) {
         // Generic/fallback — cloud resource cube
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#6639ba"><path d="M8 1.5l5.5 3v7L8 14.5l-5.5-3v-7L8 1.5zm0 1.2L3.5 5.5v5.4L8 13.3l4.5-2.4V5.5L8 2.7z"/><path d="M8 5.8L5.5 7.2v2.6L8 11.2l2.5-1.4V7.2L8 5.8z"/></svg>';
     }
-    // Inject explicit width/height for sharper rendering when Cytoscape rasterizes
+    // Inject explicit width/height so the SVG rasterizes crisply as an <img>.
     svg = svg.replace('<svg ', '<svg width="64" height="64" ');
     return 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
-// Maps a resource type to a node fill/border color and Cytoscape shape so that
-// each category reads at a glance. Color encodes the category (and matches the
-// graph legend); shape is a secondary cue (cylinder=data, hexagon=cache,
-// cut-corner=secret, tag=networking/messaging, rounded box=compute). Substring
-// matching mirrors radiusGetIconSvg so icon + chrome always agree. All shapes
-// chosen are wide-label friendly so wrapped text stays inside the node.
+// Maps a resource type to a legend category (and a nominal fill/border/shape
+// retained for the type legend). Color encodes the category and matches the
+// graph legend. Substring matching mirrors radiusGetIconSvg so icon + category
+// always agree.
 function radiusGetTypeStyle(type) {
     var t = (type || '').toLowerCase();
     // Compute / workloads
@@ -370,8 +382,8 @@ function radiusGetTypeStyle(type) {
     return { bg: '#ede9f7', border: '#6639ba', shape: 'roundrectangle', category: 'Other' };
 }
 
-// Normalizes an icon supplied by a type/recipe pack into something Cytoscape can
-// paint as a node background-image. Packs may express an icon as a ready data
+// Normalizes an icon supplied by a type/recipe pack into a usable image source
+// for the node card <img>. Packs may express an icon as a ready data
 // URI, an http(s) URL, or a raw <svg> markup string; anything unrecognized
 // returns '' so the caller falls back to the built-in glyph map.
 function radiusNormalizeIcon(icon) {
@@ -416,18 +428,40 @@ function radiusRenderGraph(containerId, resources, options) {
     var container = document.getElementById(containerId);
     if (!container) return null;
 
-    // The graph libraries are loaded from a CDN (see vendor.mjs). If that fetch
-    // failed (offline / blocked network), cytoscape is undefined — surface a
-    // recoverable message instead of throwing and breaking the whole panel.
-    if (typeof cytoscape === 'undefined') {
+    // The graph libraries are loaded from a CDN (see vendor.mjs): React,
+    // ReactDOM and React Flow. If that fetch failed (offline / blocked network)
+    // any of these globals is undefined — surface a recoverable message instead
+    // of throwing and breaking the whole panel.
+    var RF = window.ReactFlow;
+    if (!window.React || !window.ReactDOM || !RF) {
         container.innerHTML = '<div style="padding:16px;color:#cf222e;font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
         return null;
     }
+    var React = window.React;
+    var ReactDOM = window.ReactDOM;
+    var h = React.createElement;
+    var ReactFlowComp = RF.default;
+    var Background = RF.Background, Controls = RF.Controls;
+    var Handle = RF.Handle, Position = RF.Position;
+    var useNodesState = RF.useNodesState, useEdgesState = RF.useEdgesState;
 
-    // Destroy previous instance
-    if (window.__cyInstances[containerId]) {
-        window.__cyInstances[containerId].destroy();
-        delete window.__cyInstances[containerId];
+    // Tear down a previous React root mounted on this container. radiusRenderGraph
+    // can run more than once against the same container (repo switch on the
+    // deployed page, SPA navigation between graph sub-pages).
+    if (window.__radRoots[containerId]) {
+        try { window.__radRoots[containerId].unmount(); } catch (e) {}
+        delete window.__radRoots[containerId];
+    }
+    // Clear any DOM we created on a prior render (the React host + popup) so a
+    // re-render on the same container never stacks duplicate hosts/popups.
+    var priorHosts = container.querySelectorAll('.rad-flow-host, #node-popup');
+    for (var ph = 0; ph < priorHosts.length; ph++) priorHosts[ph].parentNode.removeChild(priorHosts[ph]);
+    // React Flow's absolutely-positioned host anchors to the container, so the
+    // container must establish a positioning context (all graph pages set this
+    // via CSS, but be defensive for any caller that doesn't).
+    if (container.currentStyle || window.getComputedStyle) {
+        var pos = window.getComputedStyle(container).position;
+        if (!pos || pos === 'static') container.style.position = 'relative';
     }
 
     // Remove any legend(s) left over from a previous render so re-rendering the
@@ -438,9 +472,36 @@ function radiusRenderGraph(containerId, resources, options) {
         for (var ol = 0; ol < oldLegends.length; ol++) oldLegends[ol].parentNode.removeChild(oldLegends[ol]);
     }
 
+    var diffMode = options.diffMode || false;
+    var deployMode = options.deployMode || false;
+    var repoUrl = options.repoUrl || '';
+    var branch = options.branch || 'main';
+    // In diff mode a "removed" resource's source file lived on the base
+    // branch (it may no longer exist on head at all), so its source link
+    // must point at baseBranch while everything else (added/modified/
+    // unchanged) points at the page's normal branch (head).
+    var diffBaseBranch = options.baseBranch || branch;
+    var localSource = !!options.localSource;
+    var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+
+    // Map an (optional) line-type hint to a React Flow edge type. Bezier
+    // ("default") is the figma default; a few elbow-ish aliases map to smoothstep.
+    function radiusMapLineType(lt) {
+        switch (String(lt || '').toLowerCase()) {
+            case 'straight': return 'straight';
+            case 'step': return 'step';
+            case 'smoothstep':
+            case 'taxi':
+            case 'segments': return 'smoothstep';
+            default: return 'default';
+        }
+    }
+    var edgeType = radiusMapLineType(options.lineType || options.curveStyle);
+
     if (!resources || resources.length === 0) {
         container.innerHTML = '';
-        return null;
+        // A minimal controller so callers can still repopulate later.
+        return { update: function(nr) { if (nr && nr.length) radiusRenderGraph(containerId, nr, options); }, destroy: function() {} };
     }
 
     container.innerHTML = '';
@@ -448,27 +509,21 @@ function radiusRenderGraph(containerId, resources, options) {
     container.style.display = 'block';
     container.style.minHeight = '450px';
 
-    var diffMode = options.diffMode || false;
-    var repoUrl = options.repoUrl || '';
-    var branch = options.branch || 'main';
-    var localSource = !!options.localSource;
-    var lineType = options.lineType || options.curveStyle || 'taxi';
-    var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
-
     // Build the "View source code" URL for a node. When a precise code reference
     // was discovered, deep-link straight to that file (and line). Otherwise fall
     // back to the repo tree at the current branch so the link always resolves to
     // a real page instead of a dead affordance. Empty only when there is no repo
     // context at all.
-    function buildSourceUrl(codeRef) {
+    function buildSourceUrl(codeRef, branchOverride) {
         if (!repoUrl) return '';
+        var br = branchOverride || branch;
         if (codeRef) {
             var path = codeRef.split('#')[0].replace(/\\\\/g, '/');
             if (path.charAt(0) === '/') path = path.slice(1);
             var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
-            return repoUrl + '/blob/' + branch + '/' + path + frag;
+            return repoUrl + '/blob/' + br + '/' + path + frag;
         }
-        return repoUrl + '/tree/' + branch;
+        return repoUrl + '/tree/' + br;
     }
 
     // Split a codeReference ("path#L31") into its repo-relative path and line.
@@ -485,59 +540,65 @@ function radiusRenderGraph(containerId, resources, options) {
         if (!codeRef || codeRef.indexOf('#L') === -1) return 0;
         return parseInt(codeRef.split('#L')[1], 10) || 0;
     }
-    // Transient error banner for a failed local open (file moved/deleted, editor
-    // canvas unavailable, etc.) so a click is never silently dropped. Defined once
-    // on window and auto-hidden after a few seconds.
-    if (!window.radiusFlash) {
-        window.radiusFlash = function(message) {
-            try {
-                var el = document.getElementById('rad-flash');
-                if (!el) {
-                    el = document.createElement('div');
-                    el.id = 'rad-flash';
-                    el.setAttribute('role', 'alert');
-                    el.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);max-width:80%;background:#cf222e;color:#fff;padding:8px 14px;border-radius:6px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.25);z-index:99999;';
-                    document.body.appendChild(el);
-                }
-                el.textContent = message;
-                el.style.display = '';
-                clearTimeout(window.__radFlashTimer);
-                window.__radFlashTimer = setTimeout(function() { if (el) el.style.display = 'none'; }, 4000);
-            } catch (e) {}
-        };
-    }
-    // Ask the local server to open a repo file in the Copilot editor canvas
-    // (side pane). Defined once on window so every render/card shares it. Inspects
-    // the response so a failed open (400/500/503 or network error) surfaces a
-    // banner instead of a dead click.
-    if (!window.radiusOpenLocalSource) {
-        window.radiusOpenLocalSource = function(path, line) {
-            if (!path) return false;
-            var fail = function() { if (window.radiusFlash) window.radiusFlash("Couldn't open this file. It may have moved or been deleted."); };
-            try {
-                fetch('/api/open-source', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: path, line: line || 0 })
-                }).then(function(res) {
-                    if (!res.ok) { fail(); return null; }
-                    return res.json().catch(function() { return null; });
-                }).then(function(json) {
-                    if (json && json.ok === false) fail();
-                }).catch(function() { fail(); });
-            } catch (e) { fail(); }
-            return false;
-        };
+
+    // Open an external URL (a GitHub blob/tree link) the way clicking a native
+    // target="_blank" anchor would, which the host opens in the system browser.
+    // Used as the fallback whenever a local open is not possible.
+    function radiusOpenExternal(url) {
+        if (!url) return;
+        try {
+            var a = document.createElement('a');
+            a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        } catch (e) {
+            try { window.open(url, '_blank', 'noopener'); } catch (e2) { /* best-effort */ }
+        }
     }
 
-    function getNodeColors(r, typeStyle) {
+    // Open a repo-relative worktree file in the Copilot editor canvas (side pane).
+    // The webview has no SDK session handle, so it asks the local canvas server
+    // (POST /api/open-source), which calls canvas.open({canvasId:"editor",
+    // scope:"repo", path}). Used for local-workspace graphs (localSource): the
+    // graphed files are the on-disk checkout, so this opens exactly what was
+    // graphed — including uncommitted edits — instead of a GitHub blob URL that
+    // would 404 on an unpushed branch. It is a same-origin fetch (the page is
+    // served by this same server), so unlike window.open / cross-origin
+    // navigation it is not blocked in the embedded webview.
+    //
+    // localSource is a coarse, page-level flag (repo + branch match the
+    // workspace), so it can be true for a node whose file is NOT actually on this
+    // checkout. In that case the server returns a non-2xx (NOT_ON_WORKTREE) and we
+    // fall back to opening the file's GitHub URL, so the link is never a dead end
+    // and a remote graph always resolves to a real https://github.com/... page.
+    function radiusOpenLocalSource(relPath, line, fallbackUrl) {
+        if (!relPath) { radiusOpenExternal(fallbackUrl); return; }
+        try {
+            fetch('/api/open-source', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: relPath, line: line || 0 })
+            }).then(function(r) {
+                if (!r || !r.ok) radiusOpenExternal(fallbackUrl);
+            }).catch(function() { radiusOpenExternal(fallbackUrl); });
+        } catch (e) { radiusOpenExternal(fallbackUrl); }
+    }
+
+    function getNodeColors(r) {
+        // Diff mode keeps the same white card surface as the Modeled/Planned
+        // graphs — only the border color encodes the diff status, so the
+        // resource card itself is visually identical everywhere else.
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
-                case 'added': return { bg: '#dcfce7', border: '#16a34a' };
-                case 'removed': return { bg: '#fee2e2', border: '#dc2626' };
-                case 'modified': return { bg: '#fef9c3', border: '#ca8a04' };
-                default: return { bg: '#f3f4f6', border: '#9ca3af' };
+                case 'added': return { bg: '#ffffff', border: '#16a34a' };
+                case 'removed': return { bg: '#ffffff', border: '#dc2626' };
+                case 'modified': return { bg: '#ffffff', border: '#ca8a04' };
+                default: return { bg: '#ffffff', border: '#d0d7de' };
             }
+        }
+        // Live deployment status colors (the "Deploying" page passes deployMode).
+        if (deployMode) {
+            var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
+            return { bg: sc.bg, border: sc.border };
         }
         // Non-diff nodes use the clean "modeled graph" card style: a white
         // surface with a thin neutral border. Category is conveyed by the icon
@@ -545,439 +606,319 @@ function radiusRenderGraph(containerId, resources, options) {
         return { bg: '#ffffff', border: '#d0d7de' };
     }
 
-    var elements = [];
-    // Map a concrete outputResource id → the top-level resource that "owns" it
-    // (its name matches the output's name, e.g. the Radius.Security/secret
-    // "mysql-secret" owns the concrete core/Secret "mysql-secret"). Used to skip
-    // rendering that same concrete resource as a duplicate output child under
-    // OTHER resources (e.g. the database), which otherwise produces two nodes for
-    // one secret and a tangled, overlapping layout.
-    var ownedOutputIds = {};
-    for (var oi = 0; oi < resources.length; oi++) {
-        var orr = resources[oi];
-        var oid = orr.id || orr.name;
-        var oouts = orr.outputResources || [];
-        for (var oj = 0; oj < oouts.length; oj++) {
-            if (oouts[oj] && oouts[oj].id && oouts[oj].name === orr.name) {
-                ownedOutputIds[oouts[oj].id] = oid;
+    // The figma .rad-node card is rendered natively by the RadNode React
+    // component below (real elements + real onClick), so there is no HTML-string
+    // card template here. React auto-escapes text children, so no manual escaper
+    // is needed either.
+
+    // ── Build React Flow nodes + edges from the resource list ────────────────
+    // Pure builder: returns fresh arrays plus a data-by-id map (used by the
+    // click-to-open popup delegation). Called once up front and again on every
+    // controller.update() so the live "Deploying" graph can recolor in place.
+    function buildGraph(resList) {
+        var nodes = [];
+        var edges = [];
+        var dataById = {};
+        var edgeSeen = {};
+
+        function pushEdge(source, target, dashed) {
+            var id = source + '-->' + target;
+            if (edgeSeen[id]) return;
+            edgeSeen[id] = true;
+            var stroke = dashed ? '#57606a' : '#8c959f';
+            // Diff mode colors the edge by whether the CONNECTION itself
+            // changed between base and head, not by either endpoint's own
+            // status alone: a removed endpoint wins (red), then an added
+            // endpoint (green); otherwise the edge stays neutral gray. A
+            // "modified" endpoint never colors an edge.
+            if (diffMode) {
+                var sStatus = diffStatusById[source] || '';
+                var tStatus = diffStatusById[target] || '';
+                if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
+                else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
+                else stroke = '#8c959f';
             }
+            var style = { stroke: stroke, strokeWidth: 1.5 };
+            if (dashed) style.strokeDasharray = '6 4';
+            edges.push({
+                id: id,
+                source: source,
+                target: target,
+                type: edgeType,
+                style: style
+            });
         }
-    }
-    for (var i = 0; i < resources.length; i++) {
-        var r = resources[i];
-        var typeStyle = radiusGetTypeStyle(r.type);
-        var colors = getNodeColors(r, typeStyle);
-        var shortType = radiusFormatTypeLabel(r.type);
-        var label = r.name + '\\n' + shortType;
-        // Collect any cloud (ARM) output resources so the node popup can link to
-        // the live resource in the Azure portal.
-        var cloudOutputs = [];
-        if (r.outputResources) {
-            for (var ci = 0; ci < r.outputResources.length; ci++) {
-                var co = r.outputResources[ci];
-                if (co.id && co.id.indexOf('/subscriptions/') === 0) {
-                    cloudOutputs.push({ name: co.name || '', type: co.type || '', id: co.id });
+        function pushNode(id, data) {
+            data.id = id;
+            dataById[id] = data;
+            nodes.push({ id: id, type: 'rad', data: data, position: { x: 0, y: 0 }, draggable: true });
+        }
+
+        // Map a concrete outputResource id → the top-level resource that "owns"
+        // it (its name matches the output's name). Used to skip rendering that
+        // same concrete resource as a duplicate output child under OTHER
+        // resources, which otherwise produces two nodes for one secret.
+        var ownedOutputIds = {};
+        // Diff mode looks up each edge endpoint's diffStatus by id/name to
+        // decide the edge color (see pushEdge above).
+        var diffStatusById = {};
+        for (var oi = 0; oi < resList.length; oi++) {
+            var orr = resList[oi];
+            var oid = orr.id || orr.name;
+            diffStatusById[oid] = orr.diffStatus || '';
+            var oouts = orr.outputResources || [];
+            for (var oj = 0; oj < oouts.length; oj++) {
+                if (oouts[oj] && oouts[oj].id && oouts[oj].name === orr.name) {
+                    ownedOutputIds[oouts[oj].id] = oid;
                 }
             }
         }
-        elements.push({
-            group: 'nodes',
-            data: {
-                id: r.id || r.name,
-                label: label,
+
+        for (var i = 0; i < resList.length; i++) {
+            var r = resList[i];
+            var colors = getNodeColors(r);
+            var shortType = radiusFormatTypeLabel(r.type);
+            // Collect any cloud (ARM) output resources so the node popup can link
+            // to the live resource in the Azure portal.
+            var cloudOutputs = [];
+            if (r.outputResources) {
+                for (var ci = 0; ci < r.outputResources.length; ci++) {
+                    var co = r.outputResources[ci];
+                    if (co.id && co.id.indexOf('/subscriptions/') === 0) {
+                        cloudOutputs.push({ name: co.name || '', type: co.type || '', id: co.id });
+                    }
+                }
+            }
+            var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;
+            pushNode(r.id || r.name, {
                 borderColor: colors.border,
-                borderWidth: 1.5,
+                borderWidth: diffMode ? 2 : (deployMode ? 3 : 1),
                 bgColor: colors.bg,
-                shape: typeStyle.shape,
                 icon: radiusResolveIcon(r),
                 nodeName: r.name,
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
-                sourceUrl: buildSourceUrl(r.codeReference || ''),
+                sourceUrl: buildSourceUrl(r.codeReference || '', srcBranch),
+                sourceBranch: srcBranch,
                 srcPath: srcPathFromRef(r.codeReference || ''),
                 srcLine: srcLineFromRef(r.codeReference || ''),
                 defFile: r.definitionFile || '.radius/app.bicep',
                 defLine: r.definitionLine || 0,
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
+                deployStatus: r.deployStatus || '',
+                portalUrl: r.portalUrl || '',
                 cloudResources: JSON.stringify(cloudOutputs)
-            }
-        });
-        if (r.connections) {
-            for (var j = 0; j < r.connections.length; j++) {
-                var conn = r.connections[j];
-                var dir = conn.direction || 'Outbound';
-                if (dir === 'Outbound') {
-                    var targetExists = resources.some(function(x) { return (x.id||x.name) === (conn.id||conn.name); });
-                    if (targetExists) {
-                        elements.push({
-                            group: 'edges',
-                            data: {
-                                id: (r.id||r.name) + '-->' + (conn.id||conn.name),
-                                source: r.id || r.name,
-                                target: conn.id || conn.name
-                            }
-                        });
+            });
+            if (r.connections) {
+                for (var j = 0; j < r.connections.length; j++) {
+                    var conn = r.connections[j];
+                    var dir = conn.direction || 'Outbound';
+                    if (dir === 'Outbound') {
+                        var connTarget = conn.id || conn.name;
+                        var targetExists = resList.some(function(x) { return (x.id || x.name) === connTarget; });
+                        if (targetExists) pushEdge(r.id || r.name, connTarget, false);
                     }
                 }
             }
-        }
-        // Render output resources (concrete cloud types from recipes)
-        if (r.outputResources && r.outputResources.length > 0) {
-            for (var k = 0; k < r.outputResources.length; k++) {
-                var out = r.outputResources[k];
-                // Skip a concrete resource that another top-level resource owns
-                // (and is therefore already drawn as its own connected node), so
-                // we don't render the same secret/resource twice.
-                if (out.id && ownedOutputIds[out.id] && ownedOutputIds[out.id] !== (r.id || r.name)) {
-                    continue;
-                }
-                var outId = (r.id || r.name) + '/output/' + k + '/' + out.name;
-                var outLabel = out.displayType || out.type || out.name;
-                elements.push({
-                    group: 'nodes',
-                    data: {
-                        id: outId,
-                        label: outLabel,
-                        borderColor: '#8c959f',
-                        borderWidth: 1,
-                        bgColor: '#f6f8fa',
-                        shape: radiusGetTypeStyle(out.type || out.displayType || '').shape,
+            // Render output resources (concrete cloud types from recipes)
+            if (r.outputResources && r.outputResources.length > 0) {
+                for (var k = 0; k < r.outputResources.length; k++) {
+                    var out = r.outputResources[k];
+                    // Skip a concrete resource another top-level resource owns.
+                    if (out.id && ownedOutputIds[out.id] && ownedOutputIds[out.id] !== (r.id || r.name)) {
+                        continue;
+                    }
+                    var outId = (r.id || r.name) + '/output/' + k + '/' + out.name;
+                    var outLabel = out.displayType || out.type || out.name;
+                    // Output nodes stay neutral grey unless a live deploy status
+                    // is available (deployMode), in which case they take the same
+                    // status colors as their parent.
+                    var outColors = (deployMode && out.deployStatus) ? getNodeColors(out) : { bg: '#f6f8fa', border: '#8c959f' };
+                    pushNode(outId, {
+                        borderColor: outColors.border,
+                        borderWidth: (deployMode && out.deployStatus) ? 2 : 1,
+                        bgColor: outColors.bg,
                         icon: radiusResolveIcon(out),
                         nodeName: out.name || outLabel,
                         typeLabel: outLabel,
+                        codeRef: '',
+                        sourceUrl: '',
+                        srcPath: '',
+                        srcLine: 0,
+                        defFile: '',
+                        defLine: 0,
                         resourceType: out.type || '',
                         diffStatus: '',
-                        cloudId: (out.id && out.id.indexOf('/subscriptions/') === 0) ? out.id : ''
-                    }
-                });
-                elements.push({
-                    group: 'edges',
-                    data: {
-                        id: (r.id || r.name) + '-->output-' + k,
-                        source: r.id || r.name,
-                        target: outId,
-                        lineStyle: 'dashed'
-                    }
-                });
+                        deployStatus: out.deployStatus || '',
+                        portalUrl: out.portalUrl || '',
+                        cloudId: (out.id && out.id.indexOf('/subscriptions/') === 0) ? out.id : '',
+                        cloudResources: '[]'
+                    });
+                    pushEdge(r.id || r.name, outId, true);
+                }
             }
         }
+        return { nodes: nodes, edges: edges, dataById: dataById };
     }
 
-    // Group edges by source so bezier sibling connectors can be fanned to
-    // opposite sides later. Taxi is the default line type, but the existing
-    // bezier routing remains available through options.lineType.
-    var edgeEls = elements.filter(function(e) { return e.group === 'edges'; });
-    var bySource = {};
-    edgeEls.forEach(function(e) {
-        (bySource[e.data.source] = bySource[e.data.source] || []).push(e);
-    });
-    var fanInfo = {};
-    var maxFan = 1;
-    Object.keys(bySource).forEach(function(src) {
-        var arr = bySource[src];
-        maxFan = Math.max(maxFan, arr.length);
-        arr.forEach(function(e, idx) {
-            fanInfo[e.data.id] = { idx: idx, n: arr.length };
-            e.data.cpd = [0];
-            e.data.cpw = [0.5];
-            e.data.curveStyle = lineType;
-        });
-    });
-
-    var cy = cytoscape({
-        container: container,
-        pixelRatio: 2,
-        elements: elements,
-        layout: { name: 'preset' },
-        style: [
-            { selector: 'node', style: {
-                'label': 'data(label)',
-                'text-valign': 'center',
-                'text-halign': 'center',
-                'text-margin-x': 12,
-                'font-size': '11px',
-                'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif',
-                'color': '#1f2328',
-                'background-color': 'data(bgColor)',
-                'border-color': 'data(borderColor)',
-                'border-width': 'data(borderWidth)',
-                'shape': 'roundrectangle',
-                'width': 175,
-                'height': 58,
-                'text-wrap': 'wrap',
-                'text-max-width': '130px',
-                'background-image': 'data(icon)',
-                'background-image-opacity': 1,
-                'background-width': '24px',
-                'background-height': '24px',
-                'background-position-x': '10px',
-                'background-position-y': '10px',
-                'background-clip': 'none',
-                'background-image-containment': 'over',
-                'background-image-smoothing': 'yes'
-            }},
-            { selector: 'edge', style: {
-                'width': 2,
-                'line-color': '#8c959f',
-                'target-arrow-color': '#8c959f',
-                'target-arrow-shape': 'triangle',
-                'curve-style': function(ele) { return ele.data('curveStyle') || 'taxi'; },
-                'control-point-distances': 'data(cpd)',
-                'control-point-weights': 'data(cpw)',
-                'edge-distances': 'node-position',
-                'arrow-scale': 0.8
-            }},
-            { selector: 'edge[curveStyle="taxi"], edge[curveStyle="round-taxi"]', style: {
-                'taxi-direction': 'downward',
-                'taxi-turn': '50%',
-                'taxi-turn-min-distance': 10
-            }},
-            { selector: 'edge[curveStyle="round-taxi"]', style: {
-                'taxi-radius': 8
-            }},
-            { selector: 'edge[lineStyle="dashed"]', style: { 'line-style': 'dashed', 'line-color': '#57606a', 'target-arrow-color': '#57606a' }},
-            { selector: 'node:active', style: { 'overlay-opacity': 0.1 }},
-            { selector: 'node.hover', style: { 'border-width': 3, 'border-color': '#0550ae' }}
-        ],
-        userZoomingEnabled: true,
-        userPanningEnabled: true,
-        boxSelectionEnabled: false,
-        autoungrabify: false,
-        minZoom: 0.3,
-        maxZoom: 3
-    });
-
-    // ── Optional: render nodes as pixel-exact .rad-node HTML cards ────────────
-    // When the cytoscape-node-html-label extension is present we overlay a real
-    // DOM .rad-node card on each node (icon + bold name + muted Namespace/type),
-    // so the graph matches the rest of the panel exactly. The native cytoscape
-    // node stays sized as an invisible hit-target, so edges, dagre spacing and
-    // the click-to-open popup all keep working unchanged. If the extension fails
-    // to load, the graph falls back to the native drawn nodes above.
-    if (!diffMode && typeof cytoscapeNodeHtmlLabel === 'function' && typeof cy.nodeHtmlLabel !== 'function') {
-        try { cytoscapeNodeHtmlLabel(cytoscape); } catch (e) {}
-    }
-    var htmlLabelsApplied = false;
-    if (!diffMode && typeof cy.nodeHtmlLabel === 'function') {
-        // Keep the native Cytoscape node visible behind the HTML card. The label
-        // plugin creates overlays on a later render event; if that event is
-        // delayed or never fires, hiding the native node leaves a blank graph.
-        // A successfully rendered card is opaque and covers this fallback.
-        cy.style()
-            .selector('node').style({
-                'width': 224,
-                'height': 108
-            })
-            .update();
-        var radEsc = function(s) {
-            return String(s == null ? '' : s)
-                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        };
-        cy.nodeHtmlLabel([{
-            query: 'node',
-            halign: 'center', valign: 'center',
-            halignBox: 'center', valignBox: 'center',
-            tpl: function(data) {
-                var icon = data.icon
-                    ? '<img class="rad-node__icon" src="' + String(data.icon).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" alt="" />'
-                    : '';
-                // Figma renders "</> View source code" inside each node card
-                // (own row below the type) plus a "•••" button. Provenance decides
-                // the target: for a local workspace graph the link opens the
-                // on-disk file in the editor canvas (via the container click
-                // delegation below). A local node WITHOUT a discovered reference
-                // renders a disabled row rather than falling through to a GitHub
-                // URL that 404s on an unpushed branch. Otherwise a precise GitHub
-                // source URL navigates directly, and with neither it's a span.
-                var srcInner = '<span class="rad-node__source-glyph">&lt;/&gt;</span><span>View source code</span>';
-                var srcRow;
-                if (localSource) {
-                    if (data.srcPath) {
-                        // Self-contained inline handler so the in-card link opens
-                        // the file on its own — the node-html-label overlay's
-                        // pointer-events/hit-testing can otherwise make a click
-                        // land on the card (opening the "•••" popup) instead of
-                        // reaching the container click delegation. stopPropagation
-                        // keeps that delegation from double-firing; data-local-src
-                        // stays as a fallback if the inline handler is stripped.
-                        // dataset.* avoids nested quotes inside this onclick string.
-                        srcRow = '<a class="rad-node__source" href="#" role="button" data-local-src="1" data-src-path="' + String(data.srcPath).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') + '" data-src-line="' + (data.srcLine || 0) + '" onclick="event.preventDefault();event.stopPropagation();window.radiusOpenLocalSource(this.dataset.srcPath,parseInt(this.dataset.srcLine,10)||0);return false;">' + srcInner + '</a>';
-                    } else {
-                        srcRow = '<span class="rad-node__source" role="button" aria-disabled="true" title="No source reference found" style="opacity:0.5;cursor:default;">' + srcInner + '</span>';
-                    }
-                } else if (data.sourceUrl) {
-                    srcRow = '<a class="rad-node__source" href="' + String(data.sourceUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();">' + srcInner + '</a>';
-                } else {
-                    srcRow = '<span class="rad-node__source" role="button">' + srcInner + '</span>';
-                }
-                return '<div class="rad-node" data-node-id="' + String(data.id).replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" style="box-sizing:border-box;background:'
-                    + (data.bgColor || '#ffffff') + ';border-color:'
-                    + (data.borderColor || '#d0d7de') + ';">'
-                    + '<button type="button" class="rad-node__dots" aria-label="Show details">&#8226;&#8226;&#8226;</button>'
-                    + '<div class="rad-node__head">' + icon
-                    + '<span class="rad-node__title">' + radEsc(data.nodeName) + '</span></div>'
-                    + '<div class="rad-node__type">' + radEsc(data.typeLabel) + '</div>'
-                    + srcRow
-                    + '</div>';
-            }
-        }]);
-        htmlLabelsApplied = true;
-    }
-
-    // ── Layout + edge routing via dagre (with bend-point waypoints) ──────────
-    // cytoscape-dagre discards the per-edge bend points dagre computes to route
-    // long, multi-rank edges AROUND intervening boxes — which is exactly why
-    // those edges used to cut straight through nodes. We run dagre directly so
-    // we can both position the nodes AND feed those waypoints back as bezier
-    // control points, giving smooth, Mermaid-like curves that never cross a box.
-    // All spacing is derived from measured node dimensions (never hard-coded).
-    var nodeW = 0, nodeH = 0;
-    cy.nodes().forEach(function(n) {
-        nodeW = Math.max(nodeW, n.outerWidth());
-        nodeH = Math.max(nodeH, n.outerHeight());
-    });
-    if (!nodeW) nodeW = cy.width() || 160;
-    if (!nodeH) nodeH = 56;
-
-    // The curve bow allowed for simple (non-routed) edges is a fraction of node
-    // height; separations must exceed it so fanned sibling curves still clear
-    // their neighbours. Kept deliberately tight so the graph stays compact while
-    // dagre's network-simplex ranker still minimises edge crossings.
-    var maxBow = nodeH * 0.30;
-    var fanRoom = (maxFan - 1) * maxBow * 0.6;
-    var nodeSep = Math.round(nodeW * 0.42 + maxBow * 1.5 + fanRoom);
-    var rankSep = Math.round(nodeH * 1.15 + maxBow * 1.5);
-    var edgeSep = Math.round(maxBow * 0.8 + nodeW * 0.08);
-
-    var edgeWaypoints = {}; // cy edge id → dagre interior bend points [{x,y}]
-    var positioned = false;
-    if (typeof dagre !== 'undefined' && dagre.graphlib) {
+    // ── Hierarchical layout via dagre (top-to-bottom) ────────────────────────
+    // React Flow renders the nodes/edges; dagre only computes node positions.
+    // Node size is fixed to the .rad-node card footprint so layout is stable
+    // before the DOM is measured.
+    var NODE_W = 220, NODE_H = 118;
+    function layout(nodes, edges) {
+        if (typeof dagre === 'undefined' || !dagre.graphlib) {
+            for (var s = 0; s < nodes.length; s++) nodes[s].position = { x: 0, y: s * (NODE_H + 48) };
+            return;
+        }
         try {
-            var g = new dagre.graphlib.Graph({ multigraph: true });
-            g.setGraph({
-                rankdir: 'TB', nodesep: nodeSep, ranksep: rankSep,
-                edgesep: edgeSep, ranker: 'network-simplex',
-                marginx: 24, marginy: 24
-            });
+            var g = new dagre.graphlib.Graph();
+            g.setGraph({ rankdir: 'TB', nodesep: 55, ranksep: 80, marginx: 24, marginy: 24, ranker: 'network-simplex' });
             g.setDefaultEdgeLabel(function() { return {}; });
-            cy.nodes().forEach(function(n) {
-                g.setNode(n.id(), { width: n.outerWidth(), height: n.outerHeight() });
-            });
-            cy.edges().forEach(function(e) {
-                g.setEdge(e.source().id(), e.target().id(), {}, e.id());
-            });
+            for (var n = 0; n < nodes.length; n++) g.setNode(nodes[n].id, { width: NODE_W, height: NODE_H });
+            for (var e = 0; e < edges.length; e++) {
+                if (g.hasNode(edges[e].source) && g.hasNode(edges[e].target)) g.setEdge(edges[e].source, edges[e].target);
+            }
             dagre.layout(g);
-            cy.nodes().forEach(function(n) {
-                var gn = g.node(n.id());
-                if (gn) n.position({ x: gn.x, y: gn.y });
-            });
-            cy.edges().forEach(function(e) {
-                var ge = g.edge(e.source().id(), e.target().id(), e.id());
-                if (ge && ge.points && ge.points.length > 2) {
-                    // Drop the first/last points (node-boundary anchors); keep
-                    // only the interior bends that define the routing.
-                    edgeWaypoints[e.id()] = ge.points.slice(1, ge.points.length - 1);
-                }
-            });
-            positioned = true;
-        } catch (err) { positioned = false; }
-    }
-    if (!positioned) {
-        // Fallback: let cytoscape-dagre lay out (no waypoints available).
-        cy.layout({
-            name: 'dagre', rankDir: 'TB', nodeSep: nodeSep, rankSep: rankSep,
-            edgeSep: edgeSep, ranker: 'network-simplex', padding: 24, animate: false
-        }).run();
-    }
-
-    // ── Calibrate cytoscape's perpendicular sign at runtime ───────────────────
-    // controlPoints() returns absolute model positions, and cytoscape places a
-    // control point at midpoint + normal * distance. We set a known offset on a
-    // probe edge and measure which side it lands so our waypoint-derived
-    // distances map to the correct side regardless of the internal convention.
-    var cpSign = 1;
-    try {
-        var probe = cy.edges()[0];
-        if (probe) {
-            var ps = probe.source().position(), pt = probe.target().position();
-            var pdx = pt.x - ps.x, pdy = pt.y - ps.y;
-            var plen = Math.sqrt(pdx * pdx + pdy * pdy) || 1;
-            var pnx = -pdy / plen, pny = pdx / plen;
-            var savedD = probe.data('cpd'), savedW = probe.data('cpw');
-            probe.data('cpd', [20]); probe.data('cpw', [0.5]);
-            cy.style().update();
-            var cps = probe.controlPoints && probe.controlPoints();
-            if (cps && cps.length) {
-                var midx = (ps.x + pt.x) / 2, midy = (ps.y + pt.y) / 2;
-                var dot = (cps[0].x - midx) * pnx + (cps[0].y - midy) * pny;
-                if (dot < 0) cpSign = -1;
+            for (var m = 0; m < nodes.length; m++) {
+                var gn = g.node(nodes[m].id);
+                if (gn) nodes[m].position = { x: gn.x - NODE_W / 2, y: gn.y - NODE_H / 2 };
             }
-            probe.data('cpd', savedD); probe.data('cpw', savedW);
+        } catch (err) {
+            for (var f = 0; f < nodes.length; f++) if (!nodes[f].position) nodes[f].position = { x: 0, y: f * (NODE_H + 48) };
         }
-    } catch (err) { cpSign = 1; }
+    }
 
-    // ── Map each edge to bezier control points ────────────────────────────────
-    // Edges with dagre bend points follow that routing (curving around boxes);
-    // simple single-rank edges get a gentle bow, with siblings fanned to
-    // alternating sides for separation.
-    try {
-        cy.edges().forEach(function(e) {
-            var s = e.source().position(), t = e.target().position();
-            var dx = t.x - s.x, dy = t.y - s.y;
-            var len = Math.sqrt(dx * dx + dy * dy) || 1;
-            var ux = dx / len, uy = dy / len;
-            var nx = -uy, ny = ux;
-            var wps = edgeWaypoints[e.id()];
-            if (wps && wps.length) {
-                var cpd = [], cpw = [];
-                for (var wi = 0; wi < wps.length; wi++) {
-                    var rx = wps[wi].x - s.x, ry = wps[wi].y - s.y;
-                    var along = (rx * ux + ry * uy) / len;
-                    var perp = rx * nx + ry * ny;
-                    cpw.push(Math.max(0.02, Math.min(0.98, along)));
-                    cpd.push(cpSign * perp);
-                }
-                e.data('cpd', cpd);
-                e.data('cpw', cpw);
-            } else {
-                var bow = maxBow;
-                var info = fanInfo[e.id()] || { idx: 0, n: 1 };
-                if (info.n > 1) {
-                    var spread = info.idx - (info.n - 1) / 2;
-                    bow = maxBow * (0.5 + Math.abs(spread) * 0.5);
-                    if (spread < 0) bow = -bow;
-                }
-                e.data('cpd', [bow]);
-                e.data('cpw', [0.5]);
-            }
-        });
-        cy.style().update();
-        cy.fit(undefined, 40);
-    } catch (err) { try { cy.fit(undefined, 40); } catch (e2) {} }
+    var built = buildGraph(resources);
+    layout(built.nodes, built.edges);
 
-    // cytoscape-node-html-label builds its DOM cards on a single one-shot
-    // "render" event ('_cy.one(render...)') registered when nodeHtmlLabel([...])
-    // was called. All node positioning above happens synchronously, so if that
-    // one render never fires after setup the cards (and their in-card links)
-    // never materialize, leaving only the native canvas nodes — which cannot
-    // host clickable links. Force a repaint on the next frames so the one-shot
-    // fires and the cards are built.
-    if (htmlLabelsApplied) {
-        var forceHtmlLabelRender = function() {
-            try { cy.resize(); } catch (e) {}
-            try { cy.style().update(); } catch (e) {}
-        };
-        if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(function() {
-                forceHtmlLabelRender();
-                requestAnimationFrame(forceHtmlLabelRender);
-            });
+    // Shared details-popup controller. The popup itself is wired up imperatively
+    // as a sibling overlay further below (only when enablePopup is not false); the
+    // React node calls popupCtl.open() so a card click shows it. Stays a no-op
+    // until that setup runs, and when popups are disabled.
+    var popupCtl = { open: function() {}, close: function() {} };
+
+    // ── Custom node: the figma .rad-node card, rendered natively ─────────────
+    // Real React elements (not an HTML-string overlay) so the "View source code"
+    // link and the "..." details button are genuinely clickable. Interactive
+    // children carry React Flow's nodrag/nopan classes so the pane's drag layer
+    // never swallows their clicks — the flakiness that forced the previous canvas
+    // build to bolt a node-html-label DOM overlay onto its graph nodes.
+    function RadNode(props) {
+        var d = props.data;
+        var iconEl = d.icon ? h('img', { className: 'rad-node__icon', src: d.icon, alt: '' }) : null;
+        var glyph = h('span', { className: 'rad-node__source-glyph' }, '</' + '>');
+        var label = h('span', null, 'View source code');
+        var srcRow;
+        // "View source code" behavior depends on where the graph was resolved from:
+        //   • local-workspace graph (localSource) with a code reference → open the
+        //     on-disk worktree file in the Copilot editor canvas (side pane) via the
+        //     local server. The node's GitHub blob URL rides along as the href /
+        //     fallback: if the file isn't actually on this checkout the server
+        //     returns non-2xx and the click falls back to opening GitHub, so a graph
+        //     whose coarse localSource flag was wrong still resolves to a real page.
+        //   • remote-branch graph → native GitHub anchor (target="_blank"), which the
+        //     host opens in the system browser.
+        // Only stopPropagation, so the card's own click (opening the details popup)
+        // doesn't also fire. Local graphs with no reference for this node show a
+        // disabled row.
+        if (localSource && d.srcPath) {
+            srcRow = h('a', {
+                className: 'rad-node__source nodrag nopan', href: d.sourceUrl || '#',
+                onClick: function(e) { e.preventDefault(); e.stopPropagation(); radiusOpenLocalSource(d.srcPath, d.srcLine, d.sourceUrl); }
+            }, glyph, label);
+        } else if (localSource) {
+            srcRow = h('span', {
+                className: 'rad-node__source', role: 'button', 'aria-disabled': 'true',
+                title: 'No source reference found', style: { opacity: 0.5, cursor: 'default' }
+            }, glyph, label);
+        } else if (d.sourceUrl) {
+            srcRow = h('a', {
+                className: 'rad-node__source nodrag nopan', href: d.sourceUrl, target: '_blank', rel: 'noopener noreferrer',
+                onClick: function(e) { e.stopPropagation(); }
+            }, glyph, label);
         } else {
-            setTimeout(forceHtmlLabelRender, 0);
-            setTimeout(forceHtmlLabelRender, 32);
+            srcRow = h('span', { className: 'rad-node__source', role: 'button' }, glyph, label);
         }
+        var dots = h('button', {
+            type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
+            onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.open(d, e.currentTarget.closest('.rad-node')); }
+        }, '\u2022\u2022\u2022');
+        var card = h('div', {
+            className: 'rad-node', 'data-node-id': d.id,
+            style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
+            onClick: function(e) { popupCtl.open(d, e.currentTarget); }
+        },
+            dots,
+            h('div', { className: 'rad-node__head' }, iconEl, h('span', { className: 'rad-node__title' }, d.nodeName)),
+            h('div', { className: 'rad-node__type' }, d.typeLabel),
+            srcRow
+        );
+        return h('div', { className: 'rad-node-shell' },
+            h(Handle, { type: 'target', position: Position.Top, isConnectable: false, className: 'rad-handle' }),
+            card,
+            h(Handle, { type: 'source', position: Position.Bottom, isConnectable: false, className: 'rad-handle' })
+        );
     }
+    var nodeTypes = { rad: RadNode };
+
+    // updater.fn is bound by the mounted App (via useEffect) so controller.update
+    // can push new nodes/edges into React state and preserve the current viewport.
+    var updater = { fn: null };
+    function bindUpdater(fn) { updater.fn = fn; }
+
+    function RadGraphApp(props) {
+        var ns = useNodesState(props.initialNodes);
+        var nodes = ns[0], setNodes = ns[1], onNodesChange = ns[2];
+        var es = useEdgesState(props.initialEdges);
+        var edges = es[0], setEdges = es[1], onEdgesChange = es[2];
+        var instRef = React.useRef(null);
+
+        React.useEffect(function() {
+            bindUpdater(function(newNodes, newEdges) {
+                setNodes(newNodes);
+                setEdges(newEdges);
+                var inst = instRef.current;
+                if (inst) setTimeout(function() { try { inst.fitView({ padding: 0.18, duration: 200 }); } catch (e) {} }, 40);
+            });
+            return function() { bindUpdater(null); };
+        }, []);
+
+        return h(ReactFlowComp, {
+            nodes: nodes,
+            edges: edges,
+            onNodesChange: onNodesChange,
+            onEdgesChange: onEdgesChange,
+            nodeTypes: nodeTypes,
+            fitView: true,
+            fitViewOptions: { padding: 0.18 },
+            minZoom: 0.2,
+            maxZoom: 2,
+            nodesDraggable: true,
+            nodesConnectable: false,
+            elementsSelectable: true,
+            proOptions: { hideAttribution: true },
+            onInit: function(inst) {
+                instRef.current = inst;
+                setTimeout(function() { try { inst.fitView({ padding: 0.18 }); } catch (e) {} }, 30);
+            }
+        },
+            h(Background, { gap: 16, size: 1, color: '#e1e4e8' }),
+            h(Controls, { showInteractive: false })
+        );
+    }
+
+    // Mount React into a child host so the popup/legend (siblings of the
+    // container) are never clobbered by React's DOM reconciliation.
+    var flowHost = document.createElement('div');
+    flowHost.className = 'rad-flow-host';
+    flowHost.style.cssText = 'position:absolute; inset:0; width:100%; height:100%;';
+    container.appendChild(flowHost);
+
+    var root = ReactDOM.createRoot(flowHost);
+    window.__radRoots[containerId] = root;
+    root.render(h(RadGraphApp, { initialNodes: built.nodes, initialEdges: built.edges }));
 
     // Node click popup
     if (options.enablePopup !== false) {
@@ -992,25 +933,10 @@ function radiusRenderGraph(containerId, resources, options) {
         var ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></path></svg>';
         var ICON_SRC = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex:none;"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215Zm-6.56 0a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"></path></svg>';
 
-        // Native-node fallback only: open the popup on a cytoscape node tap when
-        // the HTML card overlay did NOT render (plain canvas nodes can't host
-        // links or a "•••" button). When cards ARE rendered, the popup is driven
-        // solely by the container click delegation below, which distinguishes the
-        // "•••"/card body (open popup) from the in-card "View source code" link
-        // (navigates on its own). Registering this node-tap in card mode would
-        // make the source link ALSO open the details popup — exactly what the
-        // "•••" button is for — so it is intentionally skipped there.
-        if (!htmlLabelsApplied) {
-            cy.on('tap', 'node', function(e) { openNodePopup(e.target); });
-        }
-
-        // Build + show the links popup for a node. Extracted so the HTML node
-        // cards' "•••" button (and card body) can open the same popup — the
-        // node-html-label overlay captures pointer events, so cytoscape's own
-        // node 'tap' never fires for those clicks.
-        function openNodePopup(node) {
-            if (!node) return;
-            var d = node.data();
+        // Build + show the links popup for a node's data, positioned next to its
+        // on-screen card. Reached from the container click delegation below.
+        function openNodePopup(d, cardEl) {
+            if (!d) return;
             var links = [];
             // A link row: monochrome glyph + blue label, with the target URL shown
             // as a muted subtitle beneath (matches the node popup mock).
@@ -1020,39 +946,45 @@ function radiusRenderGraph(containerId, resources, options) {
                     '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
-            // Like linkRow but opens a repo-relative file in the editor canvas
-            // (side pane) instead of navigating — used for local workspace graphs
-            // where a GitHub blob URL would 404 on an unpushed worktree branch.
-            var localLinkRow = function(iconSvg, label, path, line) {
-                var sub = '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(path) + (line ? ':' + line : '') + '</div>';
+            // A local link row: same look as linkRow, but opens an on-disk worktree
+            // file in the editor canvas instead of navigating. The repo-relative
+            // path/line and a GitHub fallback URL ride on data attributes; the
+            // container click delegation reads them and calls radiusOpenLocalSource
+            // (which falls back to the GitHub URL when the file is not on this
+            // checkout). The fallback URL is also the anchor href so the row is a
+            // real link (copyable / right-clickable). A muted "path:line" subtitle
+            // mirrors linkRow's URL subtitle.
+            var localLinkRow = function(iconSvg, label, relPath, line, fallbackUrl) {
+                var subText = escLocal(relPath) + (line ? ':' + line : '');
+                var sub = '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + subText + '</div>';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="#" class="rad-local-link" data-src-path="' + escLocal(path) + '" data-src-line="' + (line || 0) + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(fallbackUrl || '#') + '" data-local-src="' + escLocal(relPath) + '" data-local-line="' + (line || 0) + '" data-fallback-url="' + escLocal(fallbackUrl || '') + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
-            // The in-card "</> View source code" link deep-links to the source,
-            // but the HTML card overlay is optional (it falls back to native
-            // canvas nodes, which cannot host links). So the popup carries both a
-            // "View source code" and a "View app definition" link, giving a
-            // reliable link surface on any plain node click regardless of whether
-            // the card overlay rendered. For a local workspace graph both open the
-            // on-disk file in the editor canvas instead of a GitHub blob URL that
-            // would 404 on an unpushed worktree branch.
+            // Source + app-definition links. For a local-workspace graph
+            // (localSource) they open the on-disk worktree file in the editor canvas
+            // (side pane), with the file's GitHub URL as a fallback if it is not on
+            // this checkout; for a remote-branch graph they are native GitHub
+            // anchors. The source row shows only when a real code reference exists;
+            // the app definition (.radius/app.bicep) shows whenever it is known.
             if (localSource) {
-                if (d.srcPath) {
-                    links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine));
+                if (d.srcPath) links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine, d.sourceUrl));
+                if (d.defFile) {
+                    var defUrlLocal = repoUrl ? (repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '')) : '';
+                    links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine, defUrlLocal));
                 }
-            } else if (d.sourceUrl) {
-                links.push(linkRow(ICON_SRC, 'View source code', d.sourceUrl, true));
+            } else {
+                if (d.sourceUrl) {
+                    links.push(linkRow(ICON_SRC, 'View source code', d.sourceUrl, true));
+                }
+                if (repoUrl && d.defFile) {
+                    var defUrl = repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
+                    links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
+                }
             }
-            if (localSource && d.defFile) {
-                links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine));
-            } else if (repoUrl && d.defFile) {
-                var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
-                links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
-            }
-            if (diffMode && d.diffStatus) {
-                var statusLabel = d.diffStatus.charAt(0).toUpperCase() + d.diffStatus.slice(1);
-                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">Status: <strong style="color:var(--rad-text,#1a1a1a);">' + statusLabel + '</strong></div>');
+            // Live portal link surfaced during deployment (Azure portal / AWS console).
+            if (d.portalUrl) {
+                links.push(linkRow(ICON_LINK, 'View in portal', d.portalUrl, false));
             }
             // Azure portal links for live cloud resources (from the deployed graph).
             function azurePortalUrl(armId) { return 'https://portal.azure.com/#@/resource' + armId + '/overview'; }
@@ -1073,61 +1005,64 @@ function radiusRenderGraph(containerId, resources, options) {
                 links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">No links available.</div>');
             }
             popup.innerHTML = links.join('');
-            var pos = node.renderedPosition();
-            popup.style.left = (pos.x + 20) + 'px';
-            popup.style.top = (pos.y - 20) + 'px';
+            // Position next to the card using its on-screen rect, relative to the
+            // (position:relative) container, from each card's bounding box.
+            var crect = container.getBoundingClientRect();
+            var nrect = cardEl.getBoundingClientRect();
+            var left = nrect.right - crect.left + 8;
+            var top = nrect.top - crect.top;
+            if (left + 240 > crect.width) left = Math.max(4, nrect.left - crect.left - 232);
+            popup.style.left = Math.max(0, left) + 'px';
+            popup.style.top = Math.max(0, top) + 'px';
             popup.style.display = '';
         }
 
-        // Delegate clicks from the HTML node cards: the "•••" button (or the card
-        // body) opens the popup; a remote "View source code" anchor navigates on
-        // its own (it stops propagation), so it's excluded here. Local "open in
-        // editor canvas" links (source card + popup app definition) are handled
-        // here via their data-* attributes.
+        // Delegate clicks from the HTML node cards. The card body opens the popup;
+        // the in-card "View source code" anchor and the popup's own links are native
+        // anchors that handle their own clicks (they stopPropagation), so they're not
+        // handled here. Clicking the empty pane hides the popup.
         //
-        // radiusRenderGraph can run more than once against the same container
-        // (refresh, deployed-graph rerenders). Removing the previously-stored
-        // handler before adding the current one keeps exactly ONE listener that
-        // always closes over the latest cy / openNodePopup — otherwise stale
-        // closures would stack and a single click would open the editor twice.
+        // radiusRenderGraph can run more than once against the same container.
+        // Removing the previously-stored handler before adding the current one
+        // keeps exactly ONE listener that always closes over the latest state.
         if (container._radiusClickHandler) {
             container.removeEventListener('click', container._radiusClickHandler);
         }
         container._radiusClickHandler = function(e) {
-            var localEl = e.target.closest && e.target.closest('[data-local-src], .rad-local-link');
+            // A "View source code" / "View app definition" row for a local-workspace
+            // graph carries data-local-src: open that on-disk file in the editor
+            // canvas instead of navigating. Checked before the popup early-return
+            // below because these rows live inside the popup.
+            var localEl = e.target.closest && e.target.closest('[data-local-src]');
             if (localEl) {
                 e.preventDefault();
-                window.radiusOpenLocalSource(localEl.getAttribute('data-src-path'), parseInt(localEl.getAttribute('data-src-line'), 10) || 0);
+                radiusOpenLocalSource(
+                    localEl.getAttribute('data-local-src'),
+                    parseInt(localEl.getAttribute('data-local-line'), 10) || 0,
+                    localEl.getAttribute('data-fallback-url') || ''
+                );
                 return;
             }
-            if (e.target.closest && e.target.closest('.rad-node__source')) return;
-            var card = e.target.closest && e.target.closest('.rad-node[data-node-id]');
-            if (!card) return;
-            var node = cy.getElementById(card.getAttribute('data-node-id'));
-            if (node && node.length) openNodePopup(node);
+            // Clicks inside the popup, or on a node card, are handled by their own
+            // React/imperative handlers (card onClick opens the popup, links
+            // navigate themselves). Any other click on empty canvas closes it.
+            if (e.target.closest && e.target.closest('#node-popup')) return;
+            if (e.target.closest && e.target.closest('.rad-node[data-node-id]')) return;
+            popup.style.display = 'none';
         };
         container.addEventListener('click', container._radiusClickHandler);
-
-        cy.on('tap', function(e) {
-            if (e.target === cy) popup.style.display = 'none';
-        });
+        popupCtl.open = openNodePopup;
+        popupCtl.close = function() { popup.style.display = 'none'; };
     }
 
-    // Show legend for diff mode
-    if (diffMode) {
-        var legend = document.createElement('div');
-        legend.className = 'legend';
-        legend.innerHTML = '<div class="legend-item"><span class="legend-dot" style="background:#16a34a;"></span>Added</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#dc2626;"></span>Removed</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#ca8a04;"></span>Modified</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#9ca3af;"></span>Unchanged</div>';
-        container.parentNode.insertBefore(legend, container);
-    } else if (options.showLegend) {
+    // Diff mode intentionally shows NO legend — the graph must look
+    // identical to the Planned graph aside from node border / edge colors.
+    if (options.showLegend && !diffMode) {
         // Build a resource-type legend from the categories actually present in
-        // the graph. Nodes now render as uniform white cards, so category is
-        // conveyed by the icon (owned by the type/recipe pack); the legend shows
-        // that same icon next to the category name. Order is first-seen so it
-        // only lists what's on screen.
+        // the graph. Nodes render as uniform white cards, so category is conveyed
+        // by the icon (owned by the type/recipe pack); the legend shows that same
+        // icon next to the category name. Order is first-seen so it only lists
+        // what's on screen.
         var seen = {};
         var cats = [];
         function noteCategory(r) {
@@ -1154,8 +1089,22 @@ function radiusRenderGraph(containerId, resources, options) {
         }
     }
 
-    window.__cyInstances[containerId] = cy;
-    return cy;
+    // Controller returned to callers. update() rebuilds + re-lays out the graph
+    // and pushes it into React state (preserving the viewport); destroy() unmounts.
+    var controller = {
+        update: function(newResources) {
+            if (!newResources) return;
+            var b = buildGraph(newResources);
+            layout(b.nodes, b.edges);
+            if (updater.fn) updater.fn(b.nodes, b.edges);
+        },
+        destroy: function() {
+            updater.fn = null;
+            try { root.unmount(); } catch (e) {}
+            if (window.__radRoots[containerId] === root) delete window.__radRoots[containerId];
+        }
+    };
+    return controller;
 }
 
 function radiusSetGraphLoading(containerId) {

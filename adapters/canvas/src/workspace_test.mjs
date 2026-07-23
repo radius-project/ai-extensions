@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath, toSafeRepoRelPath, isWorkspaceSelection, resolveSessionId } from "./workspace.mjs";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import { resolveWorktreePath, parseRepoFromRemote, workspaceGraphJsonPath, toSafeRepoRelPath, isWorkspaceSelection, resolveSessionId, workspaceFileExists } from "./workspace.mjs";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must
@@ -130,6 +132,16 @@ describe("isWorkspaceSelection", () => {
         expect(isWorkspaceSelection(state, "acme/other", "feature-x")).toBe(false);
     });
 
+    it("is false for an empty/unspecified branch (fail-closed)", () => {
+        expect(isWorkspaceSelection(state, "acme/app", "")).toBe(false);
+        expect(isWorkspaceSelection(state, "acme/app", undefined)).toBe(false);
+    });
+
+    it("is false for an empty/unspecified repo (fail-closed)", () => {
+        expect(isWorkspaceSelection(state, "", "feature-x")).toBe(false);
+        expect(isWorkspaceSelection(state, undefined, "feature-x")).toBe(false);
+    });
+
     it("is false when no workspace path is set", () => {
         expect(isWorkspaceSelection({ workspaceRepo: "acme/app", workspaceBranch: "feature-x" }, "acme/app", "feature-x")).toBe(false);
     });
@@ -166,5 +178,34 @@ describe("resolveSessionId", () => {
 
     it("returns empty string when no candidate env vars are set", async () => {
         expect(await resolveSessionId({}, HOME, async () => false)).toBe("");
+    });
+});
+
+// workspaceFileExists gates the "open in editor canvas" path: canvas.open silently
+// no-ops for a file that isn't checked out here, so a false result is what lets the
+// webview fall back to a GitHub URL instead of dead-clicking.
+describe("workspaceFileExists", () => {
+    it("is true for a file that exists on the worktree and false for a missing one", async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-wt-"));
+        try {
+            await fs.mkdir(path.join(dir, "src"), { recursive: true });
+            await fs.writeFile(path.join(dir, "src", "main.go"), "package main\n");
+            expect(await workspaceFileExists(dir, "src/main.go")).toBe(true);
+            expect(await workspaceFileExists(dir, "src\\main.go")).toBe(true);
+            expect(await workspaceFileExists(dir, "src/missing.go")).toBe(false);
+        } finally {
+            await fs.rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("is false for a traversal path or when either argument is missing", async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-wt-"));
+        try {
+            expect(await workspaceFileExists(dir, "../outside.txt")).toBe(false);
+            expect(await workspaceFileExists("", "src/main.go")).toBe(false);
+            expect(await workspaceFileExists(dir, "")).toBe(false);
+        } finally {
+            await fs.rm(dir, { recursive: true, force: true });
+        }
     });
 });
