@@ -11,7 +11,9 @@
 // ships the exact skill content it points the agent at — no separate skills
 // install required.
 //
-// Source of truth: plugins/radius/skills/radius-app-bicep/
+// Source of truth: plugins/radius/skills/radius-app-bicep/, plus the one
+// cross-skill reference it links to
+// (plugins/radius/skills/radius-app-graph/references/source-code-references.md).
 
 import skillMd from "../../../plugins/radius/skills/radius-app-bicep/SKILL.md";
 import runtimeContract from "../../../plugins/radius/skills/radius-app-bicep/references/runtime-contract.md";
