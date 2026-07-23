@@ -172,6 +172,8 @@ describe("plannedGraphPage", () => {
     it("renders the with-resources branch with no removed tokens", () => {
         const html = plannedGraphPage({ plannedResources: sampleResources, plannedRepo: "octo/app" });
         expect(typeof html).toBe("string");
+        expect(html).toContain("plannedMode: true");
+        expect(html).not.toContain("Cloud Resource");
         for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
     });
 });
