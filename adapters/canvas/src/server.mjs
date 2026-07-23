@@ -788,9 +788,13 @@ function createRequestHandler(instanceId) {
                     steps.push(`Selecting subscription ${subscriptionId}...`);
                     const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
                     if (setResult.code !== 0) {
+                        // Surface the CLI stderr — the failure may be a logged-out
+                        // session, expired credentials, or a tenant restriction,
+                        // not just an unknown subscription.
+                        const detail = (setResult.stderr || '').trim();
                         res.setHeader("Content-Type", "application/json");
                         res.writeHead(400);
-                        res.end(JSON.stringify({ error: `Subscription ${subscriptionId} not found or not accessible. Run "az login" for the correct account, then try again.`, steps }));
+                        res.end(JSON.stringify({ error: `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, steps }));
                         return;
                     }
                 }
@@ -807,7 +811,19 @@ function createRequestHandler(instanceId) {
                 }
                 const account = JSON.parse(acctResult.stdout);
                 const activeTenantId = account.tenantId || '';
-                subscriptionId = subscriptionId || account.id;
+                // Prefer the active account's id as the canonical subscription
+                // after switching context.
+                subscriptionId = account.id || subscriptionId;
+
+                // Guard against an unexpected/empty payload before continuing —
+                // an empty subscription or tenant would otherwise produce a
+                // malformed role-assignment scope and unclear downstream errors.
+                if (!subscriptionId || !activeTenantId) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Could not determine the active Azure subscription and tenant. Run "az login" and "az account set --subscription <id>", then try again.', steps }));
+                    return;
+                }
 
                 // If the selected profile's tenant differs from the active
                 // session's tenant, stop with an actionable message instead of
