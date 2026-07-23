@@ -126,7 +126,7 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 
 - For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, author one with the `radius-app-bicep` skill first — the canvas will not generate it.
 - For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json --preview --include-icons`.
-- The first graph build may download `rad` into `~/.rad/bin`. Set `RADIUS_RAD_BINARY` to force a specific binary, or `RADIUS_RAD_SHA256` to pin the downloaded binary checksum.
+- The first graph build may download `rad` into `~/.radius/ai-extensions/bin`. Set `RADIUS_RAD_BINARY` to force a specific binary, or `RADIUS_RAD_SHA256` to pin the downloaded binary checksum.
 
 ## Troubleshooting
 
