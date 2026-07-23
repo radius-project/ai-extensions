@@ -34,7 +34,6 @@ The renderer ports the production improvements from `radius-project/github-exten
   - `InProgress` → bold yellow border + yellow fill
   - `Failed` → bold red border + red fill
   - `Succeeded` → falls back to diff coloring
-- **Cross-edge classification** — edges that point to a same-rank or backward-rank node (cycles, lateral links) render as **dashed red** instead of the default grey arrow; helps spot non-DAG structure at a glance.
 - **Configurable line type** — `radiusRenderGraph(..., { lineType })` accepts React Flow edge types (`default` bezier, `straight`, `step`, `smoothstep`). Legacy aliases (`taxi`, `segments`) map to `smoothstep`. Defaults to `default` (bezier).
 - **Source-code links** — a node with a `codeReference` renders a clickable deep link to where the resource is defined/initialized in the repo (path + optional `#L<line>`). See [Source-code references](#source-code-references).
 
