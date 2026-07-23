@@ -107,7 +107,7 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
         if (found.some(Boolean)) return; // at least one branch has it → nothing to do
 
         try {
-            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page))).catch(() => {});
+            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page, branches))).catch(() => {});
         } catch { /* session.send unavailable → ignore */ }
     } catch { /* never block canvas open on handoff failure */ }
 }
@@ -721,7 +721,7 @@ When a recipe is not found for a resource type during planned graph resolution, 
 // Wire the server-side app.bicep handoff to the SDK session. Graph/generate
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
-setAppBicepHandoff(({ repo, page }) => session.send(appBicepHandoffPrompt(repo, page)));
+setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
 
 // Wire the "View source code" / "View app definition" click for local-workspace
 // graphs to the Copilot editor canvas (side pane). The graph + line numbers are
