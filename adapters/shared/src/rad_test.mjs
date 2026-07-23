@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import https from "node:https";
 import {
   RADIUS_BICEP_CONFIG,
   RADIUS_BICEP_CONFIG_JSON,
@@ -18,6 +20,7 @@ import {
   compareVersions,
   radBinaryVersion,
   releaseAsset,
+  ensureRadBinary,
 } from "./rad.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
@@ -372,5 +375,150 @@ describe("radBinaryVersion", () => {
   it("resolves to null (never throws) when the binary path does not exist", async () => {
     const missing = path.join(os.tmpdir(), "definitely-not-rad", `rad-${Date.now()}`);
     await expect(radBinaryVersion(missing, { timeout: 2000 })).resolves.toBeNull();
+  });
+});
+
+describe("ensureRadBinary version reconciliation", () => {
+  if (process.platform === "win32") return;
+
+  const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
+  const savedEnv = {};
+  let managedBackup = null;
+  let managedMode = null;
+
+  function writeFakeRad(dest, version) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(
+      dest,
+      `#!/usr/bin/env node
+if (process.argv.includes("version")) {
+  process.stdout.write(JSON.stringify({ version: "${version}" }));
+}
+`,
+      "utf8",
+    );
+    fs.chmodSync(dest, 0o755);
+  }
+
+  function mockHttpsGet(responses, calls) {
+    return vi.spyOn(https, "get").mockImplementation((url, options, callback) => {
+      const key = String(url);
+      calls.push(key);
+      const response = responses[key];
+      if (!response) throw new Error(`Unexpected URL: ${key}`);
+
+      const req = new EventEmitter();
+      req.destroy = (err) => { if (err) req.emit("error", err); };
+      req.on = req.addListener.bind(req);
+
+      const resp = new EventEmitter();
+      resp.statusCode = response.statusCode ?? 200;
+      resp.headers = response.headers ?? {};
+      resp.resume = () => {};
+      process.nextTick(() => {
+        callback(resp);
+        if (response.body !== undefined) {
+          resp.emit("data", Buffer.from(response.body));
+        }
+        resp.emit("end");
+      });
+      return req;
+    });
+  }
+
+  beforeEach(() => {
+    savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
+    savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK = process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    if (fs.existsSync(MANAGED_RAD_PATH)) {
+      managedBackup = fs.readFileSync(MANAGED_RAD_PATH);
+      managedMode = fs.statSync(MANAGED_RAD_PATH).mode;
+    } else {
+      managedBackup = null;
+      managedMode = null;
+    }
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+  });
+
+  afterEach(() => {
+    if (savedEnv.RADIUS_RAD_BINARY === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = savedEnv.RADIUS_RAD_BINARY;
+    if (savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK === undefined) delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    else process.env.RADIUS_RAD_SKIP_VERSION_CHECK = savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
+
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+    if (managedBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
+      if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("upgrades an older managed binary to the latest release", async () => {
+    writeFakeRad(MANAGED_RAD_PATH, "v0.1.0");
+    const asset = releaseAsset();
+    const tag = "v0.2.0";
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+    const calls = [];
+    mockHttpsGet({
+      [RELEASES_API]: {
+        body: JSON.stringify({ tag_name: tag, assets: [{ name: asset, digest: "" }] }),
+      },
+      [downloadUrl]: {
+        body: "#!/usr/bin/env node\nprocess.stdout.write('{}');\n",
+      },
+    }, calls);
+
+    const logs = [];
+    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+
+    expect(resolved).toBe(MANAGED_RAD_PATH);
+    expect(calls).toContain(RELEASES_API);
+    expect(calls).toContain(downloadUrl);
+    expect(logs.some((m) => m.includes("upgrading"))).toBe(true);
+  });
+
+  it("warns but does not download when RADIUS_RAD_BINARY is older", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-override-"));
+    const override = path.join(tmp, "rad");
+    writeFakeRad(override, "v0.1.0");
+    process.env.RADIUS_RAD_BINARY = override;
+
+    const asset = releaseAsset();
+    const tag = "v0.2.0";
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+    const calls = [];
+    mockHttpsGet({
+      [RELEASES_API]: {
+        body: JSON.stringify({ tag_name: tag, assets: [{ name: asset, digest: "" }] }),
+      },
+    }, calls);
+
+    const logs = [];
+    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+
+    expect(resolved).toBe(override);
+    expect(calls).toEqual([RELEASES_API]);
+    expect(calls).not.toContain(downloadUrl);
+    expect(logs.some((m) => m.includes("RADIUS_RAD_BINARY") && m.includes("using it anyway"))).toBe(true);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("skips the version check network call when RADIUS_RAD_SKIP_VERSION_CHECK is set", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-skip-check-"));
+    const override = path.join(tmp, "rad");
+    writeFakeRad(override, "v0.1.0");
+    process.env.RADIUS_RAD_BINARY = override;
+    process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+
+    const calls = [];
+    mockHttpsGet({}, calls);
+    const resolved = await ensureRadBinary();
+
+    expect(resolved).toBe(override);
+    expect(calls).toEqual([]);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
