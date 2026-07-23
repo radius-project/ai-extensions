@@ -15,14 +15,14 @@ import https from "node:https";
 // Order matters for the scripts: React and ReactDOM must be defined as globals
 // before the React Flow UMD bundle executes (it reads window.React / window.ReactDOM).
 const VENDOR_URLS = {
-    'react': 'https://unpkg.com/react@18/umd/react.production.min.js',
-    'react-dom': 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-    'reactflow': 'https://unpkg.com/reactflow@11/dist/umd/index.js',
+    'react': 'https://unpkg.com/react@18.3.1/umd/react.production.min.js',
+    'react-dom': 'https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js',
+    'reactflow': 'https://unpkg.com/reactflow@11.11.4/dist/umd/index.js',
     'dagre': 'https://unpkg.com/dagre@0.8.5/dist/dagre.min.js',
 };
 // CSS assets inlined into <head> as <style> tags.
 const VENDOR_STYLE_URLS = {
-    'reactflow-css': 'https://unpkg.com/reactflow@11/dist/style.css',
+    'reactflow-css': 'https://unpkg.com/reactflow@11.11.4/dist/style.css',
 };
 const vendorCache = new Map(); // name → content string
 
