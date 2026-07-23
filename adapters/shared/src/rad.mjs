@@ -19,9 +19,14 @@
 //   - `rad app graph` commits to a `radius-graph` orphan branch when
 //     GITHUB_ACTIONS === "true"; we clear it in the child env so it always
 //     writes app-graph.json locally.
-//   - Binary paths resolve from os.homedir()/PATH, never import.meta (adapters
-//     bundle this file into a single artifact).
+//   - The managed binary lives at a stable path under os.homedir(), never
+//     import.meta (adapters bundle this file into a single artifact).
 //   - Windows: `.exe` suffix, no chmod.
+//   - The first resolution per process verifies the installed rad is at least
+//     as new as the latest published release and upgrades it if it is older.
+//     This is best-effort: any failure (offline, unreadable version) keeps the
+//     existing binary. It is skipped entirely via RADIUS_RAD_SKIP_VERSION_CHECK,
+//     and a RADIUS_RAD_BINARY override is never replaced.
 
 import { spawn } from "node:child_process";
 import https from "node:https";
@@ -34,11 +39,10 @@ import { applicationGraphToResources } from "@radius-project/core";
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
 const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
-// Single install + lookup location for rad, shared with the official rad CLI and
-// `rad bicep download` (which drops bicep.exe here too). Downloads land here so
-// there is exactly one place to look for the binary — no separate app-graph
-// cache directory to keep in sync.
-const RAD_HOME_BIN = path.join(os.homedir(), ".rad", "bin");
+// Stable extension-owned location. This intentionally does not use PATH or the
+// official ~/.rad/bin install, so automatic updates never replace a user's CLI.
+export const MANAGED_RAD_BIN = path.join(os.homedir(), ".radius", "ai-extensions", "bin");
+export const MANAGED_RAD_PATH = path.join(MANAGED_RAD_BIN, `rad${EXE}`);
 
 // Bicep config that registers the Radius extension. `rad app graph` compiles
 // Bicep offline, but bicep still needs this file beside the .bicep to resolve
@@ -62,13 +66,18 @@ function noop() {}
 
 // Maps Node's platform/arch onto the GitHub release asset naming used by rad
 // (rad_<os>_<arch>[.exe]).
-function releaseAsset() {
-  const osName = { win32: "windows", darwin: "darwin", linux: "linux" }[process.platform];
-  const arch = { x64: "amd64", arm64: "arm64", arm: "arm" }[process.arch];
+export function releaseAsset(platform = process.platform, architecture = process.arch) {
+  const osName = { win32: "windows", darwin: "darwin", linux: "linux" }[platform];
+  // Radius currently publishes only an amd64 Windows binary. Windows on ARM64
+  // runs it through the OS x64 compatibility layer.
+  const arch =
+    platform === "win32"
+      ? { x64: "amd64", arm64: "amd64" }[architecture]
+      : { x64: "amd64", arm64: "arm64", arm: "arm" }[architecture];
   if (!osName || !arch) {
-    throw new Error(`Unsupported platform for rad: ${process.platform}/${process.arch}`);
+    throw new Error(`Unsupported platform for rad: ${platform}/${architecture}`);
   }
-  return `rad_${osName}_${arch}${EXE}`;
+  return `rad_${osName}_${arch}${platform === "win32" ? ".exe" : ""}`;
 }
 
 function isExecutableFile(p) {
@@ -82,8 +91,7 @@ function isExecutableFile(p) {
 // A lock older than this is treated as abandoned (owning process crashed) and
 // reaped so a dead download can never wedge future ones.
 const LOCK_STALE_MS = 5 * 60 * 1000;
-// Longest we wait for a peer process's in-flight download to publish the binary
-// before giving up and downloading ourselves.
+// Longest a waiter blocks for a peer process's in-flight download to publish.
 const DOWNLOAD_WAIT_MS = 120000;
 
 /**
@@ -91,6 +99,10 @@ const DOWNLOAD_WAIT_MS = 120000;
  * Returns a release() function on success, or null if another process holds a
  * fresh lock. A stale lock (mtime older than LOCK_STALE_MS) is reaped and the
  * acquisition retried once. Exported for deterministic unit testing.
+ *
+ * Correctness does not depend on this lock: it only avoids a redundant ~70MB
+ * download when two processes cold-start at the same instant. The atomic
+ * temp->rename publish in downloadRad keeps concurrent writers safe on its own.
  */
 export function tryAcquireLock(lockPath) {
   const write = () => {
@@ -144,32 +156,111 @@ function killChildTree(child) {
   }
 }
 
-// Finds `rad[.exe]` on PATH without shelling out.
-function findOnPath() {
-  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  for (const dir of dirs) {
-    const candidate = path.join(dir, `rad${EXE}`);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
-}
-
 /**
  * resolveExistingRadBinary - locate a usable `rad` without downloading.
- * Order: RADIUS_RAD_BINARY env -> PATH -> ~/.rad/bin (the single install
- * location, also where a first-run download lands).
+ * Order: RADIUS_RAD_BINARY env -> the stable extension-owned managed path.
+ * PATH and the user's official ~/.rad/bin install are deliberately ignored.
  */
-export function resolveExistingRadBinary() {
+export function resolveExistingRadBinary(managedPath = MANAGED_RAD_PATH) {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
   if (fromEnv && isExecutableFile(fromEnv)) return fromEnv;
 
-  const onPath = findOnPath();
-  if (onPath) return onPath;
-
-  const radHome = path.join(RAD_HOME_BIN, `rad${EXE}`);
-  if (isExecutableFile(radHome)) return radHome;
+  if (isExecutableFile(managedPath)) return managedPath;
 
   return null;
+}
+
+export function parseRadVersionOutput(stdout) {
+  try {
+    const parsed = JSON.parse(stdout);
+    const version = parsed && (parsed.version || (parsed.cli && parsed.cli.version));
+    return typeof version === "string" && version.trim() ? version.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * radBinaryVersion - best-effort read of a rad binary's own CLI version by
+ * running `rad version --cli --output json` and returning its `version` string
+ * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
+ * it can't be determined. Guarded by a timeout + process-tree kill so a rad that
+ * blocks trying to reach a control plane can never wedge binary resolution.
+ * Never throws — a null result means "version unknown", which callers treat as
+ * "leave the existing binary in place".
+ */
+export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // detached so it leads its own process group and killChildTree can reap
+      // the whole tree on timeout (mirrors runRadAppGraph); windowsHide avoids a
+      // flashing console window.
+      child = spawn(radPath, ["version", "--cli", "--output", "json"], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        detached: true,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+
+    let stdout = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      killChildTree(child);
+      finish(null);
+    }, timeout);
+
+    child.stdout?.on("data", (c) => {
+      if (stdout.length < 1024 * 1024) stdout += c.toString();
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      finish(parseRadVersionOutput(stdout));
+    });
+  });
+}
+
+// Parses the numeric major.minor.patch core out of a version string
+// ("v1.2.3", "1.2.3-rc1-1-gdeadbee", "1.2.3+build") into [major, minor, patch].
+// Any prerelease/build suffix is intentionally ignored — only the core drives
+// precedence here. Returns null when the string has no numeric major.minor.patch.
+export function parseVersion(value) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
+    (value || "").trim(),
+  );
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * compareVersions - compare the major.minor.patch core of two rad versions.
+ * Returns -1 when a < b, 1 when a > b, and 0 when equal. When either string is
+ * unparseable it returns 0, so callers fall back to leaving the current binary
+ * in place rather than churning on an unexpected format. Prerelease and build
+ * suffixes are intentionally ignored: a developer build with the same core
+ * version as the latest release must not be replaced.
+ */
+export function compareVersions(a, b) {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
 }
 
 function githubAuthHeaders() {
@@ -256,32 +347,38 @@ function verifyChecksum(data, expected, tag, assetName) {
   }
 }
 
-async function downloadRad(log) {
-  const { tag, assets } = await latestRelease();
+async function downloadRad(log, { releaseInfo = null } = {}) {
+  const { tag, assets } = releaseInfo || (await latestRelease());
   const asset = releaseAsset();
   const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
-  // Install into the same ~/.rad/bin the official rad CLI uses, so resolution
-  // and download share one location.
-  const dest = path.join(RAD_HOME_BIN, `rad${EXE}`);
-  if (isExecutableFile(dest)) return dest;
-
+  const dest = MANAGED_RAD_PATH;
   const expected = expectedDigest(assets, asset, tag);
-  fs.mkdirSync(RAD_HOME_BIN, { recursive: true });
+  fs.mkdirSync(MANAGED_RAD_BIN, { recursive: true });
+
+  // True when the managed binary already exists and its core version is at least
+  // the target release — the signal that no (further) download is needed.
+  const upToDate = async () => {
+    if (!isExecutableFile(dest)) return false;
+    const current = await radBinaryVersion(dest);
+    return current != null && compareVersions(current, tag) >= 0;
+  };
+  if (await upToDate()) return dest;
 
   // Serialize downloads across processes: if a peer is already fetching rad,
-  // wait for it to publish the binary instead of racing a second ~70MB pull.
-  const lockPath = path.join(RAD_HOME_BIN, `rad${EXE}.download.lock`);
+  // wait for it to publish instead of racing a second ~70MB pull. The atomic
+  // rename below tolerates two writers, so the lock is only an optimization.
+  const lockPath = `${dest}.download.lock`;
   const release = tryAcquireLock(lockPath);
   if (!release) {
     log(`Another process is downloading rad ${tag}; waiting...`);
-    if (await waitForFile(dest, DOWNLOAD_WAIT_MS)) return dest;
-    // Peer never finished within the window — fall through and download it
-    // ourselves. The atomic rename below tolerates both writers.
+    if ((await waitForFile(dest, DOWNLOAD_WAIT_MS)) && (await upToDate())) return dest;
+    // Peer never published a new-enough binary in the window — fetch it
+    // ourselves and let the atomic rename settle any tie.
   }
 
+  let tmp = "";
   try {
-    // A peer may have published dest while we acquired/waited on the lock.
-    if (isExecutableFile(dest)) return dest;
+    if (await upToDate()) return dest; // published while we acquired/waited
 
     log(`Downloading rad ${tag} (${asset})...`);
     const data = await httpGet(url);
@@ -292,22 +389,74 @@ async function downloadRad(log) {
         `Warning: rad ${tag} asset ${asset} has no SHA-256 digest available; skipping verification. Set RADIUS_RAD_SHA256 to enforce verification.`,
       );
     }
-    const tmp = `${dest}.${process.pid}.download`;
+    tmp = `${dest}.${process.pid}.${crypto.randomUUID()}.download`;
     fs.writeFileSync(tmp, data);
     if (!IS_WIN) fs.chmodSync(tmp, 0o755);
     try {
+      // Publish the verified download atomically.
       fs.renameSync(tmp, dest);
+      tmp = "";
     } catch (err) {
-      // Another writer may have created dest already. Accept the existing
-      // binary and clean up our temp copy.
-      try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
-      if (isExecutableFile(dest)) return dest;
+      // Another writer may have published dest first. Accept a good binary;
+      // otherwise surface the error so the previous binary is left untouched.
+      if (await upToDate()) return dest;
       throw err;
     }
     log(`Installed rad to ${dest} (${expected ? `verified against ${expected.source}` : "unverified"})`);
     return dest;
   } finally {
+    if (tmp) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+    }
     if (release) release();
+  }
+}
+
+/**
+ * reconcileWithLatest - given an already-installed rad, make sure it is at least
+ * as new as the latest published release. Returns the path to use: the existing
+ * binary when it is up to date (or when the check can't run), or a freshly
+ * downloaded latest binary when the existing one is older.
+ *
+ * Best-effort by design — any failure to reach the releases API or read the
+ * local version leaves the existing binary in place, so offline/air-gapped use
+ * keeps working. Set RADIUS_RAD_SKIP_VERSION_CHECK to skip the check entirely.
+ */
+async function reconcileWithLatest(existing, log) {
+  if (process.env.RADIUS_RAD_SKIP_VERSION_CHECK) return existing;
+
+  let latest;
+  try {
+    latest = await latestRelease();
+  } catch (err) {
+    log(`Could not check the latest rad release (${err?.message ?? err}); using the installed binary.`);
+    return existing;
+  }
+
+  const localVersion = await radBinaryVersion(existing);
+  if (!localVersion) {
+    log(`Could not determine the version of ${existing}; using it as-is.`);
+    return existing;
+  }
+  if (compareVersions(localVersion, latest.tag) >= 0) {
+    return existing; // already equal to or newer than the latest release
+  }
+
+  // An explicit override is developer-owned and is never updated in place.
+  const overridden =
+    process.env.RADIUS_RAD_BINARY &&
+    path.resolve(process.env.RADIUS_RAD_BINARY) === path.resolve(existing);
+  if (overridden) {
+    log(`Warning: RADIUS_RAD_BINARY rad ${localVersion} is older than the latest release ${latest.tag}; using it anyway. Unset RADIUS_RAD_BINARY to auto-upgrade.`);
+    return existing;
+  }
+
+  log(`Installed rad ${localVersion} is older than the latest release ${latest.tag}; upgrading...`);
+  try {
+    return await downloadRad(log, { releaseInfo: latest });
+  } catch (err) {
+    log(`Could not upgrade rad to ${latest.tag} (${err?.message ?? err}); using ${localVersion}.`);
+    return existing;
   }
 }
 
@@ -324,12 +473,18 @@ export function ensureRadBinary({ log = noop } = {}) {
   ensurePromise = (async () => {
     const existing = resolveExistingRadBinary();
     if (existing) {
-      // Packaging or a partial extract may drop the exec bit — restore it.
-      if (!IS_WIN) {
+      // Only repair permissions on the extension-owned binary. An explicit
+      // override is developer-owned and must never be modified.
+      const managed =
+        !process.env.RADIUS_RAD_BINARY &&
+        path.resolve(existing) === path.resolve(MANAGED_RAD_PATH);
+      if (!IS_WIN && managed) {
         try { fs.chmodSync(existing, 0o755); } catch { /* best-effort */ }
       }
-      cachedRadPath = existing;
-      return existing;
+      // Use the installed rad only if it is at least as new as the latest
+      // release; otherwise reconcileWithLatest upgrades it (best-effort).
+      cachedRadPath = await reconcileWithLatest(existing, log);
+      return cachedRadPath;
     }
     const downloaded = await downloadRad(log);
     cachedRadPath = downloaded;
