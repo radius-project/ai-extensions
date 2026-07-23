@@ -378,9 +378,11 @@ describe("radBinaryVersion", () => {
   });
 });
 
-describe("ensureRadBinary version reconciliation", () => {
-  if (process.platform === "win32") return;
-
+// These reconciliation tests write executable shebang scripts and spawn them as
+// a fake `rad`, which only works on POSIX. Skip (don't silently drop) on Windows
+// so the suite still registers tests rather than erroring as empty.
+const describeReconcile = process.platform === "win32" ? describe.skip : describe;
+describeReconcile("ensureRadBinary version reconciliation", () => {
   const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
   const savedEnv = {};
   let managedBackup = null;

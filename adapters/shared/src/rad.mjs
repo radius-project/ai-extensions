@@ -184,8 +184,14 @@ export function parseRadVersionOutput(stdout) {
  * radBinaryVersion - best-effort read of a rad binary's own CLI version by
  * running `rad version --cli --output json` and returning its `version` string
  * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
- * it can't be determined. Guarded by a timeout + process-tree kill so a rad that
- * blocks trying to reach a control plane can never wedge binary resolution.
+ * it can't be determined. `rad version --cli` skips the control-plane check but
+ * still shells out to the bicep binary (getCliVersionInfo -> bicep.Version() ->
+ * `bicep --version`), so it inherits the same Windows/bicep hazard as
+ * runRadAppGraph: rad+bicep can deadlock at startup inside Node's default Job
+ * Object. We defend the same way — `detached: true` to escape that Job Object,
+ * plus a timeout + process-tree kill as a hard backstop — so a wedged rad can
+ * never stall binary resolution beyond `timeout`. (If bicep isn't installed,
+ * rad returns fast with a "bicep not installed" note and still emits `version`.)
  * Never throws — a null result means "version unknown", which callers treat as
  * "leave the existing binary in place".
  */
@@ -193,9 +199,10 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      // detached so it leads its own process group and killChildTree can reap
-      // the whole tree on timeout (mirrors runRadAppGraph); windowsHide avoids a
-      // flashing console window.
+      // detached so rad (and its bicep grandchild) lead their own process group,
+      // escaping Node's Windows Job Object where rad/bicep can deadlock at startup,
+      // and so killChildTree can reap the whole tree on timeout (mirrors
+      // runRadAppGraph); windowsHide avoids a flashing console window.
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
