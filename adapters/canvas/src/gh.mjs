@@ -276,3 +276,30 @@ export function createPullRequestApi(repo, head, base, title, prBody, timeout = 
         try { child.stdin?.end(body); } catch { /* best-effort */ }
     });
 }
+
+// GET a GitHub JSON resource, surfacing the HTTP status so callers can
+// distinguish "not found" (404) from access/other failures. `gh api` exits
+// non-zero on HTTP errors and prints e.g. "gh: Not Found (HTTP 404)" to stderr;
+// we parse that status out. Optional `headers` are passed as `-H k: v` (used to
+// pin X-GitHub-Api-Version). Resolves `{ ok, status, json, stderr }`; never
+// rejects. stdin is closed so gh can never block on an interactive prompt.
+export function ghApiJson(apiPath, { headers = {}, timeout = 15000 } = {}) {
+    const args = ["api", apiPath];
+    for (const [k, v] of Object.entries(headers)) args.push("-H", `${k}: ${v}`);
+    return new Promise((resolve) => {
+        const child = cliExec("gh", args, { timeout }, (err, stdout, stderr) => {
+            if (!err) {
+                try {
+                    resolve({ ok: true, status: 200, json: JSON.parse(stdout || "null"), stderr: "" });
+                } catch (e) {
+                    resolve({ ok: false, status: 200, json: null, stderr: `failed to parse response: ${e?.message ?? e}` });
+                }
+                return;
+            }
+            const detail = ((stderr && stderr.trim()) || err.message || "").trim();
+            const m = detail.match(/\(HTTP (\d{3})\)/) || detail.match(/\bHTTP (\d{3})\b/);
+            resolve({ ok: false, status: m ? Number(m[1]) : null, json: null, stderr: detail });
+        });
+        try { child.stdin?.end(); } catch { /* best-effort */ }
+    });
+}

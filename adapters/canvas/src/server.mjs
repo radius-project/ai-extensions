@@ -9,7 +9,7 @@
 // extension.ts.
 
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
@@ -22,7 +22,11 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson } from "./gh.mjs";
+import {
+  resolveOidcSubject, buildAppCreateArgs, isServiceTreeError,
+  isUuid, isValidRepoSlug, isAzureName, GITHUB_API_VERSION,
+} from "./azure-oidc.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, buildAppGraphRadCommand, extractAppName } from "./bicep.mjs";
 import {
@@ -747,104 +751,194 @@ function createRequestHandler(instanceId) {
         if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
+            // Cleaned up in finally; declared here so it's reachable from finally.
+            let fedTmpFile = null;
             try {
                 const data = JSON.parse(body);
                 const targetRepo = data.repo || '';
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
+                const serviceManagementReference = data.serviceManagementReference || '';
+
+                function fail(status, error, code, extra) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(status);
+                    res.end(JSON.stringify({ error, ...(code ? { code } : {}), ...(extra || {}) }));
+                }
 
                 if (!targetRepo || !resourceGroup || !clusterName) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'repo, resourceGroup, and cluster are required.' }));
+                    fail(400, 'repo, resourceGroup, and cluster are required.', 'missing-params');
+                    return;
+                }
+                // Validate every value that reaches an `az`/`gh` argv. execFile
+                // does not use a shell, but a leading '-' could still be parsed
+                // as a flag, and a bad repo slug would corrupt the OIDC subject.
+                if (!isValidRepoSlug(targetRepo)) {
+                    fail(400, `Invalid repository "${targetRepo}". Expected "owner/repo".`, 'invalid-repo');
+                    return;
+                }
+                if (!isAzureName(resourceGroup)) {
+                    fail(400, `Invalid resource group name "${resourceGroup}".`, 'invalid-resource-group');
+                    return;
+                }
+                if (!isAzureName(clusterName)) {
+                    fail(400, `Invalid cluster name "${clusterName}".`, 'invalid-cluster');
+                    return;
+                }
+                if (data.tenantId && !isUuid(data.tenantId)) {
+                    fail(400, `Invalid tenantId "${data.tenantId}" (expected a GUID).`, 'invalid-tenant');
+                    return;
+                }
+                if (data.subscriptionId && !isUuid(data.subscriptionId)) {
+                    fail(400, `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`, 'invalid-subscription');
+                    return;
+                }
+                if (serviceManagementReference && !isUuid(serviceManagementReference)) {
+                    fail(400, `Invalid serviceManagementReference "${serviceManagementReference}". It must be a Service Tree GUID.`, 'invalid-smr');
                     return;
                 }
 
+                // Run `az` non-interactively: close stdin so it can never block on
+                // an interactive prompt inside this GUI host process.
                 function runCmd(cmd, args) {
                     return new Promise((resolve) => {
-                        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
+                        try { child.stdin?.end(); } catch { /* best-effort */ }
                     });
                 }
+                const ghJsonRunner = (apiPath) =>
+                    ghApiJson(apiPath, { headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION } });
 
                 const steps = [];
 
-                // Step 1: Get account info — use provided values or fall back to az CLI
-                let tenantId = data.tenantId || '';
-                let subscriptionId = data.subscriptionId || '';
+                // Step 1: Confirm az login and align the active tenant. We always
+                // read `az account show` so we can verify the active tenant
+                // matches the requested one before creating any app registration.
+                steps.push('Checking Azure CLI login...');
+                const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
+                if (acctResult.code !== 0) {
+                    fail(400, 'Azure CLI not logged in. Run "az login" first.', 'az-not-logged-in', { steps });
+                    return;
+                }
+                let account;
+                try {
+                    account = JSON.parse(acctResult.stdout);
+                } catch (e) {
+                    fail(400, 'Could not parse "az account show" output.', 'az-account-parse', { steps });
+                    return;
+                }
+                const activeTenant = account.tenantId;
+                const activeSub = account.id;
+                const tenantId = data.tenantId || activeTenant;
+                const subscriptionId = data.subscriptionId || activeSub;
 
-                if (!tenantId || !subscriptionId) {
-                    steps.push('Checking Azure CLI login...');
-                    const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
-                    if (acctResult.code !== 0) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Azure CLI not logged in. Run "az login" first.', steps }));
-                        return;
-                    }
-                    const account = JSON.parse(acctResult.stdout);
-                    tenantId = tenantId || account.tenantId;
-                    subscriptionId = subscriptionId || account.id;
+                // Fail with guidance when the signed-in tenant is not the one the
+                // credentials will be created in — otherwise the app would land in
+                // the wrong directory.
+                if (tenantId && activeTenant && tenantId.toLowerCase() !== activeTenant.toLowerCase()) {
+                    fail(400,
+                        `Azure CLI is signed in to tenant ${activeTenant}, but tenant ${tenantId} was requested. ` +
+                        `Run "az login --tenant ${tenantId}" and retry.`,
+                        'az-tenant-mismatch', { steps });
+                    return;
                 }
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 2: Create a fresh App Registration. We always auto-create
+                // Step 2: Resolve the exact OIDC subject BEFORE creating anything.
+                // This reads the canonical repo + subject customization from
+                // GitHub and fails closed on any ambiguity, so we never write a
+                // federated credential that GitHub won't match at deploy time.
+                steps.push('Resolving GitHub OIDC subject...');
+                // TODO(defer): enterprise-claim handling (AADSTS7002381) and any
+                // package-scope / workflow-permission changes are intentionally
+                // out of scope for this fix.
+                let oidc;
+                try {
+                    oidc = await resolveOidcSubject(
+                        {
+                            targetRepo,
+                            suffix: `environment:${envName}`,
+                            immutableOverride: typeof data.immutableSubject === 'boolean' ? data.immutableSubject : undefined,
+                        },
+                        ghJsonRunner,
+                    );
+                } catch (e) {
+                    fail(400, e.message, e.code || 'oidc-subject-failed', { steps });
+                    return;
+                }
+                steps.push(`✅ OIDC subject: ${oidc.subject}`);
+
+                // Step 3: Create a fresh App Registration. We always auto-create
                 // new credentials rather than reusing an existing Client ID.
+                // TODO(defer): full identity reconciliation/replacement of an
+                // existing app registration across reruns is out of scope here.
                 const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
                 steps.push(`Creating App Registration: ${appName}...`);
-                const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
+                const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
                 if (appResult.code !== 0) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
+                    // Enterprise tenants require a Service Tree id. Detect that
+                    // specific policy failure and give the user an actionable
+                    // remedy, preserving the raw error.
+                    if (!serviceManagementReference && isServiceTreeError(appResult.stderr)) {
+                        fail(400,
+                            'This Entra tenant requires a Service Tree ID (serviceManagementReference) on new App Registrations. ' +
+                            'Re-run and provide your Service Tree ID.',
+                            'service-tree-required',
+                            { steps, azError: appResult.stderr });
+                        return;
+                    }
+                    fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
                     return;
                 }
                 const clientId = appResult.stdout.trim();
                 steps.push(`✅ App Registration created: ${clientId}`);
 
-                // Step 3: Create Service Principal
+                // Step 4: Create Service Principal (FATAL on failure).
                 steps.push('Creating Service Principal...');
                 const spResult = await runCmd('az', ['ad', 'sp', 'create', '--id', clientId]);
                 if (spResult.code !== 0 && !spResult.stderr.includes('already exists')) {
-                    // SP might already exist, try to get it
+                    // The SP may already exist under a different identity; confirm.
                     const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
                     if (spShow.code !== 0) {
-                        steps.push('⚠️ Could not create/find Service Principal: ' + spResult.stderr);
+                        fail(400, 'Could not create or find the Service Principal: ' + spResult.stderr, 'sp-failed', { steps, clientId, azError: spResult.stderr });
+                        return;
                     }
                 }
                 steps.push('✅ Service Principal ready');
 
-                // Step 4: Create Federated Credential for GitHub Actions OIDC
+                // Step 5: Create the Federated Credential (FATAL on failure).
                 steps.push('Creating federated credential for GitHub OIDC...');
                 const fedParams = JSON.stringify({
                     name: `github-actions-${envName}`,
                     issuer: 'https://token.actions.githubusercontent.com',
-                    subject: `repo:${targetRepo}:environment:${envName}`,
+                    subject: oidc.subject,
                     audiences: ['api://AzureADTokenExchange']
                 });
-                const { writeFileSync, unlinkSync } = await import("node:fs");
+                const { writeFileSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
-                const fedTmpFile = join(tmpdir(), 'fed-cred-' + Date.now() + '.json');
-                writeFileSync(fedTmpFile, fedParams);
+                // Unpredictable filename so a shared tmpdir can't be pre-created or
+                // read by another local user.
+                fedTmpFile = join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`);
+                writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
                 const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
-                try { unlinkSync(fedTmpFile); } catch {}
                 if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Federated credential warning: ' + fedResult.stderr);
-                } else {
-                    steps.push('✅ Federated credential created');
+                    fail(400, 'Failed to create federated credential: ' + fedResult.stderr, 'federated-credential-failed', { steps, clientId, azError: fedResult.stderr });
+                    return;
                 }
+                steps.push('✅ Federated credential created');
 
-                // Step 5: Assign Contributor role on the resource group
+                // Step 6: Assign Contributor role on the resource group (FATAL).
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
                 const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
-                } else {
-                    steps.push('✅ Contributor role assigned');
+                    fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, azError: roleResult.stderr });
+                    return;
                 }
+                steps.push('✅ Contributor role assigned');
 
                 // Return all credentials for the environment setup
                 res.setHeader("Content-Type", "application/json");
@@ -857,12 +951,17 @@ function createRequestHandler(instanceId) {
                     resourceGroup,
                     cluster: clusterName,
                     appName,
+                    subject: oidc.subject,
                     steps
                 }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: e.message }));
+            } finally {
+                if (fedTmpFile) {
+                    try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
+                }
             }
             return;
         }
