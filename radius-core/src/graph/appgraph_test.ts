@@ -184,6 +184,54 @@ describe("applicationGraphToResources", () => {
     expect(resources[0].diffHash).toBe(alternateHash);
   });
 
+  it("reads codeReference from resource properties (rad app graph shape)", () => {
+    const resources = applicationGraphToResources([
+      {
+        id: frontendId,
+        name: "frontend",
+        type: "Radius.Compute/containers",
+        diffHash: frontendHash,
+        properties: { codeReference: "src/index.js#L18" },
+      },
+    ]);
+    expect(resources[0].codeReference).toBe("src/index.js#L18");
+  });
+
+  it("prefers the codeReference in properties over a legacy top-level one", () => {
+    const resources = applicationGraphToResources([
+      {
+        id: frontendId,
+        name: "frontend",
+        type: "Radius.Compute/containers",
+        diffHash: frontendHash,
+        codeReference: "legacy.js#L1",
+        properties: { codeReference: "src/index.js#L18" },
+      },
+    ]);
+    expect(resources[0].codeReference).toBe("src/index.js#L18");
+  });
+
+  it("falls back to a legacy top-level codeReference when properties lacks one", () => {
+    const resources = applicationGraphToResources([
+      {
+        id: frontendId,
+        name: "frontend",
+        type: "Radius.Compute/containers",
+        diffHash: frontendHash,
+        codeReference: "legacy.js#L1",
+        properties: { image: "node:18" },
+      },
+    ]);
+    expect(resources[0].codeReference).toBe("legacy.js#L1");
+  });
+
+  it("defaults codeReference to an empty string when absent", () => {
+    const resources = applicationGraphToResources([
+      { id: frontendId, name: "frontend", type: "Radius.Compute/containers", diffHash: frontendHash },
+    ]);
+    expect(resources[0].codeReference).toBe("");
+  });
+
   it("throws when diffHash is missing even with dependsOn present", () => {
     expect(() => applicationGraphToResources([
       { id: frontendId, name: "frontend", type: "Radius.Compute/containers", properties: { image: "node:18" }, dependsOn: [cacheId] },

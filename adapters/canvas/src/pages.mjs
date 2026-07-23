@@ -101,9 +101,8 @@ export function pageShell(title, bodyContent, activeNav) {
     flex: 0 0 auto;
     display: flex; align-items: center; justify-content: center;
     width: 32px; height: 32px;
-    border: 1px solid var(--rad-stroke);
     border-radius: 8px;
-    background: var(--rad-surface);
+    background: transparent;
   }
   .rad-topnav__label { white-space: nowrap; }
 

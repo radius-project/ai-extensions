@@ -81,6 +81,14 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
         expect(CLIENT_GRAPH_JS).toContain('data-local-src="1"');
     });
 
+    it("makes the in-card local source link open the file directly via an inline handler", () => {
+        // Self-contained onclick so the link works without relying on the
+        // container click delegation (the node-html-label overlay can otherwise
+        // route the click to the card/popup). dataset.* avoids nested quotes.
+        expect(CLIENT_GRAPH_JS).toContain("window.radiusOpenLocalSource(this.dataset.srcPath,parseInt(this.dataset.srcLine,10)||0)");
+        expect(CLIENT_GRAPH_JS).toContain("event.preventDefault();event.stopPropagation();");
+    });
+
     it("renders a disabled source row for a local node with no reference (no GitHub fallback)", () => {
         expect(CLIENT_GRAPH_JS).toContain('aria-disabled="true" title="No source reference found"');
     });
@@ -115,5 +123,14 @@ describe("CLIENT_GRAPH_JS — local-workspace source links (editor canvas)", () 
     it("binds the card click handler once per container to avoid duplicate opens", () => {
         expect(CLIENT_GRAPH_JS).toContain("container.removeEventListener('click', container._radiusClickHandler)");
         expect(CLIENT_GRAPH_JS).toContain("container._radiusClickHandler = function(e)");
+    });
+
+    it("only opens the popup on a node tap for native nodes, not rendered HTML cards", () => {
+        // In card mode the popup is driven solely by the container delegation
+        // (••• / card body), which excludes the in-card "View source code" link
+        // so it navigates on its own. Gating the cytoscape node-tap on
+        // !htmlLabelsApplied stops the source link from ALSO opening the popup.
+        expect(CLIENT_GRAPH_JS).toContain("if (!htmlLabelsApplied) {");
+        expect(CLIENT_GRAPH_JS).toContain("cy.on('tap', 'node', function(e) { openNodePopup(e.target); });");
     });
 });
