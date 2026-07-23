@@ -5,7 +5,7 @@ description: Build and visualize the Radius application graph for a repository. 
 
 # Radius — App Graph
 
-Build and display the Radius application graph for a repo. The graph is assembled from `app.bicep` with the same `rad app graph <app.bicep> --include-icons` path used by the Radius CLI, then rendered in the `radius` canvas using Cytoscape.
+Build and display the Radius application graph for a repo. The graph is assembled from `app.bicep` with the same `rad app graph <app.bicep> --include-icons` path used by the Radius CLI, then rendered in the `radius` canvas using React Flow.
 
 ## When to use this skill
 
@@ -35,7 +35,7 @@ The renderer ports the production improvements from `radius-project/github-exten
   - `Failed` → bold red border + red fill
   - `Succeeded` → falls back to diff coloring
 - **Cross-edge classification** — edges that point to a same-rank or backward-rank node (cycles, lateral links) render as **dashed red** instead of the default grey arrow; helps spot non-DAG structure at a glance.
-- **Configurable line type** — `radiusRenderGraph(..., { lineType })` accepts Cytoscape curve styles (`taxi`, `straight`, `unbundled-bezier`, `segments`, etc.). Defaults to `taxi`.
+- **Configurable line type** — `radiusRenderGraph(..., { lineType })` accepts React Flow edge types (`default` bezier, `straight`, `step`, `smoothstep`). Legacy aliases (`taxi`, `segments`) map to `smoothstep`. Defaults to `default` (bezier).
 - **Source-code links** — a node with a `codeReference` renders a clickable deep link to where the resource is defined/initialized in the repo (path + optional `#L<line>`). See [Source-code references](#source-code-references).
 
 ## Source-code references
@@ -129,7 +129,7 @@ The canvas will:
 
 ## Related files
 
-- `plugins/radius/extension.mjs` — Cytoscape rendering + styling (`radiusRenderGraph`)
+- `plugins/radius/extension.mjs` — React Flow rendering + styling (`radiusRenderGraph`)
 - `plugins/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node

@@ -205,6 +205,20 @@ export async function readWorkspaceFile(workspacePath, repoPath) {
     }
 }
 
+// True when a repo-relative path resolves to an existing entry inside the given
+// workspace checkout. Used to decide whether an "open in editor canvas" can
+// actually succeed (the editor open silently no-ops for a file that isn't on the
+// worktree) before falling back to a GitHub URL. Returns false on any
+// resolution/traversal error or when either argument is missing.
+export async function workspaceFileExists(workspacePath, repoPath) {
+    if (!workspacePath || !repoPath) return false;
+    try {
+        return await pathExists(safeWorkspacePath(workspacePath, repoPath));
+    } catch {
+        return false;
+    }
+}
+
 // Candidate locations for a workspace app.bicep, in priority order. The graph
 // JSON is saved next to whichever one is actually found.
 const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];

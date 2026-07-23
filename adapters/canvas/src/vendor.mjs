@@ -1,31 +1,47 @@
 // Canvas adapter — vendored CDN script cache.
 //
-// Fetches the browser graph libraries (cytoscape + dagre) once and inlines them
-// directly into rendered HTML pages, avoiding CSP/loading issues in the canvas
-// webview that block external scripts. Pre-fetched at module load so the first
-// page render already has them cached.
+// Fetches the browser graph libraries (React, ReactDOM, React Flow + its CSS,
+// and dagre) once and inlines them directly into rendered HTML pages, avoiding
+// CSP/loading issues in the canvas webview that block external scripts.
+// Pre-fetched at module load so the first page render already has them cached.
+//
+// React Flow renders the application graph (modeled / planned / deployed / diff);
+// dagre computes the hierarchical node layout. The React Flow stylesheet is
+// required for the pane transform and node/edge positioning to work, so it is
+// inlined into the page <head> via getInlineVendorStyles().
 
 import https from "node:https";
 
+// Order matters for the scripts: React and ReactDOM must be defined as globals
+// before the React Flow UMD bundle executes (it reads window.React / window.ReactDOM).
 const VENDOR_URLS = {
-    'cytoscape': 'https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js',
+    'react': 'https://unpkg.com/react@18/umd/react.production.min.js',
+    'react-dom': 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+    'reactflow': 'https://unpkg.com/reactflow@11/dist/umd/index.js',
     'dagre': 'https://unpkg.com/dagre@0.8.5/dist/dagre.min.js',
-    'cytoscape-dagre': 'https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js',
-    'cytoscape-node-html-label': 'https://unpkg.com/cytoscape-node-html-label@1.2.2/dist/cytoscape-node-html-label.js',
+};
+// CSS assets inlined into <head> as <style> tags.
+const VENDOR_STYLE_URLS = {
+    'reactflow-css': 'https://unpkg.com/reactflow@11/dist/style.css',
 };
 const vendorCache = new Map(); // name → content string
 
-function fetchVendorScript(url) {
+function fetchVendorScript(url, redirectsLeft = 5) {
     return new Promise((resolve) => {
         https.get(url, { timeout: 15000 }, (resp) => {
-            // Follow redirects
+            // Follow redirects. unpkg resolves floating tags (react@18 →
+            // react@18.3.1) with a *relative* Location header, so resolve it
+            // against the current URL and follow up to redirectsLeft hops.
             if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-                https.get(resp.headers.location, { timeout: 15000 }, (resp2) => {
-                    let data = '';
-                    resp2.on('data', c => data += c);
-                    resp2.on('end', () => resolve(data));
-                    resp2.on('error', () => resolve(null));
-                }).on('error', () => resolve(null));
+                resp.resume(); // drain the redirect body
+                if (redirectsLeft <= 0) { resolve(null); return; }
+                const next = new URL(resp.headers.location, url).toString();
+                resolve(fetchVendorScript(next, redirectsLeft - 1));
+                return;
+            }
+            if (resp.statusCode < 200 || resp.statusCode >= 300) {
+                resp.resume();
+                resolve(null);
                 return;
             }
             let data = '';
@@ -36,9 +52,10 @@ function fetchVendorScript(url) {
     });
 }
 
-// Ensure all vendor scripts are loaded (called before rendering pages)
+// Ensure all vendor assets (scripts + styles) are loaded (called before rendering pages)
 export async function ensureVendorScripts() {
-    for (const [name, url] of Object.entries(VENDOR_URLS)) {
+    const all = { ...VENDOR_URLS, ...VENDOR_STYLE_URLS };
+    for (const [name, url] of Object.entries(all)) {
         if (!vendorCache.has(name)) {
             const content = await fetchVendorScript(url);
             if (content) vendorCache.set(name, content);
@@ -46,16 +63,26 @@ export async function ensureVendorScripts() {
     }
 }
 
-// Returns inline <script> tags with the library code embedded
+// Returns inline <style> tags for the vendored CSS (React Flow). Injected into
+// the page <head> before our own .rad-node styles so our overrides win.
+export function getInlineVendorStyles() {
+    // Escape </style> inside the CSS to prevent premature tag closure
+    const esc = (s) => (s || '').replace(/<\/style>/gi, '<\\/style>');
+    const rfCss = esc(vendorCache.get('reactflow-css'));
+    return `<style>${rfCss}</style>`;
+}
+
+// Returns inline <script> tags with the library code embedded, in load order:
+// React → ReactDOM → React Flow → dagre.
 export function getInlineVendorScripts() {
     // Escape </script> inside lib code to prevent premature tag closure
     const esc = (s) => (s || '').replace(/<\/script>/gi, '<\\/script>');
-    const cy = esc(vendorCache.get('cytoscape'));
-    const dg = esc(vendorCache.get('dagre'));
-    const cd = esc(vendorCache.get('cytoscape-dagre'));
-    const nhl = esc(vendorCache.get('cytoscape-node-html-label'));
-    return `<script>${cy}</script>\n<script>${dg}</script>\n<script>${cd}</script>\n<script>${nhl}</script>`;
+    const react = esc(vendorCache.get('react'));
+    const reactDom = esc(vendorCache.get('react-dom'));
+    const reactFlow = esc(vendorCache.get('reactflow'));
+    const dagre = esc(vendorCache.get('dagre'));
+    return `<script>${react}</script>\n<script>${reactDom}</script>\n<script>${reactFlow}</script>\n<script>${dagre}</script>`;
 }
 
-// Pre-fetch all vendor scripts at extension startup
+// Pre-fetch all vendor assets at extension startup
 (async () => { await ensureVendorScripts(); })();

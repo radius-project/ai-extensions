@@ -5,7 +5,7 @@
 // ./shared.mjs. No I/O, routing, or business logic here.
 
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
-import { getInlineVendorScripts } from "./vendor.mjs";
+import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
 import { isWorkspaceSelection } from "./workspace.mjs";
@@ -26,6 +26,7 @@ export function pageShell(title, bodyContent, activeNav) {
 <meta charset="utf-8" />
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='64' fill='%23da4c2a'/%3E%3Ccircle cx='64' cy='64' r='56' fill='%23bb311e' opacity='0.3'/%3E%3Cline x1='64' y1='64' x2='34' y2='28' stroke='white' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='64' r='8' fill='white'/%3E%3C/svg%3E" />
 <title>${title} — Radius</title>
+${getInlineVendorStyles()}
 <style>
   /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
   :root {
@@ -250,7 +251,7 @@ export function pageShell(title, bodyContent, activeNav) {
     pointer-events: auto; cursor: pointer;
   }
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
-  .rad-node__icon { width: 32px; height: 32px; flex: none; }
+  .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
   .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
   .rad-node__source {
@@ -291,6 +292,39 @@ export function pageShell(title, bodyContent, activeNav) {
   }
   .rad-feedback__link + .rad-feedback__link { border-top: 1px solid var(--rad-stroke); }
   .rad-feedback__link:hover { background: var(--rad-bg-subtle); text-decoration: underline; }
+
+  /* ─── React Flow overrides ────────────────────────────────────────────────
+     React Flow ships opinionated defaults (node chrome, visible connection
+     handles, a light canvas). We render our own figma .rad-node cards, so strip
+     React Flow's node box and hide the handles; the card supplies all visuals. */
+  .rad-flow-host { width: 100%; height: 100%; }
+  .react-flow, .react-flow__renderer, .react-flow__pane { width: 100%; height: 100%; }
+  .react-flow__node { font-family: var(--rad-font); font-size: 13px; }
+  /* Custom "rad" node type: no default background/border/padding — the card owns it. */
+  .react-flow__node-rad {
+    background: transparent; border: none; border-radius: 0; padding: 0;
+    box-shadow: none; width: auto;
+  }
+  .react-flow__node-rad.selected, .react-flow__node-rad:focus, .react-flow__node-rad:focus-visible {
+    outline: none; box-shadow: none;
+  }
+  .rad-node-shell { position: relative; }
+  /* Edge handles exist only so React Flow can route edges; make them invisible
+     and non-interactive so they never intercept card clicks. */
+  .react-flow__handle.rad-handle {
+    width: 1px; height: 1px; min-width: 0; min-height: 0;
+    background: transparent; border: none; opacity: 0; pointer-events: none;
+  }
+  .react-flow__attribution { background: transparent; font-size: 10px; }
+  .react-flow__attribution a { color: var(--rad-text-tertiary); }
+  .react-flow__controls { box-shadow: 0 1px 4px rgba(0,0,0,0.12); border-radius: 6px; overflow: hidden; }
+  .react-flow__controls-button {
+    background: var(--rad-surface); border-bottom: 1px solid var(--rad-stroke);
+    color: var(--rad-text); width: 26px; height: 26px;
+  }
+  .react-flow__controls-button:hover { background: var(--rad-bg-subtle); }
+  .react-flow__controls-button svg { fill: currentColor; }
+  .react-flow__minimap { background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -2797,23 +2831,7 @@ function deployProgressView(state) {
   <div id="deploy-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:250px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
-${getInlineVendorScripts()}
 <script>
-cytoscape.use(cytoscapeDagre);
-
-var STATUS_COLORS = {
-    pending: { border: '#8b949e', bg: '#f6f8fa' },
-    in_progress: { border: '#d29922', bg: '#fff8c5' },
-    postponed: { border: '#d29922', bg: '#fff8c5' },
-    waiting: { border: '#d29922', bg: '#fff8c5' },
-    success: { border: '#1a7f37', bg: '#dcffe4' },
-    failed: { border: '#cf222e', bg: '#ffebe9' }
-};
-
-function getStatusColor(status) {
-    return STATUS_COLORS[status] || STATUS_COLORS.pending;
-}
-
 var resources = ${resourcesJson};
 var DEPLOY_REPO = ${JSON.stringify(targetRepo)};
 var DEPLOY_BRANCH = ${JSON.stringify(targetBranch)};
@@ -2850,43 +2868,10 @@ if (resources.length === 0) {
     });
 }
 
-// Use the shared radiusRenderGraph renderer for consistent graph display
-var cy = radiusRenderGraph('graph-container', resources, { enablePopup: true });
-
-// After rendering, apply deployment status colors to nodes
-if (cy) {
-    cy.nodes().forEach(function(node) {
-        var nodeId = node.id();
-        // Find the matching resource by id/name
-        var r = resources.find(function(res) { return (res.id || res.name) === nodeId; });
-        if (r) {
-            var status = r.deployStatus || 'pending';
-            var colors = getStatusColor(status);
-            node.style('border-color', colors.border);
-            node.style('border-width', 3);
-            node.style('background-color', colors.bg);
-            node.data('status', status);
-        }
-        // Check if it's an output resource node
-        if (nodeId.includes('/output/')) {
-            var parentId = nodeId.split('/output/')[0];
-            var parentRes = resources.find(function(res) { return (res.id || res.name) === parentId; });
-            if (parentRes && parentRes.outputResources) {
-                var outName = nodeId.split('/output/')[1];
-                var out = parentRes.outputResources.find(function(o) { return o.name === outName; });
-                if (out) {
-                    var outStatus = out.deployStatus || 'pending';
-                    var outColors = getStatusColor(outStatus);
-                    node.style('border-color', outColors.border);
-                    node.style('border-width', 2);
-                    node.style('background-color', outColors.bg);
-                    node.data('status', outStatus);
-                    if (out.portalUrl) node.data('portalUrl', out.portalUrl);
-                }
-            }
-        }
-    });
-}
+// Render the planned graph via the shared React Flow renderer. deployMode folds
+// the deploy-status -> node color mapping into the renderer, and the returned
+// controller's update() re-colors nodes as the deployment progresses.
+var graph = resources.length ? radiusRenderGraph('graph-container', resources, { enablePopup: true, deployMode: true }) : null;
 
 // Log output
 var logOutput = document.getElementById('deploy-log-output');
@@ -2902,31 +2887,10 @@ logOutput.scrollTop = logOutput.scrollHeight;
 // Poll for deployment status updates
 var deployPoll = setInterval(function() {
     fetch('/api/deploy-status?since=' + LOG_TOTAL).then(function(r) { return r.json(); }).then(function(d) {
-        if (d.resources && cy) {
-            for (var i = 0; i < d.resources.length; i++) {
-                var r = d.resources[i];
-                var nodeId = r.id || r.name;
-                var node = cy.getElementById(nodeId);
-                if (node.length) {
-                    var colors = getStatusColor(r.deployStatus || 'pending');
-                    node.style('border-color', colors.border);
-                    node.style('background-color', colors.bg);
-                    node.data('status', r.deployStatus);
-                }
-                if (r.outputResources) {
-                    for (var k = 0; k < r.outputResources.length; k++) {
-                        var out = r.outputResources[k];
-                        var outNode = cy.getElementById(nodeId + '/output/' + out.name);
-                        if (outNode.length) {
-                            var outColors = getStatusColor(out.deployStatus || 'pending');
-                            outNode.style('border-color', outColors.border);
-                            outNode.style('background-color', outColors.bg);
-                            outNode.data('status', out.deployStatus);
-                            if (out.portalUrl) outNode.data('portalUrl', out.portalUrl);
-                        }
-                    }
-                }
-            }
+        // Push fresh deploy-status onto the graph; the renderer re-colors nodes
+        // (top-level and output) from each resource's deployStatus.
+        if (d.resources && graph) {
+            graph.update(d.resources);
         }
         // Append new logs (incremental — server sends only lines past LOG_TOTAL)
         if (d.logsNew && d.logsNew.length) {
@@ -2954,27 +2918,5 @@ var deployPoll = setInterval(function() {
 
 // Do NOT auto-start a new deploy — the workflow was already triggered from the environment page.
 // Just poll for status updates on the existing run.
-
-// Node click handler for deep links to Azure Portal / AWS Console
-if (cy) {
-    cy.on('tap', 'node', function(e) {
-        var node = e.target;
-        var d = node.data();
-        if (d.portalUrl) {
-            window.open(d.portalUrl, '_blank');
-        }
-    });
-    cy.on('mouseover', 'node', function(e) {
-        var d = e.target.data();
-        if (d.status === 'success' && d.portalUrl) {
-            document.getElementById('graph-container').style.cursor = 'pointer';
-            e.target.style('border-width', 4);
-        }
-    });
-    cy.on('mouseout', 'node', function(e) {
-        document.getElementById('graph-container').style.cursor = 'default';
-        e.target.style('border-width', e.target.data('borderWidth') || 3);
-    });
-}
 <\/script>`);
 }
