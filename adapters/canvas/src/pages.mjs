@@ -2505,6 +2505,13 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
+// Environments that currently have a deployment which blocks a NEW deploy
+// (status success / pending / deleting), keyed by env name → status. Rebuilt from
+// each successful deployments listing. A failed deployment does NOT block, so a
+// retry/redeploy over a failure is allowed. Used by refreshDeployBtn to disable
+// the Deploy button for the selected environment.
+var DEPLOYED_ENVS = {};
+function envIsBlocked(status) { return status === 'success' || status === 'pending' || status === 'deleting'; }
 
 // Renders an inline status banner (Figma: green success / red error with a ✓/⚠
 // icon and a dismiss ✕). The message node uses textContent by default so
@@ -2548,7 +2555,22 @@ function refreshDeployBtn() {
     } else {
         deployBtn.dataset.mode = 'deploy';
         deployBtn.textContent = 'Deploy';
-        deployBtn.disabled = !(CTX_REPO && appSelect.value && envSelect.value);
+        var selEnv = envSelect.value;
+        // Block deploying to an environment that already has an active deployment
+        // (success/pending/deleting). Switching the dropdown to a free environment
+        // re-enables the button. A failed deployment does not block (retry allowed).
+        var blockedStatus = selEnv ? DEPLOYED_ENVS[selEnv] : '';
+        deployBtn.disabled = !(CTX_REPO && appSelect.value && selEnv) || !!blockedStatus;
+        if (blockedStatus) {
+            if (blockedStatus === 'deleting') {
+                deployBtn.title = 'Application is being deleted from environment "' + selEnv + '". Wait for the delete to finish before deploying again.';
+            } else {
+                var active = blockedStatus === 'pending' ? 'already has a deployment in progress in' : 'already has an active deployment in';
+                deployBtn.title = 'Application ' + active + ' environment "' + selEnv + '". Delete the existing deployment before deploying again.';
+            }
+        } else {
+            deployBtn.removeAttribute('title');
+        }
     }
 }
 
@@ -2620,7 +2642,15 @@ function loadDeployments(fresh) {
             // load-error row and leave any previous state to the next refresh.
             if (d && d.error) { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
             var deps = (d && d.deployments) || [];
-            if (deps.length === 0) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+            if (deps.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+            // Rebuild the set of environments whose deployment blocks a new deploy,
+            // honoring optimistic overrides, then refresh the Deploy button state.
+            DEPLOYED_ENVS = {};
+            deps.forEach(function(dep) {
+                var st = OP_STATUS[opKey(dep.app, dep.environment)] || dep.status;
+                if (envIsBlocked(st)) DEPLOYED_ENVS[dep.environment] = st;
+            });
+            refreshDeployBtn();
             var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
             body.innerHTML = deps.map(function(dep) {
                 // A GitHub deployment record is only created once the deploy/delete
