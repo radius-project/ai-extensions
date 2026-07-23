@@ -78,22 +78,32 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
 
     it("renders the in-card source link two ways: local editor-canvas open in a worktree, native GitHub anchor on a remote branch", () => {
         // A local-workspace graph (localSource) opens the on-disk worktree file in the
-        // Copilot editor canvas (side pane) via radiusOpenLocalSource; a remote-branch
-        // graph uses a plain target=_blank GitHub anchor the host opens in the browser.
+        // Copilot editor canvas (side pane) via radiusOpenLocalSource, passing the
+        // node's GitHub URL as the fallback; a remote-branch graph uses a plain
+        // target=_blank GitHub anchor the host opens in the browser.
         expect(CLIENT_GRAPH_JS).toContain("if (localSource && d.srcPath) {");
-        expect(CLIENT_GRAPH_JS).toContain("radiusOpenLocalSource(d.srcPath, d.srcLine)");
-        expect(CLIENT_GRAPH_JS).toContain("} else if (!localSource && d.sourceUrl) {");
+        expect(CLIENT_GRAPH_JS).toContain("radiusOpenLocalSource(d.srcPath, d.srcLine, d.sourceUrl)");
+        expect(CLIENT_GRAPH_JS).toContain("href: d.sourceUrl || '#'");
+        expect(CLIENT_GRAPH_JS).toContain("} else if (d.sourceUrl) {");
         expect(CLIENT_GRAPH_JS).toContain("href: d.sourceUrl, target: '_blank', rel: 'noopener noreferrer'");
         // The superseded single-branch guard is gone.
         expect(CLIENT_GRAPH_JS).not.toContain("var canLinkSrc = d.sourceUrl && (!localSource || d.srcPath);");
-        // Navigation is still never done via window.open (blocked in the webview).
-        expect(CLIENT_GRAPH_JS).not.toContain("window.open(");
     });
 
     it("opens local worktree files by POSTing the repo-relative path to /api/open-source (same-origin, not blocked in the webview)", () => {
-        expect(CLIENT_GRAPH_JS).toContain("function radiusOpenLocalSource(relPath, line)");
+        expect(CLIENT_GRAPH_JS).toContain("function radiusOpenLocalSource(relPath, line, fallbackUrl)");
         expect(CLIENT_GRAPH_JS).toContain("fetch('/api/open-source'");
         expect(CLIENT_GRAPH_JS).toContain("JSON.stringify({ path: relPath, line: line || 0 })");
+    });
+
+    it("falls back to opening the GitHub URL when the local open fails (non-2xx / too-coarse localSource)", () => {
+        // radiusOpenExternal opens the fallback via a synthetic target=_blank anchor
+        // click (the host opens it in the system browser); window.open is only a
+        // nested last resort. Wired to the fetch's non-ok and error paths so a
+        // remote graph mislabeled localSource still resolves to a real GitHub page.
+        expect(CLIENT_GRAPH_JS).toContain("function radiusOpenExternal(url)");
+        expect(CLIENT_GRAPH_JS).toContain("if (!r || !r.ok) radiusOpenExternal(fallbackUrl);");
+        expect(CLIENT_GRAPH_JS).toContain(".catch(function() { radiusOpenExternal(fallbackUrl); })");
     });
 
     it("marks interactive card children nodrag/nopan so React Flow's drag layer never swallows their clicks", () => {
@@ -113,15 +123,18 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
         // Remote branch: native GitHub anchors.
         expect(CLIENT_GRAPH_JS).toContain("linkRow(ICON_SRC, 'View source code', d.sourceUrl, true)");
         expect(CLIENT_GRAPH_JS).toContain("linkRow(ICON_DEF, 'View app definition', defUrl, true)");
-        // Local workspace: editor-canvas rows carrying the repo-relative path/line.
-        expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine)");
-        expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine)");
+        // Local workspace: editor-canvas rows carrying the repo-relative path/line and
+        // a GitHub fallback URL used when the file is not on this checkout.
+        expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine, d.sourceUrl)");
+        expect(CLIENT_GRAPH_JS).toContain("localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine, defUrlLocal)");
         expect(CLIENT_GRAPH_JS).toContain("data-local-src=");
+        expect(CLIENT_GRAPH_JS).toContain("data-fallback-url=");
     });
 
-    it("delegates clicks on a data-local-src row to the local editor-canvas open", () => {
+    it("delegates clicks on a data-local-src row to the local editor-canvas open, threading the GitHub fallback URL", () => {
         expect(CLIENT_GRAPH_JS).toContain("e.target.closest('[data-local-src]')");
         expect(CLIENT_GRAPH_JS).toContain("localEl.getAttribute('data-local-src')");
+        expect(CLIENT_GRAPH_JS).toContain("localEl.getAttribute('data-fallback-url')");
     });
 
     it("renders nodes through a custom React Flow node type built from native elements", () => {

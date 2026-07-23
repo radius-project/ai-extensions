@@ -535,25 +535,46 @@ function radiusRenderGraph(containerId, resources, options) {
         return parseInt(codeRef.split('#L')[1], 10) || 0;
     }
 
+    // Open an external URL (a GitHub blob/tree link) the way clicking a native
+    // target="_blank" anchor would, which the host opens in the system browser.
+    // Used as the fallback whenever a local open is not possible.
+    function radiusOpenExternal(url) {
+        if (!url) return;
+        try {
+            var a = document.createElement('a');
+            a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        } catch (e) {
+            try { window.open(url, '_blank', 'noopener'); } catch (e2) { /* best-effort */ }
+        }
+    }
+
     // Open a repo-relative worktree file in the Copilot editor canvas (side pane).
     // The webview has no SDK session handle, so it asks the local canvas server
     // (POST /api/open-source), which calls canvas.open({canvasId:"editor",
-    // scope:"repo", path}). Used only for local-workspace graphs (localSource):
-    // the graphed files are the on-disk checkout, so this opens exactly what was
+    // scope:"repo", path}). Used for local-workspace graphs (localSource): the
+    // graphed files are the on-disk checkout, so this opens exactly what was
     // graphed — including uncommitted edits — instead of a GitHub blob URL that
     // would 404 on an unpushed branch. It is a same-origin fetch (the page is
     // served by this same server), so unlike window.open / cross-origin
-    // navigation it is not blocked in the embedded webview. Best-effort: a failed
-    // open just leaves the side pane unchanged.
-    function radiusOpenLocalSource(relPath, line) {
-        if (!relPath) return;
+    // navigation it is not blocked in the embedded webview.
+    //
+    // localSource is a coarse, page-level flag (repo + branch match the
+    // workspace), so it can be true for a node whose file is NOT actually on this
+    // checkout. In that case the server returns a non-2xx (NOT_ON_WORKTREE) and we
+    // fall back to opening the file's GitHub URL, so the link is never a dead end
+    // and a remote graph always resolves to a real https://github.com/... page.
+    function radiusOpenLocalSource(relPath, line, fallbackUrl) {
+        if (!relPath) { radiusOpenExternal(fallbackUrl); return; }
         try {
             fetch('/api/open-source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: relPath, line: line || 0 })
-            }).catch(function() {});
-        } catch (e) { /* best-effort */ }
+            }).then(function(r) {
+                if (!r || !r.ok) radiusOpenExternal(fallbackUrl);
+            }).catch(function() { radiusOpenExternal(fallbackUrl); });
+        } catch (e) { radiusOpenExternal(fallbackUrl); }
     }
 
     function getNodeColors(r) {
@@ -766,9 +787,10 @@ function radiusRenderGraph(containerId, resources, options) {
         // "View source code" behavior depends on where the graph was resolved from:
         //   • local-workspace graph (localSource) with a code reference → open the
         //     on-disk worktree file in the Copilot editor canvas (side pane) via the
-        //     local server. A GitHub blob URL is deliberately NOT used here: it 404s
-        //     for an unpushed worktree branch, and the graph (with line numbers) was
-        //     built from the on-disk checkout, so the local file is the exact match.
+        //     local server. The node's GitHub blob URL rides along as the href /
+        //     fallback: if the file isn't actually on this checkout the server
+        //     returns non-2xx and the click falls back to opening GitHub, so a graph
+        //     whose coarse localSource flag was wrong still resolves to a real page.
         //   • remote-branch graph → native GitHub anchor (target="_blank"), which the
         //     host opens in the system browser.
         // Only stopPropagation, so the card's own click (opening the details popup)
@@ -776,18 +798,18 @@ function radiusRenderGraph(containerId, resources, options) {
         // disabled row.
         if (localSource && d.srcPath) {
             srcRow = h('a', {
-                className: 'rad-node__source nodrag nopan', href: '#',
-                onClick: function(e) { e.preventDefault(); e.stopPropagation(); radiusOpenLocalSource(d.srcPath, d.srcLine); }
-            }, glyph, label);
-        } else if (!localSource && d.sourceUrl) {
-            srcRow = h('a', {
-                className: 'rad-node__source nodrag nopan', href: d.sourceUrl, target: '_blank', rel: 'noopener noreferrer',
-                onClick: function(e) { e.stopPropagation(); }
+                className: 'rad-node__source nodrag nopan', href: d.sourceUrl || '#',
+                onClick: function(e) { e.preventDefault(); e.stopPropagation(); radiusOpenLocalSource(d.srcPath, d.srcLine, d.sourceUrl); }
             }, glyph, label);
         } else if (localSource) {
             srcRow = h('span', {
                 className: 'rad-node__source', role: 'button', 'aria-disabled': 'true',
                 title: 'No source reference found', style: { opacity: 0.5, cursor: 'default' }
+            }, glyph, label);
+        } else if (d.sourceUrl) {
+            srcRow = h('a', {
+                className: 'rad-node__source nodrag nopan', href: d.sourceUrl, target: '_blank', rel: 'noopener noreferrer',
+                onClick: function(e) { e.stopPropagation(); }
             }, glyph, label);
         } else {
             srcRow = h('span', { className: 'rad-node__source', role: 'button' }, glyph, label);
@@ -899,24 +921,31 @@ function radiusRenderGraph(containerId, resources, options) {
             };
             // A local link row: same look as linkRow, but opens an on-disk worktree
             // file in the editor canvas instead of navigating. The repo-relative
-            // path/line ride on data attributes; the container click delegation
-            // reads them and calls radiusOpenLocalSource. A muted "path:line"
-            // subtitle mirrors linkRow's URL subtitle.
-            var localLinkRow = function(iconSvg, label, relPath, line) {
+            // path/line and a GitHub fallback URL ride on data attributes; the
+            // container click delegation reads them and calls radiusOpenLocalSource
+            // (which falls back to the GitHub URL when the file is not on this
+            // checkout). The fallback URL is also the anchor href so the row is a
+            // real link (copyable / right-clickable). A muted "path:line" subtitle
+            // mirrors linkRow's URL subtitle.
+            var localLinkRow = function(iconSvg, label, relPath, line, fallbackUrl) {
                 var subText = escLocal(relPath) + (line ? ':' + line : '');
                 var sub = '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + subText + '</div>';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="#" data-local-src="' + escLocal(relPath) + '" data-local-line="' + (line || 0) + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(fallbackUrl || '#') + '" data-local-src="' + escLocal(relPath) + '" data-local-line="' + (line || 0) + '" data-fallback-url="' + escLocal(fallbackUrl || '') + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
             // Source + app-definition links. For a local-workspace graph
             // (localSource) they open the on-disk worktree file in the editor canvas
-            // (side pane); for a remote-branch graph they are native GitHub anchors.
-            // The source row shows only when a real code reference exists; the app
-            // definition (.radius/app.bicep) shows whenever it is known.
+            // (side pane), with the file's GitHub URL as a fallback if it is not on
+            // this checkout; for a remote-branch graph they are native GitHub
+            // anchors. The source row shows only when a real code reference exists;
+            // the app definition (.radius/app.bicep) shows whenever it is known.
             if (localSource) {
-                if (d.srcPath) links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine));
-                if (d.defFile) links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine));
+                if (d.srcPath) links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine, d.sourceUrl));
+                if (d.defFile) {
+                    var defUrlLocal = repoUrl ? (repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '')) : '';
+                    links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine, defUrlLocal));
+                }
             } else {
                 if (d.sourceUrl) {
                     links.push(linkRow(ICON_SRC, 'View source code', d.sourceUrl, true));
@@ -984,7 +1013,11 @@ function radiusRenderGraph(containerId, resources, options) {
             var localEl = e.target.closest && e.target.closest('[data-local-src]');
             if (localEl) {
                 e.preventDefault();
-                radiusOpenLocalSource(localEl.getAttribute('data-local-src'), parseInt(localEl.getAttribute('data-local-line'), 10) || 0);
+                radiusOpenLocalSource(
+                    localEl.getAttribute('data-local-src'),
+                    parseInt(localEl.getAttribute('data-local-line'), 10) || 0,
+                    localEl.getAttribute('data-fallback-url') || ''
+                );
                 return;
             }
             // Clicks inside the popup, or on a node card, are handled by their own
