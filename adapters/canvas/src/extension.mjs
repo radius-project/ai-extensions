@@ -22,6 +22,7 @@ import {
     isWorkspaceSelection,
     parseRepoFromRemote,
     toSafeRepoRelPath,
+    workspaceFileExists,
 } from "./workspace.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
@@ -106,7 +107,7 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
         if (found.some(Boolean)) return; // at least one branch has it → nothing to do
 
         try {
-            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page))).catch(() => {});
+            Promise.resolve(session.send(appBicepHandoffPrompt(repo, page, branches))).catch(() => {});
         } catch { /* session.send unavailable → ignore */ }
     } catch { /* never block canvas open on handoff failure */ }
 }
@@ -201,6 +202,12 @@ const session = await joinSession({
                             };
                             setSourceRefResources(entry, "graph", ctx.input.resources, context);
                             setSourceRefResources(entry, "planned", ctx.input.resources, context);
+                            // No authoritative app.bicep fetch on this path — clear any
+                            // provenance flag left over from a prior HTTP load so the page
+                            // falls back to (fail-closed) repo+branch matching against the
+                            // worktree context rather than trusting a stale value.
+                            delete entry.state.graphFromWorkspace;
+                            delete entry.state.plannedFromWorkspace;
                         }
                         entry.state.activeGraphView = "graph";
                         entry.url = `${entry.baseUrl}/?page=graph`;
@@ -714,23 +721,33 @@ When a recipe is not found for a resource type during planned graph resolution, 
 // Wire the server-side app.bicep handoff to the SDK session. Graph/generate
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
-setAppBicepHandoff(({ repo, page }) => session.send(appBicepHandoffPrompt(repo, page)));
+setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
 
-// Wire the "View source code" click for local-workspace graphs to the Copilot
-// editor canvas (side pane). The graph + line numbers are generated from the
-// on-disk worktree checkout, so opening the repo-relative file there always
-// matches what was graphed (including uncommitted edits) — unlike a GitHub blob
-// URL, which 404s for an unpushed worktree branch. A stable instanceId means
-// every click reuses one editor panel instead of stacking new ones. Errors are
-// re-thrown (after logging) so the /api/open-source caller returns a non-2xx and
-// the webview can flag the failed open to the user instead of dead-clicking.
-setOpenSourceHandler(async ({ path: relPath }) => {
+// Wire the "View source code" / "View app definition" click for local-workspace
+// graphs to the Copilot editor canvas (side pane). The graph + line numbers are
+// generated from the on-disk worktree checkout, so opening the repo-relative file
+// there matches what was graphed (including uncommitted edits) — unlike a GitHub
+// blob URL, which 404s for an unpushed worktree branch. A stable instanceId means
+// every click reuses one editor panel instead of stacking new ones.
+//
+// canvas.open({createIfMissing:false}) SILENTLY resolves for a file that isn't on
+// the worktree (a dead click with no error), so we first verify the file exists on
+// this session's checkout and throw NOT_ON_WORKTREE when it doesn't. Any throw is
+// logged and re-thrown so /api/open-source returns a non-2xx and the webview falls
+// back to the file's GitHub URL instead of dead-clicking.
+setOpenSourceHandler(async ({ path: relPath, state }) => {
     // Re-validate independently of the server route: reject absolute / drive /
     // UNC / traversal paths so this stays safe even if reused by another caller.
     // toSafeRepoRelPath is OS-independent, so the same rules hold on Win/macOS/Linux.
     let safe = "";
     try {
         safe = toSafeRepoRelPath(relPath);
+        const worktree = state && state.workspacePath;
+        if (!worktree || !(await workspaceFileExists(worktree, safe))) {
+            const err = new Error("file is not on this worktree");
+            err.code = "NOT_ON_WORKTREE";
+            throw err;
+        }
         await session.rpc.canvas.open({
             canvasId: "editor",
             instanceId: "radius-source",
@@ -738,7 +755,7 @@ setOpenSourceHandler(async ({ path: relPath }) => {
                 scope: "repo",
                 path: safe,
                 title: safe.split("/").pop() || safe,
-                placement: { focus: true },
+                placement: { focus: true, surface: "side" },
                 createIfMissing: false,
             },
         });

@@ -112,6 +112,29 @@ describe("graphPage — localSource provenance flag", () => {
         });
         expect(html).toContain("localSource: false");
     });
+
+    it("honors the persisted graphFromWorkspace:false even when repo+branch match", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+            graphFromWorkspace: false,
+        });
+        expect(html).toContain("localSource: false");
+    });
+
+    it("honors the persisted graphFromWorkspace:true", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "main",
+            graphFromWorkspace: true,
+        });
+        expect(html).toContain("localSource: true");
+    });
 });
 
 describe("plannedGraphPage", () => {
@@ -125,6 +148,19 @@ describe("plannedGraphPage", () => {
             workspaceBranch: "feature-x",
         });
         expect(html).toContain("localSource: true");
+    });
+
+    it("honors the persisted plannedFromWorkspace:false even when repo+branch match", () => {
+        const html = plannedGraphPage({
+            plannedResources: sampleResources,
+            plannedRepo: "octo/app",
+            plannedBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+            plannedFromWorkspace: false,
+        });
+        expect(html).toContain("localSource: false");
     });
 
     it("renders the empty (plan) branch with no removed tokens", () => {
@@ -161,6 +197,23 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("/api/save-credential-profile");
         // The old inline provider picker was removed from the env-create form.
         expect(html).not.toContain('id="env-provider-select"');
+    });
+});
+
+describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
+    it("passes repoUrl, branch (head), and baseBranch to radiusRenderGraph so buildSourceUrl doesn't short-circuit on missing repoUrl", () => {
+        const html = graphDiffPage({
+            diffResources: sampleResources,
+            diffBase: "main",
+            diffHead: "feature",
+            diffTargetRepo: "octo/app",
+        });
+        expect(html).toContain("radiusRenderGraph('graph-container', resources, {");
+        expect(html).toContain("diffMode: true");
+        expect(html).toContain("repoUrl: DIFF_REPO_URL");
+        expect(html).toContain("branch: 'feature'");
+        expect(html).toContain("baseBranch: 'main'");
+        expect(html).toContain("var DIFF_REPO_URL = 'https://github.com/' + document.getElementById('diff-repo-select').value.trim();");
     });
 });
 
