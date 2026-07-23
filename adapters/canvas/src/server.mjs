@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
@@ -2066,11 +2066,11 @@ function createRequestHandler(instanceId) {
                 const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
-                // Fetch recipes from GitHub (radius-project/resource-types-contrib)
+                // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
                 let recipes = [];
-                addProgress('Fetching recipes from GitHub...');
-                recipes = await fetchRecipesFromGitHub(github, provider);
-                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from GitHub.`);
+                addProgress('Fetching the default recipe pack from GitHub...');
+                recipes = await fetchRecipePack(github, provider);
+                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the ${provider} recipe pack.`);
 
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
@@ -2312,7 +2312,7 @@ function createRequestHandler(instanceId) {
                                 const content = selection.content;
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
-                                    const recipes = await fetchRecipesFromGitHub(github, provider);
+                                    const recipes = await fetchRecipePack(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
                                     const committed = setSourceRefResources(entry, "planned", planned, {

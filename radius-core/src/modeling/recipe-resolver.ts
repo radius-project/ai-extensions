@@ -1,90 +1,43 @@
 // @ts-nocheck — verbatim-moved orchestration from the canvas monolith.
 // Reaches the outside world only through the injected GitHub port; full
 // strict-mode typing is deferred to a follow-up (see design doc Goal 5).
-// Recipe resolution that needs GitHub access — discovers recipes in
+// Recipe resolution that needs GitHub access — reads the default recipe pack in
 // radius-project/resource-types-contrib and resolves a planned app's abstract
-// resources to the concrete cloud/k8s resources each recipe deploys. Reaches
-// GitHub only through the injected {@link GitHub} port; the pure recipe parsing
-// helpers live in ./terraform, ./recipes. When no discovered recipe matches a
-// resource type, resolution yields no outputs — custom-type recipes are handled
-// by recipe packs at deploy time, not fabricated here.
+// resources to the concrete cloud/k8s resource each recipe deploys. Reaches
+// GitHub only through the injected {@link GitHub} port; the pure recipe-pack
+// parsing/derivation helpers live in ./recipe-pack. When the pack has no recipe
+// for a resource type, resolution yields no outputs — custom-type recipes are
+// handled by recipe packs at deploy time, not fabricated here.
 
 import type { GitHub } from "../ports/index.js";
 import { getPlatform } from "../platforms/index.js";
-import { parseTerraformResources } from "./terraform.js";
-import { parseRecipeResources } from "./recipes.js";
+import {
+    parseRecipePack,
+    deriveConcreteResource,
+    recipePackContentPath,
+} from "./recipe-pack.js";
 
-export async function loadRecipeResources(gh, recipePath, format) {
-    const ghApiGetContent = (p) => gh.getContent(p);
-    const ghApiListNames = (p) => gh.listNames(p);
-    const files = await ghApiListNames(`/repos/radius-project/resource-types-contrib/contents/${recipePath}`);
-    if (files.length === 0) return null;
-    const mainFile = files.find(f => f.endsWith('.bicep') || f === 'main.tf') || files[0];
-    const content = await ghApiGetContent(`/repos/radius-project/resource-types-contrib/contents/${recipePath}/${mainFile}`);
-    if (!content) return null;
-    const concreteResources = format === 'terraform'
-        ? parseTerraformResources(content)
-        : parseRecipeResources(content);
-    return { format, content, concreteResources };
-}
+// Fetch the provider's default recipe pack and resolve each entry to the primary
+// concrete resource its recipe deploys. Replaces the legacy per-recipe tree walk:
+// instead of discovering and parsing individual recipe files under
+// <Category>/<type>/recipes/, we read the single authoritative recipe-pack file
+// (recipepack/<provider>/*.bicep) that the deploy skill treats as canonical.
+export async function fetchRecipePack(gh, provider) {
+    const content = await gh.getContent(recipePackContentPath(provider));
+    if (!content) return [];
 
-export async function fetchRecipesFromGitHub(gh, provider) {
-    // resource-types-contrib structure: <Category>/<typeName>/recipes/<platform>/<format>/
-    // Platforms: kubernetes, aws, azure
-    // Format: bicep, terraform
-    const platform = getPlatform(provider)?.recipePlatform || 'kubernetes';
-
-    // Dynamically discover resource types from the repo tree
-    const tree = await gh.treePaths('radius-project/resource-types-contrib', 'main');
-
-    // Find all resource type directories that have recipe folders
-    const recipePattern = /^([^/]+\/[^/]+)\/recipes\//;
-    const discoveredTypes = new Set();
-    for (const path of tree) {
-        const match = path.match(recipePattern);
-        if (match) discoveredTypes.add(match[1]);
-    }
-
-    // Build resource type list from discovered directories
-    const resourceTypes = [...discoveredTypes].map(dir => {
-        const typeName = dir.split('/').pop();
-        const category = dir.split('/')[0];
-        return { dir, type: `Radius.${category}/${typeName}` };
-    });
-
-    // Fallback to known types if tree fetch fails
-    if (resourceTypes.length === 0) {
-        const knownTypes = [
-            { dir: 'Compute/containers', type: 'Radius.Compute/containers' },
-            { dir: 'Compute/containerImages', type: 'Radius.Compute/containerImages' },
-            { dir: 'Compute/routes', type: 'Radius.Compute/routes' },
-            { dir: 'Compute/persistentVolumes', type: 'Radius.Compute/persistentVolumes' },
-            { dir: 'Data/mySqlDatabases', type: 'Radius.Data/mySqlDatabases' },
-            { dir: 'Data/postgreSqlDatabases', type: 'Radius.Data/postgreSqlDatabases' },
-            { dir: 'Data/neo4jDatabases', type: 'Radius.Data/neo4jDatabases' },
-            { dir: 'Security/secrets', type: 'Radius.Security/secrets' },
-        ];
-        resourceTypes.push(...knownTypes);
-    }
-
+    const entries = parseRecipePack(content);
     const recipes = [];
-    for (const rt of resourceTypes) {
-        // Try bicep first, then terraform
-        for (const format of ['bicep', 'terraform']) {
-            const recipePath = `${rt.dir}/recipes/${platform}/${format}`;
-            const loaded = await loadRecipeResources(gh, recipePath, format);
-            if (!loaded) continue;
-
-            recipes.push({
-                name: rt.dir.split('/').pop(),
-                resourceType: rt.type,
-                templateKind: format,
-                templatePath: `ghcr.io/radius-project/resource-types-contrib/${recipePath}`,
-                provider: platform,
-                concreteResources: loaded.concreteResources
-            });
-            break; // Use first available format
-        }
+    for (const entry of entries) {
+        const concrete = deriveConcreteResource(entry.source);
+        recipes.push({
+            name: entry.resourceType.split('/').pop(),
+            resourceType: entry.resourceType,
+            templateKind: entry.kind,
+            templatePath: entry.source,
+            provider: concrete?.provider || provider,
+            concreteResources: concrete ? [concrete] : [],
+        });
     }
     return recipes;
 }
@@ -113,9 +66,9 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
         const rawType = appRes.type.split('@')[0];
         const baseType = normalizeType(rawType);
 
-        // Match a real recipe discovered from resource-types-contrib by resource
-        // type (try both normalized and raw). Recipe resolution for custom types
-        // is owned by recipe packs at deploy time and the radius-app-bicep skill —
+        // Match a recipe from the default recipe pack by resource type (try both
+        // normalized and raw). Recipe resolution for custom/unlisted types is
+        // owned by recipe packs at deploy time and the radius-app-bicep skill —
         // this modeling code no longer fabricates outputs when nothing matches.
         const matchingRecipe = recipes.find(r => r.resourceType === baseType) ||
                                recipes.find(r => r.resourceType === rawType);
