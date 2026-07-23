@@ -596,8 +596,8 @@ function radiusRenderGraph(containerId, resources, options) {
             }
         }
         // Live deployment status colors (the "Deploying" page passes deployMode).
-        if (deployMode && r.deployStatus) {
-            var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus] || RADIUS_DEPLOY_STATUS_COLORS.pending;
+        if (deployMode) {
+            var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
         }
         // Non-diff nodes use the clean "modeled graph" card style: a white
@@ -699,6 +699,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
                 sourceUrl: buildSourceUrl(r.codeReference || '', srcBranch),
+                sourceBranch: srcBranch,
                 srcPath: srcPathFromRef(r.codeReference || ''),
                 srcLine: srcLineFromRef(r.codeReference || ''),
                 defFile: r.definitionFile || '.radius/app.bicep',
@@ -969,7 +970,7 @@ function radiusRenderGraph(containerId, resources, options) {
             if (localSource) {
                 if (d.srcPath) links.push(localLinkRow(ICON_SRC, 'View source code', d.srcPath, d.srcLine, d.sourceUrl));
                 if (d.defFile) {
-                    var defUrlLocal = repoUrl ? (repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '')) : '';
+                    var defUrlLocal = repoUrl ? (repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '')) : '';
                     links.push(localLinkRow(ICON_DEF, 'View app definition', d.defFile, d.defLine, defUrlLocal));
                 }
             } else {
@@ -977,7 +978,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     links.push(linkRow(ICON_SRC, 'View source code', d.sourceUrl, true));
                 }
                 if (repoUrl && d.defFile) {
-                    var defUrl = repoUrl + '/blob/' + branch + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
+                    var defUrl = repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile + (d.defLine ? '#L' + d.defLine : '');
                     links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
                 }
             }

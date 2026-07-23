@@ -50,7 +50,7 @@ describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () 
     });
 
     it("builds the app definition link from a GitHub /blob/ URL", () => {
-        expect(CLIENT_GRAPH_JS).toContain("repoUrl + '/blob/' + branch + '/' + d.defFile");
+        expect(CLIENT_GRAPH_JS).toContain("repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile");
         expect(CLIENT_GRAPH_JS).toContain("View app definition");
     });
 
@@ -204,6 +204,19 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Plann
         expect(CLIENT_GRAPH_JS).toContain("var diffBaseBranch = options.baseBranch || branch;");
         expect(CLIENT_GRAPH_JS).toContain("var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;");
         expect(CLIENT_GRAPH_JS).toContain("sourceUrl: buildSourceUrl(r.codeReference || '', srcBranch)");
+        expect(CLIENT_GRAPH_JS).toContain("sourceBranch: srcBranch");
         expect(CLIENT_GRAPH_JS).toContain("function buildSourceUrl(codeRef, branchOverride)");
+    });
+
+    it("uses the same per-node branch for a removed resource's app-definition link", () => {
+        expect(CLIENT_GRAPH_JS).toContain("repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile");
+    });
+});
+
+describe("CLIENT_GRAPH_JS — deployment status colors", () => {
+    it("renders resources without an explicit deploy status as pending instead of ordinary modeled nodes", () => {
+        expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
+        expect(CLIENT_GRAPH_JS).toContain("RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending']");
+        expect(CLIENT_GRAPH_JS).not.toContain("if (deployMode && r.deployStatus) {");
     });
 });
