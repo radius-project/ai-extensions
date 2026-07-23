@@ -152,9 +152,9 @@ registry the recipe pack configures via `containerImagesRegistry`. When that
 registry requires authentication (the common case — e.g. `ghcr.io/<owner>/<repo>`,
 which needs a token to push), the recipe reads the push credentials from a
 Kubernetes Secret named by the pack's `containerImagesRegistrySecretName` =
-**`ghcr-registry-creds`** on the target cluster. So the app definition must stay
+**`radius-ghcr-registry-creds`** on the target cluster. So the app definition must stay
 in parity with that pack parameter: when the target registry needs credentials,
-author a matching registry-credentials Secret named exactly `ghcr-registry-creds`.
+author a matching registry-credentials Secret named exactly `radius-ghcr-registry-creds`.
 
 An **unauthenticated** registry (e.g. a local/in-cluster registry the recipe pack
 configures with an empty `containerImagesRegistrySecretName`) needs no
@@ -173,12 +173,12 @@ param registryUsername string
 param registryPassword string
 
 // Registry push credentials for the containerImages recipe. The name MUST be
-// exactly 'ghcr-registry-creds' to match the recipe pack's
+// exactly 'radius-ghcr-registry-creds' to match the recipe pack's
 // containerImagesRegistrySecretName — the recipe reads the push credentials
 // from a Secret of that name on the target cluster. Omit this resource entirely
 // when pushing to an unauthenticated registry.
 resource registryCreds 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: 'ghcr-registry-creds'
+  name: 'radius-ghcr-registry-creds'
   properties: {
     environment: environment
     application: app.id
@@ -214,13 +214,13 @@ resource myImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
 Registry-credentials rules:
 
 - Author the registry Secret only when the push registry requires authentication. For an unauthenticated registry, omit the Secret, the `registryUsername`/`registryPassword` params, and the `dependsOn` — the recipe pack registers the recipe with an empty `containerImagesRegistrySecretName` in that case
-- WHEN the Secret is authored, its resource name MUST be exactly `ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other name means the recipe can't find the push credentials
+- WHEN the Secret is authored, its resource name MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other name means the recipe can't find the push credentials
 - Author it with the two keys `username` and `password` (lowercase, exactly these keys — the recipe reads them by name)
 - Populate the keys from a plain `param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials
 - Add `dependsOn: [registryCreds]` on the `containerImages` resource so the Secret exists on the target cluster before the build/push runs
 - Do NOT set a registry on the `containerImages` resource — the push registry (`ghcr.io/<owner>/<repo>`) is an operator concern supplied by the recipe pack's `containerImagesRegistry` parameter, not the app definition
 - `registryUsername`/`registryPassword` are supplied by the deploy workflow from the runner identity (`github.actor` / `GITHUB_TOKEN`); they are workflow-managed parameters, so the extension never surfaces them in the deploy UI or auto-generates values for them. Declare them but do not give them defaults
-- When authored, use exactly one `ghcr-registry-creds` Secret even when the app builds several images — all `containerImages` resources share the one registry Secret and each `dependsOn` it
+- When authored, use exactly one `radius-ghcr-registry-creds` Secret even when the app builds several images — all `containerImages` resources share the one registry Secret and each `dependsOn` it
 
 ## Radius.Data/* structure
 
@@ -277,7 +277,7 @@ resource dbSecret 'Radius.Security/secrets@2025-08-01-preview' = {
 Rules:
 Rules:
 
-- Use only when the exact schema supports it: for a type's required secret input (`secretName`), app secrets/config files, or the `ghcr-registry-creds` registry-push Secret required by a `Radius.Compute/containerImages` build when the push registry is authenticated (see [containerImages](#radiuscomputecontainerimages-structure))
+- Use only when the exact schema supports it: for a type's required secret input (`secretName`), app secrets/config files, or the `radius-ghcr-registry-creds` registry-push Secret required by a `Radius.Compute/containerImages` build when the push registry is authenticated (see [containerImages](#radiuscomputecontainerimages-structure))
 - Do not re-author a recipe-generated output. Bind directly from its schema-declared managed secret, or report that the exact contract cannot supply it
 - Never set authored secret `data.value` from a recipe resource's sensitive output or a guessed convenience property
 - NEVER hardcode passwords — use `@secure() param`
