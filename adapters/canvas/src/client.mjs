@@ -578,12 +578,15 @@ function radiusRenderGraph(containerId, resources, options) {
     }
 
     function getNodeColors(r) {
+        // Diff mode keeps the same white card surface as the Modeled/Planned
+        // graphs — only the border color encodes the diff status, so the
+        // resource card itself is visually identical everywhere else.
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
-                case 'added': return { bg: '#dcfce7', border: '#16a34a' };
-                case 'removed': return { bg: '#fee2e2', border: '#dc2626' };
-                case 'modified': return { bg: '#fef9c3', border: '#ca8a04' };
-                default: return { bg: '#f3f4f6', border: '#9ca3af' };
+                case 'added': return { bg: '#ffffff', border: '#16a34a' };
+                case 'removed': return { bg: '#ffffff', border: '#dc2626' };
+                case 'modified': return { bg: '#ffffff', border: '#ca8a04' };
+                default: return { bg: '#ffffff', border: '#d0d7de' };
             }
         }
         // Live deployment status colors (the "Deploying" page passes deployMode).
@@ -617,6 +620,18 @@ function radiusRenderGraph(containerId, resources, options) {
             if (edgeSeen[id]) return;
             edgeSeen[id] = true;
             var stroke = dashed ? '#57606a' : '#8c959f';
+            // Diff mode colors the edge by whether the CONNECTION itself
+            // changed between base and head, not by either endpoint's own
+            // status alone: a removed endpoint wins (red), then an added
+            // endpoint (green); otherwise the edge stays neutral gray. A
+            // "modified" endpoint never colors an edge.
+            if (diffMode) {
+                var sStatus = diffStatusById[source] || '';
+                var tStatus = diffStatusById[target] || '';
+                if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
+                else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
+                else stroke = '#8c959f';
+            }
             var style = { stroke: stroke, strokeWidth: 1.5 };
             if (dashed) style.strokeDasharray = '6 4';
             edges.push({
@@ -638,9 +653,13 @@ function radiusRenderGraph(containerId, resources, options) {
         // same concrete resource as a duplicate output child under OTHER
         // resources, which otherwise produces two nodes for one secret.
         var ownedOutputIds = {};
+        // Diff mode looks up each edge endpoint's diffStatus by id/name to
+        // decide the edge color (see pushEdge above).
+        var diffStatusById = {};
         for (var oi = 0; oi < resList.length; oi++) {
             var orr = resList[oi];
             var oid = orr.id || orr.name;
+            diffStatusById[oid] = orr.diffStatus || '';
             var oouts = orr.outputResources || [];
             for (var oj = 0; oj < oouts.length; oj++) {
                 if (oouts[oj] && oouts[oj].id && oouts[oj].name === orr.name) {
@@ -955,10 +974,6 @@ function radiusRenderGraph(containerId, resources, options) {
                     links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
                 }
             }
-            if (diffMode && d.diffStatus) {
-                var statusLabel = d.diffStatus.charAt(0).toUpperCase() + d.diffStatus.slice(1);
-                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">Status: <strong style="color:var(--rad-text,#1a1a1a);">' + statusLabel + '</strong></div>');
-            }
             // Live portal link surfaced during deployment (Azure portal / AWS console).
             if (d.portalUrl) {
                 links.push(linkRow(ICON_LINK, 'View in portal', d.portalUrl, false));
@@ -1032,16 +1047,9 @@ function radiusRenderGraph(containerId, resources, options) {
         popupCtl.close = function() { popup.style.display = 'none'; };
     }
 
-    // Show legend for diff mode
-    if (diffMode) {
-        var legend = document.createElement('div');
-        legend.className = 'legend';
-        legend.innerHTML = '<div class="legend-item"><span class="legend-dot" style="background:#16a34a;"></span>Added</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#dc2626;"></span>Removed</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#ca8a04;"></span>Modified</div>' +
-            '<div class="legend-item"><span class="legend-dot" style="background:#9ca3af;"></span>Unchanged</div>';
-        container.parentNode.insertBefore(legend, container);
-    } else if (options.showLegend) {
+    // Diff mode intentionally shows NO legend — the graph must look
+    // identical to the Planned graph aside from node border / edge colors.
+    if (options.showLegend && !diffMode) {
         // Build a resource-type legend from the categories actually present in
         // the graph. Nodes render as uniform white cards, so category is conveyed
         // by the icon (owned by the type/recipe pack); the legend shows that same

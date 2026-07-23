@@ -159,3 +159,44 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
         expect(CLIENT_GRAPH_JS).toContain("container._radiusClickHandler = function(e)");
     });
 });
+
+describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Planned, only border/edge color differs)", () => {
+    it("keeps diff node backgrounds white and colors only the border by diff status", () => {
+        expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: '#ffffff', border: '#16a34a' };");
+        expect(CLIENT_GRAPH_JS).toContain("case 'removed': return { bg: '#ffffff', border: '#dc2626' };");
+        expect(CLIENT_GRAPH_JS).toContain("case 'modified': return { bg: '#ffffff', border: '#ca8a04' };");
+        // Unchanged / unknown status falls back to the same neutral gray used
+        // by the non-diff modeled/planned cards.
+        expect(CLIENT_GRAPH_JS).toContain("default: return { bg: '#ffffff', border: '#d0d7de' };");
+        // No tinted diff backgrounds remain.
+        expect(CLIENT_GRAPH_JS).not.toContain("#dcfce7");
+        expect(CLIENT_GRAPH_JS).not.toContain("#fee2e2");
+        expect(CLIENT_GRAPH_JS).not.toContain("#fef9c3");
+        expect(CLIENT_GRAPH_JS).not.toContain("#f3f4f6");
+    });
+
+    it("colors diff edges from the endpoint diff statuses: removed wins, then added, else neutral gray", () => {
+        expect(CLIENT_GRAPH_JS).toContain("var sStatus = diffStatusById[source] || '';");
+        expect(CLIENT_GRAPH_JS).toContain("var tStatus = diffStatusById[target] || '';");
+        expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';");
+        expect(CLIENT_GRAPH_JS).toContain("else stroke = '#8c959f';");
+    });
+
+    it("builds a diffStatusById lookup from the resource list for edge coloring", () => {
+        expect(CLIENT_GRAPH_JS).toContain("diffStatusById[oid] = orr.diffStatus || '';");
+    });
+
+    it("has no diff Status line in the node popup (popup is identical to Planned/Modeled)", () => {
+        expect(CLIENT_GRAPH_JS).not.toContain("Status: <strong");
+        expect(CLIENT_GRAPH_JS).not.toContain("d.diffStatus.charAt(0).toUpperCase()");
+    });
+
+    it("shows no diff legend (Added/Removed/Modified/Unchanged dots removed entirely)", () => {
+        expect(CLIENT_GRAPH_JS).not.toContain("legend-dot\" style=\"background:#16a34a;\"></span>Added");
+        expect(CLIENT_GRAPH_JS).not.toContain("legend-dot\" style=\"background:#dc2626;\"></span>Removed");
+        expect(CLIENT_GRAPH_JS).not.toContain("legend-dot\" style=\"background:#ca8a04;\"></span>Modified");
+        expect(CLIENT_GRAPH_JS).not.toContain("legend-dot\" style=\"background:#9ca3af;\"></span>Unchanged");
+        expect(CLIENT_GRAPH_JS).toContain("if (options.showLegend && !diffMode) {");
+    });
+});
