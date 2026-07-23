@@ -199,4 +199,11 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Plann
         expect(CLIENT_GRAPH_JS).not.toContain("legend-dot\" style=\"background:#9ca3af;\"></span>Unchanged");
         expect(CLIENT_GRAPH_JS).toContain("if (options.showLegend && !diffMode) {");
     });
+
+    it("points a removed resource's source link at the base branch (its file may not exist on head) while other statuses use the page branch", () => {
+        expect(CLIENT_GRAPH_JS).toContain("var diffBaseBranch = options.baseBranch || branch;");
+        expect(CLIENT_GRAPH_JS).toContain("var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;");
+        expect(CLIENT_GRAPH_JS).toContain("sourceUrl: buildSourceUrl(r.codeReference || '', srcBranch)");
+        expect(CLIENT_GRAPH_JS).toContain("function buildSourceUrl(codeRef, branchOverride)");
+    });
 });

@@ -1081,7 +1081,13 @@ ${(added === 0 && removed === 0 && modified === 0) ? `<div style="margin-top:12p
 
 <script>
 var resources = ${resourcesJson};
-radiusRenderGraph('graph-container', resources, { diffMode: true });
+var DIFF_REPO_URL = 'https://github.com/' + document.getElementById('diff-repo-select').value.trim();
+radiusRenderGraph('graph-container', resources, {
+    diffMode: true,
+    repoUrl: DIFF_REPO_URL,
+    branch: '${escapeHtml(headBranch)}',
+    baseBranch: '${escapeHtml(baseBranch)}'
+});
 
 var DIFF_BASE = '${escapeHtml(baseBranch)}';
 var DIFF_HEAD = '${escapeHtml(headBranch)}';

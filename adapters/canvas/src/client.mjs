@@ -476,6 +476,11 @@ function radiusRenderGraph(containerId, resources, options) {
     var deployMode = options.deployMode || false;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
+    // In diff mode a "removed" resource's source file lived on the base
+    // branch (it may no longer exist on head at all), so its source link
+    // must point at baseBranch while everything else (added/modified/
+    // unchanged) points at the page's normal branch (head).
+    var diffBaseBranch = options.baseBranch || branch;
     var localSource = !!options.localSource;
     var escLocal = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 
@@ -509,15 +514,16 @@ function radiusRenderGraph(containerId, resources, options) {
     // back to the repo tree at the current branch so the link always resolves to
     // a real page instead of a dead affordance. Empty only when there is no repo
     // context at all.
-    function buildSourceUrl(codeRef) {
+    function buildSourceUrl(codeRef, branchOverride) {
         if (!repoUrl) return '';
+        var br = branchOverride || branch;
         if (codeRef) {
             var path = codeRef.split('#')[0].replace(/\\\\/g, '/');
             if (path.charAt(0) === '/') path = path.slice(1);
             var frag = codeRef.indexOf('#L') !== -1 ? '#L' + codeRef.split('#L')[1] : '';
-            return repoUrl + '/blob/' + branch + '/' + path + frag;
+            return repoUrl + '/blob/' + br + '/' + path + frag;
         }
-        return repoUrl + '/tree/' + branch;
+        return repoUrl + '/tree/' + br;
     }
 
     // Split a codeReference ("path#L31") into its repo-relative path and line.
@@ -683,6 +689,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     }
                 }
             }
+            var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;
             pushNode(r.id || r.name, {
                 borderColor: colors.border,
                 borderWidth: diffMode ? 2 : (deployMode ? 3 : 1),
@@ -691,7 +698,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 nodeName: r.name,
                 typeLabel: shortType,
                 codeRef: r.codeReference || '',
-                sourceUrl: buildSourceUrl(r.codeReference || ''),
+                sourceUrl: buildSourceUrl(r.codeReference || '', srcBranch),
                 srcPath: srcPathFromRef(r.codeReference || ''),
                 srcLine: srcLineFromRef(r.codeReference || ''),
                 defFile: r.definitionFile || '.radius/app.bicep',

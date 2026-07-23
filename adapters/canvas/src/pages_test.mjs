@@ -200,6 +200,23 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     });
 });
 
+describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
+    it("passes repoUrl, branch (head), and baseBranch to radiusRenderGraph so buildSourceUrl doesn't short-circuit on missing repoUrl", () => {
+        const html = graphDiffPage({
+            diffResources: sampleResources,
+            diffBase: "main",
+            diffHead: "feature",
+            diffTargetRepo: "octo/app",
+        });
+        expect(html).toContain("radiusRenderGraph('graph-container', resources, {");
+        expect(html).toContain("diffMode: true");
+        expect(html).toContain("repoUrl: DIFF_REPO_URL");
+        expect(html).toContain("branch: 'feature'");
+        expect(html).toContain("baseBranch: 'main'");
+        expect(html).toContain("var DIFF_REPO_URL = 'https://github.com/' + document.getElementById('diff-repo-select').value.trim();");
+    });
+});
+
 describe("remaining pages smoke-render without removed tokens", () => {
     const cases = [
         ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],
