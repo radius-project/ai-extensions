@@ -202,6 +202,12 @@ const session = await joinSession({
                             };
                             setSourceRefResources(entry, "graph", ctx.input.resources, context);
                             setSourceRefResources(entry, "planned", ctx.input.resources, context);
+                            // No authoritative app.bicep fetch on this path — clear any
+                            // provenance flag left over from a prior HTTP load so the page
+                            // falls back to (fail-closed) repo+branch matching against the
+                            // worktree context rather than trusting a stale value.
+                            delete entry.state.graphFromWorkspace;
+                            delete entry.state.plannedFromWorkspace;
                         }
                         entry.state.activeGraphView = "graph";
                         entry.url = `${entry.baseUrl}/?page=graph`;

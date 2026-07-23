@@ -112,6 +112,29 @@ describe("graphPage — localSource provenance flag", () => {
         });
         expect(html).toContain("localSource: false");
     });
+
+    it("honors the persisted graphFromWorkspace:false even when repo+branch match", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+            graphFromWorkspace: false,
+        });
+        expect(html).toContain("localSource: false");
+    });
+
+    it("honors the persisted graphFromWorkspace:true", () => {
+        const html = graphPage({
+            graphResources: sampleResources,
+            graphTargetRepo: "octo/app",
+            graphBranch: "main",
+            graphFromWorkspace: true,
+        });
+        expect(html).toContain("localSource: true");
+    });
 });
 
 describe("plannedGraphPage", () => {
@@ -125,6 +148,19 @@ describe("plannedGraphPage", () => {
             workspaceBranch: "feature-x",
         });
         expect(html).toContain("localSource: true");
+    });
+
+    it("honors the persisted plannedFromWorkspace:false even when repo+branch match", () => {
+        const html = plannedGraphPage({
+            plannedResources: sampleResources,
+            plannedRepo: "octo/app",
+            plannedBranch: "feature-x",
+            workspacePath: "/work/tree",
+            workspaceRepo: "octo/app",
+            workspaceBranch: "feature-x",
+            plannedFromWorkspace: false,
+        });
+        expect(html).toContain("localSource: false");
     });
 
     it("renders the empty (plan) branch with no removed tokens", () => {

@@ -495,7 +495,12 @@ export function graphPage(state) {
     // Local-workspace graphs are built from the on-disk worktree checkout, so the
     // "View source code" link should open the local file in the editor canvas
     // rather than a GitHub blob URL (which 404s for an unpushed worktree branch).
-    const localSource = isWorkspaceSelection(state, targetRepo, graphBranch);
+    // Prefer the authoritative provenance flag persisted by the graph handler
+    // (true only when the local workspace actually supplied the app.bicep); fall
+    // back to repo+branch matching only for render paths that don't set it (MCP).
+    const localSource = typeof state?.graphFromWorkspace === "boolean"
+        ? state.graphFromWorkspace
+        : isWorkspaceSelection(state, targetRepo, graphBranch);
 
     if (resources.length === 0) {
         return pageShell("Application Graph", `
@@ -771,7 +776,10 @@ export function plannedGraphPage(state) {
     const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
     // Same provenance rule as graphPage: open local files in the editor canvas
     // when the planned graph was resolved against the local workspace checkout.
-    const localSource = isWorkspaceSelection(state, targetRepo, graphBranch);
+    // Prefer the authoritative persisted flag; fall back to repo+branch matching.
+    const localSource = typeof state?.plannedFromWorkspace === "boolean"
+        ? state.plannedFromWorkspace
+        : isWorkspaceSelection(state, targetRepo, graphBranch);
 
     const resourcesJson = JSON.stringify(plannedResources);
 

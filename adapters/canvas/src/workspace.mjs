@@ -138,22 +138,23 @@ export async function detectWorkspaceContext(session) {
     };
 }
 
-// Returns true when the given branch matches the workspace branch.
-// Requires workspaceBranch to be set on state; returns false when no workspace
-// branch is available. A falsy branch arg means "unspecified" and matches
-// whatever workspaceBranch is set to (caller defaults to workspaceBranch).
+// Returns true when the given branch matches the workspace branch. Fail-closed:
+// BOTH the workspace branch and the queried branch must be set and strictly
+// equal. An empty/unspecified branch never matches — a graph whose branch could
+// not be resolved is treated as remote (GitHub links) rather than wrongly
+// opening a local worktree file. (The old permissive "empty arg means match"
+// shortcut let a remote-branch graph be misread as local, rendering bare
+// source paths with no https://github.com/ prefix.)
 function branchMatches(state, branch) {
     const workspaceBranch = state?.workspaceBranch || "";
-    return !!workspaceBranch && (!branch || branch === workspaceBranch);
+    return !!workspaceBranch && branch === workspaceBranch;
 }
 
-// Returns true when the given repo matches the workspace repo.
-// Requires workspaceRepo to be set on state; returns false when no workspace
-// repo is available. A falsy repo arg means "unspecified" and matches
-// whatever workspaceRepo is set to (caller defaults to workspaceRepo).
+// Returns true when the given repo matches the workspace repo. Fail-closed like
+// branchMatches: an empty/unspecified repo never matches.
 function repoMatches(state, repo) {
     const workspaceRepo = state?.workspaceRepo || "";
-    return !!workspaceRepo && (!repo || repo === workspaceRepo);
+    return !!workspaceRepo && repo === workspaceRepo;
 }
 
 export function isWorkspaceSelection(state, repo, branch) {

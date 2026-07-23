@@ -132,6 +132,16 @@ describe("isWorkspaceSelection", () => {
         expect(isWorkspaceSelection(state, "acme/other", "feature-x")).toBe(false);
     });
 
+    it("is false for an empty/unspecified branch (fail-closed)", () => {
+        expect(isWorkspaceSelection(state, "acme/app", "")).toBe(false);
+        expect(isWorkspaceSelection(state, "acme/app", undefined)).toBe(false);
+    });
+
+    it("is false for an empty/unspecified repo (fail-closed)", () => {
+        expect(isWorkspaceSelection(state, "", "feature-x")).toBe(false);
+        expect(isWorkspaceSelection(state, undefined, "feature-x")).toBe(false);
+    });
+
     it("is false when no workspace path is set", () => {
         expect(isWorkspaceSelection({ workspaceRepo: "acme/app", workspaceBranch: "feature-x" }, "acme/app", "feature-x")).toBe(false);
     });
