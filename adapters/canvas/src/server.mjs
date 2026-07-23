@@ -198,15 +198,42 @@ function ghOrThrow(args, timeout = 12000) {
 // record is almost always in the newest handful.
 const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 
+// Resolve the Radius application name for a repo the same way /api/list-applications
+// does: read the name declared in `.radius/app.bicep` (or `app.bicep`) on `branch`,
+// falling back to the repo's short name when it can't be read. A repo hosts a single
+// Radius application in this model. Best-effort — a read failure falls back to the
+// basename rather than throwing, since callers use the name only for display and for
+// targeting the app's deploy/delete, not for the fail-closed deployment check itself.
+async function resolveRepoAppName(repo, branch) {
+    let appName = repo.split("/").pop() || repo;
+    const ref = branch || "main";
+    for (const p of [".radius/app.bicep", "app.bicep"]) {
+        let raw = "";
+        try { raw = await ghOrThrow(["api", `/repos/${repo}/contents/${p}?ref=${ref}`, "--jq", ".content"]); }
+        catch { raw = ""; }
+        if (!raw) continue;
+        let decoded = "";
+        try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
+        const name = extractAppName(decoded);
+        if (name) { appName = name; break; }
+    }
+    return appName;
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
 // `environment=` filter) so a busy environment can never crowd another's latest
 // record out of a shared, repo-wide page. Rejects on any GitHub error so callers
-// fail closed rather than mistaking an outage for "nothing deployed". Returns
-// `{ app, environment, provider, status, deploymentId, runUrl }`.
-async function resolveEnvDeployment(repo, environment) {
-    const appName = repo.split("/").pop() || repo;
+// fail closed rather than mistaking an outage for "nothing deployed".
+//
+// `appName` is the resolved Radius application name (see resolveRepoAppName); it
+// must be passed in so the returned row targets the real app declared in
+// app.bicep, not the repo basename — the environment-deletion guard dispatches a
+// delete for this name and redirects to it, and the deployments list links to it.
+// Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
+async function resolveEnvDeployment(repo, environment, appName) {
+    appName = appName || repo.split("/").pop() || repo;
     // Provider is cosmetic (drives portal links only), so a lookup failure here
     // must not block the whole resolution — soft-fail to an empty provider.
     let provider = "";
@@ -664,7 +691,13 @@ function createRequestHandler(instanceId) {
                 // client at the app-deletion flow.
                 let active = null;
                 try {
-                    active = await resolveEnvDeployment(repo, envName);
+                    // Resolve the real app name (from app.bicep) so the guard's
+                    // message, redirect, and delete target the app declared in the
+                    // bicep rather than the repo basename.
+                    const delEntry = servers.get(instanceId);
+                    const delBranch = delEntry?.state?.contextBranch || delEntry?.state?.plannedBranch || delEntry?.state?.graphBranch || "main";
+                    const delAppName = await resolveRepoAppName(repo, delBranch);
+                    active = await resolveEnvDeployment(repo, envName, delAppName);
                 } catch (e) {
                     // Fail closed: if we can't confirm whether an app is still
                     // deployed (e.g. GitHub is unavailable), do NOT delete — that
@@ -1747,24 +1780,13 @@ function createRequestHandler(instanceId) {
                 res.end(JSON.stringify(payload));
             };
             if (!repo) { respond({ applications: [] }); return; }
-            const gh = (args, timeout = 12000) => new Promise((resolve) => {
-                cliExec("gh", args, { timeout }, (err, stdout) => resolve(err ? "" : (stdout || "").trim()));
-            });
             try {
-                // The application name is defined in the repo's app.bicep. Try to
-                // read it; otherwise fall back to the repo's short name. A repo
-                // hosts a single Radius application in this model.
-                let appName = repo.split("/").pop() || repo;
+                // The application name is defined in the repo's app.bicep (a repo
+                // hosts a single Radius application in this model). Shared with the
+                // deployments/env-deletion paths via resolveRepoAppName.
                 const entry = servers.get(instanceId);
                 const branch = entry?.state?.contextBranch || entry?.state?.plannedBranch || entry?.state?.graphBranch || "main";
-                for (const p of [".radius/app.bicep", "app.bicep"]) {
-                    const raw = await gh(["api", `/repos/${repo}/contents/${p}?ref=${branch}`, "--jq", ".content"]);
-                    if (!raw) continue;
-                    let decoded = "";
-                    try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
-                    const name = extractAppName(decoded);
-                    if (name) { appName = name; break; }
-                }
+                const appName = await resolveRepoAppName(repo, branch);
                 respond({ applications: [{ name: appName }] });
             } catch (e) {
                 respond({ applications: [{ name: repo.split("/").pop() || repo }], error: e.message });
@@ -1799,7 +1821,12 @@ function createRequestHandler(instanceId) {
                 // deploy/delete record out of the results.
                 const envNamesRaw = await ghOrThrow(["api", "--paginate", `/repos/${repo}/environments?per_page=100`, "--jq", ".environments[].name"]);
                 const envNames = envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
-                const resolved = await Promise.all(envNames.map((name) => resolveEnvDeployment(repo, name)));
+                // Resolve the real app name once (from app.bicep) so every row targets
+                // the app declared in the bicep, not the repo basename.
+                const listEntry = servers.get(instanceId);
+                const listBranch = listEntry?.state?.contextBranch || listEntry?.state?.plannedBranch || listEntry?.state?.graphBranch || "main";
+                const listAppName = await resolveRepoAppName(repo, listBranch);
+                const resolved = await Promise.all(envNames.map((name) => resolveEnvDeployment(repo, name, listAppName)));
                 const payload = { deployments: resolved.filter(Boolean) };
                 deployListCache.set(repo, { at: Date.now(), payload });
                 respond(payload);
