@@ -749,7 +749,7 @@ setOpenSourceHandler(async ({ path: relPath, state }) => {
                 scope: "repo",
                 path: safe,
                 title: safe.split("/").pop() || safe,
-                placement: { focus: true },
+                placement: { focus: true, surface: "side" },
                 createIfMissing: false,
             },
         });
