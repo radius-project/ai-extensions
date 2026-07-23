@@ -24,21 +24,47 @@ export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 // the model is written).
 const SKILL_HANDOFF =
     "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
-const GRAPH_SOURCE_NOTE =
-    "For the current workspace repo and branch, the application graph renders from the on-disk working tree, so writing .radius/app.bicep to the workspace is enough to preview it (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so the file must be committed and pushed there.";
 const RECIPE_PACK_NOTE =
     "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
+
+// Turns a branches array (which may contain undefined/empty entries meaning
+// "the default branch for the current state") into a human-readable phrase
+// for the prompts below, e.g. "branch `main`" or "branches `main`, `feat`".
+// Returns "" when there is nothing usable to name.
+function branchPhrase(branches) {
+    const names = (branches || []).filter(Boolean);
+    if (!names.length) return "";
+    const quoted = names.map((b) => `\`${b}\``);
+    return names.length === 1 ? `branch ${quoted[0]}` : `branches ${quoted.join(", ")}`;
+}
+
+// Branch-aware guidance on where the app.bicep must live for the graph to
+// render. Explains the two cases: the selected branch is the current
+// workspace branch (write to the working tree, no push needed) vs. a
+// different branch (model that branch's code, commit + push there, prefer a
+// PR, never silently push to a protected branch like main).
+function graphSourceNote(page, repo, branches) {
+    const phrase = branchPhrase(branches);
+    const where = repo ? ` for ${repo}` : "";
+    const onPhrase = phrase ? ` on ${phrase}` : "";
+    return [
+        `To render the ${page} view${where}${onPhrase}, .radius/app.bicep must exist on that branch.`,
+        "If the selected branch is your current workspace branch, writing it to the working tree is enough (the graph renders from the on-disk tree; modeling does not push).",
+        "If the selected branch is a DIFFERENT branch, model it against that branch's code and commit + push .radius/app.bicep to that branch — prefer opening a pull request into it, and do not push generated files directly to a protected branch such as main without the user's confirmation.",
+        "Once the file is committed on that branch, reopen the view; nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.",
+    ].join(" ");
+}
 
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
 // to write the file, never to fabricate a graph or singleton recipes.
-export function appBicepReminder(repo) {
+export function appBicepReminder(repo, branches = []) {
     const where = repo ? ` for ${repo}` : "";
     return [
         `No .radius/app.bicep exists${where}, so the application graph cannot be generated yet.`,
         "",
         `Create it now before retrying. ${SKILL_HANDOFF}`,
-        GRAPH_SOURCE_NOTE,
+        graphSourceNote("graph", repo, branches),
         "After the file is written, retry the original action.",
         "",
         RECIPE_PACK_NOTE,
@@ -103,7 +129,7 @@ export async function evaluateAppBicepHook(input, deps) {
         permissionDecision: "deny",
         permissionDecisionReason:
             "No .radius/app.bicep found — it must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
-        additionalContext: appBicepReminder(repo),
+        additionalContext: appBicepReminder(repo, targets.branches),
     };
 }
 
@@ -112,13 +138,15 @@ export async function evaluateAppBicepHook(input, deps) {
 // surfaced as a visible turn, keep it free of internal tool mechanics and
 // agent-only meta-instructions; it points the agent at the skill and states the
 // graph's data source, nothing more.
-export function appBicepHandoffPrompt(repo, page = "graph") {
+export function appBicepHandoffPrompt(repo, page = "graph", branches = []) {
     const where = repo ? ` for ${repo}` : "";
+    const phrase = branchPhrase(branches);
+    const onPhrase = phrase ? ` (${phrase})` : "";
     return [
-        `The Radius ${page} view${where} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
+        `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
         "",
         SKILL_HANDOFF,
-        GRAPH_SOURCE_NOTE,
+        graphSourceNote(page, repo, branches),
         `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
         "",
         RECIPE_PACK_NOTE,

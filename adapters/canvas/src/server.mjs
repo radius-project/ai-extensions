@@ -1430,6 +1430,9 @@ function createRequestHandler(instanceId) {
                     }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    // Authoritative provenance: true only when the local workspace
+                    // actually supplied the app.bicep content (file is on disk).
+                    entry.state.graphFromWorkspace = selection.fromWorkspace;
                     entry.state.activeGraphView = "graph";
                 }
 
@@ -1565,6 +1568,9 @@ function createRequestHandler(instanceId) {
                     }
                     entry.state.graphTargetRepo = repo;
                     entry.state.graphBranch = branch;
+                    // Authoritative provenance: true only when the local workspace
+                    // actually supplied the app.bicep content (file is on disk).
+                    entry.state.graphFromWorkspace = selection.fromWorkspace;
                     entry.state.activeGraphView = "graph";
                 }
                 res.setHeader("Content-Type", "application/json");
@@ -2053,6 +2059,9 @@ function createRequestHandler(instanceId) {
                     }
                     entry.state.plannedRepo = repo;
                     entry.state.plannedBranch = branch;
+                    // Authoritative provenance: true only when the local workspace
+                    // actually supplied the app.bicep content (file is on disk).
+                    entry.state.plannedFromWorkspace = selection.fromWorkspace;
                     entry.state.plannedProvider = provider;
                     entry.state.resolvedRecipes = recipes;
                     entry.state.activeGraphView = "planned";

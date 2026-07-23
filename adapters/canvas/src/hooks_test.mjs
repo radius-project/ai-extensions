@@ -26,6 +26,26 @@ describe("appBicepReminder", () => {
     it("omits the repo suffix when repo is empty", () => {
         expect(appBicepReminder("")).toContain("No .radius/app.bicep exists,");
     });
+
+    it("names the selected branch and gives cross-branch commit/push guidance", () => {
+        const msg = appBicepReminder("acme/widgets", ["feat"]);
+        expect(msg).toContain("`feat`");
+        expect(msg).toContain("commit + push");
+        expect(msg).toContain("pull request");
+        expect(msg).toContain("protected branch such as main");
+    });
+
+    it("names multiple branches when given several", () => {
+        const msg = appBicepReminder("acme/widgets", ["main", "feat"]);
+        expect(msg).toContain("`main`");
+        expect(msg).toContain("`feat`");
+    });
+
+    it("omits the branch phrase when no branch is given", () => {
+        const msg = appBicepReminder("acme/widgets");
+        expect(msg).not.toContain(" on branch ");
+        expect(msg).not.toContain(" on branches ");
+    });
 });
 
 describe("appBicepHandoffPrompt", () => {
@@ -55,6 +75,25 @@ describe("appBicepHandoffPrompt", () => {
 
     it("forbids fabricating singleton recipes", () => {
         expect(appBicepHandoffPrompt("acme/widgets")).toContain("recipe packs");
+    });
+
+    it("names the selected branch in the opening line and gives cross-branch commit/push guidance", () => {
+        const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+        expect(msg).toContain("(branch `feat`)");
+        expect(msg).toContain("commit + push");
+        expect(msg).toContain("pull request");
+        expect(msg).toContain("protected branch such as main");
+    });
+
+    it("names multiple branches when given several", () => {
+        const msg = appBicepHandoffPrompt("acme/widgets", "graph-diff", ["main", "feat"]);
+        expect(msg).toContain("branches `main`, `feat`");
+    });
+
+    it("omits the branch phrase when no branch is given", () => {
+        const msg = appBicepHandoffPrompt("acme/widgets", "graph");
+        expect(msg).not.toContain("(branch ");
+        expect(msg).not.toContain("(branches ");
     });
 });
 
