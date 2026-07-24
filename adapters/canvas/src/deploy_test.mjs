@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, extractErrorLines } from "./deploy.mjs";
+import { explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, isRepoNotFoundError, extractErrorLines } from "./deploy.mjs";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
 // a personal-account repo hits a tenant that enforces the enterprise claim.
@@ -143,12 +143,14 @@ describe("explainRepoAccessForEnvSetup", () => {
         expect(out).toContain("Read");
     });
 
-    it("null permissions with read OK (odd edge) → non-empty, 'no direct', no throw", () => {
+    it("null permissions with read OK (odd edge) → non-empty, role undetermined, no throw", () => {
         const out = explainRepoAccessForEnvSetup({
             repo: "azure-cto/app", login: "ryanwaite", readFailed: false, permissions: null,
         });
         expect(out).not.toBe("");
-        expect(out).toContain("no direct");
+        expect(out).not.toContain("no direct");
+        expect(out).toContain("does not have Admin");
+        expect(out).toContain("could not be determined");
     });
 
     it("admin missing with empty login → addresses 'you'", () => {
@@ -157,5 +159,28 @@ describe("explainRepoAccessForEnvSetup", () => {
             permissions: { admin: false, pull: true },
         });
         expect(out).toContain("you");
+    });
+});
+
+describe("isRepoNotFoundError", () => {
+    it("is true for gh's Not Found (HTTP 404) text", () => {
+        expect(isRepoNotFoundError("gh: Not Found (HTTP 404)")).toBe(true);
+    });
+    it("is true for a bare HTTP 404", () => {
+        expect(isRepoNotFoundError("request failed: HTTP 404")).toBe(true);
+    });
+    it("is true for a lowercase 'not found' phrase", () => {
+        expect(isRepoNotFoundError("the repository was not found")).toBe(true);
+    });
+    it("is false for HTTP 403", () => {
+        expect(isRepoNotFoundError("gh: Forbidden (HTTP 403)")).toBe(false);
+    });
+    it("is false for a timeout / transient error", () => {
+        expect(isRepoNotFoundError("dial tcp: i/o timeout")).toBe(false);
+    });
+    it("is false for empty / undefined / null", () => {
+        expect(isRepoNotFoundError("")).toBe(false);
+        expect(isRepoNotFoundError(undefined)).toBe(false);
+        expect(isRepoNotFoundError(null)).toBe(false);
     });
 });

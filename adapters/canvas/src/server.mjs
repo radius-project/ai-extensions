@@ -56,7 +56,7 @@ import {
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
-  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
+  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, isRepoNotFoundError,
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
@@ -216,7 +216,10 @@ async function preflightRepoAdmin(repo) {
         const raw = await ghOrThrow(['api', `repos/${repo}`, '--jq',
             '{admin:.permissions.admin,maintain:.permissions.maintain,push:.permissions.push,triage:.permissions.triage,pull:.permissions.pull}']);
         permissions = JSON.parse(raw);
-    } catch { readFailed = true; }
+    } catch (e) {
+        if (isRepoNotFoundError(e && e.message)) readFailed = true;
+        else return ''; // ambiguous/transient — don't block or mislead; let the real op surface the true error
+    }
     return explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions });
 }
 
@@ -1421,6 +1424,13 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'No target repository specified.' }));
+                    return;
+                }
+
+                if (!isValidRepoSlug(targetRepo)) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: `Invalid repository "${targetRepo}". Expected "owner/repo".`, code: 'invalid-repo' }));
                     return;
                 }
 

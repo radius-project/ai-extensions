@@ -323,8 +323,10 @@ export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissi
     }
     if (permissions && permissions.admin === true) return '';
     // Read OK but not admin — report the current best role so the user knows
-    // exactly what they have and what to ask for.
-    let role = 'no direct';
+    // exactly what they have and what to ask for. When none of the role flags is
+    // truthy (e.g. jq emitted `{admin:null,...}`) we don't actually know the
+    // role, so we avoid claiming a specific "no direct access".
+    let role = '';
     if (permissions) {
         if (permissions.maintain) role = 'Maintain';
         else if (permissions.push) role = 'Write';
@@ -332,8 +334,18 @@ export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissi
         else if (permissions.pull) role = 'Read';
     }
     const account = login || 'you';
-    return 'Environment setup needs Admin permission on "' + repo + '", but account "' + account + '" currently has ' + role + ' access. ' +
+    const haveClause = role
+        ? 'account "' + account + '" currently has ' + role + ' access'
+        : 'account "' + account + '" does not have Admin access (its exact role could not be determined)';
+    return 'Environment setup needs Admin permission on "' + repo + '", but ' + haveClause + '. ' +
         'Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry.';
+}
+
+// True when a gh error text indicates the repo/API path was Not Found (HTTP 404) —
+// the signal that the active account can't see the repo. Pure, never throws.
+export function isRepoNotFoundError(errText) {
+    if (!errText) return false;
+    return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
 }
 
 export function extractRadDeployError(logText, maxChars = 4000) {
