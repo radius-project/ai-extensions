@@ -227,6 +227,13 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("showAppPicker");
     });
 
+    it("leads the deploy-identity field copy with its purpose (Round 11A)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("Deploy identity (Azure App Registration)");
+        expect(html).toContain("GitHub Actions uses to sign in to Azure");
+        expect(html).toContain("no stored secrets");
+    });
+
     it("wires the New Environment button to open the env form (regression guard)", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // d97b6d1 accidentally dropped this handler when the use-existing IIFE was

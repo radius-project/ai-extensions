@@ -1493,11 +1493,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
         </div>
         <div class="rad-field" style="margin:8px 0 12px;">
-          <label>Deploy identity (App Registration) name</label>
+          <label>Deploy identity (Azure App Registration)</label>
           <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
           <input type="hidden" id="az-selected-app-id" value="" />
           <div style="font-size:11px; color:var(--rad-text-tertiary); margin-top:4px;">
-            Used only when creating a new deploy identity for this repository. If one already exists it is reused.
+            This is the Microsoft Entra identity GitHub Actions uses to sign in to Azure and deploy your app — securely over OIDC, with no stored secrets. We'll create it for this repository if it doesn't exist yet, or reuse it if it already does; you can edit the name before it's created.
             <a href="#" id="az-use-existing-link" style="margin-left:4px;">Use an existing application…</a>
           </div>
           <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
