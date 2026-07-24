@@ -754,11 +754,23 @@ function createRequestHandler(instanceId) {
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
+                const requestedSubscriptionId = (data.subscriptionId || '').trim();
 
                 if (!targetRepo || !resourceGroup || !clusterName) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'repo, resourceGroup, and cluster are required.' }));
+                    return;
+                }
+
+                // A subscription is required so we can pin the az CLI context to
+                // the selected profile. Without it, the `az ad` (Graph) calls
+                // below fall back to the ambient default context and create the
+                // App Registration / SP in the wrong tenant (issue #125).
+                if (!requestedSubscriptionId) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.' }));
                     return;
                 }
 
@@ -772,23 +784,68 @@ function createRequestHandler(instanceId) {
 
                 const steps = [];
 
-                // Step 1: Get account info — use provided values or fall back to az CLI
-                let tenantId = data.tenantId || '';
-                let subscriptionId = data.subscriptionId || '';
+                // Step 1: Pin the az CLI context to the SELECTED profile.
+                //
+                // Microsoft Graph / AAD commands (`az ad app create`, `az ad sp
+                // create`, `az ad app federated-credential create`) do not accept
+                // a `--subscription` flag — they target the tenant of the active
+                // `az` login context. If we rely on the ambient `az account`
+                // default, the App Registration / SP can be created in the wrong
+                // tenant (see issue #125). So we explicitly switch the active
+                // subscription first and then verify the resulting tenant matches
+                // the selected profile before creating anything.
+                let tenantId = (data.tenantId || '').trim();
+                let subscriptionId = requestedSubscriptionId;
 
-                if (!tenantId || !subscriptionId) {
-                    steps.push('Checking Azure CLI login...');
-                    const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
-                    if (acctResult.code !== 0) {
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Azure CLI not logged in. Run "az login" first.', steps }));
-                        return;
-                    }
-                    const account = JSON.parse(acctResult.stdout);
-                    tenantId = tenantId || account.tenantId;
-                    subscriptionId = subscriptionId || account.id;
+                steps.push(`Selecting subscription ${subscriptionId}...`);
+                const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
+                if (setResult.code !== 0) {
+                    // Surface the CLI stderr — the failure may be a logged-out
+                    // session, expired credentials, or a tenant restriction,
+                    // not just an unknown subscription.
+                    const detail = (setResult.stderr || '').trim();
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, steps }));
+                    return;
                 }
+
+                // Read the now-active account — this is the source of truth for
+                // what the subsequent `az ad` (Graph) calls will actually target.
+                steps.push('Checking Azure CLI login...');
+                const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
+                if (acctResult.code !== 0) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Azure CLI not logged in. Run "az login" first.', steps }));
+                    return;
+                }
+                const account = JSON.parse(acctResult.stdout);
+                const activeTenantId = account.tenantId || '';
+                // Prefer the active account's id as the canonical subscription
+                // after switching context.
+                subscriptionId = account.id || subscriptionId;
+
+                // Guard against an unexpected/empty payload before continuing —
+                // an empty subscription or tenant would otherwise produce a
+                // malformed role-assignment scope and unclear downstream errors.
+                if (!subscriptionId || !activeTenantId) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Could not determine the active Azure subscription and tenant. Run "az login" and "az account set --subscription <id>", then try again.', steps }));
+                    return;
+                }
+
+                // If the selected profile's tenant differs from the active
+                // session's tenant, stop with an actionable message instead of
+                // silently creating resources in the wrong (default) tenant.
+                if (tenantId && activeTenantId && tenantId.toLowerCase() !== activeTenantId.toLowerCase()) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${activeTenantId}, not the selected tenant ${tenantId}. Run "az login --tenant ${tenantId}" in your terminal, then try again.`, steps }));
+                    return;
+                }
+                tenantId = tenantId || activeTenantId;
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
                 // Step 2: Create a fresh App Registration. We always auto-create
@@ -840,7 +897,7 @@ function createRequestHandler(instanceId) {
 
                 // Step 5: Assign Contributor role on the resource group
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
-                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
+                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--subscription', subscriptionId, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
                     steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
                 } else {
