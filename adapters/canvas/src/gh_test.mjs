@@ -155,6 +155,59 @@ describe.sequential("cliExec", () => {
             callback,
         );
     });
+
+    it("strips COPILOT_AGENT_SESSION_ID from a non-gh (az) child env while preserving PATH", async () => {
+        const { cliExec } = await loadGh("linux");
+        const callback = vi.fn();
+        const saved = process.env.COPILOT_AGENT_SESSION_ID;
+        process.env.COPILOT_AGENT_SESSION_ID = "test-session-id";
+        try {
+            cliExec("az", ["account", "show"], {}, callback);
+        } finally {
+            if (saved === undefined) delete process.env.COPILOT_AGENT_SESSION_ID;
+            else process.env.COPILOT_AGENT_SESSION_ID = saved;
+        }
+
+        const [, , options] = childProcess.execFile.mock.calls[0];
+        expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+        expect(options.env.PATH).toBe(process.env.PATH);
+    });
+
+    it("strips COPILOT_AGENT_SESSION_ID on the gh path (on top of ghChildEnv)", async () => {
+        const { cliExec } = await loadGh("linux", "stored-token\n");
+        const callback = vi.fn();
+
+        cliExec("gh", ["auth", "status"], {
+            env: {
+                GH_TOKEN: "ambient-gh",
+                COPILOT_AGENT_SESSION_ID: "test-session-id",
+                KEEP_ME: "yes",
+            },
+        }, callback);
+
+        const [, , options] = childProcess.execFile.mock.calls[0];
+        // ghChildEnv strips GH_TOKEN (keyring login present); withoutAgentSession
+        // strips the agent session var; KEEP_ME survives.
+        expect(options.env).toEqual({ KEEP_ME: "yes" });
+        expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+    });
+
+    it("produces a valid env with PATH when COPILOT_AGENT_SESSION_ID is unset", async () => {
+        const { cliExec } = await loadGh("linux");
+        const callback = vi.fn();
+        const saved = process.env.COPILOT_AGENT_SESSION_ID;
+        delete process.env.COPILOT_AGENT_SESSION_ID;
+        try {
+            cliExec("az", ["account", "show"], {}, callback);
+        } finally {
+            if (saved !== undefined) process.env.COPILOT_AGENT_SESSION_ID = saved;
+        }
+
+        const [, , options] = childProcess.execFile.mock.calls[0];
+        expect(options.env).toBeTypeOf("object");
+        expect(options.env.PATH).toBe(process.env.PATH);
+        expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+    });
 });
 
 describe.sequential("ghApiJson", () => {

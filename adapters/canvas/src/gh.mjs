@@ -62,6 +62,20 @@ function isGhCmd(cmd) {
     return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
 }
 
+// Azure CLI 2.88+ "agentic session": when COPILOT_AGENT_SESSION_ID is set, az injects it as a
+// `client_session` query param + a claims challenge that BYPASSES the token cache and forces a
+// fresh ESTS fetch on every call. The GitHub Copilot app sets this var for all child processes,
+// so the canvas's az subprocess inherits it. On locked-down tenants (e.g. Microsoft Corpnet) ESTS
+// rejects the injected client_session with AADSTS901001, breaking every networked az command
+// (discover, app registration, role assignment). The canvas runs az as the signed-in human user
+// for infra setup, so agentic tagging is both unwanted and fatal here — strip it so az uses normal
+// cache-first user auth. Applies to every child CLI (az/aws/kubectl/gh); none of them need it.
+function withoutAgentSession(baseEnv) {
+    const env = { ...(baseEnv || process.env) };
+    delete env.COPILOT_AGENT_SESSION_ID;
+    return env;
+}
+
 // Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
 // executable directly: passing it through cmd.exe would let metacharacters in an
 // API path (for example, '&' in a query string) be interpreted as shell syntax.
@@ -74,6 +88,7 @@ export function cliExec(cmd, args, opts, cb) {
     const finalArgs = isWindows && !isWindowsGh ? ["/c", cmd, ...args] : args;
     const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
     if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
+    execOpts.env = withoutAgentSession(execOpts.env);
     return execFile(file, finalArgs, execOpts, cb);
 }
 
