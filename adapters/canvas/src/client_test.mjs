@@ -218,7 +218,7 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
     });
 
     it("relabels the modeled node with the recipe-resolved concrete type", () => {
-        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = plannedMode ? radiusSelectResolvedResource(r) : null;");
+        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
         expect(CLIENT_GRAPH_JS).toContain("radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)");
     });
 

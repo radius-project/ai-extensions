@@ -455,10 +455,13 @@ function radiusResolvedOutputRank(out) {
     return 2;
 }
 
-function radiusSelectResolvedResource(resource) {
+function radiusSelectResolvedResource(resource, ownedOutputIds, ownerId) {
     var outputs = resource && resource.outputResources ? resource.outputResources : [];
     var typedOutputs = outputs.filter(function(out) {
-        return out && (out.type || out.displayType);
+        if (!out || !(out.type || out.displayType)) return false;
+        // Exclude concrete outputs that are owned by a different top-level resource.
+        if (ownedOutputIds && ownerId && out.id && ownedOutputIds[out.id] && ownedOutputIds[out.id] !== ownerId) return false;
+        return true;
     });
     if (typedOutputs.length === 0) return null;
 
