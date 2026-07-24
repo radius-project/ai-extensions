@@ -15,6 +15,7 @@ import {
   fetchBicepFromRepo,
   fetchRecipesFromGitHub,
   resolveRecipeOutputs,
+  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -1503,6 +1504,12 @@ function createRequestHandler(instanceId) {
             // Re-derive connections (e.g. database→secret) that rad app graph
             // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
+            // Hide implementation-detail resources (containerImages + their
+            // ghcr-registry-creds secret) from the deployed view too, matching
+            // every other graph state. Applied last so any edges the rewire/
+            // normalize steps synthesized toward those nodes are also stripped.
+            // The raw deploy-graph.json on the status branch is left untouched.
+            resources = filterGraphVisualizationResources(resources);
             res.writeHead(200);
             res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
             return;

@@ -85,6 +85,25 @@ describe("filterGraphVisualizationResources", () => {
     expect(result.map((r) => r.name)).toEqual(["app-db-credentials"]);
   });
 
+  it("keeps a secret whose name merely contains the creds text (exact match only)", () => {
+    // A user-authored secret that is not the reserved registry-creds Secret must
+    // not be hidden just because its name contains the substring.
+    const resources = [
+      makeResource("Radius.Compute/containerImages", "apiImage"),
+      makeResource("Radius.Security/secrets", "my-ghcr-registry-creds-backup"),
+    ];
+    const result = filterGraphVisualizationResources(resources);
+    expect(result.map((r) => r.name)).toEqual(["my-ghcr-registry-creds-backup"]);
+  });
+
+  it("removes the registry-creds secret when its name carries a namespace prefix", () => {
+    const resources = [
+      makeResource("Radius.Compute/containerImages", "apiImage"),
+      makeResource("Radius.Security/secrets", "myapp/radius-ghcr-registry-creds"),
+    ];
+    expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
+  });
+
   it("strips connections that referenced a removed resource (no dangling edges)", () => {
     const resources = [
       {
@@ -139,5 +158,43 @@ describe("filterGraphVisualizationResources", () => {
     const result = filterGraphVisualizationResources(resources);
     expect(result).toHaveLength(1);
     expect(result[0].diffStatus).toBe("modified");
+  });
+
+  it("strips deployed-graph connections keyed by name, not just id", () => {
+    // The deployed-graph path (normalizeDeployedGraph / rewireDeployedGraphChain)
+    // synthesizes connections whose endpoint value can be a resource name rather
+    // than an id, and resources there may lack ids entirely.
+    const resources = [
+      {
+        name: "api",
+        type: "Radius.Compute/containers",
+        connections: [
+          { name: "apiImage", direction: "Outbound" },
+          { name: "db", direction: "Outbound" },
+        ],
+      },
+      { name: "apiImage", type: "Radius.Compute/containerImages", connections: [] },
+      {
+        name: "radius-ghcr-registry-creds",
+        type: "Radius.Security/secrets",
+        connections: [{ name: "apiImage", direction: "Inbound" }],
+      },
+      { name: "db", type: "Radius.Data/postgreSQLDatabases", connections: [] },
+    ];
+    const result = filterGraphVisualizationResources(resources);
+    expect(result.map((r) => r.name).sort()).toEqual(["api", "db"]);
+    const api = result.find((r) => r.name === "api");
+    expect(api.connections).toEqual([{ name: "db", direction: "Outbound" }]);
+  });
+
+  it("does not remove an unrelated resource whose id equals a removed resource's name", () => {
+    // Node removal is by predicate, never by an id/name key set, so this cannot
+    // collide even when a nameless containerImage shares text with another id.
+    const resources = [
+      { name: "apiImage", type: "Radius.Compute/containerImages", connections: [] },
+      { id: "apiImage", name: "realService", type: "Radius.Compute/containers", connections: [] },
+    ];
+    const result = filterGraphVisualizationResources(resources);
+    expect(result.map((r) => r.name)).toEqual(["realService"]);
   });
 });
