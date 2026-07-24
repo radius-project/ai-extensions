@@ -141,3 +141,109 @@ describe("computeGraphDiff", () => {
     expect(result[0]).toMatchObject({ id: r.id, name: r.name, type: r.type });
   });
 });
+
+describe("computeGraphDiff — connection-level (edge) diff", () => {
+  it("annotates a connection present on both branches as unchanged", () => {
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const mk = () => [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: dbId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const result = computeGraphDiff(mk(), mk());
+    const api = result.find((r) => r.name === "api");
+    expect(api.diffStatus).toBe("unchanged");
+    expect(api.connections).toHaveLength(1);
+    expect(api.connections[0].diffStatus).toBe("unchanged");
+  });
+
+  it("annotates a connection added on head as added", () => {
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const base = [
+      makeResource("Radius.Compute/containers", "api"),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const head = [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: dbId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const result = computeGraphDiff(base, head);
+    const api = result.find((r) => r.name === "api");
+    const edge = api.connections.find((c: any) => c.id === dbId);
+    expect(edge.diffStatus).toBe("added");
+  });
+
+  it("re-attaches a removed edge between two still-present nodes as a removed connection", () => {
+    // The db stays, but the container drops its link to it. Because the head
+    // resource carries only head connections, the removed edge must be injected
+    // back onto the (still-present) source so the diff view can render it.
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const base = [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: dbId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const head = [
+      makeResource("Radius.Compute/containers", "api"),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const result = computeGraphDiff(base, head);
+    const api = result.find((r) => r.name === "api");
+    const db = result.find((r) => r.name === "db");
+    expect(db.diffStatus).toBe("unchanged");
+    expect(api.diffStatus).toBe("modified");
+    const removedEdge = api.connections.find((c: any) => c.id === dbId);
+    expect(removedEdge).toBeTruthy();
+    expect(removedEdge.diffStatus).toBe("removed");
+  });
+
+  it("keeps both the added and the removed edge when a connection's target type changes", () => {
+    const mongoId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const postgresId = buildResourceID("Radius.Data/postgreSQLDatabases", "db");
+    const base = [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: mongoId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const head = [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: postgresId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/postgreSQLDatabases", "db"),
+    ];
+    const result = computeGraphDiff(base, head);
+    const api = result.find((r) => r.name === "api");
+    const added = api.connections.find((c: any) => c.id === postgresId);
+    const removed = api.connections.find((c: any) => c.id === mongoId);
+    expect(added?.diffStatus).toBe("added");
+    expect(removed?.diffStatus).toBe("removed");
+  });
+
+  it("marks every edge leaving a removed node as a removed connection", () => {
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const base = [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: dbId, direction: "Outbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const head = [makeResource("Radius.Data/mongoDatabases", "db")];
+    const result = computeGraphDiff(base, head);
+    const api = result.find((r) => r.name === "api");
+    expect(api.diffStatus).toBe("removed");
+    expect(api.connections[0].diffStatus).toBe("removed");
+  });
+
+  it("does not mutate the input resource connections", () => {
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const headApi = makeResource("Radius.Compute/containers", "api", {
+      connections: [{ id: dbId, direction: "Outbound" }],
+    });
+    computeGraphDiff([], [headApi, makeResource("Radius.Data/mongoDatabases", "db")]);
+    expect(headApi.connections[0]).not.toHaveProperty("diffStatus");
+  });
+
+  it("leaves inbound connections untagged (only outbound edges render)", () => {
+    const dbId = buildResourceID("Radius.Data/mongoDatabases", "db");
+    const mk = () => [
+      makeResource("Radius.Compute/containers", "api", { connections: [{ id: dbId, direction: "Inbound" }] }),
+      makeResource("Radius.Data/mongoDatabases", "db"),
+    ];
+    const result = computeGraphDiff(mk(), mk());
+    const api = result.find((r) => r.name === "api");
+    expect(api.connections[0]).not.toHaveProperty("diffStatus");
+  });
+});
