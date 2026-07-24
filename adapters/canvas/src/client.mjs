@@ -884,7 +884,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // as a sibling overlay further below (only when enablePopup is not false); the
     // React node calls popupCtl.open() so a card click shows it. Stays a no-op
     // until that setup runs, and when popups are disabled.
-    var popupCtl = { open: function() {}, close: function() {} };
+    var popupCtl = { open: function() {}, close: function() {}, toggle: function() {} };
 
     // ── Custom node: the figma .rad-node card, rendered natively ─────────────
     // Real React elements (not an HTML-string overlay) so the "View source code"
@@ -930,7 +930,7 @@ function radiusRenderGraph(containerId, resources, options) {
         }
         var dots = h('button', {
             type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
-            onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.open(d, e.currentTarget.closest('.rad-node')); }
+            onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.toggle(d, e.currentTarget.closest('.rad-node')); }
         }, '\u2022\u2022\u2022');
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
@@ -1013,6 +1013,10 @@ function radiusRenderGraph(containerId, resources, options) {
         popup.id = 'node-popup';
         popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface,#ffffff); border:1px solid var(--rad-stroke,#d0d7de); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
         container.appendChild(popup);
+
+        // The card the popup is currently anchored to (null when hidden), so the
+        // node's "..." button can toggle: clicking it again closes the popup.
+        var openCardEl = null;
 
         // Monochrome octicon glyphs (currentColor) so links match the flat
         // white-card node styling instead of the old colored emoji.
@@ -1102,6 +1106,7 @@ function radiusRenderGraph(containerId, resources, options) {
             popup.style.left = Math.max(0, left) + 'px';
             popup.style.top = Math.max(0, top) + 'px';
             popup.style.display = '';
+            openCardEl = cardEl;
         }
 
         // Delegate clicks from the HTML node cards. The card body opens the popup;
@@ -1136,10 +1141,21 @@ function radiusRenderGraph(containerId, resources, options) {
             if (e.target.closest && e.target.closest('#node-popup')) return;
             if (e.target.closest && e.target.closest('.rad-node[data-node-id]')) return;
             popup.style.display = 'none';
+            openCardEl = null;
         };
         container.addEventListener('click', container._radiusClickHandler);
         popupCtl.open = openNodePopup;
-        popupCtl.close = function() { popup.style.display = 'none'; };
+        popupCtl.close = function() { popup.style.display = 'none'; openCardEl = null; };
+        // Toggle from the node's "..." button: if the popup is already open for
+        // this same card, close it; otherwise (hidden, or open for another node)
+        // open it against this card.
+        popupCtl.toggle = function(d, cardEl) {
+            if (popup.style.display !== 'none' && openCardEl === cardEl) {
+                popupCtl.close();
+            } else {
+                openNodePopup(d, cardEl);
+            }
+        };
     }
 
     // Diff mode intentionally shows no legend; status is encoded directly on
