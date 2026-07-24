@@ -2549,13 +2549,14 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
-// Environments that currently have a deployment which blocks a NEW deploy
-// (status success / pending / deleting), keyed by env name → status. Rebuilt from
-// each successful deployments listing. A failed deployment does NOT block, so a
-// retry/redeploy over a failure is allowed. Used by refreshDeployBtn to disable
-// the Deploy button for the selected environment.
+// Environments that currently have an IN-PROGRESS operation which blocks a NEW
+// deploy (status pending = a deploy run still in flight, or deleting = a delete
+// run still in flight), keyed by env name → status. Rebuilt from each successful
+// deployments listing. Terminal states do NOT block: a failed deploy can be
+// retried, and a successful deploy can be redeployed over. Used by
+// refreshDeployBtn to disable the Deploy button for the selected environment.
 var DEPLOYED_ENVS = {};
-function envIsBlocked(status) { return status === 'success' || status === 'pending' || status === 'deleting'; }
+function envIsBlocked(status) { return status === 'pending' || status === 'deleting'; }
 
 // Renders an inline status banner (Figma: green success / red error with a ✓/⚠
 // icon and a dismiss ✕). The message node uses textContent by default so
@@ -2600,17 +2601,18 @@ function refreshDeployBtn() {
         deployBtn.dataset.mode = 'deploy';
         deployBtn.textContent = 'Deploy';
         var selEnv = envSelect.value;
-        // Block deploying to an environment that already has an active deployment
-        // (success/pending/deleting). Switching the dropdown to a free environment
-        // re-enables the button. A failed deployment does not block (retry allowed).
+        // Block deploying to an environment only while an operation is IN PROGRESS
+        // (pending = a deploy run in flight, deleting = a delete run in flight).
+        // Terminal states never block: switching to a free environment, or a
+        // failed/successful deployment, all leave the button enabled so a
+        // (re)deploy can run.
         var blockedStatus = selEnv ? DEPLOYED_ENVS[selEnv] : '';
         deployBtn.disabled = !(CTX_REPO && appSelect.value && selEnv) || !!blockedStatus;
         if (blockedStatus) {
             if (blockedStatus === 'deleting') {
                 deployBtn.title = 'Application is being deleted from environment "' + selEnv + '". Wait for the delete to finish before deploying again.';
             } else {
-                var active = blockedStatus === 'pending' ? 'already has a deployment in progress in' : 'already has an active deployment in';
-                deployBtn.title = 'Application ' + active + ' environment "' + selEnv + '". Delete the existing deployment before deploying again.';
+                deployBtn.title = 'A deployment is already in progress in environment "' + selEnv + '". Wait for it to finish before deploying again.';
             }
         } else {
             deployBtn.removeAttribute('title');
