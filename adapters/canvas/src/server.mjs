@@ -753,11 +753,23 @@ function createRequestHandler(instanceId) {
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
+                const requestedSubscriptionId = (data.subscriptionId || '').trim();
 
                 if (!targetRepo || !resourceGroup || !clusterName) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'repo, resourceGroup, and cluster are required.' }));
+                    return;
+                }
+
+                // A subscription is required so we can pin the az CLI context to
+                // the selected profile. Without it, the `az ad` (Graph) calls
+                // below fall back to the ambient default context and create the
+                // App Registration / SP in the wrong tenant (issue #125).
+                if (!requestedSubscriptionId) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.' }));
                     return;
                 }
 
@@ -782,21 +794,19 @@ function createRequestHandler(instanceId) {
                 // subscription first and then verify the resulting tenant matches
                 // the selected profile before creating anything.
                 let tenantId = (data.tenantId || '').trim();
-                let subscriptionId = (data.subscriptionId || '').trim();
+                let subscriptionId = requestedSubscriptionId;
 
-                if (subscriptionId) {
-                    steps.push(`Selecting subscription ${subscriptionId}...`);
-                    const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
-                    if (setResult.code !== 0) {
-                        // Surface the CLI stderr — the failure may be a logged-out
-                        // session, expired credentials, or a tenant restriction,
-                        // not just an unknown subscription.
-                        const detail = (setResult.stderr || '').trim();
-                        res.setHeader("Content-Type", "application/json");
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, steps }));
-                        return;
-                    }
+                steps.push(`Selecting subscription ${subscriptionId}...`);
+                const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
+                if (setResult.code !== 0) {
+                    // Surface the CLI stderr — the failure may be a logged-out
+                    // session, expired credentials, or a tenant restriction,
+                    // not just an unknown subscription.
+                    const detail = (setResult.stderr || '').trim();
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, steps }));
+                    return;
                 }
 
                 // Read the now-active account — this is the source of truth for
