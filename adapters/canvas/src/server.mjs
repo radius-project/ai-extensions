@@ -3279,11 +3279,12 @@ function createRequestHandler(instanceId) {
                                     // output; fall back to the full run log.
                                     let failLog = live;
                                     if (!failLog) failLog = await fetchRunLog(repo, dRunId);
-                                    // OIDC Azure Login can fail during deploy too. When the
-                                    // enterprise-claim rejection (AADSTS7002381) is present, lead
-                                    // with the friendly, tenant-agnostic explanation and push the
-                                    // rest of the surfaced error below it.
-                                    const claimHelp = explainOidcEnterpriseClaim(failLog);
+                                    // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the Azure Login
+                                    // step, BEFORE rad runs — so it appears in the run log, not the live rad-deploy log.
+                                    // A stale live-deploy log from a prior attempt (persisted on the status branch) could
+                                    // otherwise mask it, so always consult the current run log for THIS run for the claim.
+                                    const runLogForClaim = live ? await fetchRunLog(repo, dRunId) : failLog;
+                                    const claimHelp = explainOidcEnterpriseClaim(runLogForClaim);
                                     if (claimHelp) dErr = claimHelp + '\n\n\u2014 raw error \u2014\n' + dErr;
                                     const detailBlock = extractRadDeployError(failLog);
                                     if (detailBlock) {

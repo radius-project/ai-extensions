@@ -285,9 +285,22 @@ export function explainOidcEnterpriseClaim(logText) {
         actual = m[2];
     }
     const acceptedLabel = accepted.length ? accepted.join(', ') : 'a value required by the target Azure tenant';
-    const actualLabel = (actual === null || actual === '') ? 'empty (this repository is not part of a GitHub Enterprise)' : ('"' + actual + '"');
+    let leadLine, actualLabel;
+    if (actual === '') {
+        // Claim present in the issuer config but empty — the classic personal-repo case.
+        leadLine = 'Azure Login (OIDC) was rejected because this repository\u2019s GitHub OIDC token is missing the required "enterprise" claim.';
+        actualLabel = 'empty (this repository is not part of a GitHub Enterprise)';
+    } else if (actual) {
+        // Claim present but not one the tenant trusts.
+        leadLine = 'Azure Login (OIDC) was rejected because this repository\u2019s GitHub "enterprise" OIDC claim ("' + actual + '") is not trusted by the target Azure tenant.';
+        actualLabel = '"' + actual + '"';
+    } else {
+        // Could not parse the actual value from the error text.
+        leadLine = 'Azure Login (OIDC) was rejected by the target Azure tenant over the GitHub OIDC "enterprise" claim.';
+        actualLabel = 'not reported';
+    }
     return [
-        'Azure Login (OIDC) was rejected because this repository\u2019s GitHub OIDC token is missing the required "enterprise" claim.',
+        leadLine,
         'The target Azure tenant only trusts GitHub Actions tokens whose enterprise claim is one of: ' + acceptedLabel + ' (actual: ' + actualLabel + ').',
         'GitHub only includes the enterprise claim for repositories owned by an organization that belongs to a GitHub Enterprise \u2014 personal-account repositories cannot satisfy this policy.',
         'Fix: host this repository under an organization that is part of one of the accepted GitHub Enterprises (' + acceptedLabel + '), then re-run Create Environment so the federated credential is recreated for the new owner/repo.',
