@@ -26,6 +26,7 @@ import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles,
 import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
+  selectAppRegistration, selectMissingFederatedCredentials,
   isUuid, isValidRepoSlug, isAksClusterName, isResourceGroupName, GITHUB_API_VERSION,
 } from "./azure-oidc.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
@@ -886,35 +887,122 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push(`✅ OIDC subject(s): ${oidc.federatedCredentials.map((f) => f.subject).join(', ')}`);
 
-                // Step 3: Create a fresh App Registration. The display name is
-                // derived from the CANONICAL full_name returned by GitHub (never
-                // the raw user input), so it can never carry unexpected
-                // characters. Attempt WITHOUT a Service Management Reference
-                // first; only if Entra policy rejects it do we ask the user for
-                // one (progressive disclosure) — `az ad app create` fails
-                // atomically, so the retry is clean with no orphaned app.
-                // TODO(defer): full identity reconciliation/replacement of an
-                // existing app registration across reruns is out of scope here.
+                // Step 3: Resolve the target App Registration idempotently
+                // (lookup-then-create). Creating unconditionally would spawn a
+                // new app on every run (Azure AD allows duplicate display
+                // names) — tenant sprawl, a new clientId that orphans the
+                // AZURE_CLIENT_ID already wired into the GitHub environment, and
+                // a fresh app with no Service Management Reference (forcing the
+                // user to redo the approval-gated SMR). Instead we reuse an
+                // existing app the caller OWNS when one exists.
                 const appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
-                steps.push(`Creating App Registration: ${appName}...`);
-                const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
-                if (appResult.code !== 0) {
-                    // Enterprise tenants require a Service Management Reference.
-                    // Return a machine-readable code so the UI can reveal an SMR
-                    // input and let the user retry, preserving the raw error.
-                    if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
-                        fail(400,
-                            'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
-                            'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
-                            'service-management-reference-required',
-                            { steps, azError: appResult.stderr });
-                        return;
+
+                // The repo's existing AZURE_CLIENT_ID (if any) disambiguates
+                // when duplicate owned apps exist. Prefer the value already
+                // wired into the environment so we never orphan it. Read from
+                // the request body first, else the GitHub environment variable.
+                let existingClientId = (data.clientId || '').trim();
+                if (!existingClientId) {
+                    const varRes = await ghJsonRunner(
+                        `/repos/${oidc.fullName}/environments/${encodeURIComponent(envName)}/variables/AZURE_CLIENT_ID`,
+                    );
+                    if (varRes?.ok && varRes.json && typeof varRes.json.value === 'string') {
+                        existingClientId = varRes.json.value.trim();
                     }
-                    fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
+                    // A 404 (no environment/variable yet) is expected on a first
+                    // run; only a hard transport/permission failure is notable,
+                    // and it is non-fatal here (disambiguation still works via
+                    // the oldest-owned fallback).
+                }
+
+                steps.push(`Looking up existing App Registration: ${appName}...`);
+                const listRes = await runCmd('az', [
+                    'ad', 'app', 'list',
+                    '--filter', `displayName eq '${appName}'`,
+                    '--query', '[].{appId:appId,id:id,createdDateTime:createdDateTime}',
+                    '-o', 'json',
+                ]);
+                if (listRes.code !== 0) {
+                    // FATAL: a silent fall-through to create would resurrect the
+                    // sprawl bug this fix exists to prevent.
+                    fail(400, 'Failed to look up existing App Registrations: ' + listRes.stderr, 'app-lookup-failed', { steps, azError: listRes.stderr });
                     return;
                 }
-                const clientId = appResult.stdout.trim();
-                steps.push(`✅ App Registration created: ${clientId}`);
+                let matches;
+                try {
+                    matches = JSON.parse(listRes.stdout || '[]');
+                    if (!Array.isArray(matches)) matches = [];
+                } catch (e) {
+                    fail(400, 'Could not parse the App Registration lookup result.', 'app-lookup-parse', { steps });
+                    return;
+                }
+
+                // Scope matches to apps the signed-in user owns; reusing an app
+                // we don't own would fail on FIC/role writes and risks
+                // hijacking another user's app in a shared tenant.
+                let ownedMatches = [];
+                if (matches.length > 0) {
+                    const meRes = await runCmd('az', ['ad', 'signed-in-user', 'show', '--query', 'id', '-o', 'tsv']);
+                    if (meRes.code !== 0) {
+                        fail(400, 'Could not determine the signed-in user to verify App Registration ownership: ' + meRes.stderr, 'signed-in-user-failed', { steps, azError: meRes.stderr });
+                        return;
+                    }
+                    const myId = meRes.stdout.trim().toLowerCase();
+                    for (const m of matches) {
+                        if (!m || !m.appId) continue;
+                        const ownRes = await runCmd('az', ['ad', 'app', 'owner', 'list', '--id', m.appId, '--query', '[].id', '-o', 'tsv']);
+                        if (ownRes.code !== 0) {
+                            fail(400, `Could not read owners of App Registration ${m.appId}: ` + ownRes.stderr, 'app-owner-lookup-failed', { steps, azError: ownRes.stderr });
+                            return;
+                        }
+                        const owners = ownRes.stdout.split(/\s+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+                        if (owners.includes(myId)) ownedMatches.push(m);
+                    }
+                }
+
+                const selection = selectAppRegistration({
+                    ownedMatches,
+                    hasUnownedMatch: matches.length > ownedMatches.length,
+                    existingClientId,
+                });
+                if (selection.action === 'error') {
+                    fail(400, selection.reason, selection.code, { steps, appName });
+                    return;
+                }
+
+                let clientId;
+                if (selection.action === 'reuse') {
+                    clientId = selection.appId;
+                    if (selection.duplicates) {
+                        steps.push(`⚠️ Multiple owned App Registrations named ${appName} found; ${selection.reason}.`);
+                    }
+                    // Reuse path: never touch the existing Service Management
+                    // Reference — it may be approval-gated. SMR only applies when
+                    // creating a new app below.
+                    steps.push(`✅ Reusing existing App Registration: ${clientId}`);
+                } else {
+                    // Create a fresh App Registration. Attempt WITHOUT a Service
+                    // Management Reference first; only if Entra policy rejects it
+                    // do we ask the user for one (progressive disclosure) — `az ad
+                    // app create` fails atomically, so the retry is clean with no
+                    // orphaned app. The creator is automatically an owner.
+                    steps.push(`Creating App Registration: ${appName}...`);
+                    const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
+                    if (appResult.code !== 0) {
+                        if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
+                            fail(400,
+                                'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
+                                'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
+                                'service-management-reference-required',
+                                { steps, azError: appResult.stderr });
+                            return;
+                        }
+                        fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
+                        return;
+                    }
+                    clientId = appResult.stdout.trim();
+                    steps.push(`✅ App Registration created: ${clientId}`);
+                }
 
                 // Step 4: Create Service Principal (FATAL on failure). Once the
                 // app exists, any later failure returns clientId/appName so the
@@ -932,10 +1020,27 @@ function createRequestHandler(instanceId) {
                 steps.push('✅ Service Principal ready');
 
                 // Step 5: Create the Federated Credential(s) (FATAL on failure).
+                // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
+                // FIC whose subject already exists, so we stay under Azure's
+                // ~20-FIC/app cap and don't churn credentials. The "already
+                // exists" stderr guard remains as a backstop.
                 const { writeFileSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
-                for (const fic of oidc.federatedCredentials) {
+                let existingSubjects = [];
+                const ficListRes = await runCmd('az', ['ad', 'app', 'federated-credential', 'list', '--id', clientId, '--query', '[].subject', '-o', 'json']);
+                if (ficListRes.code === 0) {
+                    try {
+                        const parsed = JSON.parse(ficListRes.stdout || '[]');
+                        if (Array.isArray(parsed)) existingSubjects = parsed;
+                    } catch { /* fall back to attempting all, guarded by stderr */ }
+                }
+                const ficsToCreate = selectMissingFederatedCredentials(oidc.federatedCredentials, existingSubjects);
+                const skippedCount = oidc.federatedCredentials.length - ficsToCreate.length;
+                if (skippedCount > 0) {
+                    steps.push(`✅ ${skippedCount} federated credential(s) already present — skipping`);
+                }
+                for (const fic of ficsToCreate) {
                     steps.push(`Creating federated credential "${fic.name}"...`);
                     const fedParams = JSON.stringify({
                         name: fic.name,

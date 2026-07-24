@@ -78,7 +78,92 @@ export function buildAppCreateArgs({ appName, serviceManagementReference } = {})
   return args;
 }
 
-// Known Entra error identifiers for a missing/invalid Service Management
+/**
+ * Pure disambiguation for the lookup-then-create idempotency flow. Given the
+ * app registrations whose display name matches AND are owned by the signed-in
+ * user (plus whether any *unowned* app shares the name), decide whether to
+ * reuse an existing app or create a new one.
+ *
+ * Rules:
+ * - 0 owned matches, no unowned match  → create a fresh app.
+ * - 0 owned matches, an unowned match  → error `app-registration-not-owned`
+ *   (never silently create a duplicate or reuse another user's app in a shared
+ *   tenant — FIC/role writes would fail).
+ * - exactly 1 owned match              → reuse it.
+ * - >1 owned matches                   → prefer the appId equal to the repo's
+ *   existing AZURE_CLIENT_ID (if among the owned matches); else the oldest by
+ *   createdDateTime for stability. Never picks arbitrarily/first-unsorted.
+ *
+ * @param {{ownedMatches?: {appId:string,id?:string,createdDateTime?:string}[], hasUnownedMatch?: boolean, existingClientId?: string}} input
+ * @returns {{action:'reuse'|'create'|'error', appId?:string, code?:string, reason?:string, duplicates?:boolean}}
+ */
+export function selectAppRegistration({ ownedMatches = [], hasUnownedMatch = false, existingClientId } = {}) {
+  const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter((m) => m && m.appId);
+
+  if (owned.length === 0) {
+    if (hasUnownedMatch) {
+      return {
+        action: "error",
+        code: "app-registration-not-owned",
+        reason:
+          "An App Registration with this name already exists but is owned by another user. " +
+          "Reusing it would fail (federated-credential and role writes require ownership). " +
+          "Coordinate with the owner or rename, then retry.",
+      };
+    }
+    return { action: "create" };
+  }
+
+  if (owned.length === 1) {
+    return { action: "reuse", appId: owned[0].appId, duplicates: false };
+  }
+
+  // More than one owned match — disambiguate deterministically.
+  const norm = (v) => String(v || "").trim().toLowerCase();
+  if (existingClientId) {
+    const preferred = owned.find((m) => norm(m.appId) === norm(existingClientId));
+    if (preferred) {
+      return {
+        action: "reuse",
+        appId: preferred.appId,
+        duplicates: true,
+        reason: "matched the repository's existing AZURE_CLIENT_ID",
+      };
+    }
+  }
+  const oldest = [...owned].sort((a, b) => {
+    const ta = Date.parse(a.createdDateTime || "");
+    const tb = Date.parse(b.createdDateTime || "");
+    return (Number.isNaN(ta) ? Infinity : ta) - (Number.isNaN(tb) ? Infinity : tb);
+  })[0];
+  return {
+    action: "reuse",
+    appId: oldest.appId,
+    duplicates: true,
+    reason: "oldest owned match (duplicate app registrations detected)",
+  };
+}
+
+/**
+ * Pure idempotency filter for federated credentials: return only the desired
+ * FICs whose SUBJECT is not already present on the app. Matching is by subject
+ * (not name) because the subject is the identity GitHub presents at token time,
+ * and it keeps us under Azure's ~20-FIC/app cap on reruns.
+ *
+ * @param {{name:string,subject:string}[]} desired
+ * @param {Iterable<string>} existingSubjects
+ * @returns {{name:string,subject:string}[]}
+ */
+export function selectMissingFederatedCredentials(desired = [], existingSubjects = []) {
+  const have = new Set(
+    Array.from(existingSubjects || [])
+      .filter((s) => typeof s === "string")
+      .map((s) => s.trim()),
+  );
+  return (Array.isArray(desired) ? desired : []).filter((f) => f && !have.has(String(f.subject).trim()));
+}
+
+
 // Reference. These substrings are the real error identifiers and are matched
 // case-insensitively against `az` stderr so we can turn an opaque failure into
 // actionable guidance (and a machine-readable code the UI can react to).
