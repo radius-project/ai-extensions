@@ -72,6 +72,17 @@ describe("deriveConcreteResource", () => {
   it("returns null for an unrecognized source", () => {
     expect(deriveConcreteResource("ghcr.io/example/unknown:latest")).toBeNull();
   });
+
+  it("maps an Azure container recipe to the AKS managed cluster (provider-scoped)", () => {
+    // On an AKS environment the container runs on the managed cluster, so its
+    // concrete Azure resource is the cluster — not the Deployment the shared
+    // kube-recipes/containers recipe emits on a plain Kubernetes environment.
+    const src = "ghcr.io/radius-project/kube-recipes/containers:latest";
+    expect(deriveConcreteResource(src, "azure")?.type).toBe("Microsoft.ContainerService/managedClusters");
+    // The same source stays a Kubernetes Deployment off Azure and with no provider.
+    expect(deriveConcreteResource(src, "kubernetes")?.type).toBe("apps/Deployment");
+    expect(deriveConcreteResource(src)?.type).toBe("apps/Deployment");
+  });
 });
 
 describe("recipePackPathForProvider", () => {
@@ -232,7 +243,7 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Messaging/rabbitMQ": "Microsoft.ServiceBus/namespaces",
     "Radius.Messaging/kafka": "Microsoft.EventHub/namespaces",
     "Radius.Storage/objectStorage": "Microsoft.Storage/storageAccounts",
-    "Radius.Compute/containers": "apps/Deployment",
+    "Radius.Compute/containers": "Microsoft.ContainerService/managedClusters",
     "Radius.Compute/persistentVolumes": "core/PersistentVolumeClaim",
     "Radius.Security/secrets": "core/Secret",
     "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
@@ -251,22 +262,22 @@ describe("committed recipe-pack snapshots", () => {
   it.each([
     { provider: "azure", fixture: "aks-recipepack.bicep", expected: AZURE_EXPECTED },
     { provider: "kubernetes", fixture: "default-recipepack.bicep", expected: KUBE_EXPECTED },
-  ])("resolves every entry in the $provider pack to a concrete resource", ({ fixture, expected }) => {
+  ])("resolves every entry in the $provider pack to a concrete resource", ({ provider, fixture, expected }) => {
     const entries = parseRecipePack(readFixture(fixture));
 
     // Every entry the pack declares must derive a concrete resource: an
     // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
     const unresolved = entries
-      .filter((e) => deriveConcreteResource(e.source) === null)
+      .filter((e) => deriveConcreteResource(e.source, provider) === null)
       .map((e) => `${e.resourceType} (${e.source})`);
     expect(unresolved, `unmapped recipe sources: ${unresolved.join(", ")}`).toEqual([]);
 
     // The parsed set must match the expected resource types exactly (no drift).
     expect(entries.map((e) => e.resourceType).sort()).toEqual(Object.keys(expected).sort());
 
-    // Each entry must derive the specific expected concrete type.
+    // Each entry must derive the specific expected concrete type for this provider.
     for (const entry of entries) {
-      expect(deriveConcreteResource(entry.source)?.type).toBe(expected[entry.resourceType]);
+      expect(deriveConcreteResource(entry.source, provider)?.type).toBe(expected[entry.resourceType]);
     }
   });
 });

@@ -78,6 +78,19 @@ const SOURCE_CONCRETE_MAP: Record<string, { type: string; displayType: string; p
   "kube-recipes/containerimages": { type: "batch/Job", displayType: "Image Build Job", provider: "kubernetes" },
 };
 
+// Provider-scoped overrides that win over SOURCE_CONCRETE_MAP for a shared source.
+// A recipe source can appear in more than one provider's pack (e.g. the Azure/AKS
+// pack reuses the kube-recipes/containers recipe), yet materialize differently: on
+// an AKS environment a container runs on the managed cluster itself, so its
+// concrete Azure resource is the cluster — not the plain Kubernetes Deployment the
+// same recipe emits on a Kubernetes environment. Keys are normalized sources (see
+// normalizeRecipeSource); only entries that genuinely differ per provider go here.
+const PROVIDER_SOURCE_OVERRIDE: Record<string, Record<string, { type: string; displayType: string; provider: string }>> = {
+  azure: {
+    "kube-recipes/containers": { type: "Microsoft.ContainerService/managedClusters", displayType: "Azure Kubernetes Service", provider: "azure" },
+  },
+};
+
 // Normalize a recipe `source` OCI reference to its lookup key: strip the registry
 // host, the leading `bicep/` module namespace Azure uses, and the `:version` tag.
 //   mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1 -> avm/res/cache/redis-enterprise
@@ -100,10 +113,12 @@ export function normalizeRecipeSource(source: string): string {
 }
 
 // Derive the primary concrete resource a recipe-pack entry deploys, or null when
-// the source is unrecognized (unknown recipes yield no fabricated output).
-export function deriveConcreteResource(source: string): ConcreteResource | null {
+// the source is unrecognized (unknown recipes yield no fabricated output). The
+// optional provider selects a provider-scoped override for sources that
+// materialize differently per environment (see PROVIDER_SOURCE_OVERRIDE).
+export function deriveConcreteResource(source: string, provider?: string): ConcreteResource | null {
   const key = normalizeRecipeSource(source);
-  const hit = SOURCE_CONCRETE_MAP[key];
+  const hit = (provider && PROVIDER_SOURCE_OVERRIDE[provider]?.[key]) || SOURCE_CONCRETE_MAP[key];
   if (!hit) return null;
   const leaf = hit.type.split("/").pop() || hit.type;
   const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) => m.toLowerCase());

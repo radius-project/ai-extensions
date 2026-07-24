@@ -29,7 +29,7 @@ export async function fetchRecipePack(gh, provider) {
     const entries = parseRecipePack(content);
     const recipes = [];
     for (const entry of entries) {
-        const concrete = deriveConcreteResource(entry.source);
+        const concrete = deriveConcreteResource(entry.source, provider);
         recipes.push({
             name: entry.resourceType.split('/').pop(),
             resourceType: entry.resourceType,

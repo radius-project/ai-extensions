@@ -34,7 +34,7 @@ describe.skipIf(!LIVE)("live recipe packs (opt-in: set RUN_LIVE_PACK_TESTS)", ()
       expect(entries.length).toBeGreaterThan(0);
 
       const unresolved = entries
-        .filter((e) => deriveConcreteResource(e.source) === null)
+        .filter((e) => deriveConcreteResource(e.source, provider) === null)
         .map((e) => `${e.resourceType} (${e.source})`);
 
       // A non-empty list means upstream added or changed a recipe source that the

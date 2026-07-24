@@ -83,8 +83,9 @@ describe("fetchRecipePack", () => {
     expect(mysql?.concreteResources[0].provider).toBe("azure");
 
     const containers = recipes.find(r => r.resourceType === "Radius.Compute/containers");
-    expect(containers?.concreteResources[0].type).toBe("apps/Deployment");
-    expect(containers?.concreteResources[0].provider).toBe("kubernetes");
+    // On the Azure pack a container materializes onto the AKS managed cluster.
+    expect(containers?.concreteResources[0].type).toBe("Microsoft.ContainerService/managedClusters");
+    expect(containers?.concreteResources[0].provider).toBe("azure");
 
     const secrets = recipes.find(r => r.resourceType === "Radius.Security/secrets");
     expect(secrets?.concreteResources[0].type).toBe("core/Secret");
