@@ -53,7 +53,9 @@ describe("filterGraphVisualizationResources", () => {
     const resources = [
       makeResource("Radius.Compute/containers", "api"),
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds"),
+      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds", {
+        connections: [{ id: imageId, direction: "Inbound" }],
+      }),
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.type)).toEqual(["Radius.Compute/containers"]);
