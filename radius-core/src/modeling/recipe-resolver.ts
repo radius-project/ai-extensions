@@ -54,10 +54,10 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
             'Applications.Core/volumes': 'Radius.Compute/persistentVolumes',
             'Applications.Core/secretStores': 'Radius.Security/secrets',
             'Applications.Core/extenders': 'Radius.Core/extenders',
-            'Applications.Datastores/sqlDatabases': 'Radius.Data/sqlDatabases',
+            'Applications.Datastores/sqlDatabases': 'Radius.Data/sqlServerDatabases',
             'Applications.Datastores/mongoDatabases': 'Radius.Data/mongoDatabases',
             'Applications.Datastores/redisCaches': 'Radius.Data/redisCaches',
-            'Applications.Messaging/rabbitMQQueues': 'Radius.Messaging/rabbitMQQueues',
+            'Applications.Messaging/rabbitMQQueues': 'Radius.Messaging/rabbitMQ',
         };
         return typeMap[type] || type;
     }

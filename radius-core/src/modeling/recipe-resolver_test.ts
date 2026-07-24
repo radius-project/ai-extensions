@@ -176,6 +176,44 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources[0].displayType).toBe("Deployment (AKS)");
   });
 
+  it("normalizes Applications.Datastores/sqlDatabases to Radius.Data/sqlServerDatabases", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "sqlServerDatabases",
+        resourceType: "Radius.Data/sqlServerDatabases",
+        templateKind: "bicep",
+        templatePath: "mcr.microsoft.com/bicep/avm/res/sql/server:0.21.4",
+        concreteResources: [
+          { name: "server", type: "Microsoft.Sql/servers", provider: "azure", displayType: "SQL Server" },
+        ],
+      },
+    ];
+    const appResources = [{ name: "db", type: "Applications.Datastores/sqlDatabases" }];
+    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    expect(resolved[0].recipe?.name).toBe("sqlServerDatabases");
+    expect(resolved[0].outputResources[0].type).toBe("Microsoft.Sql/servers");
+  });
+
+  it("normalizes Applications.Messaging/rabbitMQQueues to Radius.Messaging/rabbitMQ", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "rabbitMQ",
+        resourceType: "Radius.Messaging/rabbitMQ",
+        templateKind: "bicep",
+        templatePath: "mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2",
+        concreteResources: [
+          { name: "namespace", type: "Microsoft.ServiceBus/namespaces", provider: "azure", displayType: "Service Bus" },
+        ],
+      },
+    ];
+    const appResources = [{ name: "queue", type: "Applications.Messaging/rabbitMQQueues" }];
+    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    expect(resolved[0].recipe?.name).toBe("rabbitMQ");
+    expect(resolved[0].outputResources[0].type).toBe("Microsoft.ServiceBus/namespaces");
+  });
+
   it("produces no outputs when no recipe matches", async () => {
     const gh = fakeGitHub();
     const appResources = [{ name: "cache", type: "Radius.Data/redisCaches@2025-08-01-preview" }];
