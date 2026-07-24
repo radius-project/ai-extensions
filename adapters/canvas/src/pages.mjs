@@ -1501,6 +1501,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
             <a href="#" id="az-use-existing-link" style="margin-left:4px;">Use an existing application…</a>
           </div>
           <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
+          <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
@@ -1904,6 +1905,7 @@ function showEnvForm(preset) {
     if (sb) sb.style.display = 'none';
     envNameInput.value = preset.name !== undefined ? preset.name : '';
     document.getElementById('az-client-id').value = '';
+    clearSharedAppPin();
     document.getElementById('deploy-status').style.display = 'none';
     envLanding.style.display = 'none';
     envForm.style.display = '';
@@ -2007,6 +2009,9 @@ function loadProfilesIntoEnvSelect(preselectName) {
         });
 }
 function onEnvProfileSelected() {
+    // A credential-profile / tenant change is a context change: never let a
+    // shared-identity pin from a previous context silently carry over.
+    clearSharedAppPin();
     selectedProfile = findProfile(envProfileSelect.value);
     var statusEl = document.getElementById('env-profile-status');
     if (!selectedProfile) {
@@ -2036,6 +2041,23 @@ function onEnvProfileSelected() {
         discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
     });
 });
+// Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
+// reuse another app's identity — deliberately wider blast radius, so it must
+// be cleared on any fresh form or context change and be explicitly reversible.
+function clearSharedAppPin() {
+    var hid = document.getElementById('az-selected-app-id');
+    if (hid) hid.value = '';
+    var note = document.getElementById('az-selected-app-note');
+    if (note) { note.style.display = 'none'; note.textContent = ''; }
+    var clearLink = document.getElementById('az-clear-pin-link');
+    if (clearLink) clearLink.style.display = 'none';
+    var nameEl = document.getElementById('az-app-name-input');
+    if (nameEl) { nameEl.disabled = false; nameEl.style.opacity = ''; }
+}
+(function(){
+    var clearLink = document.getElementById('az-clear-pin-link');
+    if (clearLink) clearLink.addEventListener('click', function(e){ e.preventDefault(); clearSharedAppPin(); });
+})();
 // Opt-in "use an existing application" (advanced, non-default): lists ALL
 // App Registrations the user owns and lets them deliberately share one across
 // repos. A shared deploy identity has a wider blast radius, so this is never
@@ -2064,6 +2086,8 @@ function onEnvProfileSelected() {
                 if (hid && choice.appId) hid.value = choice.appId;
                 var picked = apps.filter(function(a){ return a.appId === choice.appId; })[0];
                 if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-info,#0969da)'; note.textContent = 'Will reuse: ' + ((picked && picked.displayName) || choice.appId) + ' (' + choice.appId + ').'; }
+                var clearLink = document.getElementById('az-clear-pin-link');
+                if (clearLink) clearLink.style.display = 'inline';
                 var nameEl = document.getElementById('az-app-name-input');
                 if (nameEl) { nameEl.disabled = true; nameEl.style.opacity = '0.6'; }
             }).catch(function(){ /* cancelled */ });
@@ -2073,6 +2097,7 @@ function onEnvProfileSelected() {
         });
     });
 })();
+document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
     e.preventDefault(); openProfileMenu(false); switchSubtab('credentials'); showCredForm();
@@ -2191,8 +2216,10 @@ function runAzureAutoSetup(params) {
     };
     // Only sent on a retry after the tenant demands it (progressive disclosure).
     if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
-    // ROUND 9: editable create name + explicit identity selection.
-    if (params.appName) payload.appName = params.appName;
+    // ROUND 9: editable create name + explicit identity selection. Send appName
+    // whenever the field was populated in params (even ''), so the server can
+    // distinguish an explicit blank (invalid) from an omitted field (derive).
+    if (params.appName !== undefined) payload.appName = params.appName;
     if (params.appId) payload.appId = params.appId;
     if (params.createNew) payload.createNew = true;
     return fetch('/api/azure-auto-setup', {

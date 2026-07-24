@@ -226,6 +226,33 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("app-selection-required");
         expect(html).toContain("showAppPicker");
     });
+
+    it("wires the New Environment button to open the env form (regression guard)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // d97b6d1 accidentally dropped this handler when the use-existing IIFE was
+        // inserted, leaving #new-env-btn dead. Assert the exact wiring so a future
+        // deletion of the primary entry point fails the suite.
+        expect(html).toContain("getElementById('new-env-btn')");
+        expect(html).toMatch(/getElementById\('new-env-btn'\)\.addEventListener\('click',\s*function\(\)\s*\{\s*showEnvForm/);
+    });
+
+    it("makes the shared-identity pin reversible and reset on context change", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Hidden pin + note + explicit reversal affordance.
+        expect(html).toContain('id="az-selected-app-id"');
+        expect(html).toContain('id="az-selected-app-note"');
+        expect(html).toContain('id="az-clear-pin-link"');
+        // Central reset helper is defined and called from both the fresh-form and
+        // profile-change paths so a stale pin can't leak into the wrong context.
+        expect(html).toContain("function clearSharedAppPin");
+        expect(html).toMatch(/clearSharedAppPin\(\)/);
+    });
+
+    it("always sends appName on create so explicit-empty is server-detectable", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Omitted vs explicit-blank must be distinguishable server-side.
+        expect(html).toContain("params.appName !== undefined");
+    });
 });
 
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {

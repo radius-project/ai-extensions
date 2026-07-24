@@ -680,4 +680,18 @@ describe("validateAppRegistrationName", () => {
     expect(validateAppRegistrationName(undefined).ok).toBe(false);
     expect(validateAppRegistrationName(123).ok).toBe(false);
   });
+
+  // The server validates the FINAL effective name — whether user-supplied or the
+  // derived `radius-deploy-<owner>-<repo>` default — so a pathologically long
+  // owner/repo that blows past Entra's 120-char limit is rejected up front
+  // instead of failing opaquely inside `az ad app create`.
+  it("rejects an over-long derived radius-deploy name", () => {
+    const derived = "radius-deploy-" + "o".repeat(60) + "-" + "r".repeat(60);
+    expect(derived.length).toBeGreaterThan(120);
+    expect(validateAppRegistrationName(derived).ok).toBe(false);
+  });
+
+  it("accepts a normal derived radius-deploy name", () => {
+    expect(validateAppRegistrationName("radius-deploy-octo-app")).toEqual({ ok: true, name: "radius-deploy-octo-app" });
+  });
 });

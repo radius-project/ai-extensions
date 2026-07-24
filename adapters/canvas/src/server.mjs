@@ -773,7 +773,11 @@ function createRequestHandler(instanceId) {
                 //   data.appName   — an editable display name for a NEW app.
                 const explicitAppId = (data.appId || '').trim();
                 const createNewApp = data.createNew === true;
-                const requestedAppName = typeof data.appName === 'string' ? data.appName : '';
+                // Distinguish "field omitted" from "explicitly sent blank": a
+                // present-but-blank name is a user error (invalid-app-name), not
+                // a silent fall-back to the derived default.
+                const appNameProvided = typeof data.appName === 'string';
+                const requestedAppName = appNameProvided ? data.appName : '';
 
                 function fail(status, error, code, extra) {
                     res.setHeader("Content-Type", "application/json");
@@ -910,15 +914,30 @@ function createRequestHandler(instanceId) {
                 // The default per-repo deploy identity name. Editable: when the
                 // user supplies data.appName (create path), we validate and use
                 // it instead — but only for the name lookup / create below, never
-                // to repoint an already-wired AZURE_CLIENT_ID.
+                // to repoint an already-wired AZURE_CLIENT_ID. When an explicit
+                // appId is chosen the name is irrelevant (we reuse that app), so
+                // validation is skipped there.
                 let appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
-                if (requestedAppName.trim()) {
-                    const nameCheck = validateAppRegistrationName(requestedAppName);
-                    if (!nameCheck.ok) {
-                        fail(400, nameCheck.reason, 'invalid-app-name', { steps });
-                        return;
+                if (!explicitAppId) {
+                    // Always validate the FINAL effective name — including the
+                    // derived default, which for a very long owner/repo could
+                    // exceed Entra's 120-char limit. A present-but-blank name is
+                    // an explicit error rather than a silent derive.
+                    if (appNameProvided) {
+                        const nameCheck = validateAppRegistrationName(requestedAppName);
+                        if (!nameCheck.ok) {
+                            fail(400, nameCheck.reason, 'invalid-app-name', { steps });
+                            return;
+                        }
+                        appName = nameCheck.name;
+                    } else {
+                        const nameCheck = validateAppRegistrationName(appName);
+                        if (!nameCheck.ok) {
+                            fail(400, 'The derived App Registration name is invalid: ' + nameCheck.reason + ' Supply a shorter appName.', 'invalid-app-name', { steps });
+                            return;
+                        }
+                        appName = nameCheck.name;
                     }
-                    appName = nameCheck.name;
                 }
 
                 // The repo's existing AZURE_CLIENT_ID (if any). Read from the
@@ -1297,16 +1316,25 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: 'The App Registration list returned an unexpected result.', code: 'app-list-parse' }));
                     return;
                 }
+                // Enrich servesRepos in bounded-parallel batches so the picker
+                // loads quickly even for users who own many apps (avoids an N+1
+                // serial chain of `az` calls) without spawning an unbounded
+                // number of concurrent az processes.
+                const validApps = parsed.filter((a) => a && a.appId);
                 const apps = [];
-                for (const a of parsed) {
-                    if (!a || !a.appId) continue;
-                    const servesRepos = await listServesRepos(a.appId);
-                    apps.push({
-                        appId: a.appId,
-                        displayName: a.displayName,
-                        createdDateTime: a.createdDateTime,
-                        ...(servesRepos ? { servesRepos } : {}),
-                    });
+                const CONCURRENCY = 6;
+                for (let i = 0; i < validApps.length; i += CONCURRENCY) {
+                    const batch = validApps.slice(i, i + CONCURRENCY);
+                    const enriched = await Promise.all(batch.map(async (a) => {
+                        const servesRepos = await listServesRepos(a.appId);
+                        return {
+                            appId: a.appId,
+                            displayName: a.displayName,
+                            createdDateTime: a.createdDateTime,
+                            ...(servesRepos ? { servesRepos } : {}),
+                        };
+                    }));
+                    for (const e of enriched) apps.push(e);
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
