@@ -163,11 +163,20 @@ export function selectMissingFederatedCredentials(desired = [], existingSubjects
   return (Array.isArray(desired) ? desired : []).filter((f) => f && !have.has(String(f.subject).trim()));
 }
 
-// Classify an `az ad app show --id <appId>` stderr as a "resource not found"
-// (the id is stale/deleted — expected, non-fatal) versus any other failure
-// (transport/permission — must be fatal). MS Graph returns messages like
-// "Resource '...' does not exist ...", and REST 404s surface as "Not Found".
-const AZ_NOT_FOUND_RE = /does not exist|not\s*found|resource not found|was not found/i;
+// Classify an `az ad app show --id <appId>` stderr as a genuine Graph
+// "resource not found" (the id is stale/deleted — expected, non-fatal
+// fallthrough) versus ANY other failure (auth / Conditional Access / expired
+// token / permission / throttling / malformed id — must be fatal, fail closed).
+//
+// Match ONLY the canonical Microsoft Graph 404 markers `az ad app show`
+// surfaces: the `Request_ResourceNotFound` error code and the exact phrase
+// "does not exist or one of its queried reference-property objects are not
+// present." A broad /not found/ would also match AADSTS auth errors (e.g.
+// "resource principal ... was not found"), MSAL token-cache messages, and
+// interactive-auth text — misclassifying an auth failure as "stale" and
+// letting Step 3b create a duplicate app (the tenant-sprawl bug this prevents).
+const AZ_NOT_FOUND_RE =
+  /Request_ResourceNotFound|does not exist or one of its queried reference-property objects are not present/i;
 
 /**
  * @param {string} stderr

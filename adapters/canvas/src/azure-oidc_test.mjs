@@ -448,16 +448,58 @@ describe("decideExistingClientId", () => {
 });
 
 describe("isAzResourceNotFound", () => {
-  it("matches Graph 'does not exist' messages", () => {
-    expect(isAzResourceNotFound("Resource '00000000' does not exist or one of its queried reference-property objects are not present.")).toBe(true);
+  // TRUE → 'not-found' → Step 3a fallthrough to the name lookup.
+  it("matches the canonical Graph resource-not-found phrase", () => {
+    expect(
+      isAzResourceNotFound(
+        "Resource '00000000-0000-0000-0000-000000000000' does not exist or one of its queried reference-property objects are not present.",
+      ),
+    ).toBe(true);
   });
 
-  it("matches 'Not Found' / 'was not found'", () => {
-    expect(isAzResourceNotFound("Not Found (HTTP 404)")).toBe(true);
-    expect(isAzResourceNotFound("The application was not found in the directory")).toBe(true);
+  it("matches the Request_ResourceNotFound error code", () => {
+    expect(isAzResourceNotFound("(Request_ResourceNotFound) The resource could not be located.")).toBe(true);
   });
 
-  it("does not match unrelated / permission failures", () => {
+  // FALSE → 'lookup-failed' → decideExistingClientId → fatal client-id-lookup-failed.
+  // A broad /not found/ would misclassify these as stale and let Step 3b create
+  // a duplicate app — the tenant-sprawl bug this feature exists to prevent.
+  it("does NOT match AADSTS auth failures (must fail closed)", () => {
+    expect(
+      isAzResourceNotFound(
+        "AADSTS500011: The resource principal named api://foo was not found in the tenant named Contoso.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match MSAL/token-cache 'not found' messages", () => {
+    expect(isAzResourceNotFound("No token found in cache. Interactive authentication is required.")).toBe(false);
+    expect(isAzResourceNotFound("Token was not found in the cache")).toBe(false);
+  });
+
+  it("does NOT match throttling / 429 messages", () => {
+    expect(isAzResourceNotFound("TooManyRequests: Request was throttled (HTTP 429). Retry after 30s.")).toBe(false);
+  });
+
+  it("does NOT match Conditional Access / interactive-auth-required messages", () => {
+    expect(
+      isAzResourceNotFound(
+        "AADSTS53003: Access has been blocked by Conditional Access policies. Interactive authentication is needed.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match a malformed-guid error", () => {
+    expect(isAzResourceNotFound("The value 'not-a-guid' is not a valid GUID.")).toBe(false);
+  });
+
+  it("does NOT match bare 'not found' / 'was not found' / 'does not exist'", () => {
+    expect(isAzResourceNotFound("Not Found (HTTP 404)")).toBe(false);
+    expect(isAzResourceNotFound("The application was not found in the directory")).toBe(false);
+    expect(isAzResourceNotFound("Resource does not exist")).toBe(false);
+  });
+
+  it("does not match unrelated / empty input", () => {
     expect(isAzResourceNotFound("AADSTS500011: insufficient privileges")).toBe(false);
     expect(isAzResourceNotFound("")).toBe(false);
     expect(isAzResourceNotFound(undefined)).toBe(false);
