@@ -138,6 +138,14 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
         expect(CLIENT_GRAPH_JS).toContain("rad-node__dots nodrag nopan");
     });
 
+    it("toggles the details popup from the node's \"...\" button — a second click on the same node closes it", () => {
+        // The dots button calls the toggle (not open) so re-clicking it dismisses an
+        // already-open popup; toggle closes only when the popup is open for this same
+        // card, and otherwise (re)opens against it.
+        expect(CLIENT_GRAPH_JS).toContain("popupCtl.toggle(d, e.currentTarget.closest('.rad-node'))");
+        expect(CLIENT_GRAPH_JS).toContain("if (popup.style.display !== 'none' && openCardEl === cardEl)");
+    });
+
     it("renders a disabled source row for a local node with no code reference", () => {
         expect(CLIENT_GRAPH_JS).toContain("'aria-disabled': 'true'");
         expect(CLIENT_GRAPH_JS).toContain("No source reference found");
