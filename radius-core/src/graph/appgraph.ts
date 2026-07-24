@@ -25,6 +25,7 @@ const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 export function applicationGraphToResources(
   appGraph: any,
   definitionFile = ".radius/app.bicep",
+  definitionContent = "",
 ): any[] {
   const icons =
     !Array.isArray(appGraph) &&
@@ -45,6 +46,7 @@ export function applicationGraphToResources(
     : appGraph && Array.isArray(appGraph.resources)
       ? appGraph.resources
       : [];
+  const definitionLines = findResourceDefinitionLines(definitionContent);
 
   const resources: any[] = [];
   for (const r of raw) {
@@ -77,7 +79,12 @@ export function applicationGraphToResources(
         : [],
       diffHash: validateDiffHash(r.diffHash, r.name || id),
       definitionFile,
-      definitionLine: typeof r.definitionLine === "number" ? r.definitionLine : 0,
+      definitionLine:
+        typeof r.definitionLine === "number" && r.definitionLine > 0
+          ? r.definitionLine
+          : definitionLines.get(r.name) ??
+            definitionLines.get(id.split("/").pop() || "") ??
+            0,
       // Newer `rad app graph` emits the authored codeReference under the
       // resource's `properties`; older output placed it at the top level. Prefer
       // the new location and fall back to the legacy one — otherwise the canvas
@@ -94,6 +101,56 @@ export function applicationGraphToResources(
 
   addInboundConnections({ resources });
   return resources;
+}
+
+/**
+ * Find authored Bicep resource declaration lines by both symbolic name and a
+ * literal top-level `name` property. `rad app graph` does not consistently emit
+ * source locations, so this keeps app-definition links anchored to the resource
+ * declaration without coupling the graph model to a Bicep parser.
+ */
+export function findResourceDefinitionLines(content: string): Map<string, number> {
+  const result = new Map<string, number>();
+  if (!content) return result;
+
+  const lines = content.split(/\r?\n/);
+  const declarations: Array<{ index: number; symbol: string }> = [];
+  const declarationPattern =
+    /^\s*resource\s+([A-Za-z_][A-Za-z0-9_]*)\s+['"][^'"]+['"](?:\s+existing)?\s*=/;
+
+  for (let index = 0; index < lines.length; index++) {
+    const match = lines[index].match(declarationPattern);
+    if (match) declarations.push({ index, symbol: match[1] });
+  }
+
+  for (let i = 0; i < declarations.length; i++) {
+    const declaration = declarations[i];
+    const lineNumber = declaration.index + 1;
+    result.set(declaration.symbol, lineNumber);
+
+    let depth = 0;
+    let foundBody = false;
+    for (let index = declaration.index; index < lines.length; index++) {
+      const structuralLine = lines[index]
+        .replace(/'[^']*'|"[^"]*"/g, "")
+        .replace(/\/\/.*$/, "");
+      const depthBeforeLine = depth;
+      depth += (structuralLine.match(/{/g) || []).length;
+      depth -= (structuralLine.match(/}/g) || []).length;
+      foundBody ||= depth > 0 || structuralLine.includes("{");
+
+      const nameMatch =
+        depthBeforeLine === 1
+          ? lines[index].match(/^\s*name\s*:\s*['"]([^'"]+)['"]/)
+          : null;
+      if (nameMatch && !result.has(nameMatch[1])) {
+        result.set(nameMatch[1], lineNumber);
+      }
+      if (foundBody && depth === 0) break;
+    }
+  }
+
+  return result;
 }
 
 /**

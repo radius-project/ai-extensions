@@ -672,7 +672,7 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
-    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile));
+    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
