@@ -2070,7 +2070,7 @@ function createRequestHandler(instanceId) {
                 let recipes = [];
                 addProgress('Fetching the default recipe pack from GitHub...');
                 recipes = await fetchRecipePack(github, provider);
-                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the ${provider} recipe pack.`);
+                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`);
 
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
