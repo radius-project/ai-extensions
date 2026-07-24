@@ -268,6 +268,32 @@ export function extractErrorLines(logText, max = 12) {
     return out.slice(-max);
 }
 
+// Detects the Entra "enterprise claim" rejection (AADSTS7002381) that GitHub
+// Actions OIDC hits when a repo is NOT owned by an org in a GitHub Enterprise.
+// Tenant-agnostic: the accepted enterprise values and the actual value are parsed
+// out of the error text itself, so this works for any tenant policy, not just
+// Microsoft's. Returns a friendly multi-line explanation, or '' if not applicable.
+export function explainOidcEnterpriseClaim(logText) {
+    if (!logText) return '';
+    if (!/AADSTS7002381/.test(logText) && !/must contain the enterprise claim/i.test(logText)) return '';
+    // Parse: "...enterprise claim with value 'a', 'b' or 'c' but actual value is 'x'..."
+    let accepted = [];
+    let actual = null;
+    const m = /enterprise claim with value\s+(.+?)\s+but actual value is\s+'([^']*)'/i.exec(logText);
+    if (m) {
+        accepted = (m[1].match(/'([^']*)'/g) || []).map(s => s.replace(/'/g, ''));
+        actual = m[2];
+    }
+    const acceptedLabel = accepted.length ? accepted.join(', ') : 'a value required by the target Azure tenant';
+    const actualLabel = (actual === null || actual === '') ? 'empty (this repository is not part of a GitHub Enterprise)' : ('"' + actual + '"');
+    return [
+        'Azure Login (OIDC) was rejected because this repository\u2019s GitHub OIDC token is missing the required "enterprise" claim.',
+        'The target Azure tenant only trusts GitHub Actions tokens whose enterprise claim is one of: ' + acceptedLabel + ' (actual: ' + actualLabel + ').',
+        'GitHub only includes the enterprise claim for repositories owned by an organization that belongs to a GitHub Enterprise \u2014 personal-account repositories cannot satisfy this policy.',
+        'Fix: host this repository under an organization that is part of one of the accepted GitHub Enterprises (' + acceptedLabel + '), then re-run Create Environment so the federated credential is recreated for the new owner/repo.',
+    ].join('\n');
+}
+
 export function extractRadDeployError(logText, maxChars = 4000) {
     if (!logText) return '';
     // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,

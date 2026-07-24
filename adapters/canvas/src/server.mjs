@@ -56,6 +56,7 @@ import {
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
+  explainOidcEnterpriseClaim,
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
@@ -884,9 +885,10 @@ function createRequestHandler(instanceId) {
                 // single exact subject (failing loud only if a repo/repository
                 // claim needs an immutability decision it cannot make).
                 steps.push('Resolving GitHub OIDC subject...');
-                // TODO(defer): enterprise-claim handling (AADSTS7002381) and any
-                // package-scope / workflow-permission changes are intentionally
-                // out of scope for this fix.
+                // Note: enterprise-claim rejection (AADSTS7002381) is handled at
+                // Actions-run failure time via explainOidcEnterpriseClaim (deploy.mjs),
+                // which surfaces a tenant-agnostic explanation. Package-scope /
+                // workflow-permission changes remain out of scope for this fix.
                 let oidc;
                 try {
                     oidc = await resolveOidcSubject(
@@ -2436,6 +2438,8 @@ function createRequestHandler(instanceId) {
                 const log = await fetchRunLog(repo, runId);
                 const lines = extractErrorLines(log, 8);
                 if (lines.length) errMsg += '\n' + lines.join('\n');
+                const oidcClaimHelp = explainOidcEnterpriseClaim(log);
+                if (oidcClaimHelp) errMsg = oidcClaimHelp + '\n\n\u2014 raw error \u2014\n' + errMsg;
                 respond({ state: "failed", runId, runUrl, error: errMsg });
             } catch (e) {
                 respond({ state: "unknown", error: e.message });
@@ -3275,6 +3279,12 @@ function createRequestHandler(instanceId) {
                                     // output; fall back to the full run log.
                                     let failLog = live;
                                     if (!failLog) failLog = await fetchRunLog(repo, dRunId);
+                                    // OIDC Azure Login can fail during deploy too. When the
+                                    // enterprise-claim rejection (AADSTS7002381) is present, lead
+                                    // with the friendly, tenant-agnostic explanation and push the
+                                    // rest of the surfaced error below it.
+                                    const claimHelp = explainOidcEnterpriseClaim(failLog);
+                                    if (claimHelp) dErr = claimHelp + '\n\n\u2014 raw error \u2014\n' + dErr;
                                     const detailBlock = extractRadDeployError(failLog);
                                     if (detailBlock) {
                                         dErr += '\n\n' + detailBlock;
