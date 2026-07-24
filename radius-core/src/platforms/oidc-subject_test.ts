@@ -366,4 +366,42 @@ describe("buildFederatedCredentialName", () => {
     expect(name.length).toBeLessThanOrEqual(120);
     expect(name.endsWith("-")).toBe(false);
   });
+
+  it("keeps the mutable/immutable pair distinct and variant-terminated under truncation", () => {
+    const common = {
+      repoFullName: "octo-org/octo-repo",
+      envName: "e".repeat(200),
+    };
+    const mutable = buildFederatedCredentialName({ ...common, variant: "mutable" });
+    const immutable = buildFederatedCredentialName({ ...common, variant: "immutable" });
+
+    // Distinct — the collision bug produced identical truncated names.
+    expect(mutable).not.toBe(immutable);
+    // Both within Azure's 120-char limit.
+    expect(mutable.length).toBeLessThanOrEqual(120);
+    expect(immutable.length).toBeLessThanOrEqual(120);
+    // The full variant always survives truncation.
+    expect(mutable.endsWith("-mutable")).toBe(true);
+    expect(immutable.endsWith("-immutable")).toBe(true);
+    // No leading/trailing hyphen, valid charset.
+    for (const name of [mutable, immutable]) {
+      expect(name.startsWith("-")).toBe(false);
+      expect(name.endsWith("-")).toBe(false);
+      expect(/^[A-Za-z0-9_-]+$/.test(name)).toBe(true);
+    }
+  });
+
+  it("stays distinct with a long repo name plus a long env", () => {
+    const common = {
+      repoFullName: `octo-org/${"r".repeat(100)}`,
+      envName: "e".repeat(50),
+    };
+    const mutable = buildFederatedCredentialName({ ...common, variant: "mutable" });
+    const immutable = buildFederatedCredentialName({ ...common, variant: "immutable" });
+    expect(mutable).not.toBe(immutable);
+    expect(mutable.length).toBeLessThanOrEqual(120);
+    expect(immutable.length).toBeLessThanOrEqual(120);
+    expect(mutable.endsWith("-mutable")).toBe(true);
+    expect(immutable.endsWith("-immutable")).toBe(true);
+  });
 });

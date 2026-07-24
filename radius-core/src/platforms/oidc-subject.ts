@@ -209,8 +209,22 @@ export function buildFederatedCredentialName(input: {
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "");
   const { owner, repo } = parseOwnerRepo(input.repoFullName);
-  const segments = ["github", clean(owner), clean(repo), clean(input.envName)];
-  if (input.variant) segments.push(clean(input.variant));
-  const name = segments.filter(Boolean).join("-");
-  return name.length > 120 ? name.slice(0, 120).replace(/-+$/, "") : name;
+  const base = ["github", clean(owner), clean(repo), clean(input.envName)]
+    .filter(Boolean)
+    .join("-");
+
+  const variant = input.variant ? clean(input.variant) : "";
+  if (!variant) {
+    return base.length > 120 ? base.slice(0, 120).replace(/-+$/, "") : base;
+  }
+
+  // Reserve room for the variant so it always survives truncation. Without
+  // this, two variants ("mutable"/"immutable") whose shared base exceeds the
+  // limit would truncate to the SAME 120-char string, collide on the Azure
+  // federated-credential name, and silently drop the second credential
+  // (az reports "already exists") — reintroducing the AADSTS700213 mismatch.
+  const suffix = `-${variant}`;
+  const maxBase = 120 - suffix.length;
+  const truncatedBase = base.slice(0, Math.max(0, maxBase)).replace(/-+$/, "");
+  return `${truncatedBase}${suffix}`;
 }
