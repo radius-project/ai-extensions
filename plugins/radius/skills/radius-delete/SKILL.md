@@ -8,7 +8,7 @@ description: Delete a Radius application deployment (or remove a GitHub deploy e
 Two distinct teardown flows are available from the Radius canvas:
 
 - **Delete a deployment** dispatches the committed `delete-application.yml` GitHub Actions workflow, which spins up an ephemeral k3d Radius control plane, connects to the target AKS cluster, restores persisted state, runs `rad app delete`, and persists the updated state again before tearing the control plane down. Deleting the deployment also deletes that application's resources (running their recipes' delete path against the target cluster and cloud).
-- **Delete an environment** removes the **GitHub deploy environment** itself (its variables, secrets, and OIDC trust). This does not run a Radius workflow; it is guarded so it refuses while an application is still deployed to that environment.
+- **Delete an environment** removes the **GitHub deploy environment** itself (its stored variables and secrets) via the GitHub API. This does not run a Radius workflow and does not tear down the cloud-side OIDC trust (the Azure federated credential / AWS IAM role trust stays in place); it is guarded so it refuses while an application is still deployed to that environment.
 
 ## When to use this skill
 
@@ -39,18 +39,18 @@ The extension keeps the committed delete workflow files current before dispatchi
 3. Installs `k3d` + the `rad` CLI + Terraform and installs Radius on the ephemeral control plane wired to the target cluster (same setup as deploy).
 4. Projects GitHub OIDC tokens into the pods and registers the cloud identity with `rad credential register`, so recipe deletes can reach the target cluster and cloud.
 5. Authenticates to GHCR with the repository `GITHUB_TOKEN`, exports environment-scoped `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE`, then runs `rad startup` to restore the control-plane databases and Terraform recipe-state Secrets persisted by the previous run — this is what tells the delete which environment, recipe packs, resources, and Terraform state exist. Unlike deploy, it does **not** recreate the environment, recipe pack, or registry credentials.
-6. Runs `rad app delete <name> --yes --preview` (`--preview` selects the Radius.Core surface) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `output`).
+6. Runs `rad app delete <name> --yes --preview` (`--preview` switches the CLI to the deployed-application API path) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `output`).
 7. `rad shutdown` (`if: always()`) persists the post-delete control-plane databases and Terraform recipe-state Secrets back to the state archive — the OCI-backed archive by default (pushed to the GHCR repository in `RADIUS_STATE_REGISTRY` under the `RADIUS_STATE_ARCHIVE` tag, default `radius-state`), or the `radius-state` git orphan branch when `RADIUS_STATE_BACKEND=git`. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
 
 ## What the environment-delete flow does
 
 - Refuses to proceed while an application is still deployed to the environment (its cloud resources would be orphaned), and points you at the deployment-delete flow first.
-- When no deployment is active, deletes the GitHub environment via the GitHub API. No Radius control plane is created and no recipe deletes run.
+- When no deployment is active, deletes the GitHub deploy environment (its variables and secrets) via the GitHub API. No Radius control plane is created, no recipe deletes run, and the cloud-side OIDC trust is left in place.
 
 ## After a successful delete
 
 - Tell the user it succeeded and include the workflow run URL (for a deployment delete).
-- Note that deleting a deployment removed the app's resources; deleting an environment removed the GitHub deploy environment and its stored credentials.
+- Note that deleting a deployment removed the app's resources; deleting an environment removed the GitHub deploy environment (its variables and secrets), leaving the cloud-side OIDC trust intact.
 
 ## Common failure modes
 
