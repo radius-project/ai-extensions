@@ -123,24 +123,35 @@ export function deriveConcreteResource(source: string): ConcreteResource | null 
 export function parseRecipePack(content: string): RecipePackEntry[] {
   if (!content) return [];
   const entries: RecipePackEntry[] = [];
-  // Match a quoted Radius type key opening a block, then capture the block body up
-  // to the kind/source declarations. kind/source order is not assumed.
   const entryRegex = /'(Radius\.[A-Za-z0-9]+\/[A-Za-z0-9]+)'\s*:\s*\{/g;
   let match: RegExpExecArray | null;
+
   while ((match = entryRegex.exec(content)) !== null) {
     const resourceType = match[1];
-    // Scan a bounded window after the opening brace for this entry's kind/source.
-    const windowStart = entryRegex.lastIndex;
-    const window = content.slice(windowStart, windowStart + 4000);
-    const kind = matchQuoted(window, /\bkind\s*:\s*'([^']+)'/);
-    const source = matchQuoted(window, /\bsource\s*:\s*'([^']+)'/);
+    let kind: string | null = null;
+    let source: string | null = null;
+
+    let i = entryRegex.lastIndex;
+    let depth = 1;
+    let lineStart = i;
+    for (; i < content.length && depth > 0; i++) {
+      const ch = content[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+
+      if (ch === "\n" || i === content.length - 1) {
+        if (depth === 1) {
+          const line = content.slice(lineStart, i + 1);
+          kind ??= line.match(/\bkind\s*:\s*'([^']+)'/)?.[1] ?? null;
+          source ??= line.match(/\bsource\s*:\s*'([^']+)'/)?.[1] ?? null;
+        }
+        lineStart = i + 1;
+      }
+    }
+
     if (!source) continue;
     entries.push({ resourceType, kind: kind || "bicep", source });
   }
-  return entries;
-}
 
-function matchQuoted(text: string, re: RegExp): string | null {
-  const m = text.match(re);
-  return m ? m[1] : null;
+  return entries;
 }
