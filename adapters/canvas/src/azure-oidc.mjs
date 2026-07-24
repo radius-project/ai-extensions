@@ -145,6 +145,161 @@ export function selectAppRegistration({ ownedMatches = [], hasUnownedMatch = fal
 }
 
 /**
+ * Pure disambiguation for Step 3b that supports an interactive picker and an
+ * explicit opt-in choice, layered on top of `selectAppRegistration`'s heuristic.
+ *
+ * The App Registration is a per-repo CI/CD deploy identity. The zero-click
+ * default stays per-repo, but:
+ * - a user can explicitly pick an owned app (`explicitAppId`) — including one
+ *   that does NOT match the repo-derived name, enabling deliberate cross-repo
+ *   shared identity;
+ * - a user can force creating a fresh app (`createNew`);
+ * - when >1 owned name-matches exist and the user hasn't chosen, we return
+ *   `needs-selection` so the caller can prompt (never silently consolidate).
+ *
+ * @param {{ownedMatches?: {appId:string,displayName?:string,createdDateTime?:string}[], hasUnownedMatch?: boolean, existingClientId?: string, explicitAppId?: string, createNew?: boolean}} input
+ * @returns {{action:'reuse'|'create'|'error'|'needs-selection', appId?:string, code?:string, reason?:string, duplicates?:boolean, candidates?:object[], defaultAppId?:string}}
+ */
+export function decideAppSelection({
+  ownedMatches = [],
+  hasUnownedMatch = false,
+  existingClientId,
+  explicitAppId,
+  createNew = false,
+} = {}) {
+  const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter((m) => m && m.appId);
+  const norm = (v) => String(v || "").trim().toLowerCase();
+
+  // An explicit picker choice wins — but only if the caller owns it. An
+  // explicitAppId not among the owned candidates is unsafe (we can't verify
+  // ownership here), so it is an error rather than a silent create/reuse.
+  if (explicitAppId && String(explicitAppId).trim()) {
+    const picked = owned.find((m) => norm(m.appId) === norm(explicitAppId));
+    if (picked) return { action: "reuse", appId: picked.appId };
+    return {
+      action: "error",
+      code: "app-registration-not-owned",
+      reason:
+        "The selected App Registration is not owned by the signed-in user (or no longer exists). " +
+        "Choose an owned application or create a new one.",
+    };
+  }
+
+  // Explicit "create new" short-circuits the reuse heuristics.
+  if (createNew === true) return { action: "create" };
+
+  if (owned.length === 0) {
+    if (hasUnownedMatch) {
+      return {
+        action: "error",
+        code: "app-registration-not-owned",
+        reason:
+          "An App Registration with this name already exists but is owned by another user. " +
+          "Reusing it would fail (federated-credential and role writes require ownership). " +
+          "Coordinate with the owner or rename, then retry.",
+      };
+    }
+    return { action: "create" };
+  }
+
+  if (owned.length === 1) {
+    return { action: "reuse", appId: owned[0].appId, duplicates: false };
+  }
+
+  // >1 owned matches and no explicit choice — compute the heuristic default the
+  // picker should preselect, but defer to the user.
+  let defaultAppId;
+  if (existingClientId) {
+    const preferred = owned.find((m) => norm(m.appId) === norm(existingClientId));
+    if (preferred) defaultAppId = preferred.appId;
+  }
+  if (!defaultAppId) {
+    const oldest = [...owned].sort((a, b) => {
+      const ta = Date.parse(a.createdDateTime || "");
+      const tb = Date.parse(b.createdDateTime || "");
+      return (Number.isNaN(ta) ? Infinity : ta) - (Number.isNaN(tb) ? Infinity : tb);
+    })[0];
+    defaultAppId = oldest.appId;
+  }
+  return {
+    action: "needs-selection",
+    candidates: owned.map((m) => ({
+      appId: m.appId,
+      displayName: m.displayName,
+      createdDateTime: m.createdDateTime,
+    })),
+    defaultAppId,
+    reason: "Multiple owned App Registrations match this repository's name.",
+  };
+}
+
+/**
+ * Parse the set of `owner/repo` slugs a federated-credential set already serves,
+ * from its subject strings. GitHub OIDC subjects look like
+ * `repo:owner/repo:ref:refs/heads/main`, `repo:owner/repo:environment:prod`,
+ * `repo:owner/repo:pull_request`, and the immutable form
+ * `repo:owner@<ownerId>/repo@<repoId>:environment:prod`. We extract the
+ * `owner/repo` segment (stripping any `@<id>` immutable suffixes) so a picker
+ * can show which repos an app already serves.
+ *
+ * @param {Iterable<string>} subjects
+ * @returns {string[]} sorted unique `owner/repo` values
+ */
+export function parseServedReposFromSubjects(subjects) {
+  const repos = new Set();
+  for (const s of Array.from(subjects || [])) {
+    if (typeof s !== "string") continue;
+    const m = /^repo:([^:]+)/.exec(s.trim());
+    if (!m) continue;
+    const slug = m[1];
+    const parts = slug.split("/");
+    if (parts.length !== 2) continue;
+    // Strip the immutable `@<numericId>` suffix from each segment if present.
+    const owner = parts[0].replace(/@\d+$/, "");
+    const repo = parts[1].replace(/@\d+$/, "");
+    if (owner && repo) repos.add(`${owner}/${repo}`);
+  }
+  return [...repos].sort();
+}
+
+/**
+ * Short human label summarizing the repos an App Registration already serves,
+ * for the identity-picker rows. Pure; mirrored in the browser as
+ * formatServesReposLabelClient (pages.mjs) since that file can't import here.
+ *
+ * @param {string[]} list
+ * @returns {string}
+ */
+export function formatServesReposLabel(list) {
+  if (!Array.isArray(list) || list.length === 0) return "";
+  if (list.length <= 3) return "Serves: " + list.join(", ");
+  return "Serves: " + list.slice(0, 3).join(", ") + " +" + (list.length - 3) + " more";
+}
+
+// Entra display names allow a broad set; we restrict to a safe, human-typable
+// subset (letters, digits, space, and - . _ ( )) and Entra's 120-char limit,
+// rejecting control characters. This is also passed to `az ad app create
+// --display-name`, so keeping it tight avoids surprising shell/Graph behavior.
+const APP_NAME_ALLOWED_RE = /^[A-Za-z0-9 ._()-]+$/;
+
+/**
+ * @param {string} name
+ * @returns {{ok:true, name:string} | {ok:false, reason:string}}
+ */
+export function validateAppRegistrationName(name) {
+  if (typeof name !== "string") return { ok: false, reason: "Application name must be a string." };
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return { ok: false, reason: "Application name must not be empty." };
+  if (trimmed.length > 120) return { ok: false, reason: "Application name must be at most 120 characters." };
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return { ok: false, reason: "Application name must not contain control characters." };
+  if (!APP_NAME_ALLOWED_RE.test(trimmed)) {
+    return { ok: false, reason: "Application name may only contain letters, digits, spaces, and - . _ ( )." };
+  }
+  return { ok: true, name: trimmed };
+}
+
+/**
  * Pure idempotency filter for federated credentials: return only the desired
  * FICs whose SUBJECT is not already present on the app. Matching is by subject
  * (not name) because the subject is the identity GitHub presents at token time,

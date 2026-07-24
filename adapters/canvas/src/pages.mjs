@@ -1492,6 +1492,16 @@ document.getElementById('back-btn').addEventListener('click', function() {
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
         </div>
+        <div class="rad-field" style="margin:8px 0 12px;">
+          <label>Deploy identity (App Registration) name</label>
+          <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
+          <input type="hidden" id="az-selected-app-id" value="" />
+          <div style="font-size:11px; color:var(--rad-text-tertiary); margin-top:4px;">
+            Used only when creating a new deploy identity for this repository. If one already exists it is reused.
+            <a href="#" id="az-use-existing-link" style="margin-left:4px;">Use an existing application…</a>
+          </div>
+          <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
+        </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label>Resource Group</label>
@@ -1651,6 +1661,23 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
       <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
       <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
+    </div>
+  </div>
+</div>
+
+<!-- App Registration picker: shown when multiple owned identities match this
+     repo (app-selection-required), or via the opt-in "Use an existing
+     application" advanced action. Rows are built dynamically in JS. -->
+<div id="env-appselect-modal" style="display:none; position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
+    <div id="env-appselect-title" style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Choose a deploy identity</div>
+    <div id="env-appselect-intro" style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;"></div>
+    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger,#cf222e); line-height:1.5; margin-bottom:10px;"></div>
+    <div id="env-appselect-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:8px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Use selected</button>
     </div>
   </div>
 </div>
@@ -2009,7 +2036,43 @@ function onEnvProfileSelected() {
         discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
     });
 });
-document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
+// Opt-in "use an existing application" (advanced, non-default): lists ALL
+// App Registrations the user owns and lets them deliberately share one across
+// repos. A shared deploy identity has a wider blast radius, so this is never
+// reached automatically — only via this explicit action.
+(function(){
+    var link = document.getElementById('az-use-existing-link');
+    if (!link) return;
+    link.addEventListener('click', function(e){
+        e.preventDefault();
+        var note = document.getElementById('az-selected-app-note');
+        link.textContent = 'Loading applications…';
+        fetch('/api/list-azure-app-registrations').then(function(r){ return r.json(); }).then(function(data){
+            link.textContent = 'Use an existing application…';
+            if (data.error) { if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'Could not list applications: ' + data.error; } return; }
+            var apps = data.apps || [];
+            if (!apps.length) { if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'You do not own any App Registrations yet — create one instead.'; } return; }
+            showAppPicker({
+                title: 'Use an existing application',
+                intro: 'Select an App Registration you already own to reuse as this repository\u2019s deploy identity.',
+                caution: 'Sharing one identity across repositories means every wired repository can use its Azure permissions. Only do this for repos that belong to the same product.',
+                candidates: apps,
+                defaultAppId: '',
+                allowCreateNew: false
+            }).then(function(choice){
+                var hid = document.getElementById('az-selected-app-id');
+                if (hid && choice.appId) hid.value = choice.appId;
+                var picked = apps.filter(function(a){ return a.appId === choice.appId; })[0];
+                if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-info,#0969da)'; note.textContent = 'Will reuse: ' + ((picked && picked.displayName) || choice.appId) + ' (' + choice.appId + ').'; }
+                var nameEl = document.getElementById('az-app-name-input');
+                if (nameEl) { nameEl.disabled = true; nameEl.style.opacity = '0.6'; }
+            }).catch(function(){ /* cancelled */ });
+        }).catch(function(err){
+            link.textContent = 'Use an existing application…';
+            if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'Could not list applications: ' + (err && err.message || err); }
+        });
+    });
+})();
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
     e.preventDefault(); openProfileMenu(false); switchSubtab('credentials'); showCredForm();
@@ -2128,6 +2191,10 @@ function runAzureAutoSetup(params) {
     };
     // Only sent on a retry after the tenant demands it (progressive disclosure).
     if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
+    // ROUND 9: editable create name + explicit identity selection.
+    if (params.appName) payload.appName = params.appName;
+    if (params.appId) payload.appId = params.appId;
+    if (params.createNew) payload.createNew = true;
     return fetch('/api/azure-auto-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2137,6 +2204,9 @@ function runAzureAutoSetup(params) {
             var detail = data.steps && data.steps.length ? ' — ' + data.steps.join('; ') : '';
             var err = new Error(data.error + detail);
             err.code = data.code;
+            // Carry selection metadata so the interactive wrapper can prompt.
+            err.candidates = data.candidates;
+            err.defaultAppId = data.defaultAppId;
             throw err;
         }
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
@@ -2144,41 +2214,162 @@ function runAzureAutoSetup(params) {
     });
 }
 
-// Run auto-setup, and if the tenant requires a Service Management Reference,
-// reveal an input and retry the SAME payload plus the SMR the user supplies.
-function runAzureAutoSetupWithSmr(params) {
+// Prompt for a Service Management Reference (GUID) via the modal; resolves the
+// entered GUID or rejects if the user cancels.
+function promptSmr() {
     var UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    var modal = document.getElementById('env-smr-modal');
+    var input = document.getElementById('env-smr-input');
+    var errEl = document.getElementById('env-smr-error');
+    var retryBtn = document.getElementById('env-smr-retry');
+    var cancelBtn = document.getElementById('env-smr-cancel');
+    input.value = ''; errEl.style.display = 'none';
+    modal.style.display = 'flex';
+    input.focus();
+    return new Promise(function(resolve, reject) {
+        function cleanup() {
+            modal.style.display = 'none';
+            retryBtn.removeEventListener('click', onRetry);
+            cancelBtn.removeEventListener('click', onCancel);
+        }
+        function onRetry() {
+            var smr = input.value.trim();
+            if (!UUID_RE.test(smr)) {
+                errEl.textContent = 'Enter a valid GUID.';
+                errEl.style.display = 'block';
+                return;
+            }
+            cleanup();
+            resolve(smr);
+        }
+        function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
+        retryBtn.addEventListener('click', onRetry);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+}
+
+// Short "serves repos" summary for a candidate row. Mirrors the pure helper
+// formatServesReposLabel in azure-oidc.mjs (unit-tested there) — kept inline
+// because pages.mjs ships as a browser template string and can't import it.
+function formatServesReposLabelClient(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    if (list.length <= 3) return 'Serves: ' + list.join(', ');
+    return 'Serves: ' + list.slice(0, 3).join(', ') + ' +' + (list.length - 3) + ' more';
+}
+
+// Render the identity picker. opts.candidates is a list of
+// {appId, displayName, createdDateTime, servesRepos?}. Resolves with
+// {appId} or {createNew:true}; rejects on cancel.
+function showAppPicker(opts) {
+    var modal = document.getElementById('env-appselect-modal');
+    var titleEl = document.getElementById('env-appselect-title');
+    var introEl = document.getElementById('env-appselect-intro');
+    var cautionEl = document.getElementById('env-appselect-caution');
+    var listEl = document.getElementById('env-appselect-list');
+    var errEl = document.getElementById('env-appselect-error');
+    var confirmBtn = document.getElementById('env-appselect-confirm');
+    var cancelBtn = document.getElementById('env-appselect-cancel');
+    titleEl.textContent = opts.title || 'Choose a deploy identity';
+    introEl.textContent = opts.intro || '';
+    if (opts.caution) { cautionEl.textContent = opts.caution; cautionEl.style.display = 'block'; }
+    else { cautionEl.style.display = 'none'; }
+    errEl.style.display = 'none';
+    listEl.innerHTML = '';
+    var candidates = opts.candidates || [];
+    var chosen = { value: opts.defaultAppId || (candidates[0] && candidates[0].appId) || '' };
+
+    function row(value, primary, secondary, serves) {
+        var id = 'appsel-' + (value || 'create');
+        var label = document.createElement('label');
+        label.setAttribute('for', id);
+        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:8px; cursor:pointer;';
+        var radio = document.createElement('input');
+        radio.type = 'radio'; radio.name = 'appsel'; radio.id = id; radio.value = value;
+        radio.style.marginTop = '2px';
+        if (value === chosen.value) radio.checked = true;
+        radio.addEventListener('change', function() { chosen.value = value; });
+        var body = document.createElement('div');
+        body.style.minWidth = '0';
+        var line1 = document.createElement('div');
+        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--text-color-default,#1f2328); word-break:break-all;';
+        line1.textContent = primary;
+        body.appendChild(line1);
+        if (secondary) {
+            var line2 = document.createElement('div');
+            line2.style.cssText = 'font-size:11px; color:var(--text-color-muted,#656d76); margin-top:2px; word-break:break-all;';
+            line2.textContent = secondary;
+            body.appendChild(line2);
+        }
+        var servesText = formatServesReposLabelClient(serves);
+        if (servesText) {
+            var line3 = document.createElement('div');
+            line3.style.cssText = 'font-size:11px; color:var(--rad-info,#0969da); margin-top:2px; word-break:break-all;';
+            line3.textContent = servesText;
+            body.appendChild(line3);
+        }
+        label.appendChild(radio);
+        label.appendChild(body);
+        listEl.appendChild(label);
+    }
+
+    candidates.forEach(function(c) {
+        var created = c.createdDateTime ? ('created ' + String(c.createdDateTime).slice(0, 10) + ' · ') : '';
+        row(c.appId, c.displayName || c.appId, created + c.appId, c.servesRepos);
+    });
+    if (opts.allowCreateNew) {
+        row('__create__', 'Create a new application instead', 'A fresh per-repo deploy identity that only this repository can use.');
+        if (!chosen.value) chosen.value = '__create__';
+    }
+
+    modal.style.display = 'flex';
+    return new Promise(function(resolve, reject) {
+        function cleanup() {
+            modal.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+        }
+        function onConfirm() {
+            if (!chosen.value) {
+                errEl.textContent = 'Select an application or choose to create a new one.';
+                errEl.style.display = 'block';
+                return;
+            }
+            cleanup();
+            if (chosen.value === '__create__') resolve({ createNew: true });
+            else resolve({ appId: chosen.value });
+        }
+        function onCancel() { cleanup(); reject(new Error('Identity selection cancelled.')); }
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+}
+
+// Run auto-setup, resolving both progressive-disclosure prompts:
+//   - service-management-reference-required → SMR modal, retry with the GUID
+//   - app-selection-required → identity picker, retry with appId/createNew
+// Retries recursively so a create-after-picking can still surface the SMR prompt.
+function runAzureAutoSetupInteractive(params) {
     return runAzureAutoSetup(params).catch(function(err) {
-        if (err.code !== 'service-management-reference-required') throw err;
-        var modal = document.getElementById('env-smr-modal');
-        var input = document.getElementById('env-smr-input');
-        var errEl = document.getElementById('env-smr-error');
-        var retryBtn = document.getElementById('env-smr-retry');
-        var cancelBtn = document.getElementById('env-smr-cancel');
-        input.value = ''; errEl.style.display = 'none';
-        modal.style.display = 'flex';
-        input.focus();
-        return new Promise(function(resolve, reject) {
-            function cleanup() {
-                modal.style.display = 'none';
-                retryBtn.removeEventListener('click', onRetry);
-                cancelBtn.removeEventListener('click', onCancel);
-            }
-            function onRetry() {
-                var smr = input.value.trim();
-                if (!UUID_RE.test(smr)) {
-                    errEl.textContent = 'Enter a valid GUID.';
-                    errEl.style.display = 'block';
-                    return;
-                }
-                cleanup();
-                var retryParams = Object.assign({}, params, { serviceManagementReference: smr });
-                resolve(runAzureAutoSetup(retryParams));
-            }
-            function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
-            retryBtn.addEventListener('click', onRetry);
-            cancelBtn.addEventListener('click', onCancel);
-        });
+        if (err.code === 'service-management-reference-required') {
+            return promptSmr().then(function(smr) {
+                return runAzureAutoSetupInteractive(Object.assign({}, params, { serviceManagementReference: smr }));
+            });
+        }
+        if (err.code === 'app-selection-required') {
+            return showAppPicker({
+                title: 'Choose a deploy identity',
+                intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
+                candidates: err.candidates || [],
+                defaultAppId: err.defaultAppId,
+                allowCreateNew: true
+            }).then(function(choice) {
+                var next = Object.assign({}, params);
+                if (choice.createNew) { next.createNew = true; delete next.appId; }
+                else { next.appId = choice.appId; delete next.createNew; }
+                return runAzureAutoSetupInteractive(next);
+            });
+        }
+        throw err;
     });
 }
 
@@ -2224,7 +2415,14 @@ deployBtn.addEventListener('click', function() {
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
-        preflight = runAzureAutoSetupWithSmr({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster, subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId });
+        var appNameEl = document.getElementById('az-app-name-input');
+        var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
+        preflight = runAzureAutoSetupInteractive({
+            repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster,
+            subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId,
+            appName: appNameEl ? appNameEl.value.trim() : '',
+            appId: selectedAppId
+        });
     } else {
         creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';

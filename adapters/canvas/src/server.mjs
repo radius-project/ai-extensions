@@ -26,8 +26,9 @@ import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles,
 import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
-  selectAppRegistration, selectMissingFederatedCredentials,
+  selectMissingFederatedCredentials,
   decideExistingClientId, isAzResourceNotFound,
+  decideAppSelection, parseServedReposFromSubjects, validateAppRegistrationName,
   isUuid, isValidRepoSlug, isAksClusterName, isResourceGroupName, GITHUB_API_VERSION,
 } from "./azure-oidc.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
@@ -763,6 +764,16 @@ function createRequestHandler(instanceId) {
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
                 const serviceManagementReference = data.serviceManagementReference || '';
+                // ROUND 9 app-registration selection inputs:
+                //   data.appId     — an explicit App Registration the user picked
+                //                    (duplicate picker or the opt-in "use an
+                //                    existing application" cross-repo flow).
+                //   data.createNew — user explicitly chose "create a new
+                //                    application instead" from the picker.
+                //   data.appName   — an editable display name for a NEW app.
+                const explicitAppId = (data.appId || '').trim();
+                const createNewApp = data.createNew === true;
+                const requestedAppName = typeof data.appName === 'string' ? data.appName : '';
 
                 function fail(status, error, code, extra) {
                     res.setHeader("Content-Type", "application/json");
@@ -896,7 +907,19 @@ function createRequestHandler(instanceId) {
                 // a fresh app with no Service Management Reference (forcing the
                 // user to redo the approval-gated SMR). Instead we reuse an
                 // existing app the caller OWNS when one exists.
-                const appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
+                // The default per-repo deploy identity name. Editable: when the
+                // user supplies data.appName (create path), we validate and use
+                // it instead — but only for the name lookup / create below, never
+                // to repoint an already-wired AZURE_CLIENT_ID.
+                let appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
+                if (requestedAppName.trim()) {
+                    const nameCheck = validateAppRegistrationName(requestedAppName);
+                    if (!nameCheck.ok) {
+                        fail(400, nameCheck.reason, 'invalid-app-name', { steps });
+                        return;
+                    }
+                    appName = nameCheck.name;
+                }
 
                 // The repo's existing AZURE_CLIENT_ID (if any). Read from the
                 // request body first, else the GitHub environment variable. We
@@ -983,95 +1006,157 @@ function createRequestHandler(instanceId) {
                     // 'fallthrough' (empty / stale not-found) → name lookup below.
                 }
 
-                // Step 3b: name lookup + ownership scoping (only when the wired
-                // identity did not already resolve the app).
+                // Step 3b: explicit selection, or name lookup + ownership scoping
+                // (only when the wired identity did not already resolve the app).
                 if (!clientId) {
-                    steps.push(`Looking up existing App Registration: ${appName}...`);
-                    const listRes = await runCmd('az', [
-                        'ad', 'app', 'list',
-                        '--filter', `displayName eq '${appName}'`,
-                        '--query', '[].{appId:appId,id:id,createdDateTime:createdDateTime}',
-                        '-o', 'json',
-                    ]);
-                    if (listRes.code !== 0) {
-                        // FATAL: a silent fall-through to create would resurrect the
-                        // sprawl bug this fix exists to prevent.
-                        fail(400, 'Failed to look up existing App Registrations: ' + listRes.stderr, 'app-lookup-failed', { steps, azError: listRes.stderr });
-                        return;
-                    }
-                    // `az ... -o json` returns a literal `[]` for no matches, so an
-                    // empty string is anomalous. Only a genuine array proceeds; a
-                    // non-array or unparseable result is FATAL (masks an anomaly).
-                    // A legitimately EMPTY array still proceeds to create (the
-                    // normal first-run "no such app" path).
-                    let matches;
-                    try {
-                        const parsed = JSON.parse(listRes.stdout);
-                        if (!Array.isArray(parsed)) {
-                            fail(400, 'The App Registration lookup returned an unexpected (non-array) result.', 'app-lookup-parse', { steps });
+                    // Per-candidate FIC → served-repos enrichment. Best-effort: a
+                    // FIC-list failure just omits servesRepos for that candidate.
+                    const listServesRepos = async (appId) => {
+                        const ficRes = await runCmd('az', [
+                            'ad', 'app', 'federated-credential', 'list',
+                            '--id', appId, '--query', '[].subject', '-o', 'json',
+                        ]);
+                        if (ficRes.code !== 0) return undefined;
+                        try {
+                            return parseServedReposFromSubjects(JSON.parse(ficRes.stdout));
+                        } catch { return undefined; }
+                    };
+
+                    // Explicit choice: the duplicate picker or the opt-in "use an
+                    // existing application" (cross-repo) flow resubmits with an
+                    // appId. Verify ownership of THAT exact app and reuse it — this
+                    // deliberately bypasses the name lookup so a shared,
+                    // non-name-matched identity is honored. Ownership is still
+                    // enforced (an app we don't own would fail FIC/role writes and
+                    // could hijack another user's identity).
+                    if (explicitAppId) {
+                        if (!isUuid(explicitAppId)) {
+                            fail(400, 'The selected App Registration id is not a valid GUID.', 'invalid-app-id', { steps });
                             return;
                         }
-                        matches = parsed;
-                    } catch (e) {
-                        fail(400, 'Could not parse the App Registration lookup result.', 'app-lookup-parse', { steps });
-                        return;
-                    }
-
-                    // Scope matches to apps the signed-in user owns; reusing an app
-                    // we don't own would fail on FIC/role writes and risks
-                    // hijacking another user's app in a shared tenant.
-                    let ownedMatches = [];
-                    for (const m of matches) {
-                        if (!m || !m.appId) continue;
-                        const own = await isOwnedBySignedInUser(m.appId);
+                        const own = await isOwnedBySignedInUser(explicitAppId);
                         if (!own.ok) {
-                            fail(400, `Could not read owners of App Registration ${m.appId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
+                            fail(400, `Could not read owners of App Registration ${explicitAppId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
                             return;
                         }
-                        if (own.owned) ownedMatches.push(m);
-                    }
-
-                    const selection = selectAppRegistration({
-                        ownedMatches,
-                        hasUnownedMatch: matches.length > ownedMatches.length,
-                        existingClientId,
-                    });
-                    if (selection.action === 'error') {
-                        fail(400, selection.reason, selection.code, { steps, appName });
-                        return;
-                    }
-
-                    if (selection.action === 'reuse') {
-                        clientId = selection.appId;
-                        if (selection.duplicates) {
-                            steps.push(`⚠️ Multiple owned App Registrations named ${appName} found; ${selection.reason}.`);
+                        if (!own.owned) {
+                            fail(400, 'The selected App Registration is owned by another user. Choose one you own or create a new application.', 'app-registration-not-owned', { steps, appName });
+                            return;
                         }
-                        // Reuse path: never touch the existing Service Management
-                        // Reference — it may be approval-gated. SMR only applies
-                        // when creating a new app below.
-                        steps.push(`✅ Reusing existing App Registration: ${clientId}`);
-                    } else {
-                        // Create a fresh App Registration. Attempt WITHOUT a Service
-                        // Management Reference first; only if Entra policy rejects it
-                        // do we ask the user for one (progressive disclosure) — `az ad
-                        // app create` fails atomically, so the retry is clean with no
-                        // orphaned app. The creator is automatically an owner.
-                        steps.push(`Creating App Registration: ${appName}...`);
-                        const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
-                        if (appResult.code !== 0) {
-                            if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
-                                fail(400,
-                                    'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
-                                    'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
-                                    'service-management-reference-required',
-                                    { steps, azError: appResult.stderr });
+                        clientId = explicitAppId;
+                        // Reuse path: never touch SMR (may be approval-gated).
+                        steps.push(`✅ Using the selected App Registration: ${clientId}`);
+                    }
+
+                    if (!clientId) {
+                        steps.push(`Looking up existing App Registration: ${appName}...`);
+                        const listRes = await runCmd('az', [
+                            'ad', 'app', 'list',
+                            '--filter', `displayName eq '${appName}'`,
+                            '--query', '[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime}',
+                            '-o', 'json',
+                        ]);
+                        if (listRes.code !== 0) {
+                            // FATAL: a silent fall-through to create would resurrect
+                            // the sprawl bug this fix exists to prevent.
+                            fail(400, 'Failed to look up existing App Registrations: ' + listRes.stderr, 'app-lookup-failed', { steps, azError: listRes.stderr });
+                            return;
+                        }
+                        // `az ... -o json` returns a literal `[]` for no matches, so
+                        // an empty string is anomalous. Only a genuine array
+                        // proceeds; a non-array or unparseable result is FATAL. A
+                        // legitimately EMPTY array still proceeds to create.
+                        let matches;
+                        try {
+                            const parsed = JSON.parse(listRes.stdout);
+                            if (!Array.isArray(parsed)) {
+                                fail(400, 'The App Registration lookup returned an unexpected (non-array) result.', 'app-lookup-parse', { steps });
                                 return;
                             }
-                            fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
+                            matches = parsed;
+                        } catch (e) {
+                            fail(400, 'Could not parse the App Registration lookup result.', 'app-lookup-parse', { steps });
                             return;
                         }
-                        clientId = appResult.stdout.trim();
-                        steps.push(`✅ App Registration created: ${clientId}`);
+
+                        // Scope matches to apps the signed-in user owns; reusing an
+                        // app we don't own would fail on FIC/role writes and risks
+                        // hijacking another user's app in a shared tenant.
+                        let ownedMatches = [];
+                        for (const m of matches) {
+                            if (!m || !m.appId) continue;
+                            const own = await isOwnedBySignedInUser(m.appId);
+                            if (!own.ok) {
+                                fail(400, `Could not read owners of App Registration ${m.appId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
+                                return;
+                            }
+                            if (own.owned) ownedMatches.push(m);
+                        }
+
+                        const selection = decideAppSelection({
+                            ownedMatches,
+                            hasUnownedMatch: matches.length > ownedMatches.length,
+                            existingClientId,
+                            createNew: createNewApp,
+                        });
+
+                        if (selection.action === 'error') {
+                            fail(400, selection.reason, selection.code, { steps, appName });
+                            return;
+                        }
+
+                        if (selection.action === 'needs-selection') {
+                            // >1 owned name-matches and no explicit choice yet.
+                            // Enrich each candidate with the repos it already serves
+                            // (from its FIC subjects) so the user can choose
+                            // knowingly, then ask the frontend to prompt.
+                            const candidates = [];
+                            for (const c of selection.candidates) {
+                                const servesRepos = await listServesRepos(c.appId);
+                                candidates.push({
+                                    appId: c.appId,
+                                    displayName: c.displayName,
+                                    createdDateTime: c.createdDateTime,
+                                    ...(servesRepos ? { servesRepos } : {}),
+                                });
+                            }
+                            fail(400,
+                                'Multiple owned App Registrations found — choose which identity to use.',
+                                'app-selection-required',
+                                { steps, appName, candidates, defaultAppId: selection.defaultAppId });
+                            return;
+                        }
+
+                        if (selection.action === 'reuse') {
+                            clientId = selection.appId;
+                            // Reuse path: never touch the existing Service Management
+                            // Reference — it may be approval-gated. SMR only applies
+                            // when creating a new app below.
+                            steps.push(`✅ Reusing existing App Registration: ${clientId}`);
+                        } else {
+                            // Create a fresh App Registration. Attempt WITHOUT a
+                            // Service Management Reference first; only if Entra policy
+                            // rejects it do we ask the user for one (progressive
+                            // disclosure) — `az ad app create` fails atomically, so
+                            // the retry is clean with no orphaned app. The creator is
+                            // automatically an owner.
+                            steps.push(`Creating App Registration: ${appName}...`);
+                            const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
+                            if (appResult.code !== 0) {
+                                if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
+                                    fail(400,
+                                        'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
+                                        'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
+                                        'service-management-reference-required',
+                                        { steps, azError: appResult.stderr });
+                                    return;
+                                }
+                                fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
+                                return;
+                            }
+                            clientId = appResult.stdout.trim();
+                            steps.push(`✅ App Registration created: ${clientId}`);
+                        }
                     }
                 }
 
@@ -1164,6 +1249,72 @@ function createRequestHandler(instanceId) {
                 if (fedTmpFile) {
                     try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
                 }
+            }
+            return;
+        }
+
+        // List all App Registrations owned by the signed-in user, enriched with
+        // the repos each already serves (from its FIC subjects). Backs the
+        // opt-in "use an existing application" cross-repo picker on the
+        // Environment page. Runs under the same agent-session-stripped cliExec
+        // env as the rest of the Azure setup.
+        if (pathname === "/api/list-azure-app-registrations" && req.method === "GET") {
+            function runCmd(cmd, args) {
+                return new Promise((resolve) => {
+                    const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                    });
+                    try { child.stdin?.end(); } catch { /* best-effort */ }
+                });
+            }
+            const listServesRepos = async (appId) => {
+                const ficRes = await runCmd('az', [
+                    'ad', 'app', 'federated-credential', 'list',
+                    '--id', appId, '--query', '[].subject', '-o', 'json',
+                ]);
+                if (ficRes.code !== 0) return undefined;
+                try { return parseServedReposFromSubjects(JSON.parse(ficRes.stdout)); } catch { return undefined; }
+            };
+            try {
+                // `--show-mine` scopes to apps the signed-in user owns, so we
+                // avoid an O(N) owner lookup across the whole tenant.
+                const listRes = await runCmd('az', [
+                    'ad', 'app', 'list', '--show-mine',
+                    '--query', '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}',
+                    '-o', 'json',
+                ]);
+                if (listRes.code !== 0) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Failed to list App Registrations: ' + listRes.stderr, code: 'app-list-failed', azError: listRes.stderr }));
+                    return;
+                }
+                let parsed;
+                try { parsed = JSON.parse(listRes.stdout); } catch { parsed = null; }
+                if (!Array.isArray(parsed)) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'The App Registration list returned an unexpected result.', code: 'app-list-parse' }));
+                    return;
+                }
+                const apps = [];
+                for (const a of parsed) {
+                    if (!a || !a.appId) continue;
+                    const servesRepos = await listServesRepos(a.appId);
+                    apps.push({
+                        appId: a.appId,
+                        displayName: a.displayName,
+                        createdDateTime: a.createdDateTime,
+                        ...(servesRepos ? { servesRepos } : {}),
+                    });
+                }
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ apps }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message, code: 'app-list-failed' }));
             }
             return;
         }

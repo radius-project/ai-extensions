@@ -13,6 +13,10 @@ import {
   decideExistingClientId,
   isAzResourceNotFound,
   discoverStatusText,
+  decideAppSelection,
+  parseServedReposFromSubjects,
+  validateAppRegistrationName,
+  formatServesReposLabel,
 } from "./azure-oidc.mjs";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
@@ -544,5 +548,136 @@ describe("discoverStatusText", () => {
 
   it("defaults to azure summary with empty input", () => {
     expect(discoverStatusText()).toBe("Found 0 cluster(s), 0 resource group(s)");
+  });
+});
+
+describe("decideAppSelection", () => {
+  const A = { appId: "aaa", displayName: "radius-deploy-o-r", createdDateTime: "2020-01-01T00:00:00Z" };
+  const B = { appId: "bbb", displayName: "radius-deploy-o-r", createdDateTime: "2022-01-01T00:00:00Z" };
+
+  it("creates when there are no matches at all", () => {
+    expect(decideAppSelection({ ownedMatches: [], hasUnownedMatch: false })).toEqual({ action: "create" });
+  });
+
+  it("errors app-registration-not-owned when the only match is unowned", () => {
+    const r = decideAppSelection({ ownedMatches: [], hasUnownedMatch: true });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-not-owned");
+  });
+
+  it("reuses the single owned match", () => {
+    expect(decideAppSelection({ ownedMatches: [A] })).toMatchObject({ action: "reuse", appId: "aaa", duplicates: false });
+  });
+
+  it("returns needs-selection with the oldest as default when >1 owned and no choice", () => {
+    const r = decideAppSelection({ ownedMatches: [B, A] });
+    expect(r.action).toBe("needs-selection");
+    expect(r.defaultAppId).toBe("aaa"); // A is older
+    expect(r.candidates.map((c) => c.appId)).toEqual(["bbb", "aaa"]);
+    expect(r.candidates[0]).toHaveProperty("displayName");
+  });
+
+  it("needs-selection default prefers the wired existingClientId among owned", () => {
+    const r = decideAppSelection({ ownedMatches: [B, A], existingClientId: "BBB" });
+    expect(r.action).toBe("needs-selection");
+    expect(r.defaultAppId).toBe("bbb");
+  });
+
+  it("createNew short-circuits to create even with owned matches", () => {
+    expect(decideAppSelection({ ownedMatches: [A, B], createNew: true })).toEqual({ action: "create" });
+  });
+
+  it("reuses an explicitAppId that is among the owned candidates", () => {
+    expect(decideAppSelection({ ownedMatches: [A, B], explicitAppId: "bbb" })).toEqual({ action: "reuse", appId: "bbb" });
+  });
+
+  it("errors when explicitAppId is not among the owned candidates", () => {
+    const r = decideAppSelection({ ownedMatches: [A], explicitAppId: "zzz" });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-not-owned");
+  });
+
+  it("explicitAppId takes precedence over createNew", () => {
+    expect(decideAppSelection({ ownedMatches: [A], explicitAppId: "aaa", createNew: true })).toEqual({ action: "reuse", appId: "aaa" });
+  });
+});
+
+describe("parseServedReposFromSubjects", () => {
+  it("extracts sorted unique owner/repo from mixed subjects", () => {
+    const out = parseServedReposFromSubjects([
+      "repo:octo/api:ref:refs/heads/main",
+      "repo:octo/api:environment:prod",
+      "repo:octo/web:pull_request",
+    ]);
+    expect(out).toEqual(["octo/api", "octo/web"]);
+  });
+
+  it("strips the immutable @id suffixes", () => {
+    const out = parseServedReposFromSubjects(["repo:octo@123/api@456:environment:prod"]);
+    expect(out).toEqual(["octo/api"]);
+  });
+
+  it("ignores malformed / non-string entries", () => {
+    const out = parseServedReposFromSubjects([null, 42, "not-a-subject", "repo:onlyowner", "repo:a/b/c:x", "repo:good/repo:ref:x"]);
+    expect(out).toEqual(["good/repo"]);
+  });
+
+  it("returns [] for empty/undefined input", () => {
+    expect(parseServedReposFromSubjects()).toEqual([]);
+    expect(parseServedReposFromSubjects([])).toEqual([]);
+  });
+});
+
+describe("formatServesReposLabel", () => {
+  it("returns empty string for no repos", () => {
+    expect(formatServesReposLabel([])).toBe("");
+    expect(formatServesReposLabel(undefined)).toBe("");
+    expect(formatServesReposLabel(null)).toBe("");
+  });
+
+  it("lists up to three repos inline", () => {
+    expect(formatServesReposLabel(["a/b"])).toBe("Serves: a/b");
+    expect(formatServesReposLabel(["a/b", "c/d", "e/f"])).toBe("Serves: a/b, c/d, e/f");
+  });
+
+  it("truncates with a +N more suffix past three", () => {
+    expect(formatServesReposLabel(["a/b", "c/d", "e/f", "g/h", "i/j"]))
+      .toBe("Serves: a/b, c/d, e/f +2 more");
+  });
+});
+
+describe("validateAppRegistrationName", () => {
+  it("accepts a normal derived name and trims", () => {
+    expect(validateAppRegistrationName("  radius-deploy-octo-api  ")).toEqual({ ok: true, name: "radius-deploy-octo-api" });
+  });
+
+  it("accepts allowed punctuation and spaces", () => {
+    expect(validateAppRegistrationName("My App (deploy) _v1.2-3")).toEqual({ ok: true, name: "My App (deploy) _v1.2-3" });
+  });
+
+  it("rejects empty / whitespace-only", () => {
+    expect(validateAppRegistrationName("   ").ok).toBe(false);
+    expect(validateAppRegistrationName("").ok).toBe(false);
+  });
+
+  it("rejects >120 chars", () => {
+    expect(validateAppRegistrationName("a".repeat(121)).ok).toBe(false);
+    expect(validateAppRegistrationName("a".repeat(120)).ok).toBe(true);
+  });
+
+  it("rejects disallowed characters", () => {
+    expect(validateAppRegistrationName("bad/name").ok).toBe(false);
+    expect(validateAppRegistrationName("bad&name").ok).toBe(false);
+    expect(validateAppRegistrationName("emoji😀").ok).toBe(false);
+  });
+
+  it("rejects control characters", () => {
+    expect(validateAppRegistrationName("bad\u0000name").ok).toBe(false);
+    expect(validateAppRegistrationName("bad\tname").ok).toBe(false);
+  });
+
+  it("rejects non-strings", () => {
+    expect(validateAppRegistrationName(undefined).ok).toBe(false);
+    expect(validateAppRegistrationName(123).ok).toBe(false);
   });
 });

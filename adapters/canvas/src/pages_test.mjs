@@ -210,7 +210,21 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         // The client reacts to the machine-readable code and forwards the value.
         expect(html).toContain("service-management-reference-required");
         expect(html).toContain("serviceManagementReference");
-        expect(html).toContain("runAzureAutoSetupWithSmr");
+        expect(html).toContain("runAzureAutoSetupInteractive");
+    });
+
+    it("renders the app-registration picker + editable name + use-existing action", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Editable deploy-identity name prefilled from the repo.
+        expect(html).toContain('id="az-app-name-input"');
+        expect(html).toContain("radius-deploy-octo-app");
+        // Opt-in cross-repo "use existing" advanced action + its endpoint.
+        expect(html).toContain('id="az-use-existing-link"');
+        expect(html).toContain("/api/list-azure-app-registrations");
+        // Duplicate/selection picker modal + its machine-readable trigger code.
+        expect(html).toContain('id="env-appselect-modal"');
+        expect(html).toContain("app-selection-required");
+        expect(html).toContain("showAppPicker");
     });
 });
 
