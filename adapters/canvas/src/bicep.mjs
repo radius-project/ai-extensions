@@ -19,7 +19,24 @@ import { randomBytes } from "node:crypto";
 // when the template does not declare an `application` parameter
 // ("The following parameters were supplied, but do not correspond to any
 // parameters defined in the template: 'application'").
-export const WORKFLOW_MANAGED_PARAMS = new Set(["environment", "application", "image"]);
+//
+// `registryUsername` / `registryPassword` are the OCI (ghcr.io) registry
+// credentials the Radius.Compute/containerImages recipe uses to push built
+// images (feeding the app's `ghcr-registry-creds` Radius.Security/secrets
+// resource). Their values are the GitHub Actions runner's identity —
+// `github.actor` and the runner-minted `GITHUB_TOKEN` — which only exist inside
+// the runner at job time, so the deploy workflow injects them. The extension
+// runs on the user's machine at dispatch time and never holds the runner token,
+// so it MUST NOT auto-generate values for these: a random username/password
+// would be inlined into the deploy command / written into RADIUS_DEPLOY_PARAMS
+// and collide with the workflow-injected `--parameters`, breaking the push.
+export const WORKFLOW_MANAGED_PARAMS = new Set([
+  "environment",
+  "application",
+  "image",
+  "registryUsername",
+  "registryPassword",
+]);
 
 // Parse `param` declarations from Bicep source. Returns one entry per parameter:
 //   { name, type, secure, hasDefault, default, description }

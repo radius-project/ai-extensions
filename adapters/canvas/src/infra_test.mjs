@@ -191,4 +191,35 @@ describe("syncRepoWorkflows", () => {
         expect(res.updated).toEqual([]);
         expect(h.commits).toEqual([]);
     });
+
+    it("with `only`, syncs just the targeted workflow files and ignores drift in others", async () => {
+        // Both the delete workflow and the verify workflow have drifted, but a
+        // pre-delete sync should only touch the delete files.
+        h.committed.main = await expectedFilesFor("dev", "azure");
+        h.committed.main[VERIFY_PATH] = STALE_AZURE_VERIFY;
+        h.committed.main[".github/workflows/delete-application.yml"] = "name: stale-delete\n";
+
+        const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
+            only: ["delete-application.yml", "delete-azure.yml"],
+        });
+
+        expect(res.updated).toEqual([".github/workflows/delete-application.yml"]);
+        expect(h.commits).toHaveLength(1);
+        expect(h.commits[0].path).toBe(".github/workflows/delete-application.yml");
+        // The drifted verify file was outside `only`, so it must be left untouched.
+        expect(h.commits.some((c) => c.path === VERIFY_PATH)).toBe(false);
+    });
+
+    it("accepts full paths in `only` and matches on the bare filename", async () => {
+        h.committed.main = await expectedFilesFor("dev", "azure");
+        h.committed.main[".github/workflows/run-rad-commands.yml"] = "name: stale-deploy\n";
+
+        const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
+            only: [".github/workflows/run-rad-commands.yml", ".github/workflows/run-rad-commands-azure.yml"],
+        });
+
+        expect(res.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
+        expect(h.commits).toHaveLength(1);
+        expect(h.commits[0].path).toBe(".github/workflows/run-rad-commands.yml");
+    });
 });

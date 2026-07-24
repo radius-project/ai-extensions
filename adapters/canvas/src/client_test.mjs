@@ -66,6 +66,30 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
         expect(CLIENT_GRAPH_JS).toContain("srcLine: srcLineFromRef(r.codeReference || '')");
     });
 
+    it("normalizes single Windows backslashes to '/' in both the GitHub blob path and the repo-relative open path", () => {
+        // Behavioral guard (not a source-spelling check): a codeReference generated
+        // on Windows carries SINGLE backslashes at runtime. The /\\\\/g written in
+        // the .mjs source sits inside a template literal, so it is halved to /\\/g
+        // in the browser — a regex that matches ONE backslash. Extract the two
+        // helpers from the runtime script and prove they actually convert a Windows
+        // path. (This is why the source must keep /\\\\/g: /\\/g in source would
+        // become the invalid regex /\/g in the browser.)
+        const srcMatch = CLIENT_GRAPH_JS.match(/function srcPathFromRef\(codeRef\) \{[\s\S]*?return p;\s*\}/);
+        expect(srcMatch).toBeTruthy();
+        const srcPathFromRef = new Function(srcMatch[0] + "; return srcPathFromRef;")();
+        expect(srcPathFromRef("src\\graph\\diff.ts#L14")).toBe("src/graph/diff.ts");
+        expect(srcPathFromRef("a\\b\\c.bicep")).toBe("a/b/c.bicep");
+        expect(srcPathFromRef("already/posix/path.ts")).toBe("already/posix/path.ts");
+
+        const urlMatch = CLIENT_GRAPH_JS.match(/function buildSourceUrl\(codeRef, branchOverride\) \{[\s\S]*?return repoUrl \+ '\/tree\/' \+ br;\s*\}/);
+        expect(urlMatch).toBeTruthy();
+        const buildSourceUrl = new Function("repoUrl", "branch", urlMatch[0] + "; return buildSourceUrl;")(
+            "https://github.com/o/r",
+            "main",
+        );
+        expect(buildSourceUrl("src\\graph\\diff.ts#L14")).toBe("https://github.com/o/r/blob/main/src/graph/diff.ts#L14");
+    });
+
     describe("CLIENT_GRAPH_JS — React Flow node rendering", () => {
         it("renders the figma .rad-node card as native React elements (no cytoscape, no HTML-string overlay)", () => {
             expect(CLIENT_GRAPH_JS).toContain("className: 'rad-node'");
@@ -175,7 +199,21 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Plann
         expect(CLIENT_GRAPH_JS).not.toContain("#f3f4f6");
     });
 
-    it("colors diff edges from the endpoint diff statuses: removed wins, then added, else neutral gray", () => {
+    it("colors diff edges by the connection's own diff status (added/removed/unchanged), not just its endpoints", () => {
+        // The primary signal is the per-connection diffStatus that computeGraphDiff
+        // tags onto each rendered connection, so an edge added/removed between two
+        // still-present nodes colors correctly (and a removed edge, carried as a
+        // synthetic connection, is drawn at all).
+        expect(CLIENT_GRAPH_JS).toContain("function pushEdge(source, target, dashed, connStatus)");
+        expect(CLIENT_GRAPH_JS).toContain("var cs = connStatus || '';");
+        expect(CLIENT_GRAPH_JS).toContain("if (cs === 'removed') stroke = '#dc2626';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'added') stroke = '#16a34a';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'unchanged') stroke = '#8c959f';");
+        // The connection loop threads each connection's diff status into pushEdge.
+        expect(CLIENT_GRAPH_JS).toContain("if (targetExists) pushEdge(r.id || r.name, connTarget, false, conn.diffStatus || '');");
+    });
+
+    it("falls back to endpoint diff statuses only for edges with no connection-level status (e.g. output edges)", () => {
         expect(CLIENT_GRAPH_JS).toContain("var sStatus = diffStatusById[source] || '';");
         expect(CLIENT_GRAPH_JS).toContain("var tStatus = diffStatusById[target] || '';");
         expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';");
