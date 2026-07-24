@@ -644,7 +644,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When no built-in type fits a needed backing service, the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). Recipes are still supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`
             };
         },
     },

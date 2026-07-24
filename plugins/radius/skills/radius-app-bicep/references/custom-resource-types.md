@@ -177,8 +177,8 @@ resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
 
 Notes:
 - `parameters` values use Radius `{{context.resource...}}` templating (not Bicep expressions); this is how developer inputs reach the module.
-- `outputs` renames the module's outputs to the type's `readOnly` property names; sensitive outputs go under the nested `secrets` map.
-- An authored recipe (4b) already returns `values`/`secrets` keyed by the type's property names, so its `outputs` map is usually an identity mapping; an AVM module (4a) needs real renaming because its output names differ (for example `host: 'fqdn'`).
+- `outputs` maps the recipe's outputs to the type's `readOnly` property names. Non-secret outputs are mapped at the top level of `outputs` (`<typeProperty>: '<moduleOutputName>'`), and sensitive outputs go under the nested `secrets` map. This recipe-pack mapping shape is deliberately different from an authored recipe's own return value in 4b, which is `output result object = { resources, values, secrets }`.
+- An authored recipe (4b) already returns `values`/`secrets` keyed by the type's property names, so in the recipe pack its `outputs` mapping is usually the identity (and can be omitted); an AVM module (4a) needs a real mapping because its output names differ (for example `host: 'fqdn'`).
 - Do NOT fabricate a per-type singleton recipe inline in `app.bicep`; the recipe pack is how the type is resolved at deploy time. Registering the pack on the target Environment is a deployment concern (see the radius-deploy flow); modeling only writes the pack file.
 
 ### 6. Reference the type in `app.bicep`
