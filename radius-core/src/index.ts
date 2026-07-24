@@ -15,6 +15,7 @@ export {
   addInboundConnections,
   applicationGraphToResources,
   computeGraphDiff,
+  filterGraphVisualizationResources,
   MODELED_GRAPH_DEFAULTS,
   buildResourceID,
   stripAPIVersion,
