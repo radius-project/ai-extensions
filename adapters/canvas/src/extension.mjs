@@ -650,11 +650,11 @@ When a recipe is not found for a resource type during planned graph resolution, 
     },
 });
 
-// Prepare the `rad` binary once per extension load. This is the single place
-// that downloads/reconciles rad and runs the `rad version --cli` check; doing it
-// here (fire-and-forget) keeps that work off the hot path of each graph build,
-// so opening a graph/planned/diff/deploy page never blocks on a version check.
-// runRadAppGraph reuses the binary this resolves (via the module-level cache in
+// Prepare the `rad` binary once per extension load. This is the preferred place
+// to download/reconcile rad and run the `rad version --cli` check; doing it here
+// (fire-and-forget) keeps that work off the hot path of most graph builds.
+// If the warm-up has not finished yet (or no binary exists), the first graph
+// build may still await ensureRadBinary() as a fallback.
 // @radius-project/shared, shared because the canvas server runs in-process).
 ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { /* ignore */ } } })
     .catch((e) => { try { console.error(`[radius] rad binary preparation failed (will retry on first use): ${e?.message || e}`); } catch { /* ignore */ } });
