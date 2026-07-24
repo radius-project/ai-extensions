@@ -10,6 +10,8 @@ import {
   resolveOidcSubject,
   selectAppRegistration,
   selectMissingFederatedCredentials,
+  decideExistingClientId,
+  isAzResourceNotFound,
 } from "./azure-oidc.mjs";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
@@ -406,5 +408,58 @@ describe("selectMissingFederatedCredentials", () => {
   it("ignores non-string existing entries", () => {
     const out = selectMissingFederatedCredentials(desired, [null, 42, "repo:o/r:environment:dev"]);
     expect(out).toEqual([desired[1]]);
+  });
+});
+
+describe("decideExistingClientId", () => {
+  it("falls through when clientId is empty", () => {
+    expect(decideExistingClientId({ clientId: "", showStatus: "found", owned: true })).toEqual({ action: "fallthrough" });
+    expect(decideExistingClientId({})).toEqual({ action: "fallthrough" });
+  });
+
+  it("reuses when the wired app exists and is owned", () => {
+    expect(decideExistingClientId({ clientId: "abc", showStatus: "found", owned: true })).toEqual({ action: "reuse" });
+  });
+
+  it("errors client-id-not-owned when it exists but is not owned", () => {
+    expect(decideExistingClientId({ clientId: "abc", showStatus: "found", owned: false })).toEqual({
+      action: "error",
+      code: "client-id-not-owned",
+    });
+  });
+
+  it("falls through when the wired app is not found (stale variable)", () => {
+    expect(decideExistingClientId({ clientId: "abc", showStatus: "not-found" })).toEqual({ action: "fallthrough" });
+  });
+
+  it("is fatal client-id-lookup-failed on a real lookup failure", () => {
+    expect(decideExistingClientId({ clientId: "abc", showStatus: "lookup-failed" })).toEqual({
+      action: "fatal",
+      code: "client-id-lookup-failed",
+    });
+  });
+
+  it("treats an unknown status conservatively as a fatal lookup failure", () => {
+    expect(decideExistingClientId({ clientId: "abc", showStatus: "weird" })).toEqual({
+      action: "fatal",
+      code: "client-id-lookup-failed",
+    });
+  });
+});
+
+describe("isAzResourceNotFound", () => {
+  it("matches Graph 'does not exist' messages", () => {
+    expect(isAzResourceNotFound("Resource '00000000' does not exist or one of its queried reference-property objects are not present.")).toBe(true);
+  });
+
+  it("matches 'Not Found' / 'was not found'", () => {
+    expect(isAzResourceNotFound("Not Found (HTTP 404)")).toBe(true);
+    expect(isAzResourceNotFound("The application was not found in the directory")).toBe(true);
+  });
+
+  it("does not match unrelated / permission failures", () => {
+    expect(isAzResourceNotFound("AADSTS500011: insufficient privileges")).toBe(false);
+    expect(isAzResourceNotFound("")).toBe(false);
+    expect(isAzResourceNotFound(undefined)).toBe(false);
   });
 });

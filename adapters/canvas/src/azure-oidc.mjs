@@ -163,6 +163,45 @@ export function selectMissingFederatedCredentials(desired = [], existingSubjects
   return (Array.isArray(desired) ? desired : []).filter((f) => f && !have.has(String(f.subject).trim()));
 }
 
+// Classify an `az ad app show --id <appId>` stderr as a "resource not found"
+// (the id is stale/deleted — expected, non-fatal) versus any other failure
+// (transport/permission — must be fatal). MS Graph returns messages like
+// "Resource '...' does not exist ...", and REST 404s surface as "Not Found".
+const AZ_NOT_FOUND_RE = /does not exist|not\s*found|resource not found|was not found/i;
+
+/**
+ * @param {string} stderr
+ * @returns {boolean}
+ */
+export function isAzResourceNotFound(stderr) {
+  return AZ_NOT_FOUND_RE.test(String(stderr || ""));
+}
+
+/**
+ * Pure decision for the "existingClientId-first" flow. Before the display-name
+ * lookup, we prefer the identity already wired into the repo's AZURE_CLIENT_ID
+ * so a repo rename or a hand-made app (whose display name isn't the canonical
+ * `radius-deploy-<owner>-<repo>`) is never silently repointed to a name match.
+ *
+ * @param {{clientId?: string, showStatus?: 'found'|'not-found'|'lookup-failed', owned?: boolean}} input
+ *   `showStatus` is the classified result of `az ad app show --id <clientId>`.
+ * @returns {{action:'reuse'|'error'|'fallthrough'|'fatal', code?:string}}
+ *   - reuse: the wired app exists and is owned — use it directly.
+ *   - error `client-id-not-owned`: exists but owned by someone else — do NOT repoint.
+ *   - fatal `client-id-lookup-failed`: a real lookup failure (not a not-found).
+ *   - fallthrough: no clientId, or a not-found (stale var) — use the name lookup.
+ */
+export function decideExistingClientId({ clientId, showStatus, owned = false } = {}) {
+  if (!clientId || !String(clientId).trim()) return { action: "fallthrough" };
+  if (showStatus === "not-found") return { action: "fallthrough" };
+  if (showStatus === "lookup-failed") return { action: "fatal", code: "client-id-lookup-failed" };
+  if (showStatus === "found") {
+    return owned ? { action: "reuse" } : { action: "error", code: "client-id-not-owned" };
+  }
+  // Unknown status — be conservative and treat as a lookup failure.
+  return { action: "fatal", code: "client-id-lookup-failed" };
+}
+
 
 // Reference. These substrings are the real error identifiers and are matched
 // case-insensitively against `az` stderr so we can turn an opaque failure into
