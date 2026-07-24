@@ -324,6 +324,11 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
  * default. Drift is only flagged (and the file rewritten) when the committed copy
  * matches none of them, i.e. the upstream template itself changed.
  *
+ * `opts.only` (optional) restricts the pass to a set of bare workflow filenames
+ * (e.g. `["run-rad-commands.yml", "run-rad-commands-azure.yml"]`). This is what
+ * lets a caller cheaply ensure just the workflow it is about to dispatch is
+ * current, instead of syncing every committed workflow file.
+ *
  * Only files that already exist on a branch are updated; missing files are left
  * to environment creation to author. Best-effort and non-throwing per file: a
  * protected branch (or any commit failure) is reported via `log` and skipped
@@ -334,6 +339,13 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
     const log = typeof opts.log === "function" ? opts.log : () => {};
     const envs = (environments || []).filter((e) => e && e.name);
     if (!repo || envs.length === 0) return { updated: [], skipped: true };
+
+    // Optional allow-list of bare workflow filenames to sync. When set, only
+    // those files are considered (see opts.only above).
+    const onlySet =
+        opts.only && opts.only.length
+            ? new Set(opts.only.map((f) => String(f).split("/").pop()))
+            : null;
 
     const defaultBranch = (await getDefaultBranch(repo)) || "main";
     // Sync the default branch (Actions run from it) plus the working branch a
@@ -349,6 +361,7 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
     const byPath = new Map();
     const add = (path, content, provider) => {
         if (typeof content !== "string" || !content) return;
+        if (onlySet && !onlySet.has(path.split("/").pop())) return;
         const list = byPath.get(path) || [];
         list.push({ content, provider });
         byPath.set(path, list);

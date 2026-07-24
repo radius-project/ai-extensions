@@ -9,6 +9,8 @@
 export {
   RADIUS_BICEP_CONFIG,
   RADIUS_BICEP_CONFIG_JSON,
+  MANAGED_RAD_BIN,
+  MANAGED_RAD_PATH,
   resolveExistingRadBinary,
   ensureRadBinary,
   runRadAppGraph,
