@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   parseRecipePack,
@@ -6,6 +8,16 @@ import {
   recipePackPathForProvider,
   recipePackContentPath,
 } from "./recipe-pack.js";
+
+// Read a committed recipe-pack snapshot from ./testdata. These are verbatim
+// copies of the packs in radius-project/resource-types-contrib@main
+// (recipepack/azure/aks-recipepack.bicep and
+// recipepack/kubernetes/default-recipepack.bicep). They let the parser be
+// exercised against the real pack structure without any network I/O (hermetic).
+// To refresh: re-download each file's raw contents over the pinned ref and
+// overwrite it here, then update the expected tables below if entries changed.
+const readFixture = (name: string): string =>
+  readFileSync(fileURLToPath(new URL(`./testdata/${name}`, import.meta.url)), "utf8");
 
 describe("normalizeRecipeSource", () => {
   it("strips the registry host and version tag from an AVM source", () => {
@@ -199,5 +211,62 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     expect(entries).toHaveLength(1);
     expect(entries[0].kind).toBe("bicep");
     expect(entries[0].source).toBe("mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1");
+  });
+});
+
+// Hermetic regression test against committed snapshots of the real packs. Guards
+// the parser + curated map against the actual pack structure (nested parameter
+// blocks, comments, real sources) without hitting the network. If upstream pack
+// content changes, refresh the fixtures and update the expected tables below; a
+// new source that isn't in the curated map surfaces here as an unresolved entry.
+describe("committed recipe-pack snapshots", () => {
+  // resourceType -> the concrete type each entry must resolve to.
+  const AZURE_EXPECTED: Record<string, string> = {
+    "Radius.Data/redisCaches": "Microsoft.Cache/redisEnterprise",
+    "Radius.AI/models": "Microsoft.CognitiveServices/accounts",
+    "Radius.AI/search": "Microsoft.Search/searchServices",
+    "Radius.Data/mongoDatabases": "Microsoft.DocumentDB/databaseAccounts",
+    "Radius.Data/mySqlDatabases": "Microsoft.DBforMySQL/flexibleServers",
+    "Radius.Data/postgreSqlDatabases": "Microsoft.DBforPostgreSQL/flexibleServers",
+    "Radius.Data/sqlServerDatabases": "Microsoft.Sql/servers",
+    "Radius.Messaging/rabbitMQ": "Microsoft.ServiceBus/namespaces",
+    "Radius.Messaging/kafka": "Microsoft.EventHub/namespaces",
+    "Radius.Storage/objectStorage": "Microsoft.Storage/storageAccounts",
+    "Radius.Compute/containers": "apps/Deployment",
+    "Radius.Compute/persistentVolumes": "core/PersistentVolumeClaim",
+    "Radius.Security/secrets": "core/Secret",
+    "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
+    "Radius.Compute/containerImages": "batch/Job",
+  };
+
+  const KUBE_EXPECTED: Record<string, string> = {
+    "Radius.Compute/containers": "apps/Deployment",
+    "Radius.Compute/persistentVolumes": "core/PersistentVolumeClaim",
+    "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
+    "Radius.Security/secrets": "core/Secret",
+    "Radius.Data/mySqlDatabases": "apps/Deployment",
+    "Radius.Data/redisCaches": "apps/Deployment",
+  };
+
+  it.each([
+    { provider: "azure", fixture: "aks-recipepack.bicep", expected: AZURE_EXPECTED },
+    { provider: "kubernetes", fixture: "default-recipepack.bicep", expected: KUBE_EXPECTED },
+  ])("resolves every entry in the $provider pack to a concrete resource", ({ fixture, expected }) => {
+    const entries = parseRecipePack(readFixture(fixture));
+
+    // Every entry the pack declares must derive a concrete resource: an
+    // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
+    const unresolved = entries
+      .filter((e) => deriveConcreteResource(e.source) === null)
+      .map((e) => `${e.resourceType} (${e.source})`);
+    expect(unresolved, `unmapped recipe sources: ${unresolved.join(", ")}`).toEqual([]);
+
+    // The parsed set must match the expected resource types exactly (no drift).
+    expect(entries.map((e) => e.resourceType).sort()).toEqual(Object.keys(expected).sort());
+
+    // Each entry must derive the specific expected concrete type.
+    for (const entry of entries) {
+      expect(deriveConcreteResource(entry.source)?.type).toBe(expected[entry.resourceType]);
+    }
   });
 });
