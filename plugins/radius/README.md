@@ -32,7 +32,7 @@ extension become available.
 | `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
 | `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
 | `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |
-| `radius-delete` | Delete (or troubleshoot the teardown of) an app or environment via the generated GitHub Actions workflow. |
+| `radius-delete` | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment. |
 
 ### Canvas extension
 
