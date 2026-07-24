@@ -62,18 +62,20 @@ describe("filterGraphVisualizationResources", () => {
   it("matches the bare ghcr-registry-creds secret name too", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "ghcr-registry-creds"),
+      makeResource("Radius.Security/secrets", "ghcr-registry-creds", {
+        connections: [{ id: imageId, direction: "Inbound" }],
+      }),
     ];
     expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
   });
 
-  it("keeps a ghcr-registry-creds secret when there is no containerImage in the graph", () => {
+  it("keeps a ghcr-registry-creds secret when it is not associated with a containerImage", () => {
     const resources = [
-      makeResource("Radius.Compute/containers", "api"),
+      makeResource("Radius.Compute/containerImages", "apiImage"),
       makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds"),
     ];
     const result = filterGraphVisualizationResources(resources);
-    expect(result).toHaveLength(2);
+    expect(result.map((r) => r.name)).toEqual(["radius-ghcr-registry-creds"]);
   });
 
   it("keeps unrelated secrets even when a containerImage is present", () => {
