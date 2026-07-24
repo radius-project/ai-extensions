@@ -742,7 +742,7 @@ function radiusRenderGraph(containerId, resources, options) {
             // Microsoft.DBforMySQL/flexibleServers). The icon therefore stays the
             // modeled resource's own (pack-supplied r.icon, or its type glyph), not
             // the generic glyph of the resolved output.
-            var resolvedResource = plannedMode ? radiusSelectResolvedResource(r) : null;
+            var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
             var shortType = plannedMode && resolvedResource
                 ? radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)
                 : radiusFormatTypeLabel(r.type);
