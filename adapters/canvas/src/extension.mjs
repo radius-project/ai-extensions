@@ -41,6 +41,7 @@ import {
 import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
+import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -572,79 +573,10 @@ const session = await joinSession({
                     const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
                     const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
 
-                    // Compute diff using the shared algorithm (see computeGraphDiff).
+                    // Compute diff using the shared algorithm (see computeGraphDiff)
+                    // and render it as PR-embeddable Markdown (see renderPrDiffMarkdown).
                     const diffResources = computeGraphDiff(baseResources, headResources);
-
-                    const added = diffResources.filter(r => r.diffStatus === "added").length;
-                    const removed = diffResources.filter(r => r.diffStatus === "removed").length;
-                    const modified = diffResources.filter(r => r.diffStatus === "modified").length;
-                    const unchanged = diffResources.filter(r => r.diffStatus === "unchanged").length;
-
-                    // Build Mermaid diagram
-                    // Create a map from full resource id to a short safe mermaid node id
-                    const idMap = new Map();
-                    for (let i = 0; i < diffResources.length; i++) {
-                        const r = diffResources[i];
-                        const fullId = r.id || r.name || `node${i}`;
-                        // Use symName (last segment of id path) for readable Mermaid ids
-                        const segments = fullId.split('/');
-                        const shortId = segments[segments.length - 1] || `node${i}`;
-                        const safeId = shortId.replace(/[^a-zA-Z0-9]/g, "_");
-                        idMap.set(fullId, safeId);
-                    }
-
-                    const statusStyle = { added: ":::added", removed: ":::removed", modified: ":::modified", unchanged: ":::unchanged" };
-                    const statusIcon = { added: "🟢", removed: "🔴", modified: "🟡", unchanged: "" };
-                    let mermaid = "graph TD\n";
-                    mermaid += "    classDef added fill:#dafbe1,stroke:#1a7f37,stroke-width:2px,color:#1a7f37\n";
-                    mermaid += "    classDef removed fill:#ffebe9,stroke:#cf222e,stroke-width:2px,color:#cf222e\n";
-                    mermaid += "    classDef modified fill:#fff8c5,stroke:#bf8700,stroke-width:2px,color:#9a6700\n";
-                    mermaid += "    classDef unchanged fill:#f6f8fa,stroke:#d1d9e0,stroke-width:1px,color:#656d76\n";
-
-                    for (const r of diffResources) {
-                        const fullId = r.id || r.name || "node";
-                        const safeId = idMap.get(fullId) || fullId.replace(/[^a-zA-Z0-9]/g, "_");
-                        const icon = statusIcon[r.diffStatus] || "";
-                        const typeLabel = ((r.type || "").split("/").pop() || "").split("@")[0];
-                        const label = `${icon} ${r.name || r.id}\\n${typeLabel}`.trim();
-                        mermaid += `    ${safeId}["${label}"]${statusStyle[r.diffStatus] || ""}\n`;
-                    }
-
-                    // Add edges from connections (match by conn.id which is the full resource path)
-                    for (const r of diffResources) {
-                        if (r.connections && r.connections.length > 0) {
-                            const srcFullId = r.id || r.name || "";
-                            const srcSafeId = idMap.get(srcFullId);
-                            if (!srcSafeId) continue;
-                            for (const conn of r.connections) {
-                                const dir = conn.direction || 'Outbound';
-                                if (dir !== 'Outbound') continue;
-                                const tgtFullId = conn.id || conn.name || "";
-                                const tgtSafeId = idMap.get(tgtFullId);
-                                if (tgtSafeId) {
-                                    mermaid += `    ${srcSafeId} --> ${tgtSafeId}\n`;
-                                }
-                            }
-                        }
-                    }
-
-                    let md = `## 📊 Application Graph Diff\n\n`;
-                    md += `Comparing \`${baseBranch}\` → \`${headBranch}\`\n\n`;
-
-                    if (added === 0 && removed === 0 && modified === 0) {
-                        md += `✅ No application graph changes detected. The application model is identical between \`${baseBranch}\` and \`${headBranch}\`.\n`;
-                    } else {
-                        md += `| Status | Count |\n|--------|-------|\n`;
-                        if (added > 0) md += `| 🟢 Added | ${added} |\n`;
-                        if (removed > 0) md += `| 🔴 Removed | ${removed} |\n`;
-                        if (modified > 0) md += `| 🟡 Modified | ${modified} |\n`;
-                        if (unchanged > 0) md += `| ⚪ Unchanged | ${unchanged} |\n`;
-                        md += `\n`;
-                    }
-
-                    md += "```mermaid\n" + mermaid + "```\n";
-
-                    return md;
+                    return renderPrDiffMarkdown(diffResources, baseBranch, headBranch);
                 } catch (err) {
                     return `⚠️ Could not generate app graph diff: ${err.message}`;
                 }
