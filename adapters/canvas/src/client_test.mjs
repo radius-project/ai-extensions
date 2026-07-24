@@ -184,13 +184,12 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
     });
 });
 
-describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Planned, only border/edge color differs)", () => {
+describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
     it("keeps diff node backgrounds white and colors only the border by diff status", () => {
         expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: '#ffffff', border: '#16a34a' };");
         expect(CLIENT_GRAPH_JS).toContain("case 'removed': return { bg: '#ffffff', border: '#dc2626' };");
         expect(CLIENT_GRAPH_JS).toContain("case 'modified': return { bg: '#ffffff', border: '#ca8a04' };");
-        // Unchanged / unknown status falls back to the same neutral gray used
-        // by the non-diff modeled/planned cards.
+        // Unchanged / unknown status falls back to the modeled card's neutral gray.
         expect(CLIENT_GRAPH_JS).toContain("default: return { bg: '#ffffff', border: '#d0d7de' };");
         // No tinted diff backgrounds remain.
         expect(CLIENT_GRAPH_JS).not.toContain("#dcfce7");
@@ -248,6 +247,73 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design (identical cards to Plann
 
     it("uses the same per-node branch for a removed resource's app-definition link", () => {
         expect(CLIENT_GRAPH_JS).toContain("repoUrl + '/blob/' + (d.sourceBranch || branch) + '/' + d.defFile");
+    });
+});
+
+describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
+    it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
+        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && r.outputResources && r.outputResources.length > 0)");
+    });
+
+    it("relabels the modeled node with the recipe-resolved concrete type", () => {
+        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
+        expect(CLIENT_GRAPH_JS).toContain("radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)");
+    });
+
+    it("keeps the modeled resource's own icon rather than the resolved output's glyph", () => {
+        // Planned mode changes ONLY the type label; the icon stays the modeled
+        // resource's (pack-supplied r.icon, or its type glyph). Resolving the icon
+        // from the concrete output would swap e.g. a MySQL barrel for a generic
+        // apps/Deployment box.
+        expect(CLIENT_GRAPH_JS).toContain("icon: radiusResolveIcon(r)");
+        expect(CLIENT_GRAPH_JS).not.toContain("radiusResolveIcon(renderedResource)");
+    });
+
+    it("preserves the full provider namespace and prefers a top-level concrete resource", () => {
+        const helpers = new Function("window", `${CLIENT_GRAPH_JS}; return {
+            formatResolvedType: radiusFormatResolvedTypeLabel,
+            selectResolvedResource: radiusSelectResolvedResource
+        };`)({ addEventListener() {} });
+        expect(helpers.formatResolvedType("Microsoft.DBforMySQL/flexibleServers@2023-12-30")).toBe(
+            "Microsoft.DBforMySQL/flexibleServers",
+        );
+        expect(helpers.selectResolvedResource({
+            name: "mysql",
+            outputResources: [
+                {
+                    name: "firewall",
+                    type: "Microsoft.DBforMySQL/flexibleServers/firewallRules@2023-12-30",
+                },
+                {
+                    name: "server",
+                    type: "Microsoft.DBforMySQL/flexibleServers@2023-12-30",
+                },
+            ],
+        })?.name).toBe("server");
+    });
+
+    it("prefers the primary workload over supporting recipe outputs regardless of order", () => {
+        const helpers = new Function("window", `${CLIENT_GRAPH_JS}; return {
+            selectResolvedResource: radiusSelectResolvedResource
+        };`)({ addEventListener() {} });
+        // The real Kubernetes MySQL recipe emits a credentials Secret first, then
+        // the Deployment, then a Service. The Deployment is the primary resource;
+        // the Secret/Service must not be projected onto the planned node.
+        expect(helpers.selectResolvedResource({
+            name: "db",
+            outputResources: [
+                { name: "dbSecret", type: "core/Secret@v1" },
+                { name: "mySql", type: "apps/Deployment@v1" },
+                { name: "svc", type: "core/Service@v1" },
+            ],
+        })?.type).toBe("apps/Deployment@v1");
+    });
+
+    it("uses dashed node borders and connectors for planned resources", () => {
+        expect(CLIENT_GRAPH_JS).toContain("borderStyle: plannedMode ? 'dashed' : 'solid'");
+        expect(CLIENT_GRAPH_JS).toContain("dashed = dashed || plannedMode;");
+        expect(CLIENT_GRAPH_JS).toContain("style.strokeDasharray = plannedMode ? '4 4' : '6 4'");
+        expect(CLIENT_GRAPH_JS).toContain("borderStyle: d.borderStyle || 'solid'");
     });
 });
 
