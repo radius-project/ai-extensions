@@ -103,8 +103,8 @@ export function deriveConcreteResource(source: string): ConcreteResource | null 
   const hit = SOURCE_CONCRETE_MAP[key];
   if (!hit) return null;
   const leaf = hit.type.split("/").pop() || hit.type;
-  const name = leaf.charAt(0).toLowerCase() + leaf.slice(1);
-  return {
+  const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) => m.toLowerCase());
+  const name = withLowerInitialism.charAt(0).toLowerCase() + withLowerInitialism.slice(1);
     name,
     type: hit.type,
     displayType: hit.displayType,
