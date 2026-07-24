@@ -2130,6 +2130,10 @@ deployBtn.addEventListener('click', function() {
     }
 
     var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
+    if (needsAzureCreds && !(selectedProfile.subscriptionId || '').trim()) {
+        fail('The selected profile has no subscription ID. Edit the profile to add one so setup targets the correct tenant/subscription.');
+        return;
+    }
     var preflight;
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
