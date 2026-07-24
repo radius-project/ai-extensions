@@ -257,16 +257,18 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
         else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
         let runPath = "";
+        let runStatus = "";
         let runConclusion = "";
         if (m) {
-            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-            const rt = runInfo.indexOf("\t");
-            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const parts = runInfo.split("\t");
+            runPath = parts[0] || "";
+            runStatus = parts[1] || "";
+            runConclusion = parts[2] || "";
         }
         const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
         const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-        return { id, state, runUrl, isDeploy, isDelete, runConclusion };
+        return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
     };
 
     // Apply the selection rules to a resolved record:
@@ -278,9 +280,25 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (rec.isDelete && rec.runConclusion === "success") return null;
         if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
         let status = "pending";
-        if (rec.isDelete) status = "deleting"; // delete still in progress
-        else if (rec.state === "success") status = "success";
-        else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        if (rec.isDelete) {
+            status = "deleting"; // delete still in progress
+        } else {
+            // Deploy status is derived from the WORKFLOW RUN's completion, not the
+            // GitHub deployment-status record. A failed deploy often leaves that
+            // record stuck at "pending"/"in_progress" (the workflow never posts a
+            // terminal "failure" status), which previously mis-reported a failed
+            // deploy as "pending" and wrongly kept the Deploy button greyed out.
+            // Treat the run as authoritative: only a run that has NOT completed is
+            // "pending"; a completed run is "success" or "failed" by its
+            // conclusion, and a failed deploy does not block a redeploy.
+            if (rec.runConclusion === "success") status = "success";
+            else if (rec.runConclusion) status = "failed"; // completed, non-success (failure/cancelled/timed_out/…)
+            else if (rec.runStatus && rec.runStatus !== "completed") status = "pending"; // genuinely still running
+            // No linked run (or unknown run state): fall back to the deployment
+            // record's own state so we still reflect a terminal outcome.
+            else if (rec.state === "success") status = "success";
+            else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        }
         return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
     };
 
