@@ -220,6 +220,23 @@ async function resolveRepoAppName(repo, branch) {
     return appName;
 }
 
+// Derive the deployment status for a single deploy record from the linked
+// workflow run's completion state, falling back to the deployment-status record
+// when no run information is available.  Exported for unit tests.
+//
+// `rec` must carry: { runConclusion, runStatus, state }
+// Returns one of: "success" | "failed" | "pending"
+export function resolveDeployStatus(rec) {
+    if (rec.runConclusion === "success") return "success";
+    if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
+    if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
+    // No linked run (or unknown run state): fall back to the deployment
+    // record's own state so we still reflect a terminal outcome.
+    if (rec.state === "success") return "success";
+    if (rec.state === "failure" || rec.state === "error") return "failed";
+    return "pending";
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -291,13 +308,7 @@ async function resolveEnvDeployment(repo, environment, appName) {
             // Treat the run as authoritative: only a run that has NOT completed is
             // "pending"; a completed run is "success" or "failed" by its
             // conclusion, and a failed deploy does not block a redeploy.
-            if (rec.runConclusion === "success") status = "success";
-            else if (rec.runConclusion) status = "failed"; // completed, non-success (failure/cancelled/timed_out/…)
-            else if (rec.runStatus && rec.runStatus !== "completed") status = "pending"; // genuinely still running
-            // No linked run (or unknown run state): fall back to the deployment
-            // record's own state so we still reflect a terminal outcome.
-            else if (rec.state === "success") status = "success";
-            else if (rec.state === "failure" || rec.state === "error") status = "failed";
+            status = resolveDeployStatus(rec);
         }
         return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
     };
