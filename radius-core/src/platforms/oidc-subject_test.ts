@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildOidcSubject } from "./oidc-subject.js";
+import {
+  buildOidcSubject,
+  buildEnvironmentSuffix,
+  buildFederatedCredentialName,
+} from "./oidc-subject.js";
 
 describe("buildOidcSubject", () => {
   const base = {
@@ -40,6 +44,20 @@ describe("buildOidcSubject", () => {
       );
     });
 
+    it("prefers an explicit sub_claim_prefix for the immutable default", () => {
+      const subject = buildOidcSubject({
+        ...base,
+        subjectConfig: {
+          useDefault: true,
+          useImmutableSubject: true,
+          subClaimPrefix: "repo:octo-org@999/octo-repo@888",
+        },
+      });
+      expect(subject).toBe(
+        "repo:octo-org@999/octo-repo@888:environment:production",
+      );
+    });
+
     it("accepts string-typed numeric ids for the immutable default", () => {
       const subject = buildOidcSubject({
         repoFullName: "octo-org/octo-repo",
@@ -77,12 +95,50 @@ describe("buildOidcSubject", () => {
   // ─── custom (use_default = false) ────────────────────────────────────────────
 
   describe("custom subject (use_default=false)", () => {
-    it("maps the repository claim to the canonical full name", () => {
+    it("maps the mutable repository claim to the canonical full name", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: false, includeClaimKeys: ["repository"] },
+        subjectConfig: {
+          useDefault: false,
+          useImmutableSubject: false,
+          includeClaimKeys: ["repository"],
+        },
       });
       expect(subject).toBe("repository:octo-org/octo-repo");
+    });
+
+    it("maps the immutable repository claim to the owner@id/repo@id form", () => {
+      const subject = buildOidcSubject({
+        ...base,
+        subjectConfig: {
+          useDefault: false,
+          useImmutableSubject: true,
+          includeClaimKeys: ["repository"],
+        },
+      });
+      expect(subject).toBe("repository:octo-org@111/octo-repo@222");
+    });
+
+    it("prefers sub_claim_prefix for an immutable repository claim", () => {
+      const subject = buildOidcSubject({
+        ...base,
+        subjectConfig: {
+          useDefault: false,
+          useImmutableSubject: true,
+          subClaimPrefix: "repo:octo-org@5/octo-repo@6",
+          includeClaimKeys: ["repository"],
+        },
+      });
+      expect(subject).toBe("repository:octo-org@5/octo-repo@6");
+    });
+
+    it("throws when a repository claim needs an undetermined immutability decision", () => {
+      expect(() =>
+        buildOidcSubject({
+          ...base,
+          subjectConfig: { useDefault: false, includeClaimKeys: ["repository"] },
+        }),
+      ).toThrow(/immutable/);
     });
 
     it("maps repository_id to the numeric repo id", () => {
@@ -123,12 +179,37 @@ describe("buildOidcSubject", () => {
       expect(subject).toBe("environment:production");
     });
 
-    it("maps the repo short-form claim", () => {
+    it("maps the environment claim to the suffix", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: false, includeClaimKeys: ["repo"] },
+        suffix: buildEnvironmentSuffix("dev"),
+        subjectConfig: { useDefault: false, includeClaimKeys: ["environment"] },
+      });
+      expect(subject).toBe("environment:dev");
+    });
+
+    it("maps the mutable repo short-form claim", () => {
+      const subject = buildOidcSubject({
+        ...base,
+        subjectConfig: {
+          useDefault: false,
+          useImmutableSubject: false,
+          includeClaimKeys: ["repo"],
+        },
       });
       expect(subject).toBe("repo:octo-org/octo-repo");
+    });
+
+    it("maps the immutable repo short-form claim", () => {
+      const subject = buildOidcSubject({
+        ...base,
+        subjectConfig: {
+          useDefault: false,
+          useImmutableSubject: true,
+          includeClaimKeys: ["repo"],
+        },
+      });
+      expect(subject).toBe("repo:octo-org@111/octo-repo@222");
     });
 
     it("joins multiple claim keys in order", () => {
@@ -136,6 +217,7 @@ describe("buildOidcSubject", () => {
         ...base,
         subjectConfig: {
           useDefault: false,
+          useImmutableSubject: false,
           includeClaimKeys: ["repository", "repository_id", "context"],
         },
       });
@@ -166,6 +248,7 @@ describe("buildOidcSubject", () => {
           ...base,
           subjectConfig: {
             useDefault: false,
+            useImmutableSubject: false,
             includeClaimKeys: ["repository", "job_workflow_ref"],
           },
         }),
@@ -228,5 +311,59 @@ describe("buildOidcSubject", () => {
         buildOidcSubject({ ...base, repoFullName: "a/b/c" }),
       ).toThrow(/owner\/repo/);
     });
+  });
+});
+
+describe("buildEnvironmentSuffix", () => {
+  it("prefixes environment: and leaves a plain name intact", () => {
+    expect(buildEnvironmentSuffix("production")).toBe("environment:production");
+  });
+
+  it("encodes a colon in the environment name as %3A", () => {
+    expect(buildEnvironmentSuffix("prod:west")).toBe("environment:prod%3Awest");
+  });
+
+  it("encodes multiple colons", () => {
+    expect(buildEnvironmentSuffix("a:b:c")).toBe("environment:a%3Ab%3Ac");
+  });
+});
+
+describe("buildFederatedCredentialName", () => {
+  it("builds a sanitized github-owner-repo-env name", () => {
+    expect(
+      buildFederatedCredentialName({
+        repoFullName: "octo-org/octo-repo",
+        envName: "production",
+      }),
+    ).toBe("github-octo-org-octo-repo-production");
+  });
+
+  it("appends a variant when provided", () => {
+    expect(
+      buildFederatedCredentialName({
+        repoFullName: "octo-org/octo-repo",
+        envName: "dev",
+        variant: "immutable",
+      }),
+    ).toBe("github-octo-org-octo-repo-dev-immutable");
+  });
+
+  it("replaces disallowed characters (e.g. colon) with a hyphen", () => {
+    expect(
+      buildFederatedCredentialName({
+        repoFullName: "octo-org/octo-repo",
+        envName: "prod:west",
+      }),
+    ).toBe("github-octo-org-octo-repo-prod-west");
+  });
+
+  it("truncates to <=120 characters without a trailing hyphen", () => {
+    const name = buildFederatedCredentialName({
+      repoFullName: "octo-org/octo-repo",
+      envName: "e".repeat(200),
+      variant: "immutable",
+    });
+    expect(name.length).toBeLessThanOrEqual(120);
+    expect(name.endsWith("-")).toBe(false);
   });
 });

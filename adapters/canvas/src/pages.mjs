@@ -1636,6 +1636,19 @@ document.getElementById('back-btn').addEventListener('click', function() {
   </div>
 </div>
 
+<div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
+    <div style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Service Management Reference required</div>
+    <div style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
+    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328);" />
+    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:6px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
+    </div>
+  </div>
+</div>
+
 <div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
     <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
@@ -2082,21 +2095,64 @@ function getComboValue(selectId, customId) {
     return sel.value;
 }
 function runAzureAutoSetup(params) {
+    var payload = {
+        repo: params.repo, environment: params.environment,
+        resourceGroup: params.resourceGroup, cluster: params.cluster,
+        subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
+    };
+    // Only sent on a retry after the tenant demands it (progressive disclosure).
+    if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
     return fetch('/api/azure-auto-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            repo: params.repo, environment: params.environment,
-            resourceGroup: params.resourceGroup, cluster: params.cluster,
-            subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
-        })
+        body: JSON.stringify(payload)
     }).then(function(r) { return r.json(); }).then(function(data) {
         if (data.error) {
             var detail = data.steps && data.steps.length ? ' — ' + data.steps.join('; ') : '';
-            throw new Error(data.error + detail);
+            var err = new Error(data.error + detail);
+            err.code = data.code;
+            throw err;
         }
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
         return data;
+    });
+}
+
+// Run auto-setup, and if the tenant requires a Service Management Reference,
+// reveal an input and retry the SAME payload plus the SMR the user supplies.
+function runAzureAutoSetupWithSmr(params) {
+    var UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    return runAzureAutoSetup(params).catch(function(err) {
+        if (err.code !== 'service-management-reference-required') throw err;
+        var modal = document.getElementById('env-smr-modal');
+        var input = document.getElementById('env-smr-input');
+        var errEl = document.getElementById('env-smr-error');
+        var retryBtn = document.getElementById('env-smr-retry');
+        var cancelBtn = document.getElementById('env-smr-cancel');
+        input.value = ''; errEl.style.display = 'none';
+        modal.style.display = 'flex';
+        input.focus();
+        return new Promise(function(resolve, reject) {
+            function cleanup() {
+                modal.style.display = 'none';
+                retryBtn.removeEventListener('click', onRetry);
+                cancelBtn.removeEventListener('click', onCancel);
+            }
+            function onRetry() {
+                var smr = input.value.trim();
+                if (!UUID_RE.test(smr)) {
+                    errEl.textContent = 'Enter a valid GUID.';
+                    errEl.style.display = 'block';
+                    return;
+                }
+                cleanup();
+                var retryParams = Object.assign({}, params, { serviceManagementReference: smr });
+                resolve(runAzureAutoSetup(retryParams));
+            }
+            function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
+            retryBtn.addEventListener('click', onRetry);
+            cancelBtn.addEventListener('click', onCancel);
+        });
     });
 }
 
@@ -2142,7 +2198,7 @@ deployBtn.addEventListener('click', function() {
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
-        preflight = runAzureAutoSetup({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster, subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId });
+        preflight = runAzureAutoSetupWithSmr({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster, subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId });
     } else {
         creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';

@@ -198,6 +198,20 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         // The old inline provider picker was removed from the env-create form.
         expect(html).not.toContain('id="env-provider-select"');
     });
+
+    it("progressively discloses a Service Management Reference input and retries with it", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // The SMR modal + input are present but hidden by default (no field on
+        // first submit).
+        expect(html).toContain('id="env-smr-modal"');
+        expect(html).toContain('id="env-smr-input"');
+        expect(html).toContain("Service Management Reference");
+        expect(html).toContain("Service Tree ID GUID");
+        // The client reacts to the machine-readable code and forwards the value.
+        expect(html).toContain("service-management-reference-required");
+        expect(html).toContain("serviceManagementReference");
+        expect(html).toContain("runAzureAutoSetupWithSmr");
+    });
 });
 
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {

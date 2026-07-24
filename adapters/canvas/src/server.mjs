@@ -18,14 +18,15 @@ import {
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
+  buildEnvironmentSuffix,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
 import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson } from "./gh.mjs";
 import {
-  resolveOidcSubject, buildAppCreateArgs, isServiceTreeError,
-  isUuid, isValidRepoSlug, isAzureName, GITHUB_API_VERSION,
+  resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
+  isUuid, isValidRepoSlug, isAksClusterName, isResourceGroupName, GITHUB_API_VERSION,
 } from "./azure-oidc.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, buildAppGraphRadCommand, extractAppName } from "./bicep.mjs";
@@ -778,11 +779,11 @@ function createRequestHandler(instanceId) {
                     fail(400, `Invalid repository "${targetRepo}". Expected "owner/repo".`, 'invalid-repo');
                     return;
                 }
-                if (!isAzureName(resourceGroup)) {
+                if (!isResourceGroupName(resourceGroup)) {
                     fail(400, `Invalid resource group name "${resourceGroup}".`, 'invalid-resource-group');
                     return;
                 }
-                if (!isAzureName(clusterName)) {
+                if (!isAksClusterName(clusterName)) {
                     fail(400, `Invalid cluster name "${clusterName}".`, 'invalid-cluster');
                     return;
                 }
@@ -794,8 +795,13 @@ function createRequestHandler(instanceId) {
                     fail(400, `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`, 'invalid-subscription');
                     return;
                 }
+                // The Service Management Reference is only surfaced by the UI
+                // AFTER a first attempt fails with the Entra policy error
+                // (progressive disclosure), so it is optional here. When present
+                // it must be a GUID (for Microsoft-internal tenants this is the
+                // Service Tree ID).
                 if (serviceManagementReference && !isUuid(serviceManagementReference)) {
-                    fail(400, `Invalid serviceManagementReference "${serviceManagementReference}". It must be a Service Tree GUID.`, 'invalid-smr');
+                    fail(400, `Invalid Service Management Reference "${serviceManagementReference}". It must be a GUID (for Microsoft-internal tenants, your Service Tree ID).`, 'invalid-smr');
                     return;
                 }
 
@@ -845,12 +851,21 @@ function createRequestHandler(instanceId) {
                         'az-tenant-mismatch', { steps });
                     return;
                 }
+                // Validate the resolved subscription id before it reaches an
+                // `az` scope argument.
+                if (!isUuid(subscriptionId)) {
+                    fail(400, `Resolved subscription id "${subscriptionId}" is not a valid GUID.`, 'invalid-subscription', { steps });
+                    return;
+                }
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 2: Resolve the exact OIDC subject BEFORE creating anything.
-                // This reads the canonical repo + subject customization from
-                // GitHub and fails closed on any ambiguity, so we never write a
-                // federated credential that GitHub won't match at deploy time.
+                // Step 2: Resolve the federated credential(s) BEFORE creating
+                // anything. This reads the canonical repo + subject customization
+                // from GitHub. For the default (not customized) subject we create
+                // BOTH the mutable and immutable forms so whichever GitHub mints
+                // at token time matches; for a customized subject we build the
+                // single exact subject (failing loud only if a repo/repository
+                // claim needs an immutability decision it cannot make).
                 steps.push('Resolving GitHub OIDC subject...');
                 // TODO(defer): enterprise-claim handling (AADSTS7002381) and any
                 // package-scope / workflow-permission changes are intentionally
@@ -860,8 +875,8 @@ function createRequestHandler(instanceId) {
                     oidc = await resolveOidcSubject(
                         {
                             targetRepo,
-                            suffix: `environment:${envName}`,
-                            immutableOverride: typeof data.immutableSubject === 'boolean' ? data.immutableSubject : undefined,
+                            envName,
+                            suffix: buildEnvironmentSuffix(envName),
                         },
                         ghJsonRunner,
                     );
@@ -869,24 +884,29 @@ function createRequestHandler(instanceId) {
                     fail(400, e.message, e.code || 'oidc-subject-failed', { steps });
                     return;
                 }
-                steps.push(`✅ OIDC subject: ${oidc.subject}`);
+                steps.push(`✅ OIDC subject(s): ${oidc.federatedCredentials.map((f) => f.subject).join(', ')}`);
 
-                // Step 3: Create a fresh App Registration. We always auto-create
-                // new credentials rather than reusing an existing Client ID.
+                // Step 3: Create a fresh App Registration. The display name is
+                // derived from the CANONICAL full_name returned by GitHub (never
+                // the raw user input), so it can never carry unexpected
+                // characters. Attempt WITHOUT a Service Management Reference
+                // first; only if Entra policy rejects it do we ask the user for
+                // one (progressive disclosure) — `az ad app create` fails
+                // atomically, so the retry is clean with no orphaned app.
                 // TODO(defer): full identity reconciliation/replacement of an
                 // existing app registration across reruns is out of scope here.
-                const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
+                const appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
                 steps.push(`Creating App Registration: ${appName}...`);
                 const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
                 if (appResult.code !== 0) {
-                    // Enterprise tenants require a Service Tree id. Detect that
-                    // specific policy failure and give the user an actionable
-                    // remedy, preserving the raw error.
-                    if (!serviceManagementReference && isServiceTreeError(appResult.stderr)) {
+                    // Enterprise tenants require a Service Management Reference.
+                    // Return a machine-readable code so the UI can reveal an SMR
+                    // input and let the user retry, preserving the raw error.
+                    if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
                         fail(400,
-                            'This Entra tenant requires a Service Tree ID (serviceManagementReference) on new App Registrations. ' +
-                            'Re-run and provide your Service Tree ID.',
-                            'service-tree-required',
+                            'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
+                            'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
+                            'service-management-reference-required',
                             { steps, azError: appResult.stderr });
                         return;
                     }
@@ -896,46 +916,52 @@ function createRequestHandler(instanceId) {
                 const clientId = appResult.stdout.trim();
                 steps.push(`✅ App Registration created: ${clientId}`);
 
-                // Step 4: Create Service Principal (FATAL on failure).
+                // Step 4: Create Service Principal (FATAL on failure). Once the
+                // app exists, any later failure returns clientId/appName so the
+                // user can find and clean it up manually (full rollback deferred).
                 steps.push('Creating Service Principal...');
                 const spResult = await runCmd('az', ['ad', 'sp', 'create', '--id', clientId]);
                 if (spResult.code !== 0 && !spResult.stderr.includes('already exists')) {
                     // The SP may already exist under a different identity; confirm.
                     const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
                     if (spShow.code !== 0) {
-                        fail(400, 'Could not create or find the Service Principal: ' + spResult.stderr, 'sp-failed', { steps, clientId, azError: spResult.stderr });
+                        fail(400, 'Could not create or find the Service Principal: ' + spResult.stderr, 'sp-failed', { steps, clientId, appName, azError: spResult.stderr });
                         return;
                     }
                 }
                 steps.push('✅ Service Principal ready');
 
-                // Step 5: Create the Federated Credential (FATAL on failure).
-                steps.push('Creating federated credential for GitHub OIDC...');
-                const fedParams = JSON.stringify({
-                    name: `github-actions-${envName}`,
-                    issuer: 'https://token.actions.githubusercontent.com',
-                    subject: oidc.subject,
-                    audiences: ['api://AzureADTokenExchange']
-                });
+                // Step 5: Create the Federated Credential(s) (FATAL on failure).
                 const { writeFileSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
-                // Unpredictable filename so a shared tmpdir can't be pre-created or
-                // read by another local user.
-                fedTmpFile = join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`);
-                writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
-                const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
-                if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
-                    fail(400, 'Failed to create federated credential: ' + fedResult.stderr, 'federated-credential-failed', { steps, clientId, azError: fedResult.stderr });
-                    return;
+                for (const fic of oidc.federatedCredentials) {
+                    steps.push(`Creating federated credential "${fic.name}"...`);
+                    const fedParams = JSON.stringify({
+                        name: fic.name,
+                        issuer: 'https://token.actions.githubusercontent.com',
+                        subject: fic.subject,
+                        audiences: ['api://AzureADTokenExchange']
+                    });
+                    // Unpredictable filename so a shared tmpdir can't be
+                    // pre-created or read by another local user.
+                    fedTmpFile = join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`);
+                    writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
+                    const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
+                    try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
+                    fedTmpFile = null;
+                    if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
+                        fail(400, `Failed to create federated credential "${fic.name}": ` + fedResult.stderr, 'federated-credential-failed', { steps, clientId, appName, azError: fedResult.stderr });
+                        return;
+                    }
+                    steps.push(`✅ Federated credential "${fic.name}" created`);
                 }
-                steps.push('✅ Federated credential created');
 
                 // Step 6: Assign Contributor role on the resource group (FATAL).
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
                 const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
-                    fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, azError: roleResult.stderr });
+                    fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, appName, azError: roleResult.stderr });
                     return;
                 }
                 steps.push('✅ Contributor role assigned');
@@ -951,7 +977,7 @@ function createRequestHandler(instanceId) {
                     resourceGroup,
                     cluster: clusterName,
                     appName,
-                    subject: oidc.subject,
+                    subjects: oidc.federatedCredentials.map((f) => f.subject),
                     steps
                 }));
             } catch (e) {

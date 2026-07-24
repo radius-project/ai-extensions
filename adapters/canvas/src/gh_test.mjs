@@ -156,3 +156,72 @@ describe.sequential("cliExec", () => {
         );
     });
 });
+
+describe.sequential("ghApiJson", () => {
+    beforeEach(() => {
+        childProcess.execFile.mockReset();
+        childProcess.execFileSync.mockReset();
+    });
+
+    afterEach(() => {
+        Object.defineProperty(process, "platform", platformDescriptor);
+    });
+
+    const stubChild = () => ({ stdin: { end() {} } });
+
+    it("parses a successful JSON body as ok/200", async () => {
+        const { ghApiJson } = await loadGh("linux");
+        childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+            cb(null, '{"full_name":"o/r"}', "");
+            return stubChild();
+        });
+        const res = await ghApiJson("/repos/o/r");
+        expect(res).toEqual({ ok: true, status: 200, json: { full_name: "o/r" }, stderr: "" });
+    });
+
+    it("extracts an HTTP status from gh stderr on failure", async () => {
+        const { ghApiJson } = await loadGh("linux");
+        childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+            cb(new Error("gh: exit 1"), "", "gh: Not Found (HTTP 404)");
+            return stubChild();
+        });
+        const res = await ghApiJson("/repos/o/missing");
+        expect(res.ok).toBe(false);
+        expect(res.status).toBe(404);
+        expect(res.stderr).toContain("404");
+    });
+
+    it("returns a null status when no HTTP code is present (transport error)", async () => {
+        const { ghApiJson } = await loadGh("linux");
+        childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+            cb(new Error("ECONNRESET"), "", "ECONNRESET");
+            return stubChild();
+        });
+        const res = await ghApiJson("/x");
+        expect(res.status).toBe(null);
+        expect(res.ok).toBe(false);
+    });
+
+    it("reports a JSON parse failure as not-ok with status 200", async () => {
+        const { ghApiJson } = await loadGh("linux");
+        childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+            cb(null, "not json", "");
+            return stubChild();
+        });
+        const res = await ghApiJson("/x");
+        expect(res.ok).toBe(false);
+        expect(res.status).toBe(200);
+        expect(res.stderr).toMatch(/failed to parse/);
+    });
+
+    it("passes custom headers through as -H args", async () => {
+        const { ghApiJson } = await loadGh("linux");
+        childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+            cb(null, "null", "");
+            return stubChild();
+        });
+        await ghApiJson("/x", { headers: { "X-GitHub-Api-Version": "2022-11-28" } });
+        const [, args] = childProcess.execFile.mock.calls[0];
+        expect(args).toEqual(["api", "/x", "-H", "X-GitHub-Api-Version: 2022-11-28"]);
+    });
+});

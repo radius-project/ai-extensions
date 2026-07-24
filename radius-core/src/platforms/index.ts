@@ -5,7 +5,7 @@ import { aws } from "./aws.js";
 export type { ComputePlatform, OidcResult, PortalContext, SecretSpec, PlatformCapabilities } from "./types.js";
 export { azure } from "./azure.js";
 export { aws } from "./aws.js";
-export { buildOidcSubject } from "./oidc-subject.js";
+export { buildOidcSubject, buildEnvironmentSuffix, buildFederatedCredentialName } from "./oidc-subject.js";
 export type { OidcSubjectConfig, BuildOidcSubjectInput } from "./oidc-subject.js";
 
 const REGISTRY: Record<string, ComputePlatform> = {

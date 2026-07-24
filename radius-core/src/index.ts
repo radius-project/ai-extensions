@@ -39,6 +39,8 @@ export {
   azure,
   aws,
   buildOidcSubject,
+  buildEnvironmentSuffix,
+  buildFederatedCredentialName,
 } from "./platforms/index.js";
 export type {
   ComputePlatform,

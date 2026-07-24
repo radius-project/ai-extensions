@@ -2,25 +2,38 @@
 //
 // The `/api/azure-auto-setup` route in server.mjs runs `az`/`gh` as child
 // processes to bootstrap a federated-identity App Registration so a user's repo
-// can deploy to Azure. The pure decisions in that flow — how to construct the
-// federated-credential `subject`, how to build the `az ad app create` argv, how
-// to classify an `az` Service-Tree policy failure, and how to validate inputs —
-// live here so they can be unit-tested without spawning processes. Actual I/O
-// (spawning `az`/`gh`) stays in server.mjs; the network reads are injected as a
-// `runner` so this module remains testable.
+// can deploy to Azure. The pure decisions in that flow — which
+// federated-credential `subject`(s) to create, how to build the `az ad app
+// create` argv, how to classify an `az` Service Management Reference policy
+// failure, and how to validate inputs — live here so they can be unit-tested
+// without spawning processes. Actual I/O (spawning `az`/`gh`) stays in
+// server.mjs; the network reads are injected as a `runner` so this module
+// remains testable.
 
-import { buildOidcSubject } from "@radius-project/core";
+import {
+  buildOidcSubject,
+  buildFederatedCredentialName,
+} from "@radius-project/core";
 
-// owner/repo, exactly two non-empty, slash-free segments.
-export const REPO_SLUG_RE = /^[^/]+\/[^/]+$/;
-// Canonical 8-4-4-4-12 UUID (Service Tree ids, tenant/subscription ids).
+// owner/repo using GitHub's real charset — an owner is 1-39 chars starting
+// alphanumeric with internal hyphens; a repo is 1-100 of [A-Za-z0-9._-]. This
+// rejects spaces and shell metacharacters (`&`, `?`, ...) that could otherwise
+// flow into `az ad app create --display-name` via cmd.exe on Windows.
+export const REPO_SLUG_RE =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+// Canonical 8-4-4-4-12 UUID (Service Management Reference / Service Tree ids,
+// tenant/subscription/account ids).
 export const UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-// Azure resource-group / cluster names: conservative allow-list that also
-// rejects leading '-' so a value can never be mistaken for a CLI flag in argv.
-export const AZURE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._()-]{0,89}$/;
+// AKS cluster name: <=63 chars, alphanumeric bookends, internal `-` and `_`.
+// Leading char is alphanumeric so it can never be mistaken for a CLI flag.
+export const AKS_CLUSTER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,61}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
+// Resource group name: <=90 chars from Azure's allowed set, but NOT ending in a
+// dot (Azure rejects a trailing period). Leading char restricted to alphanumeric.
+export const RESOURCE_GROUP_NAME_RE =
+  /^[A-Za-z0-9][A-Za-z0-9._()-]{0,88}[A-Za-z0-9_()-]$|^[A-Za-z0-9]$/;
 
-// Pin the API version so the OIDC customization payload (which now carries
+// Pin the API version so the OIDC customization payload (which carries
 // `use_immutable_subject` / `sub_claim_prefix`) is stable across gh/GitHub
 // upgrades.
 export const GITHUB_API_VERSION = "2022-11-28";
@@ -33,8 +46,12 @@ export function isValidRepoSlug(value) {
   return typeof value === "string" && REPO_SLUG_RE.test(value.trim());
 }
 
-export function isAzureName(value) {
-  return typeof value === "string" && AZURE_NAME_RE.test(value.trim());
+export function isAksClusterName(value) {
+  return typeof value === "string" && AKS_CLUSTER_NAME_RE.test(value.trim());
+}
+
+export function isResourceGroupName(value) {
+  return typeof value === "string" && RESOURCE_GROUP_NAME_RE.test(value.trim());
 }
 
 /** Attach a machine-readable `code` to an Error for the JSON error response. */
@@ -54,24 +71,26 @@ export function buildAppCreateArgs({ appName, serviceManagementReference } = {})
   ];
   if (serviceManagementReference) {
     // Enterprise Entra tenants enforce a policy requiring every new App
-    // Registration to carry a Service Tree id (serviceManagementReference).
+    // Registration to carry a Service Management Reference (for
+    // Microsoft-internal tenants this is a Service Tree id GUID).
     args.push("--service-management-reference", serviceManagementReference);
   }
   return args;
 }
 
-// Known Entra error identifiers for a missing/invalid Service Tree id. Matched
+// Known Entra error identifiers for a missing/invalid Service Management
+// Reference. These substrings are the real error identifiers and are matched
 // case-insensitively against `az` stderr so we can turn an opaque failure into
-// actionable guidance.
-export const SERVICE_TREE_ERROR_IDS = [
+// actionable guidance (and a machine-readable code the UI can react to).
+export const SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS = [
   "servicemanagementreference",
   "servicetreenullvalueprovided",
   "servicetreeinvalid",
 ];
 
-export function isServiceTreeError(stderr) {
+export function isServiceManagementReferenceError(stderr) {
   const s = (stderr || "").toLowerCase();
-  return SERVICE_TREE_ERROR_IDS.some((id) => s.includes(id));
+  return SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS.some((id) => s.includes(id));
 }
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,25 +123,32 @@ export async function fetchGitHubJson(
 }
 
 /**
- * Resolve the exact federated-credential `subject` GitHub will present for a
- * repo + suffix (e.g. "environment:dev"), by reading the canonical repo and its
- * OIDC subject customization from GitHub.
+ * Resolve the federated-credential(s) to create so a repo's GitHub Actions OIDC
+ * token can log into Azure, by reading the canonical repo and its OIDC subject
+ * customization from GitHub.
  *
- * Design-review requirements enforced here:
+ * Design decisions enforced here:
  * - Read /repos/{repo} FIRST (proves access + gives canonical full_name and
  *   numeric ids); only then read the customization endpoint.
  * - Treat ONLY an explicit 404 from the customization endpoint as "not opted
  *   into a custom subject" (default format). Any other non-OK status is a hard,
  *   actionable failure — never silently default.
- * - Determine immutable-vs-mutable default from the API
- *   (use_immutable_subject / sub_claim_prefix). If it cannot be determined,
- *   FAIL CLOSED rather than writing a possibly-wrong subject. Callers may pass
- *   `immutableOverride` (boolean) to assert the format deliberately.
+ * - DEFAULT (not customized) subject: rather than fail closed on undetermined
+ *   immutability, emit BOTH federated credentials — the mutable
+ *   `repo:{owner}/{repo}:{suffix}` and the immutable
+ *   `repo:{owner}@{ownerId}/{repo}@{repoId}:{suffix}`. GitHub presents exactly
+ *   one subject at token time; the matching credential authorizes login and the
+ *   other is inert. Azure allows ~20 FICs/app, so two-per-environment is fine.
+ * - CUSTOM subject: build the single exact subject from the customization
+ *   config (buildOidcSubject fails loud if a repo/repository key needs an
+ *   immutability decision it cannot make).
+ * - On the customization 200 path, require an explicit boolean `use_default`
+ *   and positive numeric owner/repo ids; fail closed on a malformed body.
  *
- * @returns {Promise<{subject:string, fullName:string, ownerId:number, repoId:number, subjectConfig:object}>}
+ * @returns {Promise<{federatedCredentials:{name:string,subject:string}[], fullName:string, ownerId:number, repoId:number, subjectConfig:object}>}
  */
 export async function resolveOidcSubject(
-  { targetRepo, suffix, immutableOverride },
+  { targetRepo, envName, suffix },
   runner,
   opts = {},
 ) {
@@ -146,10 +172,14 @@ export async function resolveOidcSubject(
   const fullName = repo.full_name;
   const ownerId = repo.owner?.id;
   const repoId = repo.id;
-  if (!fullName || ownerId == null || repoId == null) {
+  if (
+    !fullName ||
+    !Number.isFinite(Number(ownerId)) || Number(ownerId) <= 0 ||
+    !Number.isFinite(Number(repoId)) || Number(repoId) <= 0
+  ) {
     throw oidcError(
       "repo-metadata",
-      `GitHub did not return full_name/id/owner.id for "${targetRepo}"; cannot build a reliable OIDC subject.`,
+      `GitHub did not return a valid full_name/id/owner.id for "${targetRepo}"; cannot build a reliable OIDC subject.`,
     );
   }
 
@@ -162,8 +192,15 @@ export async function resolveOidcSubject(
   let subjectConfig;
   if (custRes?.ok) {
     const c = custRes.json || {};
+    if (typeof c.use_default !== "boolean") {
+      throw oidcError(
+        "customization-malformed",
+        `GitHub's OIDC customization response for "${fullName}" is missing an ` +
+          `explicit boolean use_default; refusing to guess the subject.`,
+      );
+    }
     subjectConfig = {
-      useDefault: c.use_default !== false,
+      useDefault: c.use_default,
       includeClaimKeys: Array.isArray(c.include_claim_keys) ? c.include_claim_keys : [],
     };
     if (typeof c.use_immutable_subject === "boolean") {
@@ -187,28 +224,32 @@ export async function resolveOidcSubject(
     );
   }
 
-  // 3. For the default format, immutability must be known. Fail closed if not.
+  const commonInput = { repoFullName: fullName, ownerId, repoId, suffix };
+  const federatedCredentials = [];
+
   if (subjectConfig.useDefault) {
-    if (typeof immutableOverride === "boolean") {
-      subjectConfig.useImmutableSubject = immutableOverride;
-    }
-    if (subjectConfig.useImmutableSubject === undefined) {
-      throw oidcError(
-        "immutable-unknown",
-        `Could not determine whether "${fullName}" uses GitHub's immutable OIDC subject format. ` +
-          `Writing a federated credential now risks a deploy-time AADSTS700213 mismatch. ` +
-          `Opt in or preview the subject via the OIDC customization API (so sub_claim_prefix is available), ` +
-          `or re-run with the immutable-subject setting specified.`,
-      );
-    }
+    // Emit BOTH default forms so whichever GitHub actually mints matches. This
+    // removes the fail-closed dead-end and any user mutable/immutable choice.
+    federatedCredentials.push({
+      name: buildFederatedCredentialName({ repoFullName: fullName, envName, variant: "mutable" }),
+      subject: buildOidcSubject({ ...commonInput, subjectConfig: { useDefault: true, useImmutableSubject: false } }),
+    });
+    federatedCredentials.push({
+      name: buildFederatedCredentialName({ repoFullName: fullName, envName, variant: "immutable" }),
+      subject: buildOidcSubject({
+        ...commonInput,
+        subjectConfig: { useDefault: true, useImmutableSubject: true, subClaimPrefix: subjectConfig.subClaimPrefix },
+      }),
+    });
+  } else {
+    // Customized subject: one exact credential. buildOidcSubject throws if a
+    // repo/repository key needs an immutability decision it cannot make — that
+    // is the one place a clear failure is acceptable.
+    federatedCredentials.push({
+      name: buildFederatedCredentialName({ repoFullName: fullName, envName }),
+      subject: buildOidcSubject({ ...commonInput, subjectConfig }),
+    });
   }
 
-  const subject = buildOidcSubject({
-    repoFullName: fullName,
-    ownerId,
-    repoId,
-    suffix,
-    subjectConfig,
-  });
-  return { subject, fullName, ownerId, repoId, subjectConfig };
+  return { federatedCredentials, fullName, ownerId, repoId, subjectConfig };
 }

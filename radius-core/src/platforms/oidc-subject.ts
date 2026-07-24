@@ -24,9 +24,9 @@
  *                        compose the custom subject.
  * - `useImmutableSubject`: the default (or org template) uses the immutable
  *                        `owner@<ownerId>/repo@<repoId>` form.
- * - `subClaimPrefix`:    optional prefix GitHub reports for the subject; carried
- *                        for completeness/debugging (not required to build the
- *                        subject when the flags above are set).
+ * - `subClaimPrefix`:    the exact subject prefix GitHub reports (e.g.
+ *                        `repo:octo-org@111/octo-repo@222`); preferred verbatim
+ *                        for the immutable slug when present.
  */
 export interface OidcSubjectConfig {
   useDefault: boolean;
@@ -73,16 +73,47 @@ function requireId(
 }
 
 /**
+ * GitHub encodes the environment name inside the subject and escapes `:` as
+ * `%3A` (an environment name may itself contain a colon). Build the trailing
+ * `environment:<name>` claim the same way so the federated-credential subject
+ * matches the token GitHub mints.
+ */
+export function buildEnvironmentSuffix(envName: string): string {
+  const encoded = String(envName ?? "").replace(/:/g, "%3A");
+  return `environment:${encoded}`;
+}
+
+// Immutable repository slug: prefer GitHub's exact reported prefix; otherwise
+// compose it from the canonical login/name and numeric ids.
+function immutableSlug(
+  owner: string,
+  repo: string,
+  ownerId: string,
+  repoId: string,
+  subClaimPrefix?: string,
+): string {
+  if (subClaimPrefix) {
+    // sub_claim_prefix is reported as "repo:{owner}@{oid}/{repo}@{rid}".
+    const withoutRepo = subClaimPrefix.replace(/^repo:/, "");
+    if (withoutRepo.includes("@")) return withoutRepo;
+  }
+  return `${owner}@${ownerId}/${repo}@${repoId}`;
+}
+
+/**
  * Build the federated-credential `subject` string GitHub will actually present.
  *
  * Rules:
  * - default + mutable:   `repo:{owner}/{repo}:{suffix}`
  * - default + immutable: `repo:{owner}@{ownerId}/{repo}@{repoId}:{suffix}`
  * - custom (use_default=false): map each `includeClaimKeys` entry (as azd does)
- *   using the canonical full_name and numeric IDs, joined with ":".
+ *   using the canonical full_name and numeric IDs, joined with ":". For the
+ *   `repo`/`repository` keys the immutable slug is used when the config is
+ *   immutable.
  *
  * Throws (fail loud) on an unknown/unsupported claim key, on a missing numeric
- * ID that a selected key requires, or on a use_default=false config with no
+ * ID that a selected key requires, on a `repo`/`repository` key whose
+ * immutability cannot be determined, or on a use_default=false config with no
  * claim keys.
  */
 export function buildOidcSubject(input: BuildOidcSubjectInput): string {
@@ -94,7 +125,7 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
     if (subjectConfig?.useImmutableSubject) {
       const oid = requireId(ownerId, "the numeric owner id", canonical);
       const rid = requireId(repoId, "the numeric repository id", canonical);
-      return `repo:${owner}@${oid}/${repo}@${rid}:${suffix}`;
+      return `repo:${immutableSlug(owner, repo, oid, rid, subjectConfig.subClaimPrefix)}:${suffix}`;
     }
     return `repo:${canonical}:${suffix}`;
   }
@@ -107,11 +138,30 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
     );
   }
 
+  // Lazily resolve the immutable slug only when a repo/repository key needs it,
+  // so the immutability requirement (and id requirement) is enforced exactly
+  // where it matters.
+  const slugForRepoKeys = (): string => {
+    if (subjectConfig.useImmutableSubject === undefined) {
+      throw new Error(
+        `OIDC config for ${canonical} customizes the subject with a ` +
+          `repository/repo claim, but whether it uses GitHub's immutable ` +
+          `subject format could not be determined. Refusing to guess — resolve ` +
+          `the customization (so use_immutable_subject / sub_claim_prefix is ` +
+          `available) and retry.`,
+      );
+    }
+    if (!subjectConfig.useImmutableSubject) return canonical;
+    const oid = requireId(ownerId, "the numeric owner id", canonical);
+    const rid = requireId(repoId, "the numeric repository id", canonical);
+    return immutableSlug(owner, repo, oid, rid, subjectConfig.subClaimPrefix);
+  };
+
   const parts: string[] = [];
   for (const key of keys) {
     switch (key) {
       case "repository":
-        parts.push(`repository:${canonical}`);
+        parts.push(`repository:${slugForRepoKeys()}`);
         break;
       case "repository_id":
         parts.push(`repository_id:${requireId(repoId, "the numeric repository id", canonical)}`);
@@ -122,13 +172,15 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
       case "repository_owner_id":
         parts.push(`repository_owner_id:${requireId(ownerId, "the numeric owner id", canonical)}`);
         break;
+      case "environment":
       case "context":
-        // GitHub's term for the dynamic trailing part of the subject
-        // (e.g. "environment:prod" or "ref:refs/heads/main"): our suffix.
+        // GitHub's terms for the dynamic trailing part of the subject; in this
+        // product that is always the environment claim carried in `suffix`
+        // (already %3A-encoded by buildEnvironmentSuffix).
         parts.push(suffix);
         break;
       case "repo":
-        parts.push(`repo:${canonical}`);
+        parts.push(`repo:${slugForRepoKeys()}`);
         break;
       default:
         throw new Error(
@@ -139,4 +191,26 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
     }
   }
   return parts.join(":");
+}
+
+/**
+ * Build a URL-safe, Azure-valid federated-credential name. Azure limits the
+ * name to 120 chars and a conservative `[A-Za-z0-9_-]` set; we sanitize the
+ * repo/env, join them, and truncate so the value is always accepted.
+ */
+export function buildFederatedCredentialName(input: {
+  repoFullName: string;
+  envName: string;
+  variant?: string;
+}): string {
+  const clean = (s: string): string =>
+    String(s ?? "")
+      .replace(/[^A-Za-z0-9_-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
+  const { owner, repo } = parseOwnerRepo(input.repoFullName);
+  const segments = ["github", clean(owner), clean(repo), clean(input.envName)];
+  if (input.variant) segments.push(clean(input.variant));
+  const name = segments.filter(Boolean).join("-");
+  return name.length > 120 ? name.slice(0, 120).replace(/-+$/, "") : name;
 }
