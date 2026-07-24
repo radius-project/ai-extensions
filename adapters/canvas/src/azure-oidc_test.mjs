@@ -12,6 +12,7 @@ import {
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
+  discoverStatusText,
 } from "./azure-oidc.mjs";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
@@ -503,5 +504,45 @@ describe("isAzResourceNotFound", () => {
     expect(isAzResourceNotFound("AADSTS500011: insufficient privileges")).toBe(false);
     expect(isAzResourceNotFound("")).toBe(false);
     expect(isAzResourceNotFound(undefined)).toBe(false);
+  });
+});
+
+describe("discoverStatusText", () => {
+  it("azure: summarizes counts on success", () => {
+    expect(
+      discoverStatusText({ clusters: [1, 2], resourceGroups: [1] }, "azure"),
+    ).toBe("Found 2 cluster(s), 1 resource group(s)");
+  });
+
+  it("azure: prefers the resourceGroups error over a clusters error", () => {
+    expect(
+      discoverStatusText({ clusters: [], resourceGroups: [], errors: { clusters: "aks boom", resourceGroups: "rg boom" } }, "azure"),
+    ).toBe("Discovery failed: rg boom");
+  });
+
+  it("azure: surfaces a clusters error when only that failed", () => {
+    expect(
+      discoverStatusText({ clusters: [], resourceGroups: [{}], errors: { clusters: "token not acquirable" } }, "azure"),
+    ).toBe("Discovery failed: token not acquirable");
+  });
+
+  it("azure: top-level error wins", () => {
+    expect(discoverStatusText({ error: "outer fail", errors: { resourceGroups: "inner" } }, "azure")).toBe(
+      "Discovery failed: outer fail",
+    );
+  });
+
+  it("aws: summarizes counts on success", () => {
+    expect(discoverStatusText({ clusters: [1], vpcs: [1, 2, 3] }, "aws")).toBe("Found 1 cluster(s), 3 VPC(s)");
+  });
+
+  it("aws: prefers the vpcs error", () => {
+    expect(
+      discoverStatusText({ clusters: [], vpcs: [], subnets: [], errors: { clusters: "eks boom", vpcs: "vpc boom", subnets: "subnet boom" } }, "aws"),
+    ).toBe("Discovery failed: vpc boom");
+  });
+
+  it("defaults to azure summary with empty input", () => {
+    expect(discoverStatusText()).toBe("Found 0 cluster(s), 0 resource group(s)");
   });
 });

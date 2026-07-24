@@ -3175,11 +3175,11 @@ function createRequestHandler(instanceId) {
                     try {
                         const aksJson = await runCommand("az", ["aks", "list", "--query", "[].{id:name, name:name, resourceGroup:resourceGroup}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.clusters = JSON.parse(aksJson);
-                    } catch (e) { result.clusters = []; }
+                    } catch (e) { result.clusters = []; result.errors = result.errors || {}; result.errors.clusters = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const rgJson = await runCommand("az", ["group", "list", "--query", "[].{id:name, name:name}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.resourceGroups = JSON.parse(rgJson);
-                    } catch (e) { result.resourceGroups = []; }
+                    } catch (e) { result.resourceGroups = []; result.errors = result.errors || {}; result.errors.resourceGroups = String((e && e.message) || e).slice(0, 800); }
                     // If we got a cluster, try to get namespaces from it
                     if (result.clusters.length > 0) {
                         try {
@@ -3203,15 +3203,15 @@ function createRequestHandler(instanceId) {
                         const eksJson = await runCommand("aws", ["eks", "list-clusters", "--query", "clusters", "--output", "json"], { timeout: 15000 });
                         const clusterNames = JSON.parse(eksJson);
                         result.clusters = clusterNames.map(n => ({ id: n, name: n }));
-                    } catch (e) { result.clusters = []; }
+                    } catch (e) { result.clusters = []; result.errors = result.errors || {}; result.errors.clusters = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const vpcJson = await runCommand("aws", ["ec2", "describe-vpcs", "--query", "Vpcs[].{id:VpcId, name:VpcId}", "--output", "json"], { timeout: 15000 });
                         result.vpcs = JSON.parse(vpcJson);
-                    } catch (e) { result.vpcs = []; }
+                    } catch (e) { result.vpcs = []; result.errors = result.errors || {}; result.errors.vpcs = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const subnetJson = await runCommand("aws", ["ec2", "describe-subnets", "--query", "Subnets[].{id:SubnetId, name:SubnetId}", "--output", "json"], { timeout: 15000 });
                         result.subnets = JSON.parse(subnetJson);
-                    } catch (e) { result.subnets = []; }
+                    } catch (e) { result.subnets = []; result.errors = result.errors || {}; result.errors.subnets = String((e && e.message) || e).slice(0, 800); }
                     result.namespaces = ['default', 'kube-system', 'radius-system'];
                 }
 

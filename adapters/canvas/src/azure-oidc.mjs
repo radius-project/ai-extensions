@@ -163,6 +163,29 @@ export function selectMissingFederatedCredentials(desired = [], existingSubjects
   return (Array.isArray(desired) ? desired : []).filter((f) => f && !have.has(String(f.subject).trim()));
 }
 
+/**
+ * Pure status string for the Environment page resource-discovery result. The
+ * `/api/discover` handler now records per-resource failures on `data.errors`
+ * (instead of disguising them as empty arrays), so a real `az`/`aws` failure —
+ * e.g. an ARM token not yet silently acquirable on Corpnet — surfaces as
+ * "Discovery failed: <stderr>" rather than a misleading "Found 0 …".
+ *
+ * @param {{clusters?:any[], resourceGroups?:any[], vpcs?:any[], subnets?:any[], error?:string, errors?:Record<string,string>}} data
+ * @param {'azure'|'aws'} provider
+ * @returns {string}
+ */
+export function discoverStatusText(data = {}, provider = "azure") {
+  const errs = data.errors || {};
+  if (provider === "aws") {
+    const errMsg = data.error || errs.vpcs || errs.clusters || errs.subnets || "";
+    if (errMsg) return "Discovery failed: " + errMsg;
+    return `Found ${(data.clusters || []).length} cluster(s), ${(data.vpcs || []).length} VPC(s)`;
+  }
+  const errMsg = data.error || errs.resourceGroups || errs.clusters || "";
+  if (errMsg) return "Discovery failed: " + errMsg;
+  return `Found ${(data.clusters || []).length} cluster(s), ${(data.resourceGroups || []).length} resource group(s)`;
+}
+
 // Classify an `az ad app show --id <appId>` stderr as a genuine Graph
 // "resource not found" (the id is stale/deleted — expected, non-fatal
 // fallthrough) versus ANY other failure (auth / Conditional Access / expired

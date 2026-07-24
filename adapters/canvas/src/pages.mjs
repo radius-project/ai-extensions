@@ -1488,7 +1488,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
       <!-- Azure infra -->
       <div id="panel-azure">
-        <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
+          <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+        </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label>Resource Group</label>
@@ -1510,7 +1513,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
       <!-- AWS infra -->
       <div id="panel-aws" style="display:none;">
-        <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
+          <button type="button" id="aws-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+        </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label>EKS Cluster</label>
@@ -1979,6 +1985,8 @@ function onEnvProfileSelected() {
     if (!selectedProfile) {
         statusEl.style.display = 'none';
         deployBtn.disabled = true;
+        var azRb0 = document.getElementById('azure-refresh-btn'); if (azRb0) azRb0.disabled = true;
+        var awsRb0 = document.getElementById('aws-refresh-btn'); if (awsRb0) awsRb0.disabled = true;
         return;
     }
     statusEl.style.display = '';
@@ -1989,8 +1997,18 @@ function onEnvProfileSelected() {
     document.getElementById('panel-azure').style.display = prov === 'azure' ? '' : 'none';
     document.getElementById('panel-aws').style.display = prov === 'aws' ? '' : 'none';
     deployBtn.disabled = false;
+    var rb = document.getElementById(prov === 'aws' ? 'aws-refresh-btn' : 'azure-refresh-btn');
+    if (rb) rb.disabled = false;
     discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
 }
+['azure-refresh-btn','aws-refresh-btn'].forEach(function(id){
+    var b = document.getElementById(id);
+    if (b) b.addEventListener('click', function(){
+        if (!selectedProfile) return;
+        var prov = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
+        discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
+    });
+});
 document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
@@ -2073,14 +2091,22 @@ function discoverResources(provider, subId, tenantId) {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (provider === 'azure') {
-                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
+                var azErrs = data.errors || {};
+                var azErrMsg = data.error || azErrs.resourceGroups || azErrs.clusters || '';
+                if (statusEl) statusEl.textContent = azErrMsg
+                    ? 'Discovery failed: ' + azErrMsg
+                    : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
                 window.__azureClusters = data.clusters || [];
                 populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster…');
                 populateSelect('azure-rg-select', data.resourceGroups || [], 'Select resource group…');
                 populateSelect('azure-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
                 setupAzureInfraFilter();
             } else {
-                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
+                var awsErrs = data.errors || {};
+                var awsErrMsg = data.error || awsErrs.vpcs || awsErrs.clusters || awsErrs.subnets || '';
+                if (statusEl) statusEl.textContent = awsErrMsg
+                    ? 'Discovery failed: ' + awsErrMsg
+                    : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
                 populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster…');
                 populateSelect('aws-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
