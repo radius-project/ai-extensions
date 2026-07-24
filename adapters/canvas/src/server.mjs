@@ -13,8 +13,9 @@ import { createHash } from "node:crypto";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
+  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -1560,6 +1561,12 @@ function createRequestHandler(instanceId) {
             // Re-derive connections (e.g. database→secret) that rad app graph
             // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
+            // Hide implementation-detail resources (containerImages + their
+            // ghcr-registry-creds secret) from the deployed view too, matching
+            // every other graph state. Applied last so any edges the rewire/
+            // normalize steps synthesized toward those nodes are also stripped.
+            // The raw deploy-graph.json on the status branch is left untouched.
+            resources = filterGraphVisualizationResources(resources);
             res.writeHead(200);
             res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
             return;
@@ -2123,11 +2130,21 @@ function createRequestHandler(instanceId) {
                 const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
-                // Fetch recipes from GitHub (radius-project/resource-types-contrib)
+                // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
                 let recipes = [];
-                addProgress('Fetching recipes from GitHub...');
-                recipes = await fetchRecipesFromGitHub(github, provider);
-                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from GitHub.`);
+                addProgress('Fetching the default recipe pack from GitHub...');
+                recipes = await fetchRecipePack(github, provider);
+                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`);
+
+                // Surface pack recipes we couldn't map to a concrete resource so
+                // the gap is visible (rather than silently rendering the abstract
+                // type). Empty today for the Azure pack; fires if the pack adds a
+                // recipe source the curated map doesn't yet cover.
+                const unmappedRecipes = (Array.isArray(recipes) ? recipes : [])
+                    .filter(r => !r.concreteResources || r.concreteResources.length === 0);
+                if (unmappedRecipes.length) {
+                    addProgress(`Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map(r => r.resourceType).join(', ')}); those nodes show their abstract Radius type.`);
+                }
 
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
@@ -2369,7 +2386,7 @@ function createRequestHandler(instanceId) {
                                 const content = selection.content;
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
-                                    const recipes = await fetchRecipesFromGitHub(github, provider);
+                                    const recipes = await fetchRecipePack(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
                                     const committed = setSourceRefResources(entry, "planned", planned, {

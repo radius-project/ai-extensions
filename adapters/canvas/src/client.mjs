@@ -423,6 +423,62 @@ function radiusFormatTypeLabel(type) {
     return ns + '/' + name;
 }
 
+// Planned nodes keep the modeled graph's names and topology, but show the
+// concrete resource type selected by the recipe pack. Preserve the provider
+// namespace so users can see the exact deployment target.
+function radiusFormatResolvedTypeLabel(type) {
+    return type ? String(type).split('@')[0] : '';
+}
+
+// Recipes emit the primary workload or managed service alongside supporting
+// resources: a Kubernetes MySQL recipe deploys a credentials Secret and a
+// Service next to the Deployment; an Azure one deploys firewall rules and role
+// assignments next to the flexibleServer. Rank those supporting kinds below the
+// primary so a planned node shows the representative concrete type rather than a
+// Secret or a nested firewall rule. Output names are recipe symbol names (not
+// the modeled resource name), so the type — not the name — is the reliable signal.
+var RADIUS_SUPPORTING_OUTPUT_KINDS = {
+    secret: true, service: true, configmap: true, serviceaccount: true,
+    role: true, rolebinding: true, clusterrole: true, clusterrolebinding: true,
+    ingress: true, networkpolicy: true, persistentvolumeclaim: true, endpoints: true,
+    roleassignments: true, privateendpoints: true, privatednszones: true,
+    userassignedidentities: true
+};
+
+function radiusResolvedOutputRank(out) {
+    var type = radiusFormatResolvedTypeLabel(out.type || out.displayType);
+    var segments = type.split('/');
+    // Nested child resources such as flexibleServers/firewallRules are supporting.
+    if (segments.length >= 3) return 0;
+    var leaf = segments[segments.length - 1].toLowerCase();
+    if (RADIUS_SUPPORTING_OUTPUT_KINDS[leaf]) return 1;
+    return 2;
+}
+
+function radiusSelectResolvedResource(resource, ownedOutputIds, ownerId) {
+    var outputs = resource && resource.outputResources ? resource.outputResources : [];
+    var typedOutputs = outputs.filter(function(out) {
+        if (!out || !(out.type || out.displayType)) return false;
+        // Exclude concrete outputs that are owned by a different top-level resource.
+        if (ownedOutputIds && ownerId && out.id && ownedOutputIds[out.id] && ownedOutputIds[out.id] !== ownerId) return false;
+        return true;
+    });
+    if (typedOutputs.length === 0) return null;
+
+    // Pick the highest-ranked output; ties keep recipe declaration order so a
+    // deterministic primary is chosen when several equal candidates exist.
+    var best = null;
+    var bestRank = -1;
+    for (var i = 0; i < typedOutputs.length; i++) {
+        var rank = radiusResolvedOutputRank(typedOutputs[i]);
+        if (rank > bestRank) {
+            bestRank = rank;
+            best = typedOutputs[i];
+        }
+    }
+    return best;
+}
+
 function radiusRenderGraph(containerId, resources, options) {
     options = options || {};
     var container = document.getElementById(containerId);
@@ -474,6 +530,7 @@ function radiusRenderGraph(containerId, resources, options) {
 
     var diffMode = options.diffMode || false;
     var deployMode = options.deployMode || false;
+    var plannedMode = options.plannedMode || false;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     // In diff mode a "removed" resource's source file lived on the base
@@ -592,9 +649,8 @@ function radiusRenderGraph(containerId, resources, options) {
     }
 
     function getNodeColors(r) {
-        // Diff mode keeps the same white card surface as the Modeled/Planned
-        // graphs — only the border color encodes the diff status, so the
-        // resource card itself is visually identical everywhere else.
+        // Diff mode keeps the same white card surface as the modeled graph.
+        // Only the border color encodes diff status.
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
                 case 'added': return { bg: '#ffffff', border: '#16a34a' };
@@ -633,6 +689,7 @@ function radiusRenderGraph(containerId, resources, options) {
             var id = source + '-->' + target;
             if (edgeSeen[id]) return;
             edgeSeen[id] = true;
+            dashed = dashed || plannedMode;
             var stroke = dashed ? '#57606a' : '#8c959f';
             // Diff mode colors the edge by whether the CONNECTION itself changed
             // between base and head (computeGraphDiff tags each rendered
@@ -655,7 +712,9 @@ function radiusRenderGraph(containerId, resources, options) {
                 }
             }
             var style = { stroke: stroke, strokeWidth: 1.5 };
-            if (dashed) style.strokeDasharray = '6 4';
+            // Planned edges use a finer dotted pattern; other modes' dashed
+            // output connectors keep their original wider gap.
+            if (dashed) style.strokeDasharray = plannedMode ? '4 4' : '6 4';
             edges.push({
                 id: id,
                 source: source,
@@ -693,7 +752,16 @@ function radiusRenderGraph(containerId, resources, options) {
         for (var i = 0; i < resList.length; i++) {
             var r = resList[i];
             var colors = getNodeColors(r);
-            var shortType = radiusFormatTypeLabel(r.type);
+            // Planned nodes keep the modeled resource's identity — its name, icon,
+            // and everything else — and change ONLY the type label to the concrete
+            // type the recipe pack resolves to (e.g. Data/mySqlDatabases ->
+            // Microsoft.DBforMySQL/flexibleServers). The icon therefore stays the
+            // modeled resource's own (pack-supplied r.icon, or its type glyph), not
+            // the generic glyph of the resolved output.
+            var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
+            var shortType = plannedMode && resolvedResource
+                ? radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)
+                : radiusFormatTypeLabel(r.type);
             // Collect any cloud (ARM) output resources so the node popup can link
             // to the live resource in the Azure portal.
             var cloudOutputs = [];
@@ -709,6 +777,7 @@ function radiusRenderGraph(containerId, resources, options) {
             pushNode(r.id || r.name, {
                 borderColor: colors.border,
                 borderWidth: diffMode ? 2 : (deployMode ? 3 : 1),
+                borderStyle: plannedMode ? 'dashed' : 'solid',
                 bgColor: colors.bg,
                 icon: radiusResolveIcon(r),
                 nodeName: r.name,
@@ -737,8 +806,10 @@ function radiusRenderGraph(containerId, resources, options) {
                     }
                 }
             }
-            // Render output resources (concrete cloud types from recipes)
-            if (r.outputResources && r.outputResources.length > 0) {
+            // Other graph modes may expand concrete recipe outputs for deployment
+            // detail. Planned mode deliberately keeps the modeled graph's one-node-
+            // per-resource topology and projects the resolved type onto that node.
+            if (!plannedMode && r.outputResources && r.outputResources.length > 0) {
                 for (var k = 0; k < r.outputResources.length; k++) {
                     var out = r.outputResources[k];
                     // Skip a concrete resource another top-level resource owns.
@@ -813,7 +884,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // as a sibling overlay further below (only when enablePopup is not false); the
     // React node calls popupCtl.open() so a card click shows it. Stays a no-op
     // until that setup runs, and when popups are disabled.
-    var popupCtl = { open: function() {}, close: function() {} };
+    var popupCtl = { open: function() {}, close: function() {}, toggle: function() {} };
 
     // ── Custom node: the figma .rad-node card, rendered natively ─────────────
     // Real React elements (not an HTML-string overlay) so the "View source code"
@@ -859,11 +930,11 @@ function radiusRenderGraph(containerId, resources, options) {
         }
         var dots = h('button', {
             type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
-            onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.open(d, e.currentTarget.closest('.rad-node')); }
+            onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.toggle(d, e.currentTarget.closest('.rad-node')); }
         }, '\u2022\u2022\u2022');
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
-            style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
+            style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
@@ -942,6 +1013,10 @@ function radiusRenderGraph(containerId, resources, options) {
         popup.id = 'node-popup';
         popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface,#ffffff); border:1px solid var(--rad-stroke,#d0d7de); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
         container.appendChild(popup);
+
+        // The card the popup is currently anchored to (null when hidden), so the
+        // node's "..." button can toggle: clicking it again closes the popup.
+        var openCardEl = null;
 
         // Monochrome octicon glyphs (currentColor) so links match the flat
         // white-card node styling instead of the old colored emoji.
@@ -1031,6 +1106,7 @@ function radiusRenderGraph(containerId, resources, options) {
             popup.style.left = Math.max(0, left) + 'px';
             popup.style.top = Math.max(0, top) + 'px';
             popup.style.display = '';
+            openCardEl = cardEl;
         }
 
         // Delegate clicks from the HTML node cards. The card body opens the popup;
@@ -1065,14 +1141,25 @@ function radiusRenderGraph(containerId, resources, options) {
             if (e.target.closest && e.target.closest('#node-popup')) return;
             if (e.target.closest && e.target.closest('.rad-node[data-node-id]')) return;
             popup.style.display = 'none';
+            openCardEl = null;
         };
         container.addEventListener('click', container._radiusClickHandler);
         popupCtl.open = openNodePopup;
-        popupCtl.close = function() { popup.style.display = 'none'; };
+        popupCtl.close = function() { popup.style.display = 'none'; openCardEl = null; };
+        // Toggle from the node's "..." button: if the popup is already open for
+        // this same card, close it; otherwise (hidden, or open for another node)
+        // open it against this card.
+        popupCtl.toggle = function(d, cardEl) {
+            if (popup.style.display !== 'none' && openCardEl === cardEl) {
+                popupCtl.close();
+            } else {
+                openNodePopup(d, cardEl);
+            }
+        };
     }
 
-    // Diff mode intentionally shows NO legend — the graph must look
-    // identical to the Planned graph aside from node border / edge colors.
+    // Diff mode intentionally shows no legend; status is encoded directly on
+    // node borders and edges.
     if (options.showLegend && !diffMode) {
         // Build a resource-type legend from the categories actually present in
         // the graph. Nodes render as uniform white cards, so category is conveyed
