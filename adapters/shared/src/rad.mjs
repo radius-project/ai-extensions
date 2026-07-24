@@ -514,7 +514,7 @@ export function ensureRadBinary({ log = noop } = {}) {
  *      load-time ensure has not finished resolving), call ensureRadBinary(),
  *      reusing the in-flight load-time ensure if one is running.
  */
-async function resolveRadForGraph({ log = noop } = {}) {
+export async function resolveRadForGraph({ log = noop } = {}) {
   if (cachedRadPath && isExecutableFile(cachedRadPath)) return cachedRadPath;
   const existing = resolveExistingRadBinary();
   if (existing) return existing;
