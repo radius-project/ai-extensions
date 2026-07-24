@@ -24,6 +24,15 @@ describe("normalizeRecipeSource", () => {
     expect(normalizeRecipeSource("avm/res/sql/server")).toBe("avm/res/sql/server");
   });
 
+  it("strips an OCI digest before normalizing", () => {
+    expect(
+      normalizeRecipeSource("mcr.microsoft.com/bicep/avm/res/sql/server:0.1.0@sha256:abc123"),
+    ).toBe("avm/res/sql/server");
+    expect(
+      normalizeRecipeSource("mcr.microsoft.com/bicep/avm/res/sql/server@sha256:abc123"),
+    ).toBe("avm/res/sql/server");
+  });
+
   it("returns an empty string for an empty source", () => {
     expect(normalizeRecipeSource("")).toBe("");
   });
@@ -148,5 +157,47 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     }
 `;
     expect(parseRecipePack(pack)).toEqual([]);
+  });
+
+  it("skips a source-less entry without borrowing the next entry's source", () => {
+    // The source-less mySqlDatabases entry must not capture the following
+    // containers entry's source: parsing is scoped to each entry's own block.
+    const pack = `
+    recipes: {
+      'Radius.Data/mySqlDatabases': {
+        kind: 'bicep'
+      }
+      'Radius.Compute/containers': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/containers:latest'
+      }
+    }
+`;
+    const entries = parseRecipePack(pack);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].resourceType).toBe("Radius.Compute/containers");
+    expect(entries[0].source).toBe("ghcr.io/radius-project/kube-recipes/containers:latest");
+  });
+
+  it("reads kind/source even when source precedes kind around a parameters block", () => {
+    // Order-independence: parameters may appear between source and kind; nested
+    // decoys inside it must still be ignored.
+    const pack = `
+    recipes: {
+      'Radius.Data/redisCaches': {
+        source: 'mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1'
+        parameters: {
+          lock: {
+            kind: 'None'
+          }
+        }
+        kind: 'bicep'
+      }
+    }
+`;
+    const entries = parseRecipePack(pack);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("bicep");
+    expect(entries[0].source).toBe("mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1");
   });
 });

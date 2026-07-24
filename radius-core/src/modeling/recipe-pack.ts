@@ -85,6 +85,9 @@ const SOURCE_CONCRETE_MAP: Record<string, { type: string; displayType: string; p
 export function normalizeRecipeSource(source: string): string {
   if (!source) return "";
   let s = source.trim();
+  // Drop an OCI digest (`@sha256:...`) first so it isn't mistaken for a tag.
+  const at = s.indexOf("@");
+  if (at !== -1) s = s.slice(0, at);
   // Drop version tag (the last ':' segment that is not part of a URL scheme).
   const lastColon = s.lastIndexOf(":");
   if (lastColon > s.lastIndexOf("/")) s = s.slice(0, lastColon);
@@ -105,6 +108,7 @@ export function deriveConcreteResource(source: string): ConcreteResource | null 
   const leaf = hit.type.split("/").pop() || hit.type;
   const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) => m.toLowerCase());
   const name = withLowerInitialism.charAt(0).toLowerCase() + withLowerInitialism.slice(1);
+  return {
     name,
     type: hit.type,
     displayType: hit.displayType,

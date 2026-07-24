@@ -2072,6 +2072,16 @@ function createRequestHandler(instanceId) {
                 recipes = await fetchRecipePack(github, provider);
                 addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`);
 
+                // Surface pack recipes we couldn't map to a concrete resource so
+                // the gap is visible (rather than silently rendering the abstract
+                // type). Empty today for the Azure pack; fires if the pack adds a
+                // recipe source the curated map doesn't yet cover.
+                const unmappedRecipes = (Array.isArray(recipes) ? recipes : [])
+                    .filter(r => !r.concreteResources || r.concreteResources.length === 0);
+                if (unmappedRecipes.length) {
+                    addProgress(`Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map(r => r.resourceType).join(', ')}); those nodes show their abstract Radius type.`);
+                }
+
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
                 const plannedResources = await resolveRecipeOutputs(github, resources, recipes, provider);
