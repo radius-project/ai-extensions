@@ -56,7 +56,7 @@ import {
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
-  explainOidcEnterpriseClaim,
+  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
@@ -200,6 +200,24 @@ function ghOrThrow(args, timeout = 12000) {
             else resolve((stdout || "").trim());
         });
     });
+}
+
+// Preflight the acting gh account's access to `repo` BEFORE any Azure/GitHub
+// mutation (App Registration create, environment PUT). Uses ghOrThrow, which
+// routes through cliExec→ghChildEnv and therefore acts as the same active
+// keyring account the later mutations use. Returns a clear, actionable error
+// string when the account can't read the repo or lacks admin, else ''. Both
+// checks (read + admin) surface as bare 404s from GitHub otherwise.
+async function preflightRepoAdmin(repo) {
+    let login = '';
+    try { login = await ghOrThrow(['api', 'user', '--jq', '.login']); } catch { /* best-effort */ }
+    let readFailed = false, permissions = null;
+    try {
+        const raw = await ghOrThrow(['api', `repos/${repo}`, '--jq',
+            '{admin:.permissions.admin,maintain:.permissions.maintain,push:.permissions.push,triage:.permissions.triage,pull:.permissions.pull}']);
+        permissions = JSON.parse(raw);
+    } catch { readFailed = true; }
+    return explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions });
 }
 
 // How many of an environment's newest deployment records to resolve
@@ -823,6 +841,13 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
+                // Preflight repo access + admin BEFORE creating any App
+                // Registration. Catches both a wrong-active-gh-account 404 and an
+                // insufficient-permission (non-admin) 404, which GitHub otherwise
+                // returns as bare, unhelpful 404s later in the flow.
+                const accessMsg = await preflightRepoAdmin(targetRepo);
+                if (accessMsg) { fail(403, accessMsg, 'repo-admin-required'); return; }
+
                 // Run `az` non-interactively: close stdin so it can never block on
                 // an interactive prompt inside this GUI host process.
                 function runCmd(cmd, args) {
@@ -1396,6 +1421,17 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'No target repository specified.' }));
+                    return;
+                }
+
+                // Preflight repo access + admin BEFORE any GitHub mutation.
+                // Reachable directly when credentials already exist and
+                // azure-auto-setup is skipped, so guarding here too is required.
+                const accessMsg = await preflightRepoAdmin(targetRepo);
+                if (accessMsg) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ error: accessMsg, code: 'repo-admin-required' }));
                     return;
                 }
 

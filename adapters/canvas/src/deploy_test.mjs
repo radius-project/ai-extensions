@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explainOidcEnterpriseClaim, extractErrorLines } from "./deploy.mjs";
+import { explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, extractErrorLines } from "./deploy.mjs";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
 // a personal-account repo hits a tenant that enforces the enterprise claim.
@@ -90,5 +90,72 @@ describe("extractErrorLines", () => {
     it("returns [] for empty input", () => {
         expect(extractErrorLines("")).toEqual([]);
         expect(extractErrorLines(undefined)).toEqual([]);
+    });
+});
+describe("explainRepoAccessForEnvSetup", () => {
+    it("read failure with a known login → switch-account guidance", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite", readFailed: true, permissions: null,
+        });
+        expect(out).not.toBe("");
+        expect(out).toContain("ryanwaite");
+        expect(out).toContain("azure-cto/app");
+        expect(out).toContain("gh auth switch");
+    });
+
+    it("read failure with unknown login → 'the active gh account'", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "", readFailed: true, permissions: null,
+        });
+        expect(out).toContain("the active gh account");
+    });
+
+    it("admin access → '' (no error)", () => {
+        expect(explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite", readFailed: false, permissions: { admin: true },
+        })).toBe("");
+    });
+
+    it("maintain-only → Admin-needed message naming the Maintain role, no switch guidance", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite_microsoft", readFailed: false,
+            permissions: { admin: false, maintain: true, push: true },
+        });
+        expect(out).toContain("Admin");
+        expect(out).toContain("Maintain");
+        expect(out).toContain("grant");
+        expect(out).not.toContain("gh auth switch");
+    });
+
+    it("push-only → role label Write", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite", readFailed: false,
+            permissions: { admin: false, maintain: false, push: true },
+        });
+        expect(out).toContain("Write");
+    });
+
+    it("pull-only → role label Read", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite", readFailed: false,
+            permissions: { admin: false, pull: true },
+        });
+        expect(out).toContain("Read");
+    });
+
+    it("null permissions with read OK (odd edge) → non-empty, 'no direct', no throw", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "ryanwaite", readFailed: false, permissions: null,
+        });
+        expect(out).not.toBe("");
+        expect(out).toContain("no direct");
+    });
+
+    it("admin missing with empty login → addresses 'you'", () => {
+        const out = explainRepoAccessForEnvSetup({
+            repo: "azure-cto/app", login: "", readFailed: false,
+            permissions: { admin: false, pull: true },
+        });
+        expect(out).toContain("you");
     });
 });

@@ -307,6 +307,35 @@ export function explainOidcEnterpriseClaim(logText) {
     ].join('\n');
 }
 
+// Given the outcome of reading `gh api repos/{repo}` plus the acting gh login,
+// return a clear, actionable error string, or '' when the account can read the
+// repo AND has admin. Pure — no I/O, never throws. Catches the two bare-404
+// failure modes GitHub returns for auth/permission problems during environment
+// setup: (1) the wrong gh account is active (repo invisible → read 404), and
+// (2) the account can read the repo but lacks the admin needed to create a
+// deployment environment (PUT /repos/{repo}/environments → 404).
+export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions } = {}) {
+    const who = login || 'the active gh account';
+    if (readFailed) {
+        return 'Can\u2019t read repository "' + repo + '" as GitHub account "' + who + '". ' +
+            'Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). ' +
+            'Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry.';
+    }
+    if (permissions && permissions.admin === true) return '';
+    // Read OK but not admin — report the current best role so the user knows
+    // exactly what they have and what to ask for.
+    let role = 'no direct';
+    if (permissions) {
+        if (permissions.maintain) role = 'Maintain';
+        else if (permissions.push) role = 'Write';
+        else if (permissions.triage) role = 'Triage';
+        else if (permissions.pull) role = 'Read';
+    }
+    const account = login || 'you';
+    return 'Environment setup needs Admin permission on "' + repo + '", but account "' + account + '" currently has ' + role + ' access. ' +
+        'Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry.';
+}
+
 export function extractRadDeployError(logText, maxChars = 4000) {
     if (!logText) return '';
     // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,
