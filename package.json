@@ -27,11 +27,11 @@
     "release": "pnpm run build"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.11",
+    "@changesets/cli": "^2.31.1",
     "@types/node": "^26.1.1",
     "esbuild": "^0.28.1",
     "markdown-table-formatter": "1.7.0",
-    "markdownlint-cli2": "0.23.0",
+    "markdownlint-cli2": "0.23.1",
     "typescript": "^7.0.2"
   },
   "pnpm": {
