@@ -103,7 +103,19 @@ describe("filterGraphVisualizationResources", () => {
   it("removes the registry-creds secret when its name carries a namespace prefix", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "myapp/radius-ghcr-registry-creds"),
+      makeResource("Radius.Security/secrets", "myapp/radius-ghcr-registry-creds", {
+        connections: [{ id: imageId, direction: "Inbound" }],
+      }),
+    ];
+    expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
+  });
+
+  it("detects association when only the containerImage points to the secret", () => {
+    const resources = [
+      makeResource("Radius.Compute/containerImages", "apiImage", {
+        connections: [{ id: secretId, direction: "Outbound" }],
+      }),
+      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds"),
     ];
     expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
   });

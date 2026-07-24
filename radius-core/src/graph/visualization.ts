@@ -60,11 +60,10 @@ function isRegistryCredsSecret(resource: any): boolean {
  * unchanged (same reference) when nothing needs to be removed. The input is
  * never mutated.
  *
- * The secret is only removed when the graph actually contains a containerImage
- * it is associated with (they are authored as a pair — the containerImages
- * resource `dependsOn`s this Secret; that dependency is not a graph connection,
- * so presence is the reliable association signal). A similarly typed secret in a
- * graph without any containerImage is kept.
+ * The secret is only removed when a graph connection associates it with a
+ * containerImage. Connections can be present on either endpoint and can identify
+ * their target by id or name, so association matching handles every combination.
+ * A similarly named but disconnected Secret is kept.
  *
  * Nodes are dropped by predicate (re-evaluated per resource), not by an
  * id/name key set, so a resource can never be removed just because its id
@@ -75,11 +74,62 @@ function isRegistryCredsSecret(resource: any): boolean {
 export function filterGraphVisualizationResources(resources: any[]): any[] {
   if (!Array.isArray(resources)) return [];
 
-  const hasContainerImage = resources.some((r) => r && isContainerImage(r));
-  const shouldRemove = (r: any): boolean =>
-    !!r && (isContainerImage(r) || (hasContainerImage && isRegistryCredsSecret(r)));
+  const containerImages = resources.filter(
+    (resource) => resource && isContainerImage(resource),
+  );
+  if (containerImages.length === 0) return resources;
 
-  if (!resources.some(shouldRemove)) return resources;
+  const endpointKeys = (resource: any): Set<string> => {
+    const keys = new Set<string>();
+    if (resource?.id) keys.add(resource.id);
+    if (resource?.name) keys.add(resource.name);
+    return keys;
+  };
+
+  const connectionReferences = (
+    connection: any,
+    endpoints: Set<string>,
+  ): boolean =>
+    !!connection &&
+    ((connection.id != null && endpoints.has(connection.id)) ||
+      (connection.name != null && endpoints.has(connection.name)));
+
+  const imageEndpoints = new Set<string>();
+  for (const image of containerImages) {
+    for (const key of endpointKeys(image)) imageEndpoints.add(key);
+  }
+
+  const isAssociatedRegistrySecret = (resource: any): boolean => {
+    if (!isRegistryCredsSecret(resource)) return false;
+
+    if (
+      Array.isArray(resource.connections) &&
+      resource.connections.some((connection: any) =>
+        connectionReferences(connection, imageEndpoints),
+      )
+    ) {
+      return true;
+    }
+
+    const secretEndpoints = endpointKeys(resource);
+    return containerImages.some(
+      (image) =>
+        Array.isArray(image.connections) &&
+        image.connections.some((connection: any) =>
+          connectionReferences(connection, secretEndpoints),
+        ),
+    );
+  };
+
+  const removedResources = new Set<any>(containerImages);
+  for (const resource of resources) {
+    if (resource && isAssociatedRegistrySecret(resource)) {
+      removedResources.add(resource);
+    }
+  }
+
+  const shouldRemove = (resource: any): boolean =>
+    removedResources.has(resource);
 
   // Endpoint identifiers (both id and name) of every removed resource, so a
   // connection referencing one by either key can be stripped.
@@ -90,10 +140,8 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
     if (resource.name) removedEndpoints.add(resource.name);
   }
 
-  const referencesRemoved = (c: any): boolean =>
-    !!c &&
-    ((c.id != null && removedEndpoints.has(c.id)) ||
-      (c.name != null && removedEndpoints.has(c.name)));
+  const referencesRemoved = (connection: any): boolean =>
+    connectionReferences(connection, removedEndpoints);
 
   const result: any[] = [];
   for (const resource of resources) {
