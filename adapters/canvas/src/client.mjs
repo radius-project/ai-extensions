@@ -568,6 +568,13 @@ function radiusRenderGraph(containerId, resources, options) {
     // back to the repo tree at the current branch so the link always resolves to
     // a real page instead of a dead affordance. Empty only when there is no repo
     // context at all.
+    //
+    // NOTE on the backslash regex below: this file is a template literal, so the
+    // engine halves escapes before the browser ever sees this code. The /\\\\/g
+    // written here becomes /\\/g at runtime, i.e. a regex that matches a SINGLE
+    // backslash — exactly what a Windows-generated codeReference contains. Do NOT
+    // "simplify" it to /\\/g in the source: that would emit the invalid regex
+    // /\/g in the browser. (The client_test behavioral test locks this in.)
     function buildSourceUrl(codeRef, branchOverride) {
         if (!repoUrl) return '';
         var br = branchOverride || branch;
@@ -584,6 +591,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // Used when localSource is set to open the on-disk file in the editor canvas.
     // Backslashes are normalized so a Windows-generated codeReference is
     // consistent in the DOM, in transport, and with the POSIX server contract.
+    // (See buildSourceUrl above for why the source keeps /\\\\/g, not /\\/g.)
     function srcPathFromRef(codeRef) {
         if (!codeRef) return '';
         var p = codeRef.split('#')[0].replace(/\\\\/g, '/');
@@ -674,23 +682,31 @@ function radiusRenderGraph(containerId, resources, options) {
         var dataById = {};
         var edgeSeen = {};
 
-        function pushEdge(source, target, dashed) {
+        function pushEdge(source, target, dashed, connStatus) {
             var id = source + '-->' + target;
             if (edgeSeen[id]) return;
             edgeSeen[id] = true;
             dashed = dashed || plannedMode;
             var stroke = dashed ? '#57606a' : '#8c959f';
-            // Diff mode colors the edge by whether the CONNECTION itself
-            // changed between base and head, not by either endpoint's own
-            // status alone: a removed endpoint wins (red), then an added
-            // endpoint (green); otherwise the edge stays neutral gray. A
-            // "modified" endpoint never colors an edge.
+            // Diff mode colors the edge by whether the CONNECTION itself changed
+            // between base and head (computeGraphDiff tags each rendered
+            // connection): added=green, removed=red, unchanged=neutral gray. A
+            // removed edge between two still-present nodes is carried as a
+            // synthetic removed connection, so it is drawn here too. Only edges
+            // with no connection-level status (e.g. output-resource edges) fall
+            // back to the endpoints' own diff statuses.
             if (diffMode) {
-                var sStatus = diffStatusById[source] || '';
-                var tStatus = diffStatusById[target] || '';
-                if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
-                else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
-                else stroke = '#8c959f';
+                var cs = connStatus || '';
+                if (cs === 'removed') stroke = '#dc2626';
+                else if (cs === 'added') stroke = '#16a34a';
+                else if (cs === 'unchanged') stroke = '#8c959f';
+                else {
+                    var sStatus = diffStatusById[source] || '';
+                    var tStatus = diffStatusById[target] || '';
+                    if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
+                    else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
+                    else stroke = '#8c959f';
+                }
             }
             var style = { stroke: stroke, strokeWidth: 1.5 };
             // Planned edges use a finer dotted pattern; other modes' dashed
@@ -783,7 +799,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     if (dir === 'Outbound') {
                         var connTarget = conn.id || conn.name;
                         var targetExists = resList.some(function(x) { return (x.id || x.name) === connTarget; });
-                        if (targetExists) pushEdge(r.id || r.name, connTarget, false);
+                        if (targetExists) pushEdge(r.id || r.name, connTarget, false, conn.diffStatus || '');
                     }
                 }
             }
