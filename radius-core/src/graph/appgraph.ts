@@ -142,7 +142,11 @@ export function findResourceDefinitionLines(content: string): Map<string, number
       const nameMatch =
         depthBeforeLine === 1
           ? lines[index].match(/^\s*name\s*:\s*['"]([^'"]+)['"]/)
-          : null;
+          : depthBeforeLine === 0
+            ? lines[index]
+                .replace(/\/\/.*$/, "")
+                .match(/\{[^}]*\bname\s*:\s*['"]([^'"]+)['"]/)
+            : null;
       if (nameMatch && !result.has(nameMatch[1])) {
         result.set(nameMatch[1], lineNumber);
       }
