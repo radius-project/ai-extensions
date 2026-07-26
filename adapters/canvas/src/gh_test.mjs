@@ -9,6 +9,24 @@ vi.mock("node:child_process", () => childProcess);
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
+// Realistic `gh auth status` fixtures. gh reports the env-token account with a
+// `GITHUB_TOKEN`/`GH_TOKEN` source and a keyring account with a `keyring` source.
+const STATUS = {
+    empty: "",
+    tokenNoWorkflow: `github.com
+  ✓ Logged in to github.com account tokuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org'`,
+    tokenWithWorkflow: `github.com
+  ✓ Logged in to github.com account tokuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org', 'workflow'`,
+    keyringWithWorkflow: `github.com
+  ✓ Logged in to github.com account keyuser (keyring)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org', 'workflow'`,
+};
+
 function setPlatform(platform) {
     Object.defineProperty(process, "platform", {
         configurable: true,
@@ -16,9 +34,23 @@ function setPlatform(platform) {
     });
 }
 
-async function loadGh(platform, keyringToken = "") {
+// Load gh.mjs with a controlled environment. `withToken`/`keyring` are the
+// `gh auth status` texts returned for the injected-token vs token-stripped
+// probes; `token` sets the ambient injected GH_TOKEN the strategy evaluates.
+async function loadGh(platform, opts = {}) {
+    const { withToken = "", keyring = "", token = null } = opts;
     setPlatform(platform);
-    childProcess.execFileSync.mockReturnValue(Buffer.from(keyringToken));
+    if (token === null) {
+        delete process.env.GH_TOKEN;
+        delete process.env.GITHUB_TOKEN;
+    } else {
+        process.env.GH_TOKEN = token;
+    }
+    childProcess.execFileSync.mockImplementation((_file, _args, options) => {
+        const env = (options && options.env) || {};
+        const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
+        return Buffer.from(hasTok ? withToken : keyring);
+    });
     vi.resetModules();
     return import("./gh.mjs");
 }
@@ -31,6 +63,8 @@ describe.sequential("cliExec", () => {
 
     afterEach(() => {
         Object.defineProperty(process, "platform", platformDescriptor);
+        delete process.env.GH_TOKEN;
+        delete process.env.GITHUB_TOKEN;
     });
 
     it("passes a Windows gh query string containing an ampersand as one literal argument", async () => {
@@ -86,8 +120,12 @@ describe.sequential("cliExec", () => {
         expect(args).toEqual(["auth", "status"]);
     });
 
-    it("strips ambient tokens for a full-path gh invocation", async () => {
-        const { cliExec } = await loadGh("linux", "stored-token\n");
+    it("strips ambient tokens for a full-path gh invocation when the token lacks workflow and a keyring login has it", async () => {
+        const { cliExec } = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenNoWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
         const callback = vi.fn();
 
         cliExec("/usr/local/bin/gh", ["auth", "status"], {
@@ -112,8 +150,12 @@ describe.sequential("cliExec", () => {
         );
     });
 
-    it("removes ambient GitHub tokens when a keyring login exists", async () => {
-        const { cliExec } = await loadGh("win32", "stored-token\n");
+    it("removes ambient GitHub tokens when the token lacks workflow and a keyring login has it", async () => {
+        const { cliExec } = await loadGh("win32", {
+            token: "ambient-gh",
+            withToken: STATUS.tokenNoWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
         const callback = vi.fn();
 
         cliExec("gh", ["auth", "status"], {
@@ -132,8 +174,40 @@ describe.sequential("cliExec", () => {
         );
     });
 
+    it("keeps ambient GitHub tokens when the injected token already has workflow (even with a keyring login)", async () => {
+        const { cliExec } = await loadGh("win32", {
+            token: "ambient-gh",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        const callback = vi.fn();
+
+        cliExec("gh", ["auth", "status"], {
+            env: {
+                GH_TOKEN: "ambient-gh",
+                GITHUB_TOKEN: "ambient-github",
+            },
+        }, callback);
+
+        expect(childProcess.execFile).toHaveBeenCalledWith(
+            "gh.exe",
+            ["auth", "status"],
+            expect.objectContaining({
+                env: {
+                    GH_TOKEN: "ambient-gh",
+                    GITHUB_TOKEN: "ambient-github",
+                },
+            }),
+            callback,
+        );
+    });
+
     it("preserves ambient GitHub tokens when no keyring login exists", async () => {
-        const { cliExec } = await loadGh("win32");
+        const { cliExec } = await loadGh("win32", {
+            token: "ambient-gh",
+            withToken: STATUS.tokenNoWorkflow,
+            keyring: STATUS.empty,
+        });
         const callback = vi.fn();
 
         cliExec("gh", ["auth", "status"], {
@@ -174,7 +248,11 @@ describe.sequential("cliExec", () => {
     });
 
     it("strips COPILOT_AGENT_SESSION_ID on the gh path (on top of ghChildEnv)", async () => {
-        const { cliExec } = await loadGh("linux", "stored-token\n");
+        const { cliExec } = await loadGh("linux", {
+            token: "ambient-gh",
+            withToken: STATUS.tokenNoWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
         const callback = vi.fn();
 
         cliExec("gh", ["auth", "status"], {
@@ -186,8 +264,8 @@ describe.sequential("cliExec", () => {
         }, callback);
 
         const [, , options] = childProcess.execFile.mock.calls[0];
-        // ghChildEnv strips GH_TOKEN (keyring login present); withoutAgentSession
-        // strips the agent session var; KEEP_ME survives.
+        // ghChildEnv strips GH_TOKEN (token lacks workflow, keyring has it) and
+        // withoutAgentSession strips the agent session var; KEEP_ME survives.
         expect(options.env).toEqual({ KEEP_ME: "yes" });
         expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
     });
@@ -276,5 +354,142 @@ describe.sequential("ghApiJson", () => {
         await ghApiJson("/x", { headers: { "X-GitHub-Api-Version": "2022-11-28" } });
         const [, args] = childProcess.execFile.mock.calls[0];
         expect(args).toEqual(["api", "/x", "-H", "X-GitHub-Api-Version: 2022-11-28"]);
+    });
+});
+
+describe("parseGhAuthStatus", () => {
+    it("parses login, source, active flag, and scopes for multiple accounts", async () => {
+        const { parseGhAuthStatus } = await import("./gh.mjs");
+        const text = `github.com
+  ✓ Logged in to github.com account tokuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org', 'workflow'
+  ✓ Logged in to github.com account keyuser (keyring)
+    - Active account: false
+    - Token scopes: 'repo'`;
+        expect(parseGhAuthStatus(text)).toEqual([
+            { login: "tokuser", source: "GITHUB_TOKEN", active: true, scopes: ["repo", "read:org", "workflow"] },
+            { login: "keyuser", source: "keyring", active: false, scopes: ["repo"] },
+        ]);
+    });
+
+    it("returns an empty array for empty or unrecognized text", async () => {
+        const { parseGhAuthStatus } = await import("./gh.mjs");
+        expect(parseGhAuthStatus("")).toEqual([]);
+        expect(parseGhAuthStatus("not logged in")).toEqual([]);
+        expect(parseGhAuthStatus(null)).toEqual([]);
+    });
+});
+
+describe("decideGhTokenStrategy", () => {
+    let decide;
+    beforeEach(async () => {
+        ({ decideGhTokenStrategy: decide } = await import("./gh.mjs"));
+    });
+
+    it("keeps the token when it already has workflow", () => {
+        expect(decide({ hasToken: true, tokenLogin: "a", tokenHasWorkflow: true, keyringLogin: "b", keyringHasWorkflow: true }))
+            .toEqual({ useKeyring: false, reason: "token-has-workflow" });
+    });
+
+    it("strips the token only when it lacks workflow and a keyring login has it", () => {
+        expect(decide({ hasToken: true, tokenLogin: "a", tokenHasWorkflow: false, keyringLogin: "b", keyringHasWorkflow: true }))
+            .toEqual({ useKeyring: true, reason: "token-missing-workflow" });
+    });
+
+    it("keeps the token when it lacks workflow but no keyring login has it", () => {
+        expect(decide({ hasToken: true, tokenLogin: "a", tokenHasWorkflow: false, keyringLogin: "", keyringHasWorkflow: false }))
+            .toEqual({ useKeyring: false, reason: "no-workflow-scope-available" });
+    });
+
+    it("falls back to the keyring when there is no injected token", () => {
+        expect(decide({ hasToken: false, keyringLogin: "b", keyringHasWorkflow: true }))
+            .toEqual({ useKeyring: true, reason: "no-injected-token" });
+    });
+
+    it("honors an explicit preference for the token account", () => {
+        expect(decide({ hasToken: true, tokenLogin: "a", tokenHasWorkflow: false, keyringLogin: "b", keyringHasWorkflow: true, preferredLogin: "a" }))
+            .toEqual({ useKeyring: false, reason: "user-selected-token-account" });
+    });
+
+    it("honors an explicit preference for a keyring account over the token", () => {
+        expect(decide({ hasToken: true, tokenLogin: "a", tokenHasWorkflow: true, keyringLogin: "b", keyringHasWorkflow: true, preferredLogin: "b" }))
+            .toEqual({ useKeyring: true, reason: "user-selected-keyring-account" });
+    });
+});
+
+describe.sequential("getGitHubIdentity / switchGhAccount", () => {
+    beforeEach(() => {
+        childProcess.execFile.mockReset();
+        childProcess.execFileSync.mockReset();
+    });
+
+    afterEach(() => {
+        Object.defineProperty(process, "platform", platformDescriptor);
+        delete process.env.GH_TOKEN;
+        delete process.env.GITHUB_TOKEN;
+    });
+
+    it("reports acting == display with no mismatch when the token keeps its identity", async () => {
+        const { getGitHubIdentity } = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        const id = getGitHubIdentity();
+        expect(id.actingLogin).toBe("tokuser");
+        expect(id.displayLogin).toBe("tokuser");
+        expect(id.mismatch).toBe(false);
+        expect(id.actingHasWorkflow).toBe(true);
+        expect(id.accounts.map((a) => a.login).sort()).toEqual(["keyuser", "tokuser"]);
+    });
+
+    it("flags a mismatch when setup falls back to a different keyring account", async () => {
+        const { getGitHubIdentity } = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenNoWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        const id = getGitHubIdentity();
+        expect(id.displayLogin).toBe("tokuser");
+        expect(id.actingLogin).toBe("keyuser");
+        expect(id.mismatch).toBe(true);
+    });
+
+    it("switches the active account, records the preference, and re-resolves acting identity", async () => {
+        const gh = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        expect(gh.getGitHubIdentity().actingLogin).toBe("tokuser");
+
+        childProcess.execFile.mockImplementation((_file, args, _opts, cb) => {
+            cb(null, "", "");
+            return { stdin: { end() {} } };
+        });
+        const res = await gh.switchGhAccount("keyuser");
+        expect(res).toEqual({ ok: true });
+        const [, args] = childProcess.execFile.mock.calls[0];
+        expect(args).toEqual(["auth", "switch", "--user", "keyuser"]);
+
+        const id = gh.getGitHubIdentity();
+        expect(id.preferredLogin).toBe("keyuser");
+        expect(id.actingLogin).toBe("keyuser");
+    });
+
+    it("returns an error when gh auth switch fails", async () => {
+        const gh = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
+            cb(new Error("boom"), "", "no such account");
+            return { stdin: { end() {} } };
+        });
+        const res = await gh.switchGhAccount("ghost");
+        expect(res.ok).toBe(false);
+        expect(res.error).toContain("no such account");
     });
 });

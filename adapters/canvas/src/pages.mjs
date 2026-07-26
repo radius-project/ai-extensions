@@ -1444,6 +1444,25 @@ document.getElementById('back-btn').addEventListener('click', function() {
     </div>
 
     <div class="rad-section">
+      <!-- GitHub identity setup will act as. Populated by loadGitHubIdentity()
+           when the env form opens. Warns when the acting account differs from
+           the one the app shows, or lacks the workflow scope needed to write
+           the deploy workflow file. -->
+      <div class="rad-field" id="env-gh-identity-field" style="display:none;">
+        <label>GitHub account for setup</label>
+        <div class="rad-combo" id="env-gh-account-combo">
+          <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
+            <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
+            <span class="rad-combo__chevron" aria-hidden="true"></span>
+          </button>
+          <div class="rad-combo__menu" id="env-gh-account-menu" role="listbox" style="display:none;">
+            <div class="rad-combo__options" id="env-gh-account-options"></div>
+            <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
+          </div>
+        </div>
+        <div id="env-gh-identity-note" style="margin-top:8px; font-size:13px; display:none;"></div>
+      </div>
+
       <div class="rad-field">
         <label>Credential Profile</label>
         <div class="rad-combo" id="env-profile-combo">
@@ -1902,6 +1921,7 @@ function showEnvForm(preset) {
     envLanding.style.display = 'none';
     envForm.style.display = '';
     loadProfilesIntoEnvSelect(preset.profile);
+    loadGitHubIdentity();
     envNameInput.focus();
 }
 function showEnvLanding() {
@@ -2000,10 +2020,129 @@ function loadProfilesIntoEnvSelect(preselectName) {
             setProfileValue('');
         });
 }
+
+// --- GitHub identity for setup (acting account + switcher) ---
+// Setup mutations (App Registration create, environment PUT, workflow-file
+// commit) run as an effective GitHub account that is NOT always the one the
+// host app shows. Surface it, and let the user switch, so a wrong account
+// (e.g. an enterprise/EMU login without repo or tenant access) is caught here
+// rather than as a confusing mid-setup permission error.
+var GH_IDENTITY = null;
+var envGhField = document.getElementById('env-gh-identity-field');
+var envGhBtn = document.getElementById('env-gh-account-button');
+var envGhMenu = document.getElementById('env-gh-account-menu');
+var envGhValue = document.getElementById('env-gh-account-value');
+var envGhOptions = document.getElementById('env-gh-account-options');
+var envGhNote = document.getElementById('env-gh-identity-note');
+
+function openGhAccountMenu(open) {
+    if (!envGhMenu) return;
+    var show = open === undefined ? envGhMenu.style.display === 'none' : open;
+    envGhMenu.style.display = show ? '' : 'none';
+    if (envGhBtn) envGhBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+if (envGhBtn) envGhBtn.addEventListener('click', function(e) { e.stopPropagation(); openGhAccountMenu(); });
+document.addEventListener('click', function(e) {
+    var combo = document.getElementById('env-gh-account-combo');
+    if (combo && !combo.contains(e.target)) openGhAccountMenu(false);
+});
+
+function renderGitHubIdentity() {
+    if (!envGhField || !GH_IDENTITY) return;
+    var id = GH_IDENTITY;
+    if (id.error || !id.actingLogin) {
+        // Detection failed or no account — keep the field hidden rather than
+        // showing a misleading control. Setup still runs with whatever gh uses.
+        envGhField.style.display = 'none';
+        return;
+    }
+    envGhField.style.display = '';
+    if (envGhValue) envGhValue.textContent = '@' + id.actingLogin;
+    var accounts = id.accounts || [];
+    if (envGhOptions) {
+        envGhOptions.innerHTML = '';
+        accounts.forEach(function(a) {
+            var o = document.createElement('button');
+            o.type = 'button';
+            o.className = 'rad-combo__option';
+            o.setAttribute('role', 'option');
+            var label = '@' + a.login;
+            if (!a.hasWorkflow) label += ' — missing workflow scope';
+            if (!a.switchable) label += ' (not switchable)';
+            else if (a.login === id.actingLogin) label += ' ✓';
+            o.textContent = label;
+            if (a.switchable && a.login !== id.actingLogin) {
+                o.setAttribute('data-login', a.login);
+                o.addEventListener('click', function() {
+                    switchGitHubAccount(this.getAttribute('data-login'));
+                    openGhAccountMenu(false);
+                });
+            } else {
+                o.disabled = true;
+                o.style.opacity = '0.6';
+                o.style.cursor = 'default';
+            }
+            envGhOptions.appendChild(o);
+        });
+    }
+    var emptyEl = document.getElementById('env-gh-account-empty');
+    if (emptyEl) emptyEl.style.display = accounts.length ? 'none' : '';
+
+    if (envGhNote) {
+        var warn = '';
+        if (id.mismatch && id.displayLogin) {
+            warn = 'The app shows @' + id.displayLogin + ' but setup will act as @' + id.actingLogin +
+                '. If deployment fails with a permission error, switch to the account that has access to this repo and your Azure tenant.';
+        } else if (!id.actingHasWorkflow) {
+            warn = 'The active account @' + id.actingLogin + ' is missing the "workflow" scope, so writing the deploy workflow may fail. ' +
+                'Run "gh auth refresh -s workflow" or switch accounts.';
+        }
+        if (warn) {
+            envGhNote.textContent = warn;
+            envGhNote.style.color = 'var(--rad-warning, #9a6700)';
+            envGhNote.style.display = '';
+        } else {
+            envGhNote.textContent = 'Setup will act on GitHub as @' + id.actingLogin + '.';
+            envGhNote.style.color = 'var(--rad-muted, #57606a)';
+            envGhNote.style.display = '';
+        }
+    }
+}
+
+function loadGitHubIdentity() {
+    if (envGhValue) envGhValue.textContent = 'Detecting…';
+    fetch('/api/github-identity')
+        .then(function(r) { return r.json(); })
+        .then(function(d) { GH_IDENTITY = d || {}; renderGitHubIdentity(); })
+        .catch(function() { if (envGhField) envGhField.style.display = 'none'; });
+}
+
+function switchGitHubAccount(login) {
+    if (!login) return;
+    if (envGhValue) envGhValue.textContent = 'Switching…';
+    fetch('/api/github-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login: login }),
+    })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        .then(function(res) {
+            if (res.ok && res.d && res.d.identity) {
+                GH_IDENTITY = res.d.identity;
+            }
+            renderGitHubIdentity();
+            if (!res.ok && envGhNote) {
+                envGhNote.textContent = (res.d && res.d.error) || 'Could not switch account.';
+                envGhNote.style.color = 'var(--rad-danger, #cf222e)';
+                envGhNote.style.display = '';
+            }
+        })
+        .catch(function() { renderGitHubIdentity(); });
+}
+
 function onEnvProfileSelected() {
     // A credential-profile / tenant change is a context change: never let a
     // shared-identity pin from a previous context silently carry over.
-    clearSharedAppPin();
     selectedProfile = findProfile(envProfileSelect.value);
     var statusEl = document.getElementById('env-profile-status');
     if (!selectedProfile) {

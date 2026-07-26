@@ -5,55 +5,233 @@
 
 import { execFile, execFileSync } from "node:child_process";
 
-// The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment.
-// gh always prefers that env token over the user's stored (keyring) login, but
-// the injected token is an OAuth token minted WITHOUT the `workflow` scope, so
-// any `gh api ... PUT /contents/.github/workflows/...` is rejected with a 403.
-// When the user has a stored gh login (which the gh CLI requests with the
-// `workflow` scope), we drop the injected env tokens for `gh` invocations so gh
-// falls back to that full-scope credential. Detection is memoized and, if no
-// stored login exists, we leave the env untouched so the injected token is
-// still used.
-let _ghKeyringChecked = false;
-let _ghHasKeyring = false;
-
+// The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment, and
+// gh always prefers that env token over the user's stored (keyring) login. That
+// token is the identity the host UI shows, but it was historically minted
+// WITHOUT the `workflow` scope, so `gh api ... PUT /contents/.github/workflows/...`
+// was rejected with a 403. We therefore resolve a per-process token strategy
+// (see decideGhTokenStrategy): keep the injected token when it already carries
+// `workflow` (so setup acts as the identity the user sees), and fall back to a
+// stored keyring login only when we must for scope — or when the user explicitly
+// picks an account. The snapshot of `gh auth status` is memoized.
 function ghExecutable() {
     return process.platform === "win32" ? "gh.exe" : "gh";
 }
 
-function ghHasKeyringLogin() {
-    if (_ghKeyringChecked) return _ghHasKeyring;
-    _ghKeyringChecked = true;
-    try {
-        const env = { ...process.env };
-        delete env.GH_TOKEN;
-        delete env.GITHUB_TOKEN;
-        const out = execFileSync(ghExecutable(), ["auth", "token"], {
-            env,
-            stdio: ["ignore", "pipe", "ignore"],
-            timeout: 5000,
-            windowsHide: true,
-        })
-            .toString()
-            .trim();
-        _ghHasKeyring = out.length > 0;
-    } catch {
-        _ghHasKeyring = false;
+// The login the user explicitly chose in the UI (via switchGhAccount). Sticky
+// for the process lifetime and always wins over the scope-based default. null
+// means "no explicit choice — decide automatically".
+let _preferredLogin = null;
+
+// Memoized snapshot of `gh auth status` (default env + token-stripped env) and
+// the derived token strategy. Reset by resetGhIdentityCache() after a switch.
+let _ghSnapshot = null;
+let _ghStrategy = null;
+
+// Parse `gh auth status` text into structured accounts. Pure so it can be unit
+// tested against real gh output across versions. Each account block looks like:
+//   ✓ Logged in to github.com account <login> (<source>)
+//     - Active account: true|false
+//     - Token scopes: 'a', 'b', ...
+export function parseGhAuthStatus(text) {
+    const accounts = [];
+    let cur = null;
+    for (const line of String(text || "").split(/\r?\n/)) {
+        const acct = line.match(/Logged in to \S+ account (\S+) \(([^)]+)\)/);
+        if (acct) {
+            cur = { login: acct[1], source: acct[2], active: false, scopes: [] };
+            accounts.push(cur);
+            continue;
+        }
+        if (!cur) continue;
+        const active = line.match(/Active account:\s*(true|false)/i);
+        if (active) { cur.active = active[1].toLowerCase() === "true"; continue; }
+        const scopes = line.match(/Token scopes:\s*(.+)$/);
+        if (scopes) {
+            cur.scopes = scopes[1]
+                .split(",")
+                .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+                .filter(Boolean);
+        }
     }
-    return _ghHasKeyring;
+    return accounts;
 }
 
-// Build the child environment for a `gh` invocation. When a stored gh login is
-// available, strip the app-injected GH_TOKEN/GITHUB_TOKEN so gh uses the
-// full-scope keyring credential; otherwise pass the environment through
-// unchanged so the injected token still authenticates gh.
+// Decide whether to strip the app-injected GH_TOKEN and fall back to the stored
+// keyring account for a gh invocation. Pure so every branch is unit tested.
+//
+// The injected host token is the identity the UI shows, but historically it was
+// minted WITHOUT the `workflow` scope, so writing `.github/workflows/*` failed
+// with a 403. The old heuristic — "strip whenever any keyring login exists" —
+// over-corrected: when the injected token DID have `workflow`, stripping it
+// silently switched the acting identity to whatever keyring account happened to
+// be active (e.g. an enterprise/EMU account that may lack access to the target
+// repo or cloud tenant). We now strip only when we actually must, and an
+// explicit user selection always wins.
+export function decideGhTokenStrategy({
+    hasToken,
+    tokenLogin,
+    tokenHasWorkflow,
+    keyringLogin,
+    keyringHasWorkflow,
+    preferredLogin,
+}) {
+    // 1. An explicit user choice is authoritative. Keep the injected token only
+    //    when the chosen login IS the token account; otherwise strip so gh uses
+    //    the (already switched-to) keyring account.
+    if (preferredLogin) {
+        if (tokenLogin && preferredLogin === tokenLogin) {
+            return { useKeyring: false, reason: "user-selected-token-account" };
+        }
+        return { useKeyring: true, reason: "user-selected-keyring-account" };
+    }
+    // 2. No injected token → the keyring account is all we have.
+    if (!hasToken) return { useKeyring: true, reason: "no-injected-token" };
+    // 3. Injected token already carries `workflow` → keep it (and its identity).
+    if (tokenHasWorkflow) return { useKeyring: false, reason: "token-has-workflow" };
+    // 4. Token lacks `workflow` but a keyring login has it → fall back for scope.
+    if (keyringLogin && keyringHasWorkflow) return { useKeyring: true, reason: "token-missing-workflow" };
+    // 5. Nothing better available → keep the token; a later 403 explains the gap.
+    return { useKeyring: false, reason: "no-workflow-scope-available" };
+}
+
+// Run `gh auth status` synchronously, returning its combined output. gh exits
+// non-zero when not logged in but still prints useful text, so we recover it
+// from the thrown error rather than treating it as empty.
+function ghAuthStatusTextSync(env) {
+    try {
+        return execFileSync(ghExecutable(), ["auth", "status"], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 8000,
+            windowsHide: true,
+        }).toString();
+    } catch (e) {
+        const out = e && e.stdout ? e.stdout.toString() : "";
+        const err = e && e.stderr ? e.stderr.toString() : "";
+        return out + err;
+    }
+}
+
+// Snapshot the accounts gh sees with the injected token present vs stripped.
+// Memoized: the first gh call in the process pays the (network) cost once.
+function ghSnapshot() {
+    if (_ghSnapshot) return _ghSnapshot;
+    const base = process.env;
+    const hasToken = !!(base.GH_TOKEN || base.GITHUB_TOKEN);
+    const stripped = { ...base };
+    delete stripped.GH_TOKEN;
+    delete stripped.GITHUB_TOKEN;
+    const withTokenAccts = parseGhAuthStatus(ghAuthStatusTextSync(base));
+    const keyringAccts = parseGhAuthStatus(ghAuthStatusTextSync(stripped));
+    const tokenAcct = hasToken
+        ? withTokenAccts.find((a) => /TOKEN/i.test(a.source)) || null
+        : null;
+    const keyringActive = keyringAccts.find((a) => a.active) || keyringAccts[0] || null;
+    _ghSnapshot = { hasToken, withTokenAccts, keyringAccts, tokenAcct, keyringActive };
+    return _ghSnapshot;
+}
+
+// Resolve (memoized) the token strategy from the current snapshot + preference.
+function ghStrategy() {
+    if (_ghStrategy) return _ghStrategy;
+    const s = ghSnapshot();
+    _ghStrategy = decideGhTokenStrategy({
+        hasToken: s.hasToken,
+        tokenLogin: s.tokenAcct ? s.tokenAcct.login : "",
+        tokenHasWorkflow: !!(s.tokenAcct && s.tokenAcct.scopes.includes("workflow")),
+        keyringLogin: s.keyringActive ? s.keyringActive.login : "",
+        keyringHasWorkflow: !!(s.keyringActive && s.keyringActive.scopes.includes("workflow")),
+        preferredLogin: _preferredLogin,
+    });
+    return _ghStrategy;
+}
+
+// Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
+// status`. Call after anything that changes the active account (a switch). The
+// sticky user preference is intentionally preserved across resets.
+export function resetGhIdentityCache() {
+    _ghSnapshot = null;
+    _ghStrategy = null;
+}
+
+// Build the child environment for a `gh` invocation. Strips the injected
+// GH_TOKEN/GITHUB_TOKEN only when the resolved strategy says to fall back to the
+// keyring credential; otherwise passes the token through so gh keeps the
+// identity the user sees.
 function ghChildEnv(baseEnv) {
     const env = { ...(baseEnv || process.env) };
-    if (ghHasKeyringLogin()) {
+    if (ghStrategy().useKeyring) {
         delete env.GH_TOKEN;
         delete env.GITHUB_TOKEN;
     }
     return env;
+}
+
+// Resolve the effective GitHub identity for setup, plus the switchable account
+// list. `actingLogin` is who gh mutates as (after the strategy decision);
+// `displayLogin` is who the injected token represents (what the host UI shows).
+// A mismatch means setup would act as a different account than the user thinks.
+export function getGitHubIdentity() {
+    const s = ghSnapshot();
+    const strat = ghStrategy();
+    const displayLogin = s.hasToken && s.tokenAcct
+        ? s.tokenAcct.login
+        : (s.keyringActive ? s.keyringActive.login : "");
+    const actingLogin = strat.useKeyring
+        ? (s.keyringActive ? s.keyringActive.login : "")
+        : (s.tokenAcct ? s.tokenAcct.login : (s.keyringActive ? s.keyringActive.login : ""));
+    // De-duplicated switchable account list. An account is switchable when it
+    // exists in the keyring (gh auth switch operates on keyring accounts).
+    const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
+    const seen = new Set();
+    const accounts = [];
+    for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
+        if (seen.has(a.login)) continue;
+        seen.add(a.login);
+        accounts.push({
+            login: a.login,
+            hasWorkflow: a.scopes.includes("workflow"),
+            switchable: keyringLogins.has(a.login),
+            acting: a.login === actingLogin,
+        });
+    }
+    const actingAcct = accounts.find((a) => a.login === actingLogin) || null;
+    return {
+        actingLogin,
+        displayLogin,
+        mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
+        actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
+        preferredLogin: _preferredLogin,
+        reason: strat.reason,
+        accounts,
+    };
+}
+
+// Switch the active gh account to `login`. gh auth switch changes the keyring
+// active account; because a present GH_TOKEN would still override it at call
+// time, we also record the preference (so ghChildEnv strips the token when the
+// chosen account is not the token account) and reset the identity cache.
+// Resolves { ok, error } and never rejects.
+export function switchGhAccount(login) {
+    return new Promise((resolve) => {
+        if (!login) { resolve({ ok: false, error: "A GitHub account login is required." }); return; }
+        const env = { ...process.env };
+        execFile(
+            ghExecutable(),
+            ["auth", "switch", "--user", login],
+            { env, timeout: 15000, windowsHide: true },
+            (err, _stdout, stderr) => {
+                if (err) {
+                    resolve({ ok: false, error: ((stderr || "").trim() || err.message || "gh auth switch failed").trim() });
+                    return;
+                }
+                _preferredLogin = login;
+                resetGhIdentityCache();
+                resolve({ ok: true });
+            },
+        );
+    });
 }
 
 // Returns true when cmd refers to the gh CLI regardless of whether the caller

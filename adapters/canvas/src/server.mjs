@@ -24,7 +24,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -685,6 +685,44 @@ function createRequestHandler(instanceId) {
             return;
         }
 
+        // Report the GitHub identity setup will act as, plus switchable accounts.
+        // Used by the Create Environment dialog to warn when the acting account
+        // differs from the one the host UI shows, or lacks the workflow scope.
+        if (pathname === "/api/github-identity" && req.method === "GET") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                res.writeHead(200);
+                res.end(JSON.stringify(getGitHubIdentity()));
+            } catch (e) {
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: e.message, accounts: [] }));
+            }
+            return;
+        }
+
+        // Switch the active GitHub account setup acts as.
+        if (pathname === "/api/github-account" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const data = JSON.parse(body || "{}");
+                const login = (data.login || "").trim();
+                const result = await switchGhAccount(login);
+                if (!result.ok) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: result.error || "Failed to switch account." }));
+                    return;
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, identity: getGitHubIdentity() }));
+            } catch (e) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message }));
+            }
+            return;
+        }
+
         // Create / update a credential profile (already verified client-side).
         if (pathname === "/api/save-credential-profile" && req.method === "POST") {
             let body = "";
@@ -907,6 +945,20 @@ function createRequestHandler(instanceId) {
                     ghApiJson(apiPath, { headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION } });
 
                 const steps = [];
+
+                // Record the GitHub identity setup is acting as, so the setup
+                // log makes it obvious when mutations run as a different account
+                // than the one the host UI shows (e.g. an enterprise/EMU login
+                // that may lack access to the target repo or Azure tenant).
+                try {
+                    const ghId = getGitHubIdentity();
+                    if (ghId && ghId.actingLogin) {
+                        steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
+                        if (ghId.mismatch && ghId.displayLogin) {
+                            steps.push(`Note: the app shows @${ghId.displayLogin} but setup is acting as @${ghId.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`);
+                        }
+                    }
+                } catch { /* identity is advisory — never block setup on it */ }
 
                 // Step 1: Pin the az CLI context to the SELECTED profile, then
                 // confirm login and align the tenant. Microsoft Graph / AAD

@@ -44,3 +44,13 @@ environments (e.g. Microsoft Corpnet):
 - Validate every value that reaches an `az`/`gh` argv (repo slug, resource
   group, cluster, tenant/subscription/SMR GUIDs, App Registration name) and
   surface real discovery failures instead of a misleading "Found 0".
+
+- Act on GitHub as the identity the user sees. The host injects a
+  `GH_TOKEN`, but the previous heuristic stripped it whenever any stored
+  keyring login existed, silently switching setup to the keyring-active
+  account (e.g. an enterprise/EMU login) that may lack access to the target
+  repo or Azure tenant. The token is now kept when it already carries the
+  `workflow` scope, and stripped only when it genuinely lacks it and a keyring
+  login has it. The Create Environment dialog shows which account setup will
+  act as, warns on a mismatch or a missing `workflow` scope, and offers an
+  account switcher (`gh auth switch`).
