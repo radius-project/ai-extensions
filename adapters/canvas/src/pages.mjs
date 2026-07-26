@@ -907,15 +907,6 @@ ${graphHeader('planned')}
   <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
 </div>
 <div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
-<div class="legend" style="margin-bottom:12px;">
-  <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/></svg> Compute</div>
-  <div class="legend-item"><svg width="18" height="15" style="vertical-align:middle"><path d="M2 4 a6 2 0 0 1 12 0 v6 a6 2 0 0 1 -12 0 z" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/><ellipse cx="8" cy="4" rx="6" ry="2" fill="#fdf0e3" stroke="#e48400" stroke-width="1.5"/></svg> Data Store</div>
-  <div class="legend-item"><svg width="18" height="15" style="vertical-align:middle"><polygon points="5,2 13,2 17,7.5 13,13 5,13 1,7.5" fill="#fdeceb" stroke="#d82c20" stroke-width="1.5"/></svg> Cache</div>
-  <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><polygon points="4,2 14,2 17,5 17,9 14,12 4,12 1,9 1,5" fill="#e9f5ee" stroke="#1a7f37" stroke-width="1.5"/></svg> Secrets</div>
-  <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><polygon points="1,2 12,2 17,7 12,12 1,12" fill="#f2ecfb" stroke="#8250df" stroke-width="1.5"/></svg> Networking</div>
-  <div class="legend-item"><svg width="18" height="14" style="vertical-align:middle"><rect x="1" y="3" width="16" height="9" rx="3" fill="#ede9f7" stroke="#6639ba" stroke-width="1.5"/></svg> Other</div>
-  <div class="legend-item"><div class="legend-dot" style="background:var(--rad-bg-subtle); border:1px dashed var(--rad-stroke-strong); border-radius:3px;"></div> Cloud Resource</div>
-</div>
 <div id="graph-container"></div>
 
 <script>
@@ -952,7 +943,8 @@ var resources = ${resourcesJson};
 radiusRenderGraph('graph-container', resources, {
     repoUrl: 'https://github.com/' + CONTEXT_REPO,
     branch: CONTEXT_BRANCH,
-    localSource: ${localSource ? 'true' : 'false'}
+    localSource: ${localSource ? 'true' : 'false'},
+    plannedMode: true
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -2438,6 +2430,10 @@ deployBtn.addEventListener('click', function() {
     }
 
     var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
+    if (needsAzureCreds && !(selectedProfile.subscriptionId || '').trim()) {
+        fail('The selected profile has no subscription ID. Edit the profile to add one so setup targets the correct tenant/subscription.');
+        return;
+    }
     var preflight;
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
@@ -2860,13 +2856,14 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
-// Environments that currently have a deployment which blocks a NEW deploy
-// (status success / pending / deleting), keyed by env name → status. Rebuilt from
-// each successful deployments listing. A failed deployment does NOT block, so a
-// retry/redeploy over a failure is allowed. Used by refreshDeployBtn to disable
-// the Deploy button for the selected environment.
+// Environments that currently have an IN-PROGRESS operation which blocks a NEW
+// deploy (status pending = a deploy run still in flight, or deleting = a delete
+// run still in flight), keyed by env name → status. Rebuilt from each successful
+// deployments listing. Terminal states do NOT block: a failed deploy can be
+// retried, and a successful deploy can be redeployed over. Used by
+// refreshDeployBtn to disable the Deploy button for the selected environment.
 var DEPLOYED_ENVS = {};
-function envIsBlocked(status) { return status === 'success' || status === 'pending' || status === 'deleting'; }
+function envIsBlocked(status) { return status === 'pending' || status === 'deleting'; }
 
 // Renders an inline status banner (Figma: green success / red error with a ✓/⚠
 // icon and a dismiss ✕). The message node uses textContent by default so
@@ -2911,17 +2908,18 @@ function refreshDeployBtn() {
         deployBtn.dataset.mode = 'deploy';
         deployBtn.textContent = 'Deploy';
         var selEnv = envSelect.value;
-        // Block deploying to an environment that already has an active deployment
-        // (success/pending/deleting). Switching the dropdown to a free environment
-        // re-enables the button. A failed deployment does not block (retry allowed).
+        // Block deploying to an environment only while an operation is IN PROGRESS
+        // (pending = a deploy run in flight, deleting = a delete run in flight).
+        // Terminal states never block: switching to a free environment, or a
+        // failed/successful deployment, all leave the button enabled so a
+        // (re)deploy can run.
         var blockedStatus = selEnv ? DEPLOYED_ENVS[selEnv] : '';
         deployBtn.disabled = !(CTX_REPO && appSelect.value && selEnv) || !!blockedStatus;
         if (blockedStatus) {
             if (blockedStatus === 'deleting') {
                 deployBtn.title = 'Application is being deleted from environment "' + selEnv + '". Wait for the delete to finish before deploying again.';
             } else {
-                var active = blockedStatus === 'pending' ? 'already has a deployment in progress in' : 'already has an active deployment in';
-                deployBtn.title = 'Application ' + active + ' environment "' + selEnv + '". Delete the existing deployment before deploying again.';
+                deployBtn.title = 'A deployment is already in progress in environment "' + selEnv + '". Wait for it to finish before deploying again.';
             }
         } else {
             deployBtn.removeAttribute('title');

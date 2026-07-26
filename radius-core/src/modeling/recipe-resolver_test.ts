@@ -1,74 +1,140 @@
 import { describe, it, expect } from "vitest";
 import type { GitHub } from "../ports/index.js";
 import {
-  loadRecipeResources,
   resolveRecipeOutputs,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
 } from "./recipe-resolver.js";
+import { recipePackContentPath } from "./recipe-pack.js";
 
 interface FakeConfig {
   content?: Record<string, string | null>;
-  names?: Record<string, string[]>;
-  tree?: Record<string, string[]>;
 }
 
-// A configurable in-memory GitHub port. Keys are the API paths / repo:branch
-// combinations the code under test requests; anything unlisted resolves empty.
+// A configurable in-memory GitHub port. `fetchRecipePack` reaches GitHub only
+// through `getContent`; anything unlisted resolves to null.
 function fakeGitHub(cfg: FakeConfig = {}): GitHub {
   return {
     async getContent(apiPath: string) {
       return cfg.content?.[apiPath] ?? null;
     },
-    async listNames(apiPath: string) {
-      return cfg.names?.[apiPath] ?? [];
+    async listNames() {
+      return [];
     },
-    async treePaths(repo: string, branch: string) {
-      return cfg.tree?.[`${repo}@${branch}`] ?? [];
+    async treePaths() {
+      return [];
     },
   };
 }
 
-const CONTRIB = "/repos/radius-project/resource-types-contrib/contents";
+// A minimal recipe-pack bicep with one AVM-backed and two kube-recipe-backed
+// entries, mirroring the shape of the committed packs.
+const AZURE_PACK = `
+extension radius
+resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'azure-avm'
+  properties: {
+    recipes: {
+      'Radius.Data/mySqlDatabases': {
+        kind: 'bicep'
+        source: 'mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3'
+        parameters: {
+          name: '{{context.resource.name}}'
+          lock: {
+            kind: 'None'
+          }
+        }
+        outputs: {
+          host: 'fqdn'
+        }
+      }
+      'Radius.Compute/containers': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/containers:latest'
+      }
+      'Radius.Security/secrets': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/secrets:latest'
+      }
+    }
+  }
+}
+`;
 
-describe("loadRecipeResources", () => {
-  it("returns null when the recipe directory is empty", async () => {
+describe("fetchRecipePack", () => {
+  it("returns an empty list when the pack file is absent", async () => {
     const gh = fakeGitHub();
-    expect(await loadRecipeResources(gh, "Data/mySqlDatabases/recipes/aws/terraform", "terraform")).toBeNull();
+    expect(await fetchRecipePack(gh, "azure")).toEqual([]);
   });
 
-  it("returns null when the main file content is empty", async () => {
+  it("parses the pack and derives one concrete resource per entry", async () => {
     const gh = fakeGitHub({
-      names: { [`${CONTRIB}/Data/redisCaches/recipes/kubernetes/bicep`]: ["main.bicep"] },
-      content: { [`${CONTRIB}/Data/redisCaches/recipes/kubernetes/bicep/main.bicep`]: null },
+      content: { [recipePackContentPath("azure")]: AZURE_PACK },
     });
-    expect(await loadRecipeResources(gh, "Data/redisCaches/recipes/kubernetes/bicep", "bicep")).toBeNull();
+    const recipes = await fetchRecipePack(gh, "azure");
+    expect(recipes).toHaveLength(3);
+
+    const mysql = recipes.find(r => r.resourceType === "Radius.Data/mySqlDatabases");
+    expect(mysql?.name).toBe("mySqlDatabases");
+    expect(mysql?.templateKind).toBe("bicep");
+    expect(mysql?.templatePath).toBe("mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3");
+    // AVM module maps to its ARM resource type.
+    expect(mysql?.concreteResources).toHaveLength(1);
+    expect(mysql?.concreteResources[0].type).toBe("Microsoft.DBforMySQL/flexibleServers");
+    expect(mysql?.concreteResources[0].provider).toBe("azure");
+
+    const containers = recipes.find(r => r.resourceType === "Radius.Compute/containers");
+    // On the Azure pack a container materializes onto the AKS managed cluster.
+    expect(containers?.concreteResources[0].type).toBe("Microsoft.ContainerService/managedClusters");
+    expect(containers?.concreteResources[0].provider).toBe("azure");
+
+    const secrets = recipes.find(r => r.resourceType === "Radius.Security/secrets");
+    expect(secrets?.concreteResources[0].type).toBe("core/Secret");
   });
 
-  it("parses a bicep recipe's concrete resources", async () => {
+  it("reads the kubernetes default pack for aws and kubernetes providers", async () => {
+    const KUBE_PACK = `
+resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'default'
+  properties: {
+    recipes: {
+      'Radius.Data/redisCaches': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/rediscaches:latest'
+      }
+    }
+  }
+}
+`;
+    // Both providers resolve to recipepack/kubernetes/default-recipepack.bicep.
+    expect(recipePackContentPath("aws")).toBe(recipePackContentPath("kubernetes"));
     const gh = fakeGitHub({
-      names: { [`${CONTRIB}/Data/redisCaches/recipes/kubernetes/bicep`]: ["main.bicep"] },
-      content: {
-        [`${CONTRIB}/Data/redisCaches/recipes/kubernetes/bicep/main.bicep`]:
-          `resource dep 'apps/Deployment@v1' = {}`,
-      },
+      content: { [recipePackContentPath("aws")]: KUBE_PACK },
     });
-    const result = await loadRecipeResources(gh, "Data/redisCaches/recipes/kubernetes/bicep", "bicep");
-    expect(result?.format).toBe("bicep");
-    expect(result?.concreteResources).toHaveLength(1);
-    expect(result?.concreteResources[0].provider).toBe("kubernetes");
+    const recipes = await fetchRecipePack(gh, "aws");
+    expect(recipes).toHaveLength(1);
+    expect(recipes[0].resourceType).toBe("Radius.Data/redisCaches");
+    expect(recipes[0].concreteResources[0].type).toBe("apps/Deployment");
   });
 
-  it("parses a terraform recipe using main.tf", async () => {
+  it("yields an entry with no concrete resource when the source is unrecognized", async () => {
+    const UNKNOWN_PACK = `
+resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  properties: {
+    recipes: {
+      'Radius.Custom/widgets': {
+        kind: 'bicep'
+        source: 'ghcr.io/example/unknown-recipe:latest'
+      }
+    }
+  }
+}
+`;
     const gh = fakeGitHub({
-      names: { [`${CONTRIB}/Data/mySqlDatabases/recipes/aws/terraform`]: ["main.tf", "variables.tf"] },
-      content: {
-        [`${CONTRIB}/Data/mySqlDatabases/recipes/aws/terraform/main.tf`]:
-          `resource "aws_db_instance" "mysql" { engine = "mysql" }`,
-      },
+      content: { [recipePackContentPath("azure")]: UNKNOWN_PACK },
     });
-    const result = await loadRecipeResources(gh, "Data/mySqlDatabases/recipes/aws/terraform", "terraform");
-    expect(result?.format).toBe("terraform");
-    expect(result?.concreteResources[0].type).toBe("aws_db_instance");
+    const recipes = await fetchRecipePack(gh, "azure");
+    expect(recipes).toHaveLength(1);
+    expect(recipes[0].concreteResources).toEqual([]);
   });
 });
 
@@ -82,7 +148,7 @@ describe("resolveRecipeOutputs", () => {
         templateKind: "bicep",
         templatePath: "ghcr.io/...",
         concreteResources: [
-          { name: "service", type: "core/Service", provider: "kubernetes", displayType: "K8s Service" },
+          { name: "service", type: "core/Service", provider: "kubernetes", displayType: "Service" },
         ],
       },
     ];
@@ -101,14 +167,52 @@ describe("resolveRecipeOutputs", () => {
         templateKind: "bicep",
         templatePath: "ghcr.io/...",
         concreteResources: [
-          { name: "dep", type: "apps/Deployment", provider: "kubernetes", displayType: "K8s Deployment" },
+          { name: "deployment", type: "apps/Deployment", provider: "kubernetes", displayType: "Deployment" },
         ],
       },
     ];
     const appResources = [{ name: "api", type: "Applications.Core/containers" }];
     const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
     // K8s Deployment nodes get annotated with the managed cluster service name.
-    expect(resolved[0].outputResources[0].displayType).toBe("K8s Deployment (AKS)");
+    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (AKS)");
+  });
+
+  it("normalizes Applications.Datastores/sqlDatabases to Radius.Data/sqlServerDatabases", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "sqlServerDatabases",
+        resourceType: "Radius.Data/sqlServerDatabases",
+        templateKind: "bicep",
+        templatePath: "mcr.microsoft.com/bicep/avm/res/sql/server:0.21.4",
+        concreteResources: [
+          { name: "server", type: "Microsoft.Sql/servers", provider: "azure", displayType: "SQL Server" },
+        ],
+      },
+    ];
+    const appResources = [{ name: "db", type: "Applications.Datastores/sqlDatabases" }];
+    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    expect(resolved[0].recipe?.name).toBe("sqlServerDatabases");
+    expect(resolved[0].outputResources[0].type).toBe("Microsoft.Sql/servers");
+  });
+
+  it("normalizes Applications.Messaging/rabbitMQQueues to Radius.Messaging/rabbitMQ", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "rabbitMQ",
+        resourceType: "Radius.Messaging/rabbitMQ",
+        templateKind: "bicep",
+        templatePath: "mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2",
+        concreteResources: [
+          { name: "namespace", type: "Microsoft.ServiceBus/namespaces", provider: "azure", displayType: "Service Bus" },
+        ],
+      },
+    ];
+    const appResources = [{ name: "queue", type: "Applications.Messaging/rabbitMQQueues" }];
+    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    expect(resolved[0].recipe?.name).toBe("rabbitMQ");
+    expect(resolved[0].outputResources[0].type).toBe("Microsoft.ServiceBus/namespaces");
   });
 
   it("produces no outputs when no recipe matches", async () => {
@@ -118,37 +222,5 @@ describe("resolveRecipeOutputs", () => {
     // No matching recipe -> nothing is fabricated.
     expect(resolved[0].recipe).toBeNull();
     expect(resolved[0].outputResources).toEqual([]);
-  });
-});
-
-describe("fetchRecipesFromGitHub", () => {
-  it("discovers recipe directories from the repo tree", async () => {
-    const dir = "Data/redisCaches";
-    const gh = fakeGitHub({
-      tree: {
-        "radius-project/resource-types-contrib@main": [
-          `${dir}/recipes/kubernetes/bicep/main.bicep`,
-          `${dir}/redisCaches.yaml`,
-        ],
-      },
-      names: { [`${CONTRIB}/${dir}/recipes/kubernetes/bicep`]: ["main.bicep"] },
-      content: {
-        [`${CONTRIB}/${dir}/recipes/kubernetes/bicep/main.bicep`]:
-          `resource dep 'apps/Deployment@v1' = {}`,
-      },
-    });
-    const recipes = await fetchRecipesFromGitHub(gh, "azure");
-    expect(recipes).toHaveLength(1);
-    expect(recipes[0].resourceType).toBe("Radius.Data/redisCaches");
-    expect(recipes[0].templateKind).toBe("bicep");
-    expect(recipes[0].concreteResources[0].provider).toBe("kubernetes");
-  });
-
-  it("falls back to known types when the tree is empty", async () => {
-    // Tree empty -> known types are attempted, but no recipe dirs resolve, so
-    // the result is an empty recipe list (each loadRecipeResources returns null).
-    const gh = fakeGitHub();
-    const recipes = await fetchRecipesFromGitHub(gh, "azure");
-    expect(recipes).toEqual([]);
   });
 });

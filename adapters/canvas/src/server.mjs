@@ -13,8 +13,9 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
+  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -250,6 +251,23 @@ async function resolveRepoAppName(repo, branch) {
     return appName;
 }
 
+// Derive the deployment status for a single deploy record from the linked
+// workflow run's completion state, falling back to the deployment-status record
+// when no run information is available.  Exported for unit tests.
+//
+// `rec` must carry: { runConclusion, runStatus, state }
+// Returns one of: "success" | "failed" | "pending"
+export function resolveDeployStatus(rec) {
+    if (rec.runConclusion === "success") return "success";
+    if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
+    if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
+    // No linked run (or unknown run state): fall back to the deployment
+    // record's own state so we still reflect a terminal outcome.
+    if (rec.state === "success") return "success";
+    if (rec.state === "failure" || rec.state === "error") return "failed";
+    return "pending";
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -287,16 +305,18 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
         else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
         let runPath = "";
+        let runStatus = "";
         let runConclusion = "";
         if (m) {
-            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-            const rt = runInfo.indexOf("\t");
-            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const parts = runInfo.split("\t");
+            runPath = parts[0] || "";
+            runStatus = parts[1] || "";
+            runConclusion = parts[2] || "";
         }
         const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
         const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-        return { id, state, runUrl, isDeploy, isDelete, runConclusion };
+        return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
     };
 
     // Apply the selection rules to a resolved record:
@@ -308,9 +328,19 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (rec.isDelete && rec.runConclusion === "success") return null;
         if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
         let status = "pending";
-        if (rec.isDelete) status = "deleting"; // delete still in progress
-        else if (rec.state === "success") status = "success";
-        else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        if (rec.isDelete) {
+            status = "deleting"; // delete still in progress
+        } else {
+            // Deploy status is derived from the WORKFLOW RUN's completion, not the
+            // GitHub deployment-status record. A failed deploy often leaves that
+            // record stuck at "pending"/"in_progress" (the workflow never posts a
+            // terminal "failure" status), which previously mis-reported a failed
+            // deploy as "pending" and wrongly kept the Deploy button greyed out.
+            // Treat the run as authoritative: only a run that has NOT completed is
+            // "pending"; a completed run is "success" or "failed" by its
+            // conclusion, and a failed deploy does not block a redeploy.
+            status = resolveDeployStatus(rec);
+        }
         return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
     };
 
@@ -800,6 +830,9 @@ function createRequestHandler(instanceId) {
                 // a silent fall-back to the derived default.
                 const appNameProvided = typeof data.appName === 'string';
                 const requestedAppName = appNameProvided ? data.appName : '';
+                // Subscription the user selected (profile). Required so we can pin
+                // the az CLI context to it before the Graph calls (issue #125).
+                const requestedSubscriptionId = (data.subscriptionId || '').trim();
 
                 function fail(status, error, code, extra) {
                     res.setHeader("Content-Type", "application/json");
@@ -844,6 +877,15 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
+                // A subscription is required so we can pin the az CLI context to
+                // the selected profile. Without it, the `az ad` (Graph) calls
+                // below fall back to the ambient default context and create the
+                // App Registration / SP in the wrong tenant (issue #125).
+                if (!requestedSubscriptionId) {
+                    fail(400, 'subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.', 'subscription-required');
+                    return;
+                }
+
                 // Preflight repo access + admin BEFORE creating any App
                 // Registration. Catches both a wrong-active-gh-account 404 and an
                 // insufficient-permission (non-admin) 404, which GitHub otherwise
@@ -866,9 +908,30 @@ function createRequestHandler(instanceId) {
 
                 const steps = [];
 
-                // Step 1: Confirm az login and align the active tenant. We always
-                // read `az account show` so we can verify the active tenant
-                // matches the requested one before creating any app registration.
+                // Step 1: Pin the az CLI context to the SELECTED profile, then
+                // confirm login and align the tenant. Microsoft Graph / AAD
+                // commands (`az ad app create`, `az ad sp create`, `az ad app
+                // federated-credential create`) do NOT accept a `--subscription`
+                // flag — they target the tenant of the active `az` login context.
+                // If we rely on the ambient default the App Registration / SP can
+                // be created in the wrong tenant (issue #125), so we switch the
+                // active subscription first and then verify the resulting tenant.
+                let tenantId = (data.tenantId || '').trim();
+                let subscriptionId = requestedSubscriptionId;
+
+                steps.push(`Selecting subscription ${subscriptionId}...`);
+                const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
+                if (setResult.code !== 0) {
+                    // Surface the CLI stderr — the failure may be a logged-out
+                    // session, expired credentials, or a tenant restriction, not
+                    // just an unknown subscription.
+                    const detail = (setResult.stderr || '').trim();
+                    fail(400, `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, 'az-subscription-set-failed', { steps });
+                    return;
+                }
+
+                // Read the now-active account — the source of truth for what the
+                // subsequent `az ad` (Graph) calls will actually target.
                 steps.push('Checking Azure CLI login...');
                 const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
                 if (acctResult.code !== 0) {
@@ -882,25 +945,30 @@ function createRequestHandler(instanceId) {
                     fail(400, 'Could not parse "az account show" output.', 'az-account-parse', { steps });
                     return;
                 }
-                const activeTenant = account.tenantId;
-                const activeSub = account.id;
-                const tenantId = data.tenantId || activeTenant;
-                const subscriptionId = data.subscriptionId || activeSub;
+                const activeTenantId = account.tenantId || '';
+                // Prefer the active account's id as the canonical subscription
+                // after switching context.
+                subscriptionId = account.id || subscriptionId;
 
-                // Fail with guidance when the signed-in tenant is not the one the
-                // credentials will be created in — otherwise the app would land in
-                // the wrong directory.
-                if (tenantId && activeTenant && tenantId.toLowerCase() !== activeTenant.toLowerCase()) {
+                // Fail with guidance when the selected tenant is not the active
+                // one — otherwise the app would land in the wrong directory.
+                if (tenantId && activeTenantId && tenantId.toLowerCase() !== activeTenantId.toLowerCase()) {
                     fail(400,
-                        `Azure CLI is signed in to tenant ${activeTenant}, but tenant ${tenantId} was requested. ` +
+                        `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
                         `Run "az login --tenant ${tenantId}" and retry.`,
                         'az-tenant-mismatch', { steps });
                     return;
                 }
+                tenantId = tenantId || activeTenantId;
+
                 // Validate the resolved subscription id before it reaches an
-                // `az` scope argument.
+                // `az` scope argument, and ensure the tenant is known.
                 if (!isUuid(subscriptionId)) {
                     fail(400, `Resolved subscription id "${subscriptionId}" is not a valid GUID.`, 'invalid-subscription', { steps });
+                    return;
+                }
+                if (!activeTenantId) {
+                    fail(400, 'Could not determine the active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.', 'az-account-incomplete', { steps });
                     return;
                 }
                 steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
@@ -1269,7 +1337,7 @@ function createRequestHandler(instanceId) {
 
                 // Step 6: Assign Contributor role on the resource group (FATAL).
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
-                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--output', 'none']);
+                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--subscription', subscriptionId, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
                     fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, appName, azError: roleResult.stderr });
                     return;
@@ -2031,6 +2099,12 @@ function createRequestHandler(instanceId) {
             // Re-derive connections (e.g. database→secret) that rad app graph
             // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
+            // Hide implementation-detail resources (containerImages + their
+            // ghcr-registry-creds secret) from the deployed view too, matching
+            // every other graph state. Applied last so any edges the rewire/
+            // normalize steps synthesized toward those nodes are also stripped.
+            // The raw deploy-graph.json on the status branch is left untouched.
+            resources = filterGraphVisualizationResources(resources);
             res.writeHead(200);
             res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
             return;
@@ -2596,11 +2670,21 @@ function createRequestHandler(instanceId) {
                 const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
-                // Fetch recipes from GitHub (radius-project/resource-types-contrib)
+                // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
                 let recipes = [];
-                addProgress('Fetching recipes from GitHub...');
-                recipes = await fetchRecipesFromGitHub(github, provider);
-                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from GitHub.`);
+                addProgress('Fetching the default recipe pack from GitHub...');
+                recipes = await fetchRecipePack(github, provider);
+                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`);
+
+                // Surface pack recipes we couldn't map to a concrete resource so
+                // the gap is visible (rather than silently rendering the abstract
+                // type). Empty today for the Azure pack; fires if the pack adds a
+                // recipe source the curated map doesn't yet cover.
+                const unmappedRecipes = (Array.isArray(recipes) ? recipes : [])
+                    .filter(r => !r.concreteResources || r.concreteResources.length === 0);
+                if (unmappedRecipes.length) {
+                    addProgress(`Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map(r => r.resourceType).join(', ')}); those nodes show their abstract Radius type.`);
+                }
 
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
@@ -2842,7 +2926,7 @@ function createRequestHandler(instanceId) {
                                 const content = selection.content;
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
-                                    const recipes = await fetchRecipesFromGitHub(github, provider);
+                                    const recipes = await fetchRecipePack(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
                                     const committed = setSourceRefResources(entry, "planned", planned, {

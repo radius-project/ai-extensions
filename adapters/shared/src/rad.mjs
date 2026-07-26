@@ -34,7 +34,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { applicationGraphToResources } from "@radius-project/core";
+import { applicationGraphToResources, filterGraphVisualizationResources } from "@radius-project/core";
 
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
@@ -653,6 +653,12 @@ export function saveGraphJson(destPath, raw, log = noop) {
  * `saveGraphJsonTo`, when set to an absolute path, persists the raw
  * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
  * `.radius/app-graph.json`, next to the app.bicep it was built from).
+ *
+ * The returned array is passed through `filterGraphVisualizationResources`, the
+ * shared visualization filter, so implementation-detail resources
+ * (containerImages and their ghcr-registry-creds secret) are never rendered in
+ * any graph state — modeled, planned, deployed, or diff. This is applied only
+ * to the returned array; the raw app-graph.json saved above is left complete.
  */
 export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "" } = {}) {
   if (!content) return [];
@@ -666,7 +672,7 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
-    return applicationGraphToResources(appGraph, definitionFile);
+    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
