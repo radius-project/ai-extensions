@@ -53,4 +53,8 @@ environments (e.g. Microsoft Corpnet):
   `workflow` scope, and stripped only when it genuinely lacks it and a keyring
   login has it. The Create Environment dialog shows which account setup will
   act as, warns on a mismatch or a missing `workflow` scope, and offers an
-  account switcher (`gh auth switch`).
+  account switcher (`gh auth switch`). The private GHCR state package is now
+  bootstrapped with credentials pinned to that same acting account (via
+  `gh auth token --user`) instead of whatever keyring account is active, so a
+  container-registry push no longer fails with "As an Enterprise Managed User,
+  you cannot access this content" when an EMU account is the active login.

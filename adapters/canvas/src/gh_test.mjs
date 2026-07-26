@@ -25,6 +25,20 @@ const STATUS = {
   ✓ Logged in to github.com account keyuser (keyring)
     - Active account: true
     - Token scopes: 'repo', 'read:org', 'workflow'`,
+    // Multi-account machine: the injected token is the public account, which is
+    // ALSO present in the keyring, while a different (enterprise/EMU) keyring
+    // account is the active one. Mirrors the reported GHCR-denial setup.
+    tokenPubActive: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org', 'workflow'`,
+    keyringPubAndEmu: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: false
+    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'
+  ✓ Logged in to github.com account emuuser (keyring)
+    - Active account: true
+    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`,
 };
 
 function setPlatform(platform) {
@@ -38,7 +52,7 @@ function setPlatform(platform) {
 // `gh auth status` texts returned for the injected-token vs token-stripped
 // probes; `token` sets the ambient injected GH_TOKEN the strategy evaluates.
 async function loadGh(platform, opts = {}) {
-    const { withToken = "", keyring = "", token = null } = opts;
+    const { withToken = "", keyring = "", token = null, userTokens = {} } = opts;
     setPlatform(platform);
     if (token === null) {
         delete process.env.GH_TOKEN;
@@ -46,7 +60,21 @@ async function loadGh(platform, opts = {}) {
     } else {
         process.env.GH_TOKEN = token;
     }
-    childProcess.execFileSync.mockImplementation((_file, _args, options) => {
+    childProcess.execFileSync.mockImplementation((_file, args, options) => {
+        const a = args || [];
+        // `gh auth token --user <login>` — return that login's keyring token.
+        if (a[0] === "auth" && a[1] === "token") {
+            const ui = a.indexOf("--user");
+            if (ui !== -1) {
+                const login = a[ui + 1];
+                if (Object.prototype.hasOwnProperty.call(userTokens, login)) {
+                    return Buffer.from(userTokens[login]);
+                }
+                const err = new Error("no token for user");
+                throw err;
+            }
+        }
+        // `gh auth status` — return the token-present vs token-stripped view.
         const env = (options && options.env) || {};
         const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
         return Buffer.from(hasTok ? withToken : keyring);
@@ -491,5 +519,65 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
         const res = await gh.switchGhAccount("ghost");
         expect(res.ok).toBe(false);
         expect(res.error).toContain("no such account");
+    });
+});
+
+describe.sequential("getGhPackageCredentials", () => {
+    beforeEach(() => {
+        childProcess.execFile.mockReset();
+        childProcess.execFileSync.mockReset();
+    });
+
+    afterEach(() => {
+        Object.defineProperty(process, "platform", platformDescriptor);
+        delete process.env.GH_TOKEN;
+        delete process.env.GITHUB_TOKEN;
+    });
+
+    it("uses the acting login's keyring token, not the active (EMU) keyring account", async () => {
+        const { getGhPackageCredentials } = await loadGh("linux", {
+            token: "injected-pub",
+            withToken: STATUS.tokenPubActive,
+            keyring: STATUS.keyringPubAndEmu,
+            userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" },
+        });
+        // Acting identity is pubuser (token has workflow → token kept). GHCR
+        // creds must pin to pubuser's keyring token, never the active EMU one.
+        expect(getGhPackageCredentials()).toEqual({ token: "keyring-pub-token", username: "pubuser" });
+    });
+
+    it("honors an explicit switch to a keyring account for package auth", async () => {
+        const gh = await loadGh("linux", {
+            token: "injected-pub",
+            withToken: STATUS.tokenPubActive,
+            keyring: STATUS.keyringPubAndEmu,
+            userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" },
+        });
+        childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
+            cb(null, "", "");
+            return { stdin: { end() {} } };
+        });
+        await gh.switchGhAccount("emuuser");
+        expect(gh.getGhPackageCredentials()).toEqual({ token: "keyring-emu-token", username: "emuuser" });
+    });
+
+    it("falls back to the injected token when the acting login has no keyring entry", async () => {
+        const { getGhPackageCredentials } = await loadGh("linux", {
+            token: "injected-solo",
+            withToken: STATUS.tokenNoWorkflow, // tokuser, no keyring counterpart
+            keyring: STATUS.empty,
+            userTokens: {},
+        });
+        expect(getGhPackageCredentials()).toEqual({ token: "injected-solo", username: "tokuser" });
+    });
+
+    it("throws when no GitHub account can be resolved", async () => {
+        const { getGhPackageCredentials } = await loadGh("linux", {
+            token: null,
+            withToken: STATUS.empty,
+            keyring: STATUS.empty,
+            userTokens: {},
+        });
+        expect(() => getGhPackageCredentials()).toThrow(/No GitHub account/);
     });
 });

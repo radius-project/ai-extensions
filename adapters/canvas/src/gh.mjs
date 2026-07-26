@@ -234,6 +234,60 @@ export function switchGhAccount(login) {
     });
 }
 
+// Read the keyring token for a SPECIFIC login without changing the active
+// account. GH_TOKEN/GITHUB_TOKEN/GH_HOST are stripped so gh reads the stored
+// (keyring) credential, and `--user` pins the account so we never fall through
+// to whichever account happens to be active. Returns "" when gh can't produce a
+// token for that login (e.g. no keyring entry).
+function ghKeyringTokenForUser(login) {
+    const env = { ...process.env };
+    delete env.GH_TOKEN;
+    delete env.GITHUB_TOKEN;
+    delete env.GH_HOST;
+    try {
+        return execFileSync(
+            ghExecutable(),
+            ["auth", "token", "--hostname", "github.com", "--user", login],
+            { env, stdio: ["ignore", "pipe", "ignore"], timeout: 8000, windowsHide: true },
+        ).toString().trim();
+    } catch {
+        return "";
+    }
+}
+
+// Resolve GitHub credentials for GHCR / GitHub Packages operations that match
+// the identity setup acts as (the account shown and selected in the dialog),
+// instead of whatever keyring account is merely active. This is the package
+// analogue of ghChildEnv: without it, `gh auth token` returns the active
+// keyring account — which on multi-account machines can be an enterprise/EMU
+// login that GHCR rejects ("As an Enterprise Managed User, you cannot access
+// this content") even though the rest of setup runs as the intended account.
+//
+// Preference order:
+//   1. When the acting login has a keyring entry, use its token pinned via
+//      `--user` (a full `gh auth login` credential, which carries the
+//      read:packages/write:packages scopes GHCR needs).
+//   2. Otherwise fall back to the injected GH_TOKEN/GITHUB_TOKEN for that same
+//      identity. It may lack package scopes, in which case GHCR returns a scope
+//      error the caller surfaces with refresh guidance.
+// Throws when no credential can be resolved. `username` is always the acting
+// login so the Basic-auth pair matches the token.
+export function getGhPackageCredentials() {
+    const id = getGitHubIdentity();
+    const login = id.actingLogin;
+    if (!login) {
+        throw new Error("No GitHub account is available for package setup. Sign in with: gh auth login");
+    }
+    const acct = (id.accounts || []).find((a) => a.login === login) || null;
+    if (acct && acct.switchable) {
+        const token = ghKeyringTokenForUser(login);
+        if (token) return { token, username: login };
+    }
+    const injected = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "").trim();
+    if (injected) return { token: injected, username: login };
+    throw new Error(`Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`);
+}
+
 // Returns true when cmd refers to the gh CLI regardless of whether the caller
 // passes "gh", "gh.exe", or an absolute path to the executable.
 function isGhCmd(cmd) {

@@ -24,7 +24,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -1622,9 +1622,24 @@ function createRequestHandler(instanceId) {
                 const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
 
                 steps.push('Creating private GHCR state package "' + stateRegistry + '"...');
+                // Authenticate GHCR as the identity setup acts as (the account
+                // shown/selected in the dialog), not whatever keyring account is
+                // active. On multi-account machines the active keyring login can
+                // be an enterprise/EMU account GHCR rejects, even though the rest
+                // of setup runs as the intended account.
+                let packageCredentials;
+                try {
+                    packageCredentials = getGhPackageCredentials();
+                } catch (e) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ error: `Could not authenticate to GitHub Packages for this repository. ${e.message}`, code: 'ghcr-auth-failed', steps }));
+                    return;
+                }
                 const statePackage = await bootstrapGHCRStatePackage({
                     targetRepository: targetRepo,
                     registry: stateRegistry,
+                    credentials: packageCredentials,
                 });
                 steps.push(`✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`);
 
