@@ -70,3 +70,11 @@ environments (e.g. Microsoft Corpnet):
   subscription and signed-in identity, and profiles persist the friendly
   `subscriptionName`/`tenantName` so the destination reads as a name rather
   than a bare GUID.
+
+- Grant the deploy identity data-plane access on AKS clusters that use Azure
+  RBAC for Kubernetes (the default for AKS Automatic). Contributor on the
+  resource group is management-plane only, so `kubectl`/data-plane calls fail
+  with "User does not have access to the resource in Azure". Setup now also
+  assigns the "Azure Kubernetes Service RBAC Cluster Admin" role scoped to the
+  target cluster (best-effort and non-fatal, since it is a no-op on clusters
+  that do not use Azure RBAC).

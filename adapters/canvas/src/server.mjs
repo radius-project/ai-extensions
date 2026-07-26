@@ -1396,6 +1396,37 @@ function createRequestHandler(instanceId) {
                 }
                 steps.push('✅ Contributor role assigned');
 
+                // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
+                // cluster (best-effort). Contributor on the resource group is a
+                // MANAGEMENT-plane role — it lets the identity read/manage the
+                // cluster *resource*, but on clusters with Azure RBAC for
+                // Kubernetes enabled (the default for AKS Automatic) every
+                // kubectl/data-plane call (e.g. `kubectl get services`) is
+                // authorized by Azure roles scoped to the cluster, NOT by
+                // Contributor. Without this the deploy identity signs in but
+                // gets "cannot list resource ... : User does not have access to
+                // the resource in Azure" and the run fails at Verify AKS Access.
+                // Cluster Admin is required because the Radius control plane
+                // installs cluster-scoped resources (CRDs, namespaces). This is
+                // a no-op on clusters that use only Kubernetes RBAC, so we
+                // attempt it whenever an AKS cluster is targeted and treat a
+                // failure as a warning rather than aborting the whole setup.
+                const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
+                steps.push(`Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`);
+                const aksRoleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Azure Kubernetes Service RBAC Cluster Admin', '--scope', clusterScope, '--subscription', subscriptionId, '--output', 'none']);
+                if (aksRoleResult.code === 0 || aksRoleResult.stderr.includes('already exists')) {
+                    steps.push('✅ AKS RBAC Cluster Admin role assigned');
+                } else {
+                    // Non-fatal: control-plane access is already in place, and
+                    // clusters without Azure RBAC for Kubernetes don't need this.
+                    // Surface actionable guidance so an Automatic-cluster user can
+                    // grant it manually if the deploy later fails on AKS access.
+                    steps.push('⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. ' +
+                        'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
+                        `Grant it manually: az role assignment create --assignee ${clientId} --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
+                        'Details: ' + aksRoleResult.stderr);
+                }
+
                 // Return all credentials for the environment setup
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
