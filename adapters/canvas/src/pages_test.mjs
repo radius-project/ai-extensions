@@ -6,6 +6,7 @@
 // module's branches stay exercised.
 
 import { describe, it, expect } from "vitest";
+import vm from "node:vm";
 import {
     pageShell,
     oidcPage,
@@ -263,6 +264,19 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Omitted vs explicit-blank must be distinguishable server-side.
         expect(html).toContain("params.appName !== undefined");
+    });
+
+    it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
+        // The client scripts live inside a template literal, so an escaped
+        // apostrophe (\\') un-escapes to a raw ' in the emitted JS and breaks a
+        // single-quoted string, halting page init so the tables never load.
+        // Compile every emitted script to catch that class of bug at build time.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+        expect(scripts.length).toBeGreaterThan(0);
+        for (const src of scripts) {
+            expect(() => new vm.Script(src)).not.toThrow();
+        }
     });
 });
 

@@ -2222,7 +2222,7 @@ function onEnvProfileSelected() {
     // land (subscription / account), and the verified identity behind it.
     var detail = '';
     if (prov === 'aws') {
-        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">GitHub Actions assumes this profile\'s IAM role over OIDC to deploy — no stored secrets.</div>';
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">GitHub Actions assumes the IAM role in this profile over OIDC to deploy — no stored secrets.</div>';
         var awsDest = escapeHtmlClient(selectedProfile.accountId || '') + (selectedProfile.region ? ' · ' + escapeHtmlClient(selectedProfile.region) : '');
         if (awsDest.trim()) detail += '<div><span style="color:var(--rad-text-tertiary);">Account:</span> <strong style="color:var(--rad-text);">' + awsDest + '</strong></div>';
     } else {
