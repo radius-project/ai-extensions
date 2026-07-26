@@ -212,6 +212,34 @@ ${getInlineVendorStyles()}
   .rad-section:first-of-type { border-top: none; padding-top: 0; margin-top: 16px; }
   .rad-section__title { font-size: 15px; font-weight: 600; color: var(--rad-text); margin-bottom: 4px; }
   .rad-section__desc { font-size: 13px; color: var(--rad-text-tertiary); margin-bottom: 8px; }
+  /* Lead-in sentence under a card title. */
+  .rad-card__lede { font-size: 13px; line-height: 19px; color: var(--rad-text-tertiary); margin: 6px 0 0; max-width: 640px; }
+  /* Helper text tucked under a form control. */
+  .rad-field__help { font-size: 12px; color: var(--rad-text-tertiary); }
+  /* ─── Connection layout (GitHub ⇒ cloud federation) ─────────────────────── */
+  /* Presents the two identities as the two ends of a trust: a GitHub side and a
+     cloud side, joined by a direction arrow. Collapses to a stack on narrow
+     panels, where the arrow rotates to point downward. */
+  .rad-conn { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 12px; margin-top: 12px; }
+  .rad-conn__side {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--rad-stroke); border-radius: var(--rad-radius);
+    background: var(--rad-bg-subtle); padding: 12px 14px;
+  }
+  .rad-conn__badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--rad-text-tertiary);
+  }
+  .rad-conn__badge svg { width: 15px; height: 15px; display: block; }
+  .rad-conn__arrow {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--rad-text-tertiary); font-size: 20px; line-height: 1; padding: 0 2px;
+  }
+  @media (max-width: 620px) {
+    .rad-conn { grid-template-columns: 1fr; }
+    .rad-conn__arrow { transform: rotate(90deg); padding: 2px 0; }
+  }
   .rad-link { color: #1f6feb; text-decoration: underline; cursor: pointer; font-size: 13px; }
   .rad-link:hover { color: #388bfd; }
 
@@ -1410,7 +1438,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
 <!-- ══════════════ ENVIRONMENTS SUBTAB ══════════════ -->
 <section id="pane-environments" style="${activeSubtab === 'environments' ? '' : 'display:none;'}">
-<p class="rad-lede" style="margin-bottom:20px;">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
+<p class="rad-lede" style="margin-bottom:20px;">An environment is a deployment target — a landing zone like <strong>prod</strong> or <strong>test</strong>. Name it, then connect GitHub so it can deploy your app here over OIDC.</p>
 
 <!-- Landing: New Environment button + environments table -->
 <div id="env-landing">
@@ -1442,50 +1470,14 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-card__title" style="margin:0;">Create Environment</div>
       <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
     </div>
-
+    <!-- 1 · Name this environment -->
     <div class="rad-section">
-      <!-- GitHub identity setup will act as. Populated by loadGitHubIdentity()
-           when the env form opens. Warns when the acting account differs from
-           the one the app shows, or lacks the workflow scope needed to write
-           the deploy workflow file. -->
-      <div class="rad-field" id="env-gh-identity-field" style="display:none;">
-        <label>GitHub account for setup</label>
-        <div class="rad-combo" id="env-gh-account-combo">
-          <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
-            <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
-            <span class="rad-combo__chevron" aria-hidden="true"></span>
-          </button>
-          <div class="rad-combo__menu" id="env-gh-account-menu" role="listbox" style="display:none;">
-            <div class="rad-combo__options" id="env-gh-account-options"></div>
-            <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
-          </div>
-        </div>
-        <div id="env-gh-identity-note" style="margin-top:8px; font-size:13px; display:none;"></div>
+      <div class="rad-section__title">1 · Name this environment</div>
+      <div class="rad-field" style="max-width:420px;">
+        <label>Environment name</label>
+        <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(envName)}" />
+        <div class="rad-field__help">The deployment target you'll deploy apps into by name.</div>
       </div>
-
-      <div class="rad-field">
-        <label>Credential Profile</label>
-        <div class="rad-combo" id="env-profile-combo">
-          <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
-            <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
-            <span class="rad-combo__chevron" aria-hidden="true"></span>
-          </button>
-          <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
-            <div class="rad-combo__options" id="env-profile-options"></div>
-            <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
-            <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
-          </div>
-        </div>
-        <!-- Holds the selected profile name; read by the create flow. -->
-        <input type="hidden" id="env-profile-select" value="" />
-        <div id="env-profile-status" style="margin-top:8px; font-size:13px; display:none;"></div>
-      </div>
-
-      <div class="rad-field" style="margin-top:16px;">
-        <label>Environment Name</label>
-        <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" />
-      </div>
-
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
       <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
@@ -1493,26 +1485,96 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <input type="hidden" id="env-selected-provider" value="" />
     </div>
 
+    <!-- 2 · Connect GitHub to a cloud -->
+    <div class="rad-section">
+      <div class="rad-section__title">2 · Connect GitHub to a cloud</div>
+      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo.</div>
+
+      <div class="rad-conn">
+        <!-- GitHub side of the trust. The account combo is populated by
+             loadGitHubIdentity() when the env form opens; it warns when the
+             acting account differs from the one the app shows, or lacks the
+             workflow scope needed to write the deploy workflow file. -->
+        <div class="rad-conn__side">
+          <div class="rad-conn__badge">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </div>
+          <div class="rad-field" id="env-gh-identity-field" style="display:none;">
+            <label>Account</label>
+            <div class="rad-combo" id="env-gh-account-combo">
+              <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
+                <span class="rad-combo__chevron" aria-hidden="true"></span>
+              </button>
+              <div class="rad-combo__menu" id="env-gh-account-menu" role="listbox" style="display:none;">
+                <div class="rad-combo__options" id="env-gh-account-options"></div>
+                <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
+              </div>
+            </div>
+            <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
+          </div>
+        </div>
+
+        <div class="rad-conn__arrow" aria-hidden="true">→</div>
+
+        <!-- Cloud side of the trust. The provider (Azure/AWS) comes from the
+             selected credential profile; the profile detail below the combo
+             reflects what the connection does and where deploys land. -->
+        <div class="rad-conn__side">
+          <div class="rad-conn__badge">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 13a3.5 3.5 0 01-.36-6.98A4 4 0 0111.9 6.1 3 3 0 0111.5 13h-7z"/></svg>
+            Cloud credentials
+          </div>
+          <div class="rad-field">
+            <label>Credential profile</label>
+            <div class="rad-combo" id="env-profile-combo">
+              <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
+                <span class="rad-combo__chevron" aria-hidden="true"></span>
+              </button>
+              <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
+                <div class="rad-combo__options" id="env-profile-options"></div>
+                <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
+                <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
+              </div>
+            </div>
+            <!-- Holds the selected profile name; read by the create flow. -->
+            <input type="hidden" id="env-profile-select" value="" />
+            <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 · Deploy identity -->
+    <div class="rad-section" id="env-identity-section">
+      <div class="rad-section__title">3 · Deploy identity</div>
+      <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
+      <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
+        <label>Azure app registration</label>
+        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
+        <input type="hidden" id="az-selected-app-id" value="" />
+        <div class="rad-field__help">
+          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the resource group below. Reused if it already exists.
+          <a href="#" id="az-use-existing-link">Use an existing application…</a>
+        </div>
+        <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
+        <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
+      </div>
+      <div class="rad-field__help" id="env-identity-aws" style="display:none;">GitHub Actions assumes the IAM role from your credential profile — no extra identity to configure here.</div>
+    </div>
+
+    <!-- 4 · Landing zone -->
     <div class="rad-section" id="env-infra-section">
-      <div class="rad-section__title">Infrastructure</div>
-      <div class="rad-section__desc">Configure the compute infrastructure for your environment.</div>
+      <div class="rad-section__title">4 · Landing zone</div>
+      <div class="rad-section__desc">Where your app runs in this subscription.</div>
 
       <!-- Azure infra -->
       <div id="panel-azure">
         <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
-        </div>
-        <div class="rad-field" style="margin:8px 0 12px;">
-          <label>Deploy identity (Azure App Registration)</label>
-          <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
-          <input type="hidden" id="az-selected-app-id" value="" />
-          <div style="font-size:11px; color:var(--rad-text-tertiary); margin-top:4px;">
-            This is the Microsoft Entra identity GitHub Actions uses to sign in to Azure and deploy your app — securely over OIDC, with no stored secrets. We'll create it for this repository if it doesn't exist yet, or reuse it if it already does; you can edit the name before it's created.
-            <a href="#" id="az-use-existing-link" style="margin-left:4px;">Use an existing application…</a>
-          </div>
-          <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
-          <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
@@ -2102,7 +2164,7 @@ function renderGitHubIdentity() {
             envGhNote.style.color = 'var(--rad-warning, #9a6700)';
             envGhNote.style.display = '';
         } else {
-            envGhNote.textContent = 'Setup will act on GitHub as @' + id.actingLogin + '.';
+            envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> scope.';
             envGhNote.style.color = 'var(--rad-muted, #57606a)';
             envGhNote.style.display = '';
         }
@@ -2145,6 +2207,8 @@ function onEnvProfileSelected() {
     // shared-identity pin from a previous context silently carry over.
     selectedProfile = findProfile(envProfileSelect.value);
     var statusEl = document.getElementById('env-profile-status');
+    var idAz = document.getElementById('env-identity-azure');
+    var idAws = document.getElementById('env-identity-aws');
     if (!selectedProfile) {
         statusEl.style.display = 'none';
         deployBtn.disabled = true;
@@ -2152,11 +2216,26 @@ function onEnvProfileSelected() {
         var awsRb0 = document.getElementById('aws-refresh-btn'); if (awsRb0) awsRb0.disabled = true;
         return;
     }
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span>' +
-        (selectedProfile.user ? ' <span style="color:var(--rad-text-tertiary);">· Logged in as <strong style="color:var(--rad-text);">' + escapeHtmlClient(selectedProfile.user) + '</strong></span>' : '');
     var prov = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
     document.getElementById('env-selected-provider').value = prov;
+    // Provider-aware profile detail: what the connection does, where deploys
+    // land (subscription / account), and the verified identity behind it.
+    var detail = '';
+    if (prov === 'aws') {
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">GitHub Actions assumes this profile\'s IAM role over OIDC to deploy — no stored secrets.</div>';
+        var awsDest = escapeHtmlClient(selectedProfile.accountId || '') + (selectedProfile.region ? ' · ' + escapeHtmlClient(selectedProfile.region) : '');
+        if (awsDest.trim()) detail += '<div><span style="color:var(--rad-text-tertiary);">Account:</span> <strong style="color:var(--rad-text);">' + awsDest + '</strong></div>';
+    } else {
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">Creates the Entra app, the OIDC trust to your repo, and grants it Contributor on the resource group.</div>';
+        var sub = selectedProfile.subscriptionName || selectedProfile.subscriptionId || '';
+        if (sub) detail += '<div><span style="color:var(--rad-text-tertiary);">Subscription:</span> <strong style="color:var(--rad-text);">' + escapeHtmlClient(sub) + '</strong></div>';
+    }
+    if (selectedProfile.user) detail += '<div><span style="color:var(--rad-text-tertiary);">Signed in as</span> <strong style="color:var(--rad-text);">' + escapeHtmlClient(selectedProfile.user) + '</strong> <span style="color:var(--rad-primary);font-weight:600;">· ✓ Verified</span></div>';
+    else detail += '<div><span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span></div>';
+    statusEl.style.display = '';
+    statusEl.innerHTML = detail;
+    if (idAz) idAz.style.display = prov === 'azure' ? '' : 'none';
+    if (idAws) idAws.style.display = prov === 'aws' ? '' : 'none';
     document.getElementById('panel-azure').style.display = prov === 'azure' ? '' : 'none';
     document.getElementById('panel-aws').style.display = prov === 'aws' ? '' : 'none';
     deployBtn.disabled = false;
@@ -2779,7 +2858,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
             if (data.error) { credVerifyError(data.error); return; }
             if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
-            markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId });
+            markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId, subscriptionName: data.subscriptionName || '' });
         }).catch(function(err) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
             credVerifyError('Error: ' + err.message);
@@ -2818,7 +2897,7 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
     if (!credVerified) { alert('Please verify your credentials first.'); return; }
     var provider = credProviderSelect.value;
     var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
-    if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; }
+    if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; profile.subscriptionName = credVerified.subscriptionName || ''; }
     else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
     btn.disabled = true; btn.textContent = 'Saving…';
     fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })

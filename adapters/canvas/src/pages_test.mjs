@@ -229,10 +229,12 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("showAppPicker");
     });
 
-    it("leads the deploy-identity field copy with its purpose (Round 11A)", () => {
+    it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
-        expect(html).toContain("Deploy identity (Azure App Registration)");
-        expect(html).toContain("GitHub Actions uses to sign in to Azure");
+        // Step 3 header + provider-federated app registration copy.
+        expect(html).toContain("3 · Deploy identity");
+        expect(html).toContain("Azure app registration");
+        expect(html).toContain("The Microsoft Entra app GitHub Actions signs in as");
         expect(html).toContain("no stored secrets");
     });
 

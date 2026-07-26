@@ -58,3 +58,15 @@ environments (e.g. Microsoft Corpnet):
   `gh auth token --user`) instead of whatever keyring account is active, so a
   container-registry push no longer fails with "As an Enterprise Managed User,
   you cannot access this content" when an EMU account is the active login.
+
+- Reframe the Create Environment dialog around the GitHub↔cloud OIDC
+  connection it actually sets up. The form is now four numbered steps — name
+  the environment, connect a GitHub account to a cloud credential profile,
+  choose the deploy identity (Entra app), and pick the landing zone — with a
+  GitHub→cloud connection visual and copy that attributes each action to the
+  correct side (the GitHub account commits the workflow and publishes the state
+  package; the cloud profile creates the Entra app, OIDC trust, and role
+  assignment). The credential-profile picker now surfaces the verified
+  subscription and signed-in identity, and profiles persist the friendly
+  `subscriptionName`/`tenantName` so the destination reads as a name rather
+  than a bare GUID.
