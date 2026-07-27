@@ -57,7 +57,7 @@ import {
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
-  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, isRepoNotFoundError,
+  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
@@ -204,22 +204,29 @@ function ghOrThrow(args, timeout = 12000) {
 }
 
 // Preflight the acting gh account's access to `repo` BEFORE any Azure/GitHub
-// mutation (App Registration create, environment PUT). Uses ghOrThrow, which
+// mutation (App Registration create, environment PUT). Uses ghApiJson, which
 // routes through cliExec→ghChildEnv and therefore acts as the same active
 // keyring account the later mutations use. Returns a clear, actionable error
-// string when the account can't read the repo or lacks admin, else ''. Both
-// checks (read + admin) surface as bare 404s from GitHub otherwise.
+// string when the account can't read the repo or lacks admin, else ''.
+//
+// Keying on ghApiJson's parsed HTTP status (not string-matched error text) makes
+// the two failure modes unambiguous: a 404 means the account genuinely can't see
+// the repo (readFailed), while any other non-ok result — a transient error, a
+// non-JSON body, or an unparseable status — is treated as ambiguous and returns
+// '' so the preflight never silently misdirects; the real op then surfaces the
+// true error. GitHub still enforces permissions server-side regardless.
 async function preflightRepoAdmin(repo) {
     let login = '';
-    try { login = await ghOrThrow(['api', 'user', '--jq', '.login']); } catch { /* best-effort */ }
+    const who = await ghApiJson('user');
+    if (who.ok) login = (who.json && who.json.login) || '';
     let readFailed = false, permissions = null;
-    try {
-        const raw = await ghOrThrow(['api', `repos/${repo}`, '--jq',
-            '{admin:.permissions.admin,maintain:.permissions.maintain,push:.permissions.push,triage:.permissions.triage,pull:.permissions.pull}']);
-        permissions = JSON.parse(raw);
-    } catch (e) {
-        if (isRepoNotFoundError(e && e.message)) readFailed = true;
-        else return ''; // ambiguous/transient — don't block or mislead; let the real op surface the true error
+    const res = await ghApiJson(`repos/${repo}`);
+    if (res.ok) {
+        permissions = (res.json && res.json.permissions) || null;
+    } else if (res.status === 404) {
+        readFailed = true;
+    } else {
+        return ''; // ambiguous/transient — don't block or mislead; let the real op surface the true error
     }
     return explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions });
 }
