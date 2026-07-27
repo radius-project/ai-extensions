@@ -242,6 +242,15 @@ export function decideAppSelection({
  * `owner/repo` segment (stripping any `@<id>` immutable suffixes) so a picker
  * can show which repos an app already serves.
  *
+ * A repo that uses OIDC subject customization (use_default=false with the
+ * `repository` claim key) instead begins the subject with `repository:` — e.g.
+ * `repository:owner/repo:environment:prod` — which `buildOidcSubject` emits for
+ * exactly that case. Both the default `repo:` and the customized `repository:`
+ * prefixes carry the `owner/repo` slug, so we accept either. Note the trailing
+ * `:` in the alternation is required, so this deliberately does NOT match the
+ * `repository_id:`/`repository_owner:` claim keys (which carry an id/owner, not
+ * a full slug).
+ *
  * @param {Iterable<string>} subjects
  * @returns {string[]} sorted unique `owner/repo` values
  */
@@ -249,7 +258,7 @@ export function parseServedReposFromSubjects(subjects) {
   const repos = new Set();
   for (const s of Array.from(subjects || [])) {
     if (typeof s !== "string") continue;
-    const m = /^repo:([^:]+)/.exec(s.trim());
+    const m = /^(?:repo|repository):([^:]+)/.exec(s.trim());
     if (!m) continue;
     const slug = m[1];
     const parts = slug.split("/");

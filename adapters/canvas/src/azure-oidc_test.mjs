@@ -617,6 +617,22 @@ describe("parseServedReposFromSubjects", () => {
     expect(out).toEqual(["octo/api"]);
   });
 
+  it("accepts the customized 'repository:' subject prefix (mutable and immutable)", () => {
+    const out = parseServedReposFromSubjects([
+      "repository:octo/api:environment:prod",
+      "repository:octo@123/web@456:ref:refs/heads/main",
+    ]);
+    expect(out).toEqual(["octo/api", "octo/web"]);
+  });
+
+  it("does not treat repository_id/repository_owner claim keys as a repo slug", () => {
+    const out = parseServedReposFromSubjects([
+      "repository_id:456789:ref:refs/heads/main",
+      "repository_owner:octo:environment:prod",
+    ]);
+    expect(out).toEqual([]);
+  });
+
   it("ignores malformed / non-string entries", () => {
     const out = parseServedReposFromSubjects([null, 42, "not-a-subject", "repo:onlyowner", "repo:a/b/c:x", "repo:good/repo:ref:x"]);
     expect(out).toEqual(["good/repo"]);
