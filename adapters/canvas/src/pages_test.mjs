@@ -261,6 +261,17 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toMatch(/clearSharedAppPin\(\)/);
     });
 
+    it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Repro: open the env form, use the combo's "+ Create new profile" action
+        // to add a profile on the Credentials subtab, then switch back to
+        // Environments. switchSubtab() must refresh the combo (preserving the
+        // current selection) so the new profile appears without a full canvas
+        // reload — but only while the form is visible, so discovery doesn't fire
+        // on the hidden landing view.
+        expect(html).toMatch(/if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/);
+    });
+
     it("always sends appName on create so explicit-empty is server-detectable", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Omitted vs explicit-blank must be distinguishable server-side.

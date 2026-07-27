@@ -1866,7 +1866,20 @@ function switchSubtab(name) {
         links[i].classList.toggle('rad-subtab--active', links[i].getAttribute('data-subtab') === name);
     }
     try { history.replaceState(null, '', '/?page=' + (isCred ? 'credentials' : 'environment')); } catch (e) {}
-    if (isCred) loadCredTable(); else loadEnvTable();
+    if (isCred) {
+        loadCredTable();
+    } else {
+        loadEnvTable();
+        // If the user is returning to an already-open Create Environment form
+        // (e.g. they opened it, hit the combo's "+ Create new profile" action to
+        // add a profile on the Credentials subtab, then came back), the combo
+        // still holds the PROFILES snapshot from when the form opened — so a
+        // just-created profile is missing until a full canvas reload. Re-sync it
+        // here, preserving the current selection. Skipped on the landing view:
+        // the combo is hidden there, New Environment re-fetches via showEnvForm(),
+        // and refreshing would fire resource discovery on a hidden form.
+        if (envForm && envForm.style.display !== 'none') loadProfilesIntoEnvSelect(envProfileSelect.value);
+    }
 }
 (function() {
     var links = document.querySelectorAll('#env-subtabs .rad-subtab');
