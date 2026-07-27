@@ -1,6 +1,6 @@
 # Radius Plugin
 
-Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles five skills and a canvas extension that turn Copilot into a Radius application-modeling and deployment assistant.
+Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles six skills and a canvas extension that turn Copilot into a Radius application-modeling and deployment assistant.
 
 The canvas runs only in the
 [GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins),
@@ -33,6 +33,7 @@ extension become available.
 | `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
 | `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
 | `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |
+| `radius-delete` | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment. |
 | `radius-fix-canvas-installation` | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ### Canvas extension

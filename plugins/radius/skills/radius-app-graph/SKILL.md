@@ -133,7 +133,7 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 ## Troubleshooting
 
 - **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
-- **Graph build fails**: verify `rad app graph <app.bicep> --include-icons` succeeds locally, or check that the cached/downloaded `rad` binary is executable. Do not add `--preview` to this modeled command. On Windows, the runner starts `rad` detached so the embedded Bicep child process does not hang in Node's default job object.
+- **Graph build fails**: verify `rad app graph <app.bicep> --include-icons` succeeds locally, or check that the cached/downloaded `rad` binary is executable. Do not add `--preview` to this modeled command. On Windows, the extension runs `rad` detached to avoid a known `rad`/Bicep hang under Node’s default job object.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.
 
