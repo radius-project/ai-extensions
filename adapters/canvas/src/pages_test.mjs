@@ -166,6 +166,7 @@ describe("plannedGraphPage", () => {
     it("renders the empty (plan) branch with no removed tokens", () => {
         const html = plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" });
         expect(html).toContain("Plan Deployment");
+        expect(html).toContain("radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH)");
         for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
     });
 
