@@ -77,6 +77,7 @@ actions and tools:
 | [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
 | [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
 | [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
+| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment. |
 
 ## Architecture
 

@@ -841,7 +841,7 @@ ${graphHeader('planned')}
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS);
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
     if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
