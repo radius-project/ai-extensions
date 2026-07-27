@@ -56,6 +56,17 @@ function packageAuthError(message) {
     return new Error(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
 }
 
+// GHCR's token endpoint does NOT reject a push request from a credential that
+// only holds read:packages — it silently issues a pull-only bearer token. The
+// denial then surfaces on the first write (blob upload POST/PUT or manifest
+// PUT) as a 401/403 whose body reads "DENIED: … does not match expected
+// scopes". Detect that here and re-throw with the concrete refresh command,
+// instead of leaking the raw, unactionable HTTP status to the user.
+async function assertPackageWriteAuthorized(response, repositoryPath, action) {
+    if (response.status !== 401 && response.status !== 403) return;
+    throw packageAuthError(`GHCR denied ${action} for ${repositoryPath} (HTTP ${response.status})${await responseDetail(response)}`);
+}
+
 function parseBearerChallenge(header) {
     if (!header || !/^Bearer\s+/i.test(header)) {
         throw new Error("GHCR did not return a Bearer authentication challenge.");
@@ -131,6 +142,7 @@ async function pushBlob({ fetchImpl, registryOrigin, repositoryPath, bearerToken
     const existing = await registryFetch(fetchImpl, registryOrigin, bearerToken, blobPath, { method: "HEAD" });
     if (existing.ok) return;
     if (existing.status !== 404) {
+        await assertPackageWriteAuthorized(existing, repositoryPath, "the package write");
         throw new Error(`Failed to check GHCR blob ${digest} (HTTP ${existing.status})${await responseDetail(existing)}`);
     }
 
@@ -142,6 +154,7 @@ async function pushBlob({ fetchImpl, registryOrigin, repositoryPath, bearerToken
         { method: "POST" },
     );
     if (start.status !== 202) {
+        await assertPackageWriteAuthorized(start, repositoryPath, "the blob upload");
         throw new Error(`Failed to start GHCR blob upload (HTTP ${start.status})${await responseDetail(start)}`);
     }
     const location = start.headers.get("location");
@@ -164,6 +177,7 @@ async function pushBlob({ fetchImpl, registryOrigin, repositoryPath, bearerToken
         redirect: "error",
     });
     if (upload.status !== 201) {
+        await assertPackageWriteAuthorized(upload, repositoryPath, "the blob upload");
         throw new Error(`Failed to upload GHCR blob ${digest} (HTTP ${upload.status})${await responseDetail(upload)}`);
     }
 }
@@ -222,6 +236,7 @@ async function pushBootstrapManifest({
         },
     );
     if (response.status !== 201 && response.status !== 202) {
+        await assertPackageWriteAuthorized(response, repositoryPath, "the manifest push");
         throw new Error(`Failed to push the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`);
     }
 }

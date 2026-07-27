@@ -1678,6 +1678,24 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: `Could not authenticate to GitHub Packages for this repository. ${e.message}`, code: 'ghcr-auth-failed', steps }));
                     return;
                 }
+                // Fail fast when the acting account lacks write:packages, BEFORE
+                // the bootstrap push. GHCR's token endpoint silently issues a
+                // pull-only token for a read-only credential, so without this gate
+                // the missing scope only surfaces as a cryptic 403 deep in the blob
+                // upload — after the rest of setup has already run. actingHasPackages
+                // is read keyring-first, matching the credential getGhPackageCredentials
+                // pins, so it reflects the token this push actually uses.
+                const ghPkgIdentity = getGitHubIdentity();
+                if (ghPkgIdentity && ghPkgIdentity.actingLogin && !ghPkgIdentity.actingHasPackages) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({
+                        error: `The GitHub account @${ghPkgIdentity.actingLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth refresh -h github.com -u ${ghPkgIdentity.actingLogin} -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry.`,
+                        code: 'ghcr-scope-required',
+                        steps,
+                    }));
+                    return;
+                }
                 const statePackage = await bootstrapGHCRStatePackage({
                     targetRepository: targetRepo,
                     registry: stateRegistry,

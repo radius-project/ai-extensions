@@ -184,6 +184,15 @@ export function getGitHubIdentity() {
     // De-duplicated switchable account list. An account is switchable when it
     // exists in the keyring (gh auth switch operates on keyring accounts).
     const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
+    // GHCR pushes authenticate with the credential getGhPackageCredentials
+    // resolves: the keyring token pinned to the login when a keyring entry
+    // exists, else the injected token. So the *packages* scope must be read
+    // keyring-first — reading the token account first (as hasWorkflow does)
+    // would misreport for a login whose keyring credential differs from its
+    // injected one.
+    const keyringScopesByLogin = new Map(s.keyringAccts.map((a) => [a.login, a.scopes]));
+    const tokenScopesByLogin = new Map(s.withTokenAccts.map((a) => [a.login, a.scopes]));
+    const packageScopesFor = (login) => keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
     const seen = new Set();
     const accounts = [];
     for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
@@ -192,6 +201,7 @@ export function getGitHubIdentity() {
         accounts.push({
             login: a.login,
             hasWorkflow: a.scopes.includes("workflow"),
+            hasPackages: packageScopesFor(a.login).includes("write:packages"),
             switchable: keyringLogins.has(a.login),
             acting: a.login === actingLogin,
         });
@@ -202,6 +212,7 @@ export function getGitHubIdentity() {
         displayLogin,
         mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
         actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
+        actingHasPackages: !!(actingAcct && actingAcct.hasPackages),
         preferredLogin: _preferredLogin,
         reason: strat.reason,
         accounts,

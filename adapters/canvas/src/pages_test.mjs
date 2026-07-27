@@ -272,6 +272,21 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toMatch(/if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/);
     });
 
+    it("surfaces the write:packages scope in the account picker and identity warning", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Per-account label flags a missing packages scope (sibling of the
+        // existing workflow-scope flag).
+        expect(html).toContain("missing ");
+        expect(html).toContain("hasPackages");
+        expect(html).toContain("actingHasPackages");
+        // The identity warning builds the concrete refresh command including
+        // read:packages + write:packages when the acting account lacks it.
+        expect(html).toContain("read:packages");
+        expect(html).toContain("write:packages");
+        // Default (non-warning) note names both scopes setup needs.
+        expect(html).toContain("<code>write:packages</code>");
+    });
+
     it("always sends appName on create so explicit-empty is server-detectable", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Omitted vs explicit-blank must be distinguishable server-side.

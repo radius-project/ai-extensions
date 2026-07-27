@@ -472,8 +472,35 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
         expect(id.accounts.map((a) => a.login).sort()).toEqual(["keyuser", "tokuser"]);
     });
 
-    it("flags a mismatch when setup falls back to a different keyring account", async () => {
+    it("reports actingHasPackages=false and per-account hasPackages when no account holds write:packages", async () => {
         const { getGitHubIdentity } = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        const id = getGitHubIdentity();
+        expect(id.actingHasPackages).toBe(false);
+        expect(id.accounts.every((a) => a.hasPackages === false)).toBe(true);
+    });
+
+    it("reads the packages scope keyring-first, matching the credential GHCR pushes use", async () => {
+        // pubuser's INJECTED token lacks write:packages, but its KEYRING entry
+        // has it. getGhPackageCredentials pins the keyring token, so the identity
+        // must report the keyring scope — not the token account's — or the
+        // dialog and preflight would wrongly block a push that would succeed.
+        const { getGitHubIdentity } = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenPubActive,
+            keyring: STATUS.keyringPubAndEmu,
+        });
+        const id = getGitHubIdentity();
+        expect(id.actingLogin).toBe("pubuser");
+        expect(id.actingHasPackages).toBe(true);
+        const pub = id.accounts.find((a) => a.login === "pubuser");
+        expect(pub.hasPackages).toBe(true);
+    });
+
+    it("flags a mismatch when setup falls back to a different keyring account", async () => {        const { getGitHubIdentity } = await loadGh("linux", {
             token: "tok",
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.keyringWithWorkflow,

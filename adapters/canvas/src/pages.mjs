@@ -2142,7 +2142,10 @@ function renderGitHubIdentity() {
             o.className = 'rad-combo__option';
             o.setAttribute('role', 'option');
             var label = '@' + a.login;
-            if (!a.hasWorkflow) label += ' — missing workflow scope';
+            var missingScopes = [];
+            if (!a.hasWorkflow) missingScopes.push('workflow');
+            if (!a.hasPackages) missingScopes.push('packages');
+            if (missingScopes.length) label += ' — missing ' + missingScopes.join(' + ') + ' scope' + (missingScopes.length > 1 ? 's' : '');
             if (!a.switchable) label += ' (not switchable)';
             else if (a.login === id.actingLogin) label += ' ✓';
             o.textContent = label;
@@ -2168,16 +2171,24 @@ function renderGitHubIdentity() {
         if (id.mismatch && id.displayLogin) {
             warn = 'The app shows @' + id.displayLogin + ' but setup will act as @' + id.actingLogin +
                 '. If deployment fails with a permission error, switch to the account that has access to this repo and your Azure tenant.';
-        } else if (!id.actingHasWorkflow) {
-            warn = 'The active account @' + id.actingLogin + ' is missing the "workflow" scope, so writing the deploy workflow may fail. ' +
-                'Run "gh auth refresh -s workflow" or switch accounts.';
+        } else if (!id.actingHasWorkflow || !id.actingHasPackages) {
+            // Both scopes are needed to complete setup: 'workflow' to commit the
+            // deploy workflow, 'write:packages' to publish the private state
+            // package to GHCR. Name whichever is missing and build the exact
+            // refresh command (read:packages accompanies write:packages).
+            var missNames = [], refreshScopes = [];
+            if (!id.actingHasWorkflow) { missNames.push('workflow'); refreshScopes.push('workflow'); }
+            if (!id.actingHasPackages) { missNames.push('write:packages'); refreshScopes.push('read:packages'); refreshScopes.push('write:packages'); }
+            var refreshCmd = 'gh auth refresh -h github.com -u ' + id.actingLogin + refreshScopes.map(function(s){ return ' -s ' + s; }).join('');
+            warn = 'The active account @' + id.actingLogin + ' is missing the ' + missNames.join(' and ') + ' scope' + (missNames.length > 1 ? 's' : '') +
+                ' environment setup needs. Run "' + refreshCmd + '" or switch accounts.';
         }
         if (warn) {
             envGhNote.textContent = warn;
             envGhNote.style.color = 'var(--rad-warning, #9a6700)';
             envGhNote.style.display = '';
         } else {
-            envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> scope.';
+            envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> and <code>write:packages</code> scopes.';
             envGhNote.style.color = 'var(--rad-muted, #57606a)';
             envGhNote.style.display = '';
         }
