@@ -20,6 +20,10 @@ for details.
 Restart your Copilot session after installing so the skills and the canvas
 extension become available.
 
+> **NOTE:** Due to a GitHub Copilot app bug, the canvas may not appear after installing or updating the plugin, even though the skills load. If the Radius canvas is missing, run the bundled `radius-fix-canvas-installation` skill (ask Copilot to "fix radius canvas") and then reload extensions or restart the app. This is a temporary workaround that will be removed once the upstream bug is fixed.
+
+<!-- markdownlint-disable-next-line MD028 -->
+
 > **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge and publishes it to a generated `release` branch, and the marketplace manifest pins the plugin `source` to that branch — so installing from the app delivers the skills and canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
 
 ## What's included
@@ -32,6 +36,7 @@ extension become available.
 | `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
 | `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
 | `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |
+| `radius-fix-canvas-installation` | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ### Canvas extension
 
