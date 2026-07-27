@@ -77,6 +77,10 @@ function requireId(
  * `%3A` (an environment name may itself contain a colon). Build the trailing
  * `environment:<name>` claim the same way so the federated-credential subject
  * matches the token GitHub mints.
+ *
+ * `:` is the ONLY character GitHub percent-escapes in the environment segment of
+ * the subject — other characters are passed through verbatim — so a single
+ * `:` → `%3A` replacement is complete, not a partial encoding.
  */
 export function buildEnvironmentSuffix(envName: string): string {
   const encoded = String(envName ?? "").replace(/:/g, "%3A");

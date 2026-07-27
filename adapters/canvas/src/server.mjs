@@ -1221,6 +1221,10 @@ function createRequestHandler(instanceId) {
                         steps.push(`Looking up existing App Registration: ${appName}...`);
                         const listRes = await runCmd('az', [
                             'ad', 'app', 'list',
+                            // single-quote-safe: appName was replaced with the
+                            // validateAppRegistrationName() result above, whose
+                            // allow-list forbids quotes, so it cannot break out of
+                            // this OData single-quoted string literal.
                             '--filter', `displayName eq '${appName}'`,
                             '--query', '[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime}',
                             '-o', 'json',

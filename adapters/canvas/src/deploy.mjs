@@ -343,6 +343,15 @@ export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissi
 
 // True when a gh error text indicates the repo/API path was Not Found (HTTP 404) —
 // the signal that the active account can't see the repo. Pure, never throws.
+//
+// The bare `not found` alternate is INTENTIONAL, not an oversight: gh surfaces
+// this condition with variable wording (e.g. "gh: Not Found (HTTP 404)" but also
+// plain "the repository was not found"), and both must match. The match is
+// deliberately allowed to be broad because the sole caller (server.mjs, the repo
+// preflight) is fail-open — a match only flips an advisory `readFailed` flag and
+// GitHub still enforces real permissions server-side — so a false positive here
+// costs nothing while a false negative would misdirect the preflight. Narrowing
+// to `HTTP 404` only would drop the tested bare-phrase case (deploy_test.mjs).
 export function isRepoNotFoundError(errText) {
     if (!errText) return false;
     return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
