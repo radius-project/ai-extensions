@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applicationGraphToResources } from "./appgraph.js";
+import { applicationGraphToResources, findResourceDefinitionLines } from "./appgraph.js";
 import { buildResourceID } from "./model.js";
 
 const frontendId = buildResourceID("Radius.Compute/containers", "frontend");
@@ -195,6 +195,53 @@ describe("applicationGraphToResources", () => {
       },
     ]);
     expect(resources[0].codeReference).toBe("src/index.js#L18");
+  });
+
+  it("derives definition lines from resource symbols and literal names", () => {
+    const content = [
+      "extension radius",
+      "",
+      "resource frontend 'Radius.Compute/containers@2023-10-01-preview' = {",
+      "  name: 'web'",
+      "}",
+      "",
+      "resource database 'Radius.Data/sqlDatabases@2023-10-01-preview' = {",
+      "  name: app.name",
+      "}",
+    ].join("\n");
+
+    expect(findResourceDefinitionLines(content)).toEqual(new Map([
+      ["frontend", 3],
+      ["web", 3],
+      ["database", 7],
+    ]));
+  });
+
+  it("adds the authored resource line when rad omits definitionLine", () => {
+    const graph = sampleAppGraph();
+    const content = [
+      "resource frontend 'Radius.Compute/containers@2023-10-01-preview' = {",
+      "  name: 'frontend'",
+      "}",
+      "resource cache 'Radius.Data/redisCaches@2023-10-01-preview' = {",
+      "  name: 'cache'",
+      "}",
+    ].join("\n");
+
+    const resources = applicationGraphToResources(graph, ".radius/app.bicep", content);
+
+    expect(resources.find((r) => r.name === "frontend").definitionLine).toBe(1);
+    expect(resources.find((r) => r.name === "cache").definitionLine).toBe(4);
+  });
+
+  it("preserves a definitionLine emitted by rad", () => {
+    const graph = sampleAppGraph();
+    graph.resources[0].definitionLine = 42;
+    const content = "resource frontend 'Radius.Compute/containers@2023-10-01-preview' = {}";
+
+    const resources = applicationGraphToResources(graph, ".radius/app.bicep", content);
+
+    expect(resources[0].definitionLine).toBe(42);
   });
 
   it("prefers the codeReference in properties over a legacy top-level one", () => {
