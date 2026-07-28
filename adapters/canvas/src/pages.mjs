@@ -1452,6 +1452,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <span id="env-error-banner-text" class="env-error-banner__text"></span>
     <button type="button" id="env-error-banner-close" class="env-error-banner__close" aria-label="Dismiss">×</button>
   </div>
+  <div id="env-warning-banner" role="status" style="display:none;">
+    <span class="env-warning-banner__icon" aria-hidden="true">⚠</span>
+    <span id="env-warning-banner-text" class="env-warning-banner__text"></span>
+    <button type="button" id="env-warning-banner-close" class="env-warning-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -1785,6 +1790,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-error-banner__text strong { font-weight:600; }
 .env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:#82071e; cursor:pointer; }
 .env-error-banner__close:hover { color:#5a0410; }
+#env-warning-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:#fff8c5; border:1px solid #d4a72c; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#d4a72c; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-warning-banner__text { flex:1 1 auto; font-size:13px; color:#54470b; line-height:1.4; white-space:pre-wrap; }
+.env-warning-banner__text strong { font-weight:600; }
+.env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:#54470b; cursor:pointer; }
+.env-warning-banner__close:hover { color:#3a3007; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -2032,6 +2043,27 @@ function showEnvError(msg) {
 var envErrorClose = document.getElementById('env-error-banner-close');
 if (envErrorClose) envErrorClose.addEventListener('click', function() {
     document.getElementById('env-error-banner').style.display = 'none';
+});
+
+// Surface non-fatal auto-setup warnings (steps prefixed with "⚠️") on the
+// SUCCESS path. Auto-setup returns a 'steps' log; the AKS Cluster Admin grant is
+// best-effort and only pushes a warning into that log, so without this the user
+// would never see (on success) that they must grant the role manually before the
+// deploy will pass "Verify AKS Access". Renders nothing when there are no
+// warnings. Steps are server-built plain text; render as text, not markup.
+function showEnvSetupWarnings(steps) {
+    var banner = document.getElementById('env-warning-banner');
+    var text = document.getElementById('env-warning-banner-text');
+    if (!banner || !text) return;
+    var warnings = (steps || []).filter(function(s) { return typeof s === 'string' && s.indexOf('⚠️') === 0; });
+    if (!warnings.length) { banner.style.display = 'none'; return; }
+    text.textContent = warnings.join('\\n\\n');
+    banner.style.display = 'flex';
+    banner.scrollIntoView({ block: 'nearest' });
+}
+var envWarningClose = document.getElementById('env-warning-banner-close');
+if (envWarningClose) envWarningClose.addEventListener('click', function() {
+    document.getElementById('env-warning-banner').style.display = 'none';
 });
 
 function findProfile(name) {
@@ -2494,12 +2526,25 @@ function getComboValue(selectId, customId) {
     if (sel.value === '__custom__') return document.getElementById(customId).value;
     return sel.value;
 }
+// Look up a discovered AKS cluster's own resource group by its selected id/name.
+// Returns '' when the cluster was typed by hand (not in the discovery list), so
+// the server falls back to the deployment resource group.
+function findAzureClusterResourceGroup(clusterId) {
+    var list = window.__azureClusters || [];
+    for (var i = 0; i < list.length; i++) {
+        if ((list[i].id || list[i].name) === clusterId) return list[i].resourceGroup || '';
+    }
+    return '';
+}
 function runAzureAutoSetup(params) {
     var payload = {
         repo: params.repo, environment: params.environment,
         resourceGroup: params.resourceGroup, cluster: params.cluster,
         subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
     };
+    // The cluster's own resource group (from discovery), used server-side to
+    // scope the AKS Cluster Admin grant. Sent only when known.
+    if (params.clusterResourceGroup) payload.clusterResourceGroup = params.clusterResourceGroup;
     // Only sent on a retry after the tenant demands it (progressive disclosure).
     if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
     // ROUND 9: editable create name + explicit identity selection. Send appName
@@ -2696,13 +2741,18 @@ deployBtn.addEventListener('click', function() {
     var provider = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
     var targetRepo = document.getElementById('target-repo').value.trim();
     if (!targetRepo) { fail('Please specify a target repository (owner/repo).'); return; }
-    var cluster, namespace, vpc, subnets, resourceGroup;
+    var cluster, namespace, vpc, subnets, resourceGroup, clusterResourceGroup;
     if (provider === 'azure') {
         cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
         namespace = getComboValue('azure-namespace-select', 'azure-namespace-custom') || 'default';
         resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
         if (!resourceGroup) { fail('Please specify a resource group.'); return; }
         if (!cluster) { fail('Please specify an AKS cluster.'); return; }
+        // Capture the cluster's OWN resource group from discovery, independent of
+        // the editable RG combo above, so the AKS Cluster Admin grant is scoped to
+        // the cluster's real path even if the deployment RG differs. Empty for a
+        // custom-typed cluster that never came from discovery.
+        clusterResourceGroup = findAzureClusterResourceGroup(cluster);
     } else {
         cluster = getComboValue('aws-cluster-select', 'aws-cluster-custom');
         namespace = getComboValue('aws-namespace-select', 'aws-namespace-custom') || 'default';
@@ -2714,6 +2764,8 @@ deployBtn.addEventListener('click', function() {
     btn.textContent = 'Creating environment…';
     btn.disabled = true;
     statusEl.style.display = 'none';
+    var staleWarn = document.getElementById('env-warning-banner');
+    if (staleWarn) staleWarn.style.display = 'none';
     var creatingModal = document.getElementById('env-creating-modal');
     var creatingTitle = document.getElementById('env-creating-title');
     var label = providerLabel(provider);
@@ -2736,6 +2788,7 @@ deployBtn.addEventListener('click', function() {
         var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
         preflight = runAzureAutoSetupInteractive({
             repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster,
+            clusterResourceGroup: clusterResourceGroup,
             subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId,
             appName: appNameEl ? appNameEl.value.trim() : '',
             appId: selectedAppId
@@ -2746,7 +2799,11 @@ deployBtn.addEventListener('click', function() {
         preflight = Promise.resolve(null);
     }
 
-    preflight.then(function() {
+    preflight.then(function(setupResult) {
+        // Auto-setup's step log (incl. any ⚠️ AKS Cluster Admin warning) rides on
+        // the resolved payload; keep it so we can surface warnings once the
+        // environment is created (below), instead of discarding it as before.
+        var setupSteps = (setupResult && setupResult.steps) || [];
         creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster, namespace: namespace, profileName: selectedProfile.name };
         envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
@@ -2777,7 +2834,7 @@ deployBtn.addEventListener('click', function() {
                                 creatingModal.style.display = 'none';
                                 btn.textContent = 'Create Environment'; btn.disabled = false;
                                 statusEl.style.display = 'none';
-                                showEnvLanding(); showEnvSuccessBanner(provider, env); loadEnvTable();
+                                showEnvLanding(); showEnvSuccessBanner(provider, env); showEnvSetupWarnings(setupSteps); loadEnvTable();
                                 return;
                             }
                             if (v.state === 'failed') { failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : '')); return; }

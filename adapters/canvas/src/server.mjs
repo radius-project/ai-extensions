@@ -329,6 +329,24 @@ export function findFederatedCredentialNameCollision(desired, existingNameToSubj
     return null;
 }
 
+// Choose the resource group that actually holds the AKS cluster, for building
+// the Cluster Admin role scope. The deployment resource group (the editable RG
+// combo in the dialog) and the cluster's own resource group can legitimately
+// differ: a cluster in "rg-shared" can be targeted by an environment that
+// deploys into "rg-app". The dialog auto-syncs the RG combo to the cluster's RG
+// when a cluster is picked, but the combo stays editable — so a user who then
+// changes the RG would otherwise scope the AKS grant to a resource group that
+// does NOT contain the cluster, landing the Cluster Admin assignment on a path
+// where the cluster doesn't exist and failing the deploy at "Verify AKS Access".
+// `clusterResourceGroup` is sourced from /api/discover (which returns each
+// cluster's own resourceGroup) and is therefore authoritative when present;
+// fall back to the deployment resource group only when it is absent (e.g. a
+// custom-typed cluster name that never came from discovery).
+export function pickAksResourceGroup(clusterResourceGroup, resourceGroup) {
+    const own = typeof clusterResourceGroup === 'string' ? clusterResourceGroup.trim() : '';
+    return own || resourceGroup;
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -920,6 +938,12 @@ function createRequestHandler(instanceId) {
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
+                // The resource group that actually holds the AKS cluster, sourced
+                // from /api/discover (per-cluster resourceGroup) independently of
+                // the editable RG combo. Used to scope the AKS Cluster Admin grant
+                // so it lands on the cluster's real path even when the deployment
+                // resource group differs. Absent for a custom-typed cluster.
+                const clusterResourceGroup = (data.clusterResourceGroup || '').trim();
                 const serviceManagementReference = data.serviceManagementReference || '';
                 // ROUND 9 app-registration selection inputs:
                 //   data.appId     — an explicit App Registration the user picked
@@ -962,6 +986,10 @@ function createRequestHandler(instanceId) {
                 }
                 if (!isAksClusterName(clusterName)) {
                     fail(400, `Invalid cluster name "${clusterName}".`, 'invalid-cluster');
+                    return;
+                }
+                if (clusterResourceGroup && !isResourceGroupName(clusterResourceGroup)) {
+                    fail(400, `Invalid cluster resource group name "${clusterResourceGroup}".`, 'invalid-cluster-resource-group');
                     return;
                 }
                 if (data.tenantId && !isUuid(data.tenantId)) {
@@ -1577,7 +1605,16 @@ function createRequestHandler(instanceId) {
                 // a no-op on clusters that use only Kubernetes RBAC, so we
                 // attempt it whenever an AKS cluster is targeted and treat a
                 // failure as a warning rather than aborting the whole setup.
-                const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
+                //
+                // Scope the grant to the cluster's OWN resource group — not the
+                // deployment resource group above. The two can differ, and the
+                // editable RG combo in the dialog can be changed after a cluster
+                // is picked; scoping to the wrong RG puts the assignment on a path
+                // where the cluster doesn't exist, so the deploy still fails at
+                // "Verify AKS Access". pickAksResourceGroup prefers the cluster's
+                // discovered resource group and falls back only when it's absent.
+                const aksResourceGroup = pickAksResourceGroup(clusterResourceGroup, resourceGroup);
+                const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${aksResourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
                 steps.push(`Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`);
                 const aksRoleResult = await assignRoleByObjectId(spObjectId, 'Azure Kubernetes Service RBAC Cluster Admin', clusterScope);
                 if (aksRoleResult.ok) {

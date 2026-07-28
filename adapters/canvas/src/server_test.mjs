@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision } from "./server.mjs";
+import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -115,5 +115,29 @@ describe("findFederatedCredentialNameCollision", () => {
         expect(findFederatedCredentialNameCollision(null, new Map())).toBeNull();
         expect(findFederatedCredentialNameCollision([], null)).toBeNull();
         expect(findFederatedCredentialNameCollision([{ subject: "s" }], new Map([["n", "x"]]))).toBeNull();
+    });
+});
+
+describe("pickAksResourceGroup", () => {
+    // The AKS Cluster Admin grant must be scoped to the resource group that
+    // actually holds the cluster, which can differ from the deployment RG the
+    // user selected. pickAksResourceGroup prefers the cluster's discovered RG.
+    it("prefers the cluster's own resource group over the deployment RG", () => {
+        expect(pickAksResourceGroup("rg-cluster", "rg-deploy")).toBe("rg-cluster");
+    });
+
+    it("falls back to the deployment RG when the cluster RG is absent", () => {
+        expect(pickAksResourceGroup("", "rg-deploy")).toBe("rg-deploy");
+        expect(pickAksResourceGroup(undefined, "rg-deploy")).toBe("rg-deploy");
+        expect(pickAksResourceGroup(null, "rg-deploy")).toBe("rg-deploy");
+    });
+
+    it("trims whitespace and falls back on a blank cluster RG", () => {
+        expect(pickAksResourceGroup("  rg-cluster  ", "rg-deploy")).toBe("rg-cluster");
+        expect(pickAksResourceGroup("   ", "rg-deploy")).toBe("rg-deploy");
+    });
+
+    it("ignores non-string cluster RG values", () => {
+        expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
     });
 });

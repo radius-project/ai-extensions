@@ -301,6 +301,23 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("window.addEventListener('focus', envGhAutoRecheck)");
     });
 
+    it("scopes the AKS grant to the cluster's own resource group and surfaces setup warnings on success", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // The cluster's own RG (from discovery) is sent independently of the
+        // editable deployment RG combo, so the server scopes AKS Cluster Admin to
+        // the cluster's real path even when the deployment RG differs.
+        expect(html).toContain("function findAzureClusterResourceGroup(");
+        expect(html).toContain("clusterResourceGroup = findAzureClusterResourceGroup(cluster)");
+        expect(html).toContain("clusterResourceGroup: clusterResourceGroup");
+        expect(html).toContain("payload.clusterResourceGroup = params.clusterResourceGroup");
+        // The auto-setup step log (incl. the best-effort AKS warning) is surfaced
+        // on the SUCCESS path, not just swallowed into the error message.
+        expect(html).toContain("function showEnvSetupWarnings(");
+        expect(html).toContain("preflight.then(function(setupResult)");
+        expect(html).toContain("showEnvSetupWarnings(setupSteps)");
+        expect(html).toContain('id="env-warning-banner"');
+    });
+
     it("always sends appName on create so explicit-empty is server-detectable", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Omitted vs explicit-blank must be distinguishable server-side.
