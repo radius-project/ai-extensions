@@ -297,18 +297,23 @@ function radiusIsManagedClusterResource(resource) {
 }
 
 // Inline SVG (as a data URI, mirroring radiusGetIconSvg) for a status badge.
+var __radDeployBadgeSvgCache = {};
 function radiusDeployBadgeSvg(kind) {
+    var k = kind || 'progress';
+    if (__radDeployBadgeSvgCache[k]) return __radDeployBadgeSvgCache[k];
     var svg;
-    if (kind === 'success') {
+    if (k === 'success') {
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="4" fill="#1a7f37"/><path d="M4.3 8.2l2.3 2.3 4.8-5" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    } else if (kind === 'failed') {
+    } else if (k === 'failed') {
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#cf222e" stroke-width="2.4" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
     } else {
         // Hourglass (queued / in progress).
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#9a6700"><path d="M4 1.75a.75.75 0 000 1.5h.5V4.6c0 .93.44 1.8 1.18 2.36L6.83 8l-1.15.94A2.95 2.95 0 004.5 11.3v1.45H4a.75.75 0 000 1.5h8a.75.75 0 000-1.5h-.5V11.3a2.95 2.95 0 00-1.18-2.36L9.17 8l1.15-.94A2.95 2.95 0 0011.5 4.6V3.25h.5a.75.75 0 000-1.5H4zm2 1.5h4V4.6c0 .5-.23.97-.62 1.28L8 7.05 6.62 5.88A1.65 1.65 0 016 4.6V3.25z"/></svg>';
     }
     svg = svg.replace('<svg ', '<svg width="40" height="40" ');
-    return 'data:image/svg+xml,' + encodeURIComponent(svg);
+    var uri = 'data:image/svg+xml,' + encodeURIComponent(svg);
+    __radDeployBadgeSvgCache[k] = uri;
+    return uri;
 }
 
 function radiusGetIconSvg(type) {
