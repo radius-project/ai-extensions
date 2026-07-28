@@ -1513,6 +1513,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
               </div>
             </div>
             <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
+            <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
           </div>
         </div>
 
@@ -2109,6 +2110,13 @@ var envGhMenu = document.getElementById('env-gh-account-menu');
 var envGhValue = document.getElementById('env-gh-account-value');
 var envGhOptions = document.getElementById('env-gh-account-options');
 var envGhNote = document.getElementById('env-gh-identity-note');
+var envGhRecheck = document.getElementById('env-gh-recheck');
+// True while the identity note is showing a missing-scope warning the user must
+// fix out-of-band (run a gh command). Gates the auto re-check on window refocus
+// so we only re-poll gh when there is actually something to clear.
+var envGhScopeWarn = false;
+// Guards against overlapping re-checks (rapid focus events / button spam).
+var envGhChecking = false;
 
 function openGhAccountMenu(open) {
     if (!envGhMenu) return;
@@ -2129,6 +2137,8 @@ function renderGitHubIdentity() {
         // Detection failed or no account — keep the field hidden rather than
         // showing a misleading control. Setup still runs with whatever gh uses.
         envGhField.style.display = 'none';
+        envGhScopeWarn = false;
+        if (envGhRecheck) envGhRecheck.style.display = 'none';
         return;
     }
     envGhField.style.display = '';
@@ -2168,6 +2178,7 @@ function renderGitHubIdentity() {
 
     if (envGhNote) {
         var warn = '';
+        var scopeWarn = false;
         if (id.mismatch && id.displayLogin) {
             warn = 'The app shows @' + id.displayLogin + ' but setup will act as @' + id.actingLogin +
                 '. If deployment fails with a permission error, switch to the account that has access to this repo and your Azure tenant.';
@@ -2190,7 +2201,13 @@ function renderGitHubIdentity() {
                 ' && gh auth refresh -h github.com' + refreshScopeFlags;
             warn = 'The active account @' + id.actingLogin + ' is missing the ' + missNames.join(' and ') + ' scope' + (missNames.length > 1 ? 's' : '') +
                 ' environment setup needs. Run "' + refreshCmd + '" or switch accounts.';
+            scopeWarn = true;
         }
+        // Remember whether a fixable scope warning is on screen, and offer the
+        // manual Re-check control only in that case. Returning from the terminal
+        // (window refocus) auto re-checks while this is true; see below.
+        envGhScopeWarn = scopeWarn;
+        if (envGhRecheck) envGhRecheck.style.display = scopeWarn ? '' : 'none';
         if (warn) {
             envGhNote.textContent = warn;
             envGhNote.style.color = 'var(--rad-warning, #9a6700)';
@@ -2203,13 +2220,40 @@ function renderGitHubIdentity() {
     }
 }
 
-function loadGitHubIdentity() {
-    if (envGhValue) envGhValue.textContent = 'Detecting…';
-    fetch('/api/github-identity')
+function loadGitHubIdentity(fresh) {
+    if (envGhChecking) return;
+    envGhChecking = true;
+    // On the very first load show the neutral "Detecting…" placeholder; on a
+    // re-check the account value is already shown, so give feedback on the
+    // button instead of blanking the field.
+    if (fresh && envGhRecheck) { envGhRecheck.disabled = true; envGhRecheck.textContent = 'Checking…'; }
+    else if (envGhValue) envGhValue.textContent = 'Detecting…';
+    // fresh=1 asks the server to drop its memoized gh snapshot so newly added
+    // scopes (e.g. write:packages) are actually observed.
+    fetch('/api/github-identity' + (fresh ? '?fresh=1' : ''))
         .then(function(r) { return r.json(); })
         .then(function(d) { GH_IDENTITY = d || {}; renderGitHubIdentity(); })
-        .catch(function() { if (envGhField) envGhField.style.display = 'none'; });
+        .catch(function() { if (envGhField) envGhField.style.display = 'none'; })
+        .then(function() {
+            envGhChecking = false;
+            if (envGhRecheck) { envGhRecheck.disabled = false; envGhRecheck.textContent = 'Re-check'; }
+        });
 }
+
+// Manual re-check: the user ran the gh command and wants the warning re-evaluated.
+if (envGhRecheck) envGhRecheck.addEventListener('click', function() { loadGitHubIdentity(true); });
+
+// Auto re-check when the canvas regains focus. The user leaves to a terminal to
+// run the remediation command and comes back; refocus is the natural signal to
+// re-poll. Only fire while a fixable scope warning is showing so we do not run
+// gh on every unrelated focus.
+function envGhAutoRecheck() {
+    if (envGhScopeWarn && !envGhChecking && envGhField && envGhField.style.display !== 'none') {
+        loadGitHubIdentity(true);
+    }
+}
+document.addEventListener('visibilitychange', function() { if (!document.hidden) envGhAutoRecheck(); });
+window.addEventListener('focus', envGhAutoRecheck);
 
 function switchGitHubAccount(login) {
     if (!login) return;

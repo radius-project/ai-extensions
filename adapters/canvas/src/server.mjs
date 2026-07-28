@@ -24,7 +24,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -727,6 +727,12 @@ function createRequestHandler(instanceId) {
         if (pathname === "/api/github-identity" && req.method === "GET") {
             res.setHeader("Content-Type", "application/json");
             try {
+                // A re-check (?fresh=1) means the user just changed their gh auth
+                // out-of-band (e.g. ran `gh auth refresh` to add write:packages).
+                // The snapshot is memoized for the process, so drop it first and
+                // force `gh auth status` to be re-read; otherwise we'd return the
+                // stale pre-refresh scopes and the warning would never clear.
+                if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
                 res.writeHead(200);
                 res.end(JSON.stringify(getGitHubIdentity()));
             } catch (e) {

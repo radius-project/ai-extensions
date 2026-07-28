@@ -292,6 +292,13 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("gh auth switch -h github.com -u ");
         expect(html).toContain("gh auth refresh -h github.com");
         expect(html).not.toMatch(/gh auth refresh[^'"`]*-u /);
+        // After running the command out-of-band the UX must be able to detect the
+        // change: a manual Re-check button plus an auto re-check on window refocus,
+        // both hitting the cache-busting ?fresh=1 identity endpoint.
+        expect(html).toContain('id="env-gh-recheck"');
+        expect(html).toContain("'/api/github-identity' + (fresh ? '?fresh=1' : '')");
+        expect(html).toContain("visibilitychange");
+        expect(html).toContain("window.addEventListener('focus', envGhAutoRecheck)");
     });
 
     it("always sends appName on create so explicit-empty is server-detectable", () => {
