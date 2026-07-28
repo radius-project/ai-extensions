@@ -11,8 +11,8 @@ import {
 
 // Read a committed recipe-pack snapshot from ./testdata. These are verbatim
 // copies of the packs in radius-project/resource-types-contrib@main
-// (recipepack/azure/aks-recipepack.bicep and
-// recipepack/kubernetes/default-recipepack.bicep). They let the parser be
+// (recipe-packs/azure/aks-recipepack.bicep and
+// recipe-packs/kubernetes/default-recipepack.bicep). They let the parser be
 // exercised against the real pack structure without any network I/O (hermetic).
 // To refresh: re-download each file's raw contents over the pinned ref and
 // overwrite it here, then update the expected tables below if entries changed.
@@ -87,21 +87,21 @@ describe("deriveConcreteResource", () => {
 
 describe("recipePackPathForProvider", () => {
   it("selects the azure pack for the azure provider", () => {
-    expect(recipePackPathForProvider("azure")).toBe("recipepack/azure/aks-recipepack.bicep");
+    expect(recipePackPathForProvider("azure")).toBe("recipe-packs/azure/aks-recipepack.bicep");
   });
 
   it("selects the kubernetes default pack for aws and kubernetes", () => {
-    expect(recipePackPathForProvider("aws")).toBe("recipepack/kubernetes/default-recipepack.bicep");
-    expect(recipePackPathForProvider("kubernetes")).toBe("recipepack/kubernetes/default-recipepack.bicep");
+    expect(recipePackPathForProvider("aws")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
+    expect(recipePackPathForProvider("kubernetes")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
   });
 
   it("falls back to the kubernetes default pack for an unknown provider", () => {
-    expect(recipePackPathForProvider("gcp")).toBe("recipepack/kubernetes/default-recipepack.bicep");
+    expect(recipePackPathForProvider("gcp")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
   });
 
   it("builds a contents API path pinned to the main ref", () => {
     expect(recipePackContentPath("azure")).toBe(
-      "/repos/radius-project/resource-types-contrib/contents/recipepack/azure/aks-recipepack.bicep?ref=main",
+      "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep?ref=main",
     );
   });
 });
