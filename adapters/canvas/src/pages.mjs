@@ -2748,7 +2748,15 @@ function loadDeployments(fresh) {
                 var statusHtml = statusCell(status);
                 // The app name and the "Monitor Graph" link both route to the
                 // Applications → Deployed tab (the live deployed app graph).
-                var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment) + '&application=' + encodeURIComponent(dep.app);
+                // sourceRef (the deploy run's head_branch, surfaced by
+                // /api/list-deployments) is threaded through as branch= so
+                // /api/deployed-graph can address the durable graph at the exact
+                // per-(sourceBranch, scope, env) path the workflow published it
+                // under. Empty on rare rows with no linked run — the server then
+                // falls back to the session's last-dispatched branch, then 'main'.
+                var deployedHref = '/?page=deployed&environment=' + encodeURIComponent(dep.environment)
+                    + '&application=' + encodeURIComponent(dep.app)
+                    + (dep.sourceRef ? '&branch=' + encodeURIComponent(dep.sourceRef) : '');
                 var monitorCell = '<a class="rad-monitor-link" href="' + escapeHtmlClient(deployedHref) + '" title="Monitor the deployed application graph">Monitor Graph</a>';
                 // Workflow → the GitHub Actions run that produced this deployment.
                 var workflowCell = dep.runUrl
