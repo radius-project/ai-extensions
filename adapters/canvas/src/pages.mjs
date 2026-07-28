@@ -2179,7 +2179,15 @@ function renderGitHubIdentity() {
             var missNames = [], refreshScopes = [];
             if (!id.actingHasWorkflow) { missNames.push('workflow'); refreshScopes.push('workflow'); }
             if (!id.actingHasPackages) { missNames.push('write:packages'); refreshScopes.push('read:packages'); refreshScopes.push('write:packages'); }
-            var refreshCmd = 'gh auth refresh -h github.com -u ' + id.actingLogin + refreshScopes.map(function(s){ return ' -s ' + s; }).join('');
+            // gh auth refresh has no --user flag: it refreshes whichever
+            // account is ACTIVE for the host. In a multi-account (EMU/enterprise)
+            // setup the active account may not be the one we act as, so first
+            // switch to it with "gh auth switch -u" (which does take --user), then
+            // run a bare refresh. Adding a -u flag to the refresh call errors
+            // with "unknown shorthand flag: 'u'".
+            var refreshScopeFlags = refreshScopes.map(function(s){ return ' -s ' + s; }).join('');
+            var refreshCmd = 'gh auth switch -h github.com -u ' + id.actingLogin +
+                ' && gh auth refresh -h github.com' + refreshScopeFlags;
             warn = 'The active account @' + id.actingLogin + ' is missing the ' + missNames.join(' and ') + ' scope' + (missNames.length > 1 ? 's' : '') +
                 ' environment setup needs. Run "' + refreshCmd + '" or switch accounts.';
         }

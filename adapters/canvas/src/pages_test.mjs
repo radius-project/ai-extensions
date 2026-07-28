@@ -285,6 +285,13 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("write:packages");
         // Default (non-warning) note names both scopes setup needs.
         expect(html).toContain("<code>write:packages</code>");
+        // `gh auth refresh` has NO --user flag, so the remediation must first
+        // `gh auth switch -u <login>` and then run a bare `gh auth refresh`.
+        // Guard against regressing to `gh auth refresh ... -u <login>`, which
+        // errors with "unknown shorthand flag: 'u'".
+        expect(html).toContain("gh auth switch -h github.com -u ");
+        expect(html).toContain("gh auth refresh -h github.com");
+        expect(html).not.toMatch(/gh auth refresh[^'"`]*-u /);
     });
 
     it("always sends appName on create so explicit-empty is server-detectable", () => {
