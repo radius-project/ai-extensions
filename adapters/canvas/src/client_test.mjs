@@ -260,11 +260,11 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
     it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
-        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && r.outputResources && r.outputResources.length > 0)");
+        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0)");
     });
 
     it("relabels the modeled node with the recipe-resolved concrete type", () => {
-        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
+        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = (plannedMode || deployMode) ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
         expect(CLIENT_GRAPH_JS).toContain("radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)");
     });
 
@@ -326,9 +326,50 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 });
 
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
-    it("renders resources without an explicit deploy status as pending instead of ordinary modeled nodes", () => {
+    it("keeps only managed-cluster nodes gray and colors ordinary compute nodes by deploy status", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
+        expect(CLIENT_GRAPH_JS).toContain("if (radiusIsManagedClusterResource(r)) return { bg: '#f6f8fa', border: '#8b949e' };");
         expect(CLIENT_GRAPH_JS).toContain("RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending']");
         expect(CLIENT_GRAPH_JS).not.toContain("if (deployMode && r.deployStatus) {");
+    });
+
+    it("recognizes a managed cluster from either the node type or its resolved output", () => {
+        const isManagedCluster = new Function("window", `${CLIENT_GRAPH_JS}; return radiusIsManagedClusterResource;`)({ addEventListener() {} });
+        expect(isManagedCluster({
+            type: "Microsoft.ContainerService/managedClusters@2024-02-01",
+        })).toBe(true);
+        expect(isManagedCluster({
+            type: "Radius.Compute/containers",
+            outputResources: [{ type: "Microsoft.ContainerService/managedClusters" }],
+        })).toBe(true);
+        expect(isManagedCluster({
+            type: "Radius.Compute/containers",
+            outputResources: [{ type: "apps/Deployment@v1" }],
+        })).toBe(false);
+    });
+
+    it("uses gray for in-flight, blue for completed, and red for failed resources", () => {
+        const colors = new Function("window", `${CLIENT_GRAPH_JS}; return RADIUS_DEPLOY_STATUS_COLORS;`)({ addEventListener() {} });
+        expect(colors.in_progress).toEqual({ bg: "#f6f8fa", border: "#8b949e" });
+        expect(colors.success).toEqual({ bg: "#ddf4ff", border: "#0969da" });
+        expect(colors.failed).toEqual({ bg: "#ffebe9", border: "#cf222e" });
+    });
+
+    it("maps each deploy status to a corner badge (hourglass / check / x)", () => {
+        const badgeKind = new Function("window", `${CLIENT_GRAPH_JS}; return radiusDeployBadgeKind;`)({ addEventListener() {} });
+        expect(badgeKind("pending")).toBe("progress");
+        expect(badgeKind("in_progress")).toBe("progress");
+        expect(badgeKind("success")).toBe("success");
+        expect(badgeKind("failed")).toBe("failed");
+        // Every node in deployMode carries a rendered status badge.
+        expect(CLIENT_GRAPH_JS).toContain("deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : ''");
+        expect(CLIENT_GRAPH_JS).toContain("rad-node__badge");
+    });
+
+    it("shares the planned graph's shape but keeps solid (regular) borders while deploying", () => {
+        // The deploying graph matches the planned graph's one-node-per-resource
+        // shape and resolved type labels, but its borders/lines stay solid.
+        expect(CLIENT_GRAPH_JS).toContain("borderStyle: plannedMode ? 'dashed' : 'solid'");
+        expect(CLIENT_GRAPH_JS).toContain("var shortType = (plannedMode || deployMode) && resolvedResource");
     });
 });
