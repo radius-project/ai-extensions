@@ -260,9 +260,9 @@ window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 
 // Deploy-status → card colors, applied when radiusRenderGraph runs with
 // { deployMode: true } (the live "Deploying" page). In-flight/queued resources
-// read gray, a completed resource turns blue, and a failed one turns red. The
-// compute/app node stays gray throughout (see getNodeColors); its overall
-// status is conveyed by the corner status badge instead of the fill.
+// read gray, a completed resource turns blue, and a failed one turns red.
+// Managed-cluster resources stay gray throughout (see getNodeColors); their
+// overall status is conveyed by the corner status badge instead of the fill.
 var RADIUS_DEPLOY_STATUS_COLORS = {
     pending:     { bg: '#f6f8fa', border: '#8b949e' },
     in_progress: { bg: '#f6f8fa', border: '#8b949e' },
