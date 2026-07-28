@@ -10,3 +10,12 @@ export {
 export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";
 export { filterGraphVisualizationResources } from "./visualization.js";
+export {
+  DEFAULT_RADIUS_SCOPE,
+  LEGACY_DEPLOY_GRAPH_FILE,
+  LIVE_GRAPH_FILE,
+  RADIUS_DEPLOY_STATUS_BRANCH,
+  RADIUS_GRAPH_BRANCH,
+  deployedGraphPath,
+} from "./deployed-graph-path.js";
+export type { DeployedGraphKey } from "./deployed-graph-path.js";
