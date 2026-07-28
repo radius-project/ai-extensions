@@ -149,6 +149,84 @@ export function fetchDeployGraph(repo) {
     ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
 }
 
+// Normalize a raw graph blob (from any of the durable/live/legacy fetchers or
+// the session cache) to a resources array. The workflow-published files are
+// `{ resources: [...] }`, but some legacy shapes were flat arrays; both are
+// accepted so the resolver never has to care which one a fetcher returned.
+function graphToResources(graph) {
+    if (!graph) return [];
+    return Array.isArray(graph) ? graph : (graph.resources || []);
+}
+
+// Clone a resources array and stamp every node (and its outputResources) as
+// pending, so the modeled/planned graph can serve as a greyed skeleton on the
+// Deployed tab when no deployed graph is available yet. Deep-clones so the
+// caller's modeled state isn't mutated (the same array typically also feeds
+// the Modeled/Planned tabs).
+function toScaffold(resources) {
+    if (!Array.isArray(resources) || resources.length === 0) return [];
+    const clone = JSON.parse(JSON.stringify(resources));
+    for (const r of clone) {
+        r.deployStatus = "pending";
+        if (Array.isArray(r.outputResources)) {
+            for (const o of r.outputResources) o.deployStatus = "pending";
+        }
+    }
+    return clone;
+}
+
+/**
+ * Resolve the resources array + provenance the /api/deployed-graph handler
+ * should render for one (sourceBranch, scope, env) request. Pure: all I/O
+ * arrives via injected fetchers, so this is safe to unit-test.
+ *
+ * Priority chain (mirrors the read priority documented above the fetchers):
+ *   1. Durable  — radius-graph:<branch>/.radius/deployments/<scope>-<env>/app-graph.json
+ *   2. Live     — radius-deploy-status:deploy-graph-live.json (structured snapshot loop)
+ *   3. Legacy   — radius-deploy-status:deploy-graph.json (old workflow single file)
+ *   4. Session  — the graph captured by /api/deploy in entry.state.deployedGraph
+ *                 for the currently-running / last-finished deploy this session
+ *   5. Scaffold — the modeled/planned resources with every node stamped pending
+ *                 so the Deployed tab always shows *some* topology (grey) even
+ *                 before a deploy has ever completed
+ *   6. None     — empty resources; the client shows "Nothing deployed yet"
+ *
+ * `source` on the return tells the client which tier answered so it can decide
+ * whether to keep polling: durable is terminal; live/legacy/session are the
+ * happy path during a deploy; scaffold/none warrant continued polling.
+ */
+export async function resolveDeployedGraph({
+    key,
+    fetchers,
+    sessionDeployedGraph = null,
+    scaffoldResources = null,
+}) {
+    const { fetchDurable, fetchLive, fetchLegacy } = fetchers;
+
+    if (fetchDurable) {
+        const durable = await fetchDurable(key);
+        if (durable) return { resources: graphToResources(durable), source: "durable" };
+    }
+    if (fetchLive) {
+        const live = await fetchLive();
+        if (live) return { resources: graphToResources(live), source: "live" };
+    }
+    if (fetchLegacy) {
+        const legacy = await fetchLegacy();
+        if (legacy) return { resources: graphToResources(legacy), source: "legacy" };
+    }
+    if (sessionDeployedGraph) {
+        // Same tier as legacy — it's what fetchLegacy captured during this
+        // session's deploy. A fresh network legacy read wins over it above,
+        // but if the file was deleted (e.g. by a delete workflow) we still
+        // have the last-good snapshot in memory.
+        return { resources: graphToResources(sessionDeployedGraph), source: "legacy" };
+    }
+    const scaffold = toScaffold(scaffoldResources);
+    if (scaffold.length > 0) return { resources: scaffold, source: "scaffold" };
+    return { resources: [], source: "none" };
+}
+
 export function normalizeDeployedGraph(resources) {
     if (!Array.isArray(resources) || resources.length < 2) return resources;
     const keyOf = r => r.id || r.name;

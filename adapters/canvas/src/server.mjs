@@ -19,6 +19,7 @@ import {
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
+  DEFAULT_RADIUS_SCOPE,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
@@ -46,7 +47,9 @@ import {
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
-  fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
+  fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState,
+  fetchDeployGraph, fetchDeployedGraph, fetchLiveDeployedGraph,
+  resolveDeployedGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
   parseResourceProgress, parseRadDeployLog,
@@ -1579,25 +1582,78 @@ function createRequestHandler(instanceId) {
                 || entry?.state?.contextRepo || entry?.state?.deployingRepo
                 || entry?.state?.plannedRepo || entry?.state?.graphTargetRepo || '';
             res.setHeader("Content-Type", "application/json");
-            if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '' })); return; }
-            // Prefer the live deploy-graph.json on the orphan status branch (source
-            // of truth). Fall back to any graph captured in state this session.
-            let graph = await fetchDeployGraph(repo);
-            if (!graph && entry?.state?.deployedGraph) graph = entry.state.deployedGraph;
-            let resources = Array.isArray(graph) ? graph : (graph?.resources || []);
-            // DEMO: present the deployed topology as container → cache → database.
+            if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '', source: 'none' })); return; }
+
+            // Address the deployment by (sourceBranch, scope, environment) so the
+            // durable read hits the right file on the radius-graph orphan branch.
+            // `branch` may come from the query (the Deployments row's Monitor
+            // Graph link surfaces it) or from the session's last dispatched
+            // deploy. Scope defaults to the Radius CLI's implicit resource group;
+            // wire it to a per-deployment value when we start threading it
+            // through the workflow. Environment is the GitHub environment name.
+            const sourceBranch = (reqUrl.searchParams.get('branch') || '').trim()
+                || entry?.state?.deployingBranch
+                || (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo) ? entry.state.workspaceBranch : "")
+                || entry?.state?.contextBranch
+                || "main";
+            const environment = (reqUrl.searchParams.get('environment') || '').trim()
+                || entry?.state?.envName
+                || "";
+
+            // Priority chain: durable → live → legacy → session cache → modeled
+            // scaffold → none. The pure resolver in deploy.mjs owns the order;
+            // this handler only injects the real fetchers and the modeled graph
+            // (when it matches the requested repo+branch) as the scaffold source.
+            // Rebuilding the modeled graph via `rad app graph` here would be too
+            // expensive for a 5s poll, so we reuse whatever the Modeled tab has
+            // already cached in-session.
+            const scaffoldResources =
+                entry?.state?.graphResources
+                && entry.state.graphTargetRepo === repo
+                && entry.state.graphBranch === sourceBranch
+                    ? entry.state.graphResources
+                    : null;
+
+            let resources = [];
+            let source = "none";
+            // A missing environment is only fatal for the DURABLE tier (which
+            // needs the full (branch, scope, env) key). Live/legacy/session/
+            // scaffold don't need it, so still try them.
+            try {
+                const resolved = await resolveDeployedGraph({
+                    key: { sourceBranch, scope: DEFAULT_RADIUS_SCOPE, environment },
+                    fetchers: {
+                        fetchDurable: environment
+                            ? (key) => fetchDeployedGraph(repo, key)
+                            : null,
+                        fetchLive: () => fetchLiveDeployedGraph(repo),
+                        fetchLegacy: () => fetchDeployGraph(repo),
+                    },
+                    sessionDeployedGraph: entry?.state?.deployedGraph || null,
+                    scaffoldResources,
+                });
+                resources = resolved.resources;
+                source = resolved.source;
+            } catch (e) {
+                // Never let a transient GitHub error break the Deployed tab —
+                // surface a "none" response so the client can retry on its poll.
+                console.error(`[radius deployed-graph] resolve failed for ${repo}: ${e?.message || e}`);
+            }
+
+            // Same post-processing for every source: rewire the demo chain,
+            // synthesize omitted connections, hide implementation-detail nodes.
+            // Applied to the scaffold too so the Deployed tab's greyed graph
+            // matches the topology the Modeled/Planned tabs render.
             resources = rewireDeployedGraphChain(resources);
-            // Re-derive connections (e.g. database→secret) that rad app graph
-            // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
-            // Hide implementation-detail resources (containerImages + their
-            // ghcr-registry-creds secret) from the deployed view too, matching
-            // every other graph state. Applied last so any edges the rewire/
-            // normalize steps synthesized toward those nodes are also stripped.
-            // The raw deploy-graph.json on the status branch is left untouched.
             resources = filterGraphVisualizationResources(resources);
             res.writeHead(200);
-            res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
+            res.end(JSON.stringify({
+                resources,
+                repo,
+                branch: sourceBranch,
+                source,
+            }));
             return;
         }
 
