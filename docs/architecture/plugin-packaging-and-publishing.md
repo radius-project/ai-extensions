@@ -1,6 +1,6 @@
 # Plugin packaging and publishing
 
-How the `radius` Copilot plugin is laid out, how its canvas bundle is built from the workspace source, and how CI publishes a complete, installable artifact to a generated `release` branch without committing the bundle to `main`.
+How the `radius` Copilot plugin is laid out, how its canvas bundle is built from the workspace source, and how CI publishes a complete, installable, version-tagged artifact to a generated `release` branch without committing the bundle to `main`.
 
 ```mermaid
 graph TD
@@ -32,7 +32,9 @@ graph TD
 - **`adapters/canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file.
 - **`plugins/radius/`** — the plugin that Copilot installs. Contains the tracked `plugin.json`, `package.json`, `README.md`, and `skills/`, plus the generated `extension.mjs`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at the plugin.
-- **`.github/workflows/publish.yml`** — the CI workflow that builds the bundle and publishes the whole plugin to the `release` branch.
+- **`scripts/version.mjs`** — keeps the single released version in lockstep across `plugin.json`, `package.json`, and `marketplace.json`; bumps it by semver level and verifies consistency in CI.
+- **`.github/workflows/release.yml`** — the manually triggered workflow that bumps the version, builds and attests the bundle, and publishes the `release` branch, the immutable `v<version>` tag, and the GitHub release.
+- **`.github/workflows/build.yml`** — read-only CI for pull requests and `main`; never publishes.
 
 ## How it works
 
@@ -65,33 +67,43 @@ esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencie
 
 The bundle is intentionally git-ignored so `main` never carries a large generated file that would cause constant merge conflicts.
 
-### 3. The publish: assembling a complete artifact on `release`
+### 3. The release: assembling a complete, versioned artifact on `release`
 
-Because the bundle is git-ignored and the marketplace installs only git-tracked files with no build step, the bundle would never ship from `main`. `.github/workflows/publish.yml` closes that gap. It runs on every push to `main` (after a PR merges) and on manual `workflow_dispatch`, with `permissions: contents: write` and a `concurrency` group so only one publish runs at a time.
+Because the bundle is git-ignored and the marketplace installs only git-tracked files with no build step, the bundle would never ship from `main`. `.github/workflows/release.yml` closes that gap. It runs **only on manual `workflow_dispatch`** with a semver `bump` input (`patch` by default, or `minor` / `major`) and an optional `dry_run`, using `permissions: contents: write` (push refs), `id-token: write` and `attestations: write` (provenance), plus a `concurrency` group so only one release runs at a time.
 
 ```mermaid
 graph TD
-    subgraph CI["publish.yml (on push to main)"]
-        Steps["install --frozen-lockfile<br/>typecheck / test / build"]
-        Assemble["git checkout -B release<br/>git add -f extension.mjs<br/>commit + force-push<br/>move latest tag"]
+    subgraph CI["release.yml (manual dispatch, bump: patch|minor|major)"]
+        Steps["install --frozen-lockfile<br/>typecheck / test"]
+        Version["resolve next version<br/>fail if v&lt;version&gt; tag exists<br/>bump the three manifests"]
+        BuildStep["build + attest provenance"]
+        Assemble["push bump to main<br/>git checkout -B release<br/>git add -f extension.mjs<br/>force-push release<br/>push immutable v&lt;version&gt; tag"]
     end
 
-    Main["main branch<br/>(source, no bundle)"] -->|triggers| Steps
-    Steps -->|extension.mjs built| Assemble
+    Main["main branch<br/>(source, no bundle)"] -->|dispatch| Steps
+    Steps --> Version
+    Version --> BuildStep
+    BuildStep -->|attested extension.mjs| Assemble
 
-    subgraph Published["Install targets"]
+    subgraph Published["Install and audit targets"]
         Release["release branch<br/>(main tree + 1 bundle commit)"]
-        Latest["latest tag"]
+        Tag["v&lt;version&gt; tag<br/>(immutable)"]
+        GHRelease["GitHub release<br/>(notes + attested bundle)"]
     end
 
     Assemble --> Release
-    Assemble --> Latest
+    Assemble --> Tag
+    Assemble --> GHRelease
 
     Release -->|source pins ref: release| MP[".github/plugin/marketplace.json"]
     MP -->|install from the app| Install["GitHub Copilot app<br/>installs complete plugin"]
 ```
 
-The publish step is deliberately simple: `git checkout -B release` **recreates** the `release` branch at the just-built `main` commit, then a single commit force-adds the otherwise-ignored `extension.mjs`. The result is that `release` equals the entire `main` tree — `plugin.json`, `package.json`, all `skills/`, and `README.md` — **plus** one commit that adds only the bundle. The skills and manifest travel to `release` automatically because the branch is the `main` tree; there is no separate copy step. Finally the `latest` tag is force-moved to the new `release` head.
+The version lives in three tracked manifests — `plugins/radius/plugin.json`, `plugins/radius/package.json`, and `.github/plugin/marketplace.json` (both `metadata.version` and the plugin entry). `scripts/version.mjs` is the only thing that writes them: `--bump <level>` applies the semver bump to all three, and `--check` fails if they disagree. `build.yml` runs `--check` on every pull request, so the manifests cannot drift.
+
+The publish step itself is deliberately simple: after the bump commit lands on `main`, `git checkout -B release` **recreates** the `release` branch at that commit, then a single commit force-adds the otherwise-ignored `extension.mjs`. The result is that `release` equals the entire `main` tree — `plugin.json`, `package.json`, all `skills/`, and `README.md` — **plus** one commit that adds only the bundle. The skills and manifest travel to `release` automatically because the branch is the `main` tree; there is no separate copy step. Finally the annotated `v<version>` tag is pushed **without** `--force` (so an existing tag fails the run instead of being overwritten) and a GitHub release is created with the bundle attached.
+
+Order matters: everything that can fail — typecheck, test, build, attest — runs **before** the first push, so a failed run leaves `main`, `release`, and the tags untouched.
 
 ### 4. The install: resolving the complete artifact
 
@@ -112,8 +124,10 @@ The installer copies the git-tracked files at `plugins/radius/` from the `releas
 
 ## Notable details
 
-- **Skills and canvas stay in lockstep.** Both come from the same `main` commit tree that the publish job checked out, so a PR that updates a skill and a PR that updates canvas code both land on `release` together on the next publish. There is no way for the shipped skills to lag the shipped bundle.
-- **`release` is generated — never hand-edit it.** The publish job force-recreates the branch every run, so any manual commit to `release` would be overwritten. `main` remains the single source of truth.
-- **The publish gates on the same checks as CI.** `typecheck` and `test` run before the bundle is assembled, so a broken build never publishes; on failure, `release` and `latest` keep pointing at the last good artifact.
-- **`build.yml` also uploads the bundle as a read-only CI artifact** for per-PR inspection; only `publish.yml` writes to `release`.
-- **Canvas activation is a separate concern.** This pipeline guarantees a complete, installable plugin. Whether the installed plugin's `extensions` are auto-discovered and the canvas registered is a GitHub App behavior, tracked outside this packaging/publishing flow. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../design/2026-07-canvas-bundle-publishing.md) for the design and scope.
+- **Skills and canvas stay in lockstep.** Both come from the same `main` commit tree that the release job checked out, so a PR that updates a skill and a PR that updates canvas code both land on `release` together on the next release. There is no way for the shipped skills to lag the shipped bundle.
+- **`release` is generated — never hand-edit it.** The release job force-recreates the branch every run, so any manual commit to `release` would be overwritten. `main` remains the single source of truth.
+- **Version tags are immutable.** `v<version>` tags are pushed without `--force` and should be protected in repository settings; re-running a release with an already-published version fails the run instead of moving the tag. `release` is the only moving pointer.
+- **Every published bundle is attested.** `actions/attest-build-provenance` records signed provenance for `extension.mjs`, so a consumer can verify which workflow, repository, and commit produced it: `gh attestation verify extension.mjs --repo radius-project/ai-extensions`.
+- **The release gates on the same checks as CI.** `typecheck` and `test` run before the bundle is assembled, so a broken build never publishes; on failure, `release` and the tags keep pointing at the last good artifact.
+- **`build.yml` also uploads the bundle as a read-only CI artifact** for per-PR inspection, and verifies manifest version consistency; only `release.yml` writes to `release`.
+- **Canvas activation is a separate concern.** This pipeline guarantees a complete, installable plugin. Whether the installed plugin's `extensions` are auto-discovered and the canvas registered is a GitHub App behavior, tracked outside this packaging/publishing flow. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../design/2026-07-canvas-bundle-publishing.md) for the design and scope. That design's Option 2 (publish on every merge to `main`) has since moved to its Option 3 — versioned releases cut on demand — as described above.

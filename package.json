@@ -24,7 +24,9 @@
     "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "pnpm run build"
+    "release": "pnpm run build",
+    "release:version": "node scripts/version.mjs",
+    "release:check": "node scripts/version.mjs --check"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",

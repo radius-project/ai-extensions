@@ -1,0 +1,170 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Release
+
+# Cuts a versioned, immutable release of the radius plugin.
+#
+# A release is triggered manually with a semver bump level (patch by default).
+# The job bumps the version in every tracked manifest, builds the canvas bundle
+# (plugins/radius/extension.mjs, which is git-ignored on main), attests its build
+# provenance, and then publishes:
+#
+#   main            + one commit that bumps the manifests to the new version
+#   release branch  = that main tree + one commit force-adding the built bundle
+#   v<version> tag  = immutable annotated tag on the release commit
+#   GitHub release  = notes + the bundle as an attested asset
+#
+# `release` is the only moving pointer (the plugin `source` in
+# .github/plugin/marketplace.json pins `ref: release`); version tags are never
+# force-moved, so an existing tag fails the run rather than being overwritten.
+#
+# All fallible work (typecheck, test, build, attest) runs before anything is
+# pushed, so a failed run leaves main, release and the tags untouched.
+#
+# See RELEASING.md and docs/architecture/plugin-packaging-and-publishing.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver level to bump for this release
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: Build and verify only - do not push the bump, branch, tag or release
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# Releases mutate shared refs; never run two at once, and never cancel one
+# mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  BUNDLE: plugins/radius/extension.mjs
+
+jobs:
+  release:
+    name: Build, attest and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the bump commit, release branch, tag and GitHub release
+      id-token: write # OIDC token used to sign the build provenance
+      attestations: write # record the provenance attestation for the bundle
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Run unit tests
+        run: pnpm run test
+
+      - name: Resolve release version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          current="$(node scripts/version.mjs --check)"
+          next="$(node scripts/version.mjs --bump "$BUMP" --dry-run)"
+          echo "current=$current" >>"$GITHUB_OUTPUT"
+          echo "version=$next" >>"$GITHUB_OUTPUT"
+          echo "Releasing $current -> $next ($BUMP)" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the version tag is unused
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists. Released versions are immutable - pick a different bump level."
+            exit 1
+          fi
+
+      - name: Bump version in manifests
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: node scripts/version.mjs --bump "$BUMP"
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Verify the bundle was produced
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BUNDLE" ]; then
+            echo "::error::Expected build artifact $BUNDLE was not produced."
+            exit 1
+          fi
+
+      - name: Attest build provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ env.BUNDLE }}
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1. Record the new version on main.
+          git add plugins/radius/plugin.json plugins/radius/package.json .github/plugin/marketplace.json
+          git commit -m "chore(release): v$VERSION"
+          git push origin HEAD:main
+
+          # 2. release = that main tree + one commit force-adding the ignored bundle.
+          git checkout -B release
+          git add -f "$BUNDLE"
+          git commit -m "chore(release): canvas bundle for v$VERSION"
+          git push --force origin release
+
+          # 3. Immutable annotated tag on the release commit - pushed without --force
+          #    so a pre-existing tag fails the push instead of being overwritten.
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+          # 4. GitHub release carrying the attested bundle.
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            "$BUNDLE"
+
+      - name: Summarize dry run
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "Dry run: built v$VERSION but pushed nothing." >>"$GITHUB_STEP_SUMMARY"

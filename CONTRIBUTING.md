@@ -113,10 +113,7 @@ your change:
 pnpm changeset
 ```
 
-Select the affected packages, the bump level (`patch` / `minor` / `major`), and
-write a user-facing summary. Commit the generated `.changeset/*.md` file with
-your PR. See [`RELEASING.md`](./RELEASING.md) for the version/tag convention and
-release flow.
+Select the affected packages, the bump level (`patch` / `minor` / `major`), and write a user-facing summary. Commit the generated `.changeset/*.md` file with your PR. Do not hand-edit the version in `plugin.json`, `package.json`, or `marketplace.json` — the release workflow bumps those together. See [`RELEASING.md`](./RELEASING.md) for the release lifecycle.
 
 ## Developer Certificate of Origin
 

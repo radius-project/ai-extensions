@@ -2,6 +2,10 @@
 ---
 name: Build
 
+# Read-only CI for every PR and push to main: it verifies the workspace and
+# uploads the canvas bundle for inspection, but never publishes. Releases are cut
+# manually by .github/workflows/release.yml.
+
 on:
   push:
     branches: [main]
@@ -27,6 +31,9 @@ jobs:
         with:
           node-version: lts/*
           cache: pnpm
+
+      - name: Check manifest versions agree
+        run: pnpm run release:check
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
