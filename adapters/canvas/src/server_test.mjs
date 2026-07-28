@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs } from "./server.mjs";
+import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision } from "./server.mjs";
+import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
     it("returns success when the run concluded with success", () => {
@@ -64,5 +65,55 @@ describe("buildRoleAssignmentArgs", () => {
         expect(args).not.toContain("--assignee");
         expect(args.slice(args.indexOf("--role"), args.indexOf("--role") + 2)).toEqual(["--role", "Contributor"]);
         expect(args.slice(args.indexOf("--scope"), args.indexOf("--scope") + 2)).toEqual(["--scope", "/subscriptions/sub/resourceGroups/rg"]);
+    });
+});
+
+describe("findFederatedCredentialNameCollision", () => {
+    // Prove the real name-collapse: two env names differing only by a char that
+    // clean() normalizes ("prod:west" vs "prod-west") build the SAME FIC name but
+    // DIFFERENT subjects (the subject keeps "%3A"). Emulates a reused app where
+    // the colon env was set up first and the hyphen env is being added.
+    const repoFullName = "octo/app";
+    const colonName = buildFederatedCredentialName({ repoFullName, envName: "prod:west" });
+    const hyphenName = buildFederatedCredentialName({ repoFullName, envName: "prod-west" });
+    const colonSubject = `repo:${repoFullName}:${buildEnvironmentSuffix("prod:west")}`;
+    const hyphenSubject = `repo:${repoFullName}:${buildEnvironmentSuffix("prod-west")}`;
+
+    it("names collapse but subjects differ (guards the premise of the fix)", () => {
+        expect(hyphenName).toBe(colonName);
+        expect(hyphenSubject).not.toBe(colonSubject);
+    });
+
+    it("flags a name that already exists with a different subject", () => {
+        const desired = [{ name: hyphenName, subject: hyphenSubject }];
+        const existing = new Map([[colonName, colonSubject]]);
+        const hit = findFederatedCredentialNameCollision(desired, existing);
+        expect(hit).not.toBeNull();
+        expect(hit.name).toBe(hyphenName);
+        expect(hit.existingSubject).toBe(colonSubject);
+        expect(hit.desiredSubject).toBe(hyphenSubject);
+    });
+
+    it("returns null when the same name maps to the same subject (true idempotent rerun)", () => {
+        const desired = [{ name: colonName, subject: colonSubject }];
+        const existing = new Map([[colonName, colonSubject]]);
+        expect(findFederatedCredentialNameCollision(desired, existing)).toBeNull();
+    });
+
+    it("returns null when the name is not present at all", () => {
+        const desired = [{ name: hyphenName, subject: hyphenSubject }];
+        expect(findFederatedCredentialNameCollision(desired, new Map())).toBeNull();
+    });
+
+    it("accepts a plain object map as well as a Map", () => {
+        const desired = [{ name: hyphenName, subject: hyphenSubject }];
+        const hit = findFederatedCredentialNameCollision(desired, { [colonName]: colonSubject });
+        expect(hit && hit.name).toBe(hyphenName);
+    });
+
+    it("is null-safe on empty or missing inputs", () => {
+        expect(findFederatedCredentialNameCollision(null, new Map())).toBeNull();
+        expect(findFederatedCredentialNameCollision([], null)).toBeNull();
+        expect(findFederatedCredentialNameCollision([{ subject: "s" }], new Map([["n", "x"]]))).toBeNull();
     });
 });

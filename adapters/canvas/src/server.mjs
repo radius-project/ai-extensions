@@ -304,6 +304,31 @@ export function buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId 
         '--output', 'none'];
 }
 
+// Detect the federated-credential NAME collision that reintroduces AADSTS700213.
+// FIC creation dedups on SUBJECT, but Azure keys FIC uniqueness on NAME, and
+// `buildFederatedCredentialName` runs the env name through clean() (collapsing
+// non-alphanumerics to "-") while the subject keeps its "%3A"-encoded colon. So
+// two environments whose names normalize to the same string (e.g. "prod:west"
+// and "prod-west") produce ONE name with TWO subjects. Given the post-dedup list
+// to create and a name→subject map of the FICs already on the app, return the
+// first credential whose name already exists with a DIFFERENT subject (a real
+// collision that must fail loud), or null when there is none. `desired` items
+// with a subject already present would have been deduped upstream, so any name
+// hit here is genuinely a different environment.
+export function findFederatedCredentialNameCollision(desired, existingNameToSubject) {
+    if (!desired || !existingNameToSubject) return null;
+    const lookup = existingNameToSubject instanceof Map
+        ? existingNameToSubject
+        : new Map(Object.entries(existingNameToSubject));
+    for (const fic of desired) {
+        if (!fic || !fic.name) continue;
+        if (lookup.has(fic.name) && lookup.get(fic.name) !== fic.subject) {
+            return { name: fic.name, existingSubject: lookup.get(fic.name), desiredSubject: fic.subject };
+        }
+    }
+    return null;
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -1393,23 +1418,48 @@ function createRequestHandler(instanceId) {
                 // Step 5: Create the Federated Credential(s) (FATAL on failure).
                 // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
                 // FIC whose subject already exists, so we stay under Azure's
-                // ~20-FIC/app cap and don't churn credentials. The "already
-                // exists" stderr guard remains as a backstop.
+                // ~20-FIC/app cap and don't churn credentials. "already exists" is
+                // never trusted blindly — a name collision is caught up front and
+                // a stale-list race is verified by reading the FIC back (below).
                 const { writeFileSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
                 let existingSubjects = [];
-                const ficListRes = await runCmd('az', ['ad', 'app', 'federated-credential', 'list', '--id', clientId, '--query', '[].subject', '-o', 'json']);
+                let existingNameToSubject = new Map();
+                // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
+                // on SUBJECT (below), but we also need the NAME→subject map to
+                // detect a name collision: clean() collapses ':' and '-' to the
+                // same FIC name while the subject keeps '%3A', so two distinct
+                // environments can map to one name with different subjects.
+                const ficListRes = await runCmd('az', ['ad', 'app', 'federated-credential', 'list', '--id', clientId, '--query', '[].{name:name,subject:subject}', '-o', 'json']);
                 if (ficListRes.code === 0) {
                     try {
                         const parsed = JSON.parse(ficListRes.stdout || '[]');
-                        if (Array.isArray(parsed)) existingSubjects = parsed;
-                    } catch { /* fall back to attempting all, guarded by stderr */ }
+                        if (Array.isArray(parsed)) {
+                            existingSubjects = parsed.map((f) => f && f.subject).filter(Boolean);
+                            existingNameToSubject = new Map(
+                                parsed.filter((f) => f && f.name).map((f) => [f.name, f.subject]),
+                            );
+                        }
+                    } catch { /* fall back to attempting all, guarded by the read-back below */ }
                 }
                 const ficsToCreate = selectMissingFederatedCredentials(oidc.federatedCredentials, existingSubjects);
                 const skippedCount = oidc.federatedCredentials.length - ficsToCreate.length;
                 if (skippedCount > 0) {
                     steps.push(`✅ ${skippedCount} federated credential(s) already present — skipping`);
+                }
+                // Fail loud on a NAME collision (two environments normalizing to
+                // one FIC name with different subjects). Creating the second would
+                // silently no-op ("already exists") and leave this environment
+                // with no matching credential → AADSTS700213 at deploy.
+                const ficCollision = findFederatedCredentialNameCollision(ficsToCreate, existingNameToSubject);
+                if (ficCollision) {
+                    fail(400, `Federated credential name "${ficCollision.name}" already exists with a different subject ` +
+                        `("${ficCollision.existingSubject}" vs required "${ficCollision.desiredSubject}"). Two environment ` +
+                        `names normalize to the same credential name — rename this environment to avoid characters ` +
+                        `that collapse together (for example ":" and "-").`,
+                        'federated-credential-name-collision', { steps, clientId, appName });
+                    return;
                 }
                 for (const fic of ficsToCreate) {
                     steps.push(`Creating federated credential "${fic.name}"...`);
@@ -1426,9 +1476,24 @@ function createRequestHandler(instanceId) {
                     const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
                     try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
                     fedTmpFile = null;
-                    if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
-                        fail(400, `Failed to create federated credential "${fic.name}": ` + fedResult.stderr, 'federated-credential-failed', { steps, clientId, appName, azError: fedResult.stderr });
-                        return;
+                    if (fedResult.code !== 0) {
+                        if (!fedResult.stderr.includes('already exists')) {
+                            fail(400, `Failed to create federated credential "${fic.name}": ` + fedResult.stderr, 'federated-credential-failed', { steps, clientId, appName, azError: fedResult.stderr });
+                            return;
+                        }
+                        // Backstop: the pre-create list was stale or a concurrent
+                        // create won the race. Never trust "already exists" as
+                        // success — read the FIC back and confirm its subject
+                        // matches before reporting the credential as created.
+                        const showRes = await runCmd('az', ['ad', 'app', 'federated-credential', 'show', '--id', clientId, '--federated-credential-id', fic.name, '--query', 'subject', '-o', 'tsv']);
+                        const actualSubject = (showRes.stdout || '').trim();
+                        if (showRes.code !== 0 || actualSubject !== fic.subject) {
+                            fail(400, `Federated credential "${fic.name}" already exists but its subject ` +
+                                `("${actualSubject}") does not match the required subject ("${fic.subject}"). Rename this ` +
+                                `environment to avoid a credential-name collision.`,
+                                'federated-credential-subject-mismatch', { steps, clientId, appName });
+                            return;
+                        }
                     }
                     steps.push(`✅ Federated credential "${fic.name}" created`);
                 }
