@@ -705,7 +705,7 @@ function radiusRenderGraph(containerId, resources, options) {
         // deploy-status colors (gray while queued/deploying, blue when complete,
         // red on failure).
         if (deployMode) {
-            if (radiusIsManagedClusterResource(r)) return { bg: '#f6f8fa', border: '#8b949e' };
+            if (radiusIsManagedClusterResource(r)) return RADIUS_DEPLOY_STATUS_COLORS.pending;
             var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
         }
