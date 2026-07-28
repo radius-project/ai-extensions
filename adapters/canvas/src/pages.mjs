@@ -3053,7 +3053,7 @@ function deployProgressView(state) {
   <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--font-mono, monospace); font-size:12px; color:#82071e; max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
 </div>
 <div class="legend" style="margin-bottom:12px;">
-  <div class="legend-item"><div class="legend-dot" style="background:#f6f8fa; border:1px solid #8b949e;"></div><span title="hourglass">⏳</span> In Progress</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f6f8fa; border:1px solid #8b949e;"></div><span title="hourglass">⏳</span> Pending / In Progress</div>
   <div class="legend-item"><div class="legend-dot" style="background:#ddf4ff; border:1px solid #0969da;"></div><span title="check">✅</span> Deployed</div>
   <div class="legend-item"><div class="legend-dot" style="background:#ffebe9; border:1px solid #cf222e;"></div><span title="x" style="color:#cf222e; font-weight:700;">✕</span> Failed</div>
 </div>
