@@ -71,14 +71,18 @@ foreach ($f in $files) {
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
 foreach ($f in $files) {
-    Copy-Item -Path (Join-Path $src $f) -Destination (Join-Path $dst $f) -Force
+    Copy-Item -Path (Join-Path $src $f) -Destination (Join-Path $dst $f) -Force -ErrorAction Stop
 }
 
-# Verify each destination file now exists and is non-empty.
+# Verify each destination file now exists, is non-empty, and matches its source.
 foreach ($f in $files) {
+    $sp = Join-Path $src $f
     $dp = Join-Path $dst $f
     if (-not (Test-Path $dp) -or (Get-Item $dp).Length -eq 0) {
         throw "Copy failed or produced an empty file: $dp"
+    }
+    if ((Get-FileHash -Path $sp -ErrorAction Stop).Hash -ne (Get-FileHash -Path $dp -ErrorAction Stop).Hash) {
+        throw "Copied file does not match source: $dp"
     }
 }
 
