@@ -240,6 +240,16 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("no stored secrets");
     });
 
+    it("discloses both role grants (Contributor + AKS Cluster Admin) at consent", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Setup grants two roles; both the deploy-identity field help and the
+        // profile-detail line must name the AKS Cluster Admin grant, not just
+        // Contributor, so the privilege is disclosed before the user proceeds.
+        expect(html).toContain("Azure Kubernetes Service RBAC Cluster Admin");
+        expect(html).toContain("the default for AKS Automatic");
+        expect(html).toContain("AKS RBAC Cluster Admin on the cluster");
+    });
+
     it("wires the New Environment button to open the env form (regression guard)", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // d97b6d1 accidentally dropped this handler when the use-existing IIFE was

@@ -1562,7 +1562,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
         <input type="hidden" id="az-selected-app-id" value="" />
         <div class="rad-field__help">
-          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the resource group below. Reused if it already exists.
+          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). Reused if it already exists.
           <a href="#" id="az-use-existing-link">Use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
@@ -2334,7 +2334,7 @@ function onEnvProfileSelected() {
         var awsDest = escapeHtmlClient(selectedProfile.accountId || '') + (selectedProfile.region ? ' · ' + escapeHtmlClient(selectedProfile.region) : '');
         if (awsDest.trim()) detail += '<div><span style="color:var(--rad-text-tertiary);">Account:</span> <strong style="color:var(--rad-text);">' + awsDest + '</strong></div>';
     } else {
-        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">Creates the Entra app, the OIDC trust to your repo, and grants it Contributor on the resource group.</div>';
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">Creates the Entra app, the OIDC trust to your repo, and grants it Contributor on the resource group and AKS RBAC Cluster Admin on the cluster.</div>';
         var sub = selectedProfile.subscriptionName || selectedProfile.subscriptionId || '';
         if (sub) detail += '<div><span style="color:var(--rad-text-tertiary);">Subscription:</span> <strong style="color:var(--rad-text);">' + escapeHtmlClient(sub) + '</strong></div>';
     }
