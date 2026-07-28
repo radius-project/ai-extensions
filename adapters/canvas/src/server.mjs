@@ -275,6 +275,35 @@ export function resolveDeployStatus(rec) {
     return "pending";
 }
 
+// True when an `az role assignment create` error means the assignee principal
+// has not replicated through Microsoft Graph yet, so the SAME command is worth
+// retrying after a short delay. Genuine failures — above all AuthorizationFailed
+// (the signed-in user lacks permission to assign roles) — return false so they
+// surface immediately instead of being masked by pointless retries. See the
+// Step-6 role-assignment block for why this race exists and why it is platform
+// independent (not a macOS/Windows difference).
+export function isReplicationLagError(stderr) {
+    if (!stderr) return false;
+    return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(stderr);
+}
+
+// Build the argument vector for `az role assignment create`. Assign by the
+// Service Principal's OBJECT ID (not its appId): `--assignee <appId>` forces az
+// to resolve the appId to its SP object first, which races Graph replication
+// right after `az ad sp create` and, on some CLI versions, silently no-ops so
+// the role is never written (the identity then signs in but sees "No
+// subscriptions found"). `--assignee-object-id` with an explicit
+// `--assignee-principal-type ServicePrincipal` skips that lookup entirely.
+export function buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId }) {
+    return ['role', 'assignment', 'create',
+        '--assignee-object-id', objectId,
+        '--assignee-principal-type', 'ServicePrincipal',
+        '--role', role,
+        '--scope', scope,
+        '--subscription', subscriptionId,
+        '--output', 'none'];
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -1399,9 +1428,64 @@ function createRequestHandler(instanceId) {
                 }
 
                 // Step 6: Assign Contributor role on the resource group (FATAL).
+                //
+                // Assign by the Service Principal's OBJECT ID, not its appId. A
+                // role assignment created with `--assignee <appId>` right after
+                // `az ad sp create` races Microsoft Graph replication: az must
+                // first resolve the appId to its SP object, and until that object
+                // has replicated the lookup can fail — or, on some az-CLI
+                // versions, silently no-op so the role is never written. The
+                // identity then signs in successfully but sees "No subscriptions
+                // found" because it has no effective RBAC. This is a real,
+                // platform-independent race, NOT a macOS/Windows difference; it
+                // just surfaces more often on some CLI-version/timing
+                // combinations (e.g. a reviewer's freshly reset machine) than on
+                // the author's.
+                //
+                // `--assignee-object-id` with an explicit
+                // `--assignee-principal-type ServicePrincipal` skips the appId
+                // lookup entirely, and a short retry absorbs the residual lag in
+                // the object itself becoming visible. Genuine authorization
+                // failures (the signed-in user cannot assign roles) are NOT
+                // retried, so they surface immediately with actionable detail.
+
+                // Errors meaning "the principal hasn't replicated yet" are
+                // retried; genuine failures (notably AuthorizationFailed) surface
+                // immediately. See isReplicationLagError / buildRoleAssignmentArgs.
+                async function resolveSpObjectId() {
+                    let lastErr = '';
+                    for (let attempt = 0; attempt < 6; attempt++) {
+                        const show = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
+                        const objId = (show.stdout || '').trim();
+                        if (show.code === 0 && objId) return { objectId: objId, error: '' };
+                        lastErr = show.stderr || show.stdout || '';
+                        if (attempt < 5) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+                    }
+                    return { objectId: '', error: lastErr };
+                }
+
+                async function assignRoleByObjectId(objectId, role, scope) {
+                    let last = { code: 1, stdout: '', stderr: '' };
+                    for (let attempt = 0; attempt < 6; attempt++) {
+                        last = await runCmd('az', buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId }));
+                        if (last.code === 0 || last.stderr.includes('already exists')) return { ok: true, stderr: '' };
+                        if (!isReplicationLagError(last.stderr)) break;
+                        if (attempt < 5) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+                    }
+                    return { ok: false, stderr: last.stderr };
+                }
+
+                steps.push('Resolving Service Principal object id...');
+                const spObjLookup = await resolveSpObjectId();
+                if (!spObjLookup.objectId) {
+                    fail(400, 'Could not resolve the Service Principal object id needed to assign Azure roles: ' + spObjLookup.error, 'sp-objectid-failed', { steps, clientId, appName, azError: spObjLookup.error });
+                    return;
+                }
+                const spObjectId = spObjLookup.objectId;
+
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
-                const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--subscription', subscriptionId, '--output', 'none']);
-                if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
+                const roleResult = await assignRoleByObjectId(spObjectId, 'Contributor', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`);
+                if (!roleResult.ok) {
                     fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, appName, azError: roleResult.stderr });
                     return;
                 }
@@ -1424,8 +1508,8 @@ function createRequestHandler(instanceId) {
                 // failure as a warning rather than aborting the whole setup.
                 const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
                 steps.push(`Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`);
-                const aksRoleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Azure Kubernetes Service RBAC Cluster Admin', '--scope', clusterScope, '--subscription', subscriptionId, '--output', 'none']);
-                if (aksRoleResult.code === 0 || aksRoleResult.stderr.includes('already exists')) {
+                const aksRoleResult = await assignRoleByObjectId(spObjectId, 'Azure Kubernetes Service RBAC Cluster Admin', clusterScope);
+                if (aksRoleResult.ok) {
                     steps.push('✅ AKS RBAC Cluster Admin role assigned');
                 } else {
                     // Non-fatal: control-plane access is already in place, and
