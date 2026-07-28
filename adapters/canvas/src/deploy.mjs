@@ -6,6 +6,13 @@
 
 import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
+import {
+    LEGACY_DEPLOY_GRAPH_FILE,
+    LIVE_GRAPH_FILE,
+    RADIUS_DEPLOY_STATUS_BRANCH,
+    RADIUS_GRAPH_BRANCH,
+    deployedGraphPath,
+} from "@radius-project/core";
 
 export function ghJson(args, fallback = null, timeout = 15000) {
     return new Promise((resolve) => {
@@ -74,25 +81,72 @@ export function fetchRunLog(repo, runId) {
 }
 
 export function fetchLiveDeployLog(repo) {
-    return ghApiGetContent(`/repos/${repo}/contents/deploy-progress.log?ref=radius-deploy-status`, 12000);
+    return ghApiGetContent(`/repos/${repo}/contents/deploy-progress.log?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`, 12000);
 }
 
 export function fetchLiveActivityLog(repo) {
-    return ghApiGetContent(`/repos/${repo}/contents/deploy-activity.log?ref=radius-deploy-status`, 12000);
+    return ghApiGetContent(`/repos/${repo}/contents/deploy-activity.log?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`, 12000);
 }
 
 export function fetchLiveControlPlaneLog(repo) {
-    return ghApiGetContent(`/repos/${repo}/contents/deploy-controlplane.log?ref=radius-deploy-status`, 12000);
+    return ghApiGetContent(`/repos/${repo}/contents/deploy-controlplane.log?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`, 12000);
 }
 
 export function fetchDeployState(repo) {
-    return ghApiGetContent(`/repos/${repo}/contents/deploy-state.txt?ref=radius-deploy-status`, 10000)
+    return ghApiGetContent(`/repos/${repo}/contents/deploy-state.txt?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`, 10000)
         .then(t => (t ? t.trim() : null));
 }
 
+// Read priority for the Deployed tab — implemented by the /api/deployed-graph
+// handler on top of these three helpers:
+//   1. fetchDeployedGraph     — durable per-(sourceBranch, scope, env) graph on
+//                                the radius-graph orphan branch. What Monitor
+//                                Graph opens after a successful deploy.
+//   2. fetchLiveDeployedGraph — structured `rad app graph --preview` snapshot
+//                                the workflow publishes on a loop during
+//                                `rad deploy`. Same schema as the durable file,
+//                                so the renderer treats them interchangeably.
+//   3. fetchDeployGraph       — legacy single-file location on
+//                                radius-deploy-status. Kept as the fallback so
+//                                the extension keeps working against repos
+//                                whose workflow hasn't migrated yet.
+// Below that, the /api/deployed-graph handler falls back to a modeled scaffold
+// rebuilt from the source-branch app.bicep so the tab always shows *some*
+// topology (all nodes grey) even before a deploy has ever run.
+
+/**
+ * Fetch the durable deployed application graph for one (sourceBranch, scope,
+ * env) deployment from the `radius-graph` orphan branch. Returns the parsed
+ * JSON object (same shape rad app graph emits) or null when the file isn't
+ * published yet, so callers can chain to a live/legacy/scaffold fallback.
+ */
+export function fetchDeployedGraph(repo, { sourceBranch, scope, environment }) {
+    const path = deployedGraphPath({ sourceBranch, scope, environment });
+    return ghApiGetContent(
+        `/repos/${repo}/contents/${path}?ref=${RADIUS_GRAPH_BRANCH}`,
+        12000,
+    ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+}
+
+/**
+ * Fetch the live `rad app graph --preview` snapshot published on the
+ * radius-deploy-status branch while `rad deploy` is running. Returns null
+ * when the file doesn't exist (deploy hasn't published one yet, or the
+ * workflow doesn't publish live snapshots) so callers can chain to the legacy
+ * / scaffold fallback.
+ */
+export function fetchLiveDeployedGraph(repo) {
+    return ghApiGetContent(
+        `/repos/${repo}/contents/${LIVE_GRAPH_FILE}?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`,
+        12000,
+    ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+}
+
 export function fetchDeployGraph(repo) {
-    return ghApiGetContent(`/repos/${repo}/contents/deploy-graph.json?ref=radius-deploy-status`, 12000)
-        .then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+    return ghApiGetContent(
+        `/repos/${repo}/contents/${LEGACY_DEPLOY_GRAPH_FILE}?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`,
+        12000,
+    ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
 }
 
 export function normalizeDeployedGraph(resources) {
