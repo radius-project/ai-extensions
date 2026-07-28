@@ -1204,6 +1204,14 @@ function escapeHtmlClient(s) {
     var container = document.getElementById('graph-container');
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
+    // The React-Flow controller returned by radiusRenderGraph. First render
+    // mounts the graph; subsequent renders on the same container call
+    // controller.update(resources) so React just diffs nodes/edges in place
+    // instead of tearing down the whole root every ~5s poll (which was the
+    // "canvas flashes on every update" symptom). Reset to null in showNothing()
+    // — which nukes the container.innerHTML — so the next real render mounts
+    // fresh instead of update()-ing an orphaned root.
+    var graphController = null;
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
@@ -1259,11 +1267,24 @@ function escapeHtmlClient(s) {
     function showNothing(msg) {
         if (statusEl) { statusEl.style.display = 'none'; }
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
+        // The React root just got nuked with the container's innerHTML — the
+        // controller now points at unmounted state, so drop it so the next
+        // render mounts a fresh root instead of update()-ing an orphan.
+        graphController = null;
     }
 
     function renderGraph(resources) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        radiusRenderGraph('graph-container', resources, {
+        if (graphController && typeof graphController.update === 'function') {
+            // Incremental update: keeps the React root mounted so only the
+            // changed nodes' colors, status icons, and edge positions animate,
+            // instead of the whole canvas flashing on every poll. The renderer
+            // re-runs layout inside update() and fits the viewport, so the
+            // topology can grow / shrink between calls too.
+            graphController.update(resources);
+            return;
+        }
+        graphController = radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
             branch: 'main',
             showLegend: true
