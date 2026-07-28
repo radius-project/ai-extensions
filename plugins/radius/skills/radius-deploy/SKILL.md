@@ -31,6 +31,8 @@ Before invoking this skill, all of these must exist:
    - Click **Deploy**
 3. The canvas immediately triggers the workflow (no intermediate form). Live status streams in until success / failure / timeout.
 
+> **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, the canvas may not be registered due to a known GitHub Copilot app bug. Run the `radius-fix-canvas-installation` skill to repair it, then reload extensions (or restart the app) and try again.
+
 Programmatic alternative: directly trigger the deploy workflow via the GitHub API:
 ```
 POST /repos/{owner}/{repo}/actions/workflows/run-rad-commands.yml/dispatches
