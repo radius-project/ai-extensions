@@ -105,7 +105,7 @@ resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   }
 }
 `;
-    // Both providers resolve to recipepack/kubernetes/default-recipepack.bicep.
+    // Both providers resolve to recipe-packs/kubernetes/default-recipepack.bicep.
     expect(recipePackContentPath("aws")).toBe(recipePackContentPath("kubernetes"));
     const gh = fakeGitHub({
       content: { [recipePackContentPath("aws")]: KUBE_PACK },
