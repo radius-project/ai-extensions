@@ -252,7 +252,12 @@ export function resolveDeployStatus(rec) {
 // must be passed in so the returned row targets the real app declared in
 // app.bicep, not the repo basename — the environment-deletion guard dispatches a
 // delete for this name and redirects to it, and the deployments list links to it.
-// Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
+// Returns `{ app, environment, provider, status, deploymentId, runUrl, sourceRef }`.
+// `sourceRef` is the run's head_branch (the source branch that was deployed);
+// the Deployments row's Monitor Graph link threads it into /api/deployed-graph
+// so the durable read hits the right per-(sourceBranch, scope, env) file. Empty
+// when the linked run is unresolvable, letting the client fall back to its
+// default branch.
 async function resolveEnvDeployment(repo, environment, appName) {
     appName = appName || repo.split("/").pop() || repo;
     // Provider is cosmetic (drives portal links only), so a lookup failure here
@@ -280,16 +285,22 @@ async function resolveEnvDeployment(repo, environment, appName) {
         let runPath = "";
         let runStatus = "";
         let runConclusion = "";
+        // `head_branch` is the source branch that ran the deploy (the workflow
+        // dispatches --ref <branch>, so head_branch mirrors it). Threaded to
+        // the row as sourceRef so Monitor Graph can address the durable graph
+        // by the exact (sourceBranch, scope, env) tuple it was published under.
+        let runHeadBranch = "";
         if (m) {
-            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\") + \"\\t\" + (.head_branch // \"\")"]);
             const parts = runInfo.split("\t");
             runPath = parts[0] || "";
             runStatus = parts[1] || "";
             runConclusion = parts[2] || "";
+            runHeadBranch = parts[3] || "";
         }
         const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
         const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-        return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
+        return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion, runHeadBranch };
     };
 
     // Apply the selection rules to a resolved record:
@@ -314,7 +325,15 @@ async function resolveEnvDeployment(repo, environment, appName) {
             // conclusion, and a failed deploy does not block a redeploy.
             status = resolveDeployStatus(rec);
         }
-        return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
+        return {
+            app: appName,
+            environment,
+            provider,
+            status,
+            deploymentId: rec.id,
+            runUrl: rec.runUrl,
+            sourceRef: rec.runHeadBranch || "",
+        };
     };
 
     // Resolve the newest batch concurrently, then apply the rules newest-first.
