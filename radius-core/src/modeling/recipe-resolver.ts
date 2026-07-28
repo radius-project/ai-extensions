@@ -21,7 +21,7 @@ import {
 // concrete resource its recipe deploys. Replaces the legacy per-recipe tree walk:
 // instead of discovering and parsing individual recipe files under
 // <Category>/<type>/recipes/, we read the single authoritative recipe-pack file
-// (recipepack/<provider>/*.bicep) that the deploy skill treats as canonical.
+// (recipe-packs/<provider>/*.bicep) that the deploy skill treats as canonical.
 export async function fetchRecipePack(gh, provider) {
     const content = await gh.getContent(recipePackContentPath(provider));
     if (!content) return [];
@@ -98,4 +98,3 @@ export async function resolveRecipeOutputs(gh, appResources, recipes, provider) 
     }
     return resolved;
 }
-

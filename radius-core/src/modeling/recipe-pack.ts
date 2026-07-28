@@ -5,7 +5,7 @@
 // Under the recipe-pack model, the planned graph resolves each abstract Radius
 // resource to the concrete cloud/k8s resource its recipe deploys. The authority
 // for that mapping is the *default recipe pack* committed in
-// radius-project/resource-types-contrib (recipepack/<provider>/*.bicep), NOT the
+// radius-project/resource-types-contrib (recipe-packs/<provider>/*.bicep), NOT the
 // individual recipe files under <Category>/<type>/recipes/. A pack declares a
 // `Radius.Core/recipePacks` resource whose `recipes` map keys each Radius type to
 // a recipe { kind, source }. The pack does not enumerate the concrete resources a
@@ -19,9 +19,9 @@ export const RECIPE_PACK_REF = "main";
 // AWS's real pack is generated inline at deploy time, so for modeling it (and any
 // plain Kubernetes environment) uses the committed kubernetes default pack.
 const PROVIDER_PACK_PATH: Record<string, string> = {
-  azure: "recipepack/azure/aks-recipepack.bicep",
-  aws: "recipepack/kubernetes/default-recipepack.bicep",
-  kubernetes: "recipepack/kubernetes/default-recipepack.bicep",
+  azure: "recipe-packs/azure/aks-recipepack.bicep",
+  aws: "recipe-packs/kubernetes/default-recipepack.bicep",
+  kubernetes: "recipe-packs/kubernetes/default-recipepack.bicep",
 };
 
 export function recipePackPathForProvider(provider: string): string {
