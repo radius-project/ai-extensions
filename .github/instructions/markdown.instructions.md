@@ -3,6 +3,12 @@ description: 'Conventions for authoring Markdown in this repository'
 applyTo: '**/*.md'
 ---
 
+<!--
+  This file is synced from the radius-project/.github repository.
+  DO NOT EDIT MANUALLY - changes will be overwritten by the next sync.
+  Source: https://github.com/radius-project/.github
+-->
+
 # Markdown Guidelines
 
 Formatting rules for Markdown are enforced by tooling. This file covers only the conventions the linters cannot check and points to the source of truth for everything else.
@@ -11,7 +17,7 @@ Formatting rules for Markdown are enforced by tooling. This file covers only the
 
 Do not restate or duplicate lint rules here — change the configuration instead, otherwise this file will drift from what is actually enforced.
 
-- **Rules:** `markdownlint-cli2`, configured by [`.github/linters/.markdownlint-cli2.yaml`](../linters/.markdownlint-cli2.yaml), which extends [`.github/linters/.markdownlint.yml`](../linters/.markdownlint.yml). Both configs are synced from the `radius-project/.github` repository — do not edit them by hand.
+- **Rules:** `markdownlint-cli2`, configured by [`.github/linters/.markdownlint-cli2.yaml`](../linters/.markdownlint-cli2.yaml), which extends [`.github/linters/.markdownlint.yml`](../linters/.markdownlint.yml).
 - **Tables:** formatted by `markdown-table-formatter`.
 
 Both tools are installed as dev dependencies in the root `package.json`. See the `radius-markdown-lint` skill for how to run them.
