@@ -328,7 +328,7 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
     it("keeps only managed-cluster nodes gray and colors ordinary compute nodes by deploy status", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
-        expect(CLIENT_GRAPH_JS).toContain("if (radiusIsManagedClusterResource(r)) return { bg: '#f6f8fa', border: '#8b949e' };");
+        expect(CLIENT_GRAPH_JS).toContain("if (radiusIsManagedClusterResource(r)) return RADIUS_DEPLOY_STATUS_COLORS.pending;");
         expect(CLIENT_GRAPH_JS).toContain("RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending']");
         expect(CLIENT_GRAPH_JS).not.toContain("if (deployMode && r.deployStatus) {");
     });
