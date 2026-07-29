@@ -804,6 +804,79 @@ export function saveGraphJson(destPath, raw, log = noop) {
   }
 }
 
+// isOciExtensionRef - true when a bicepconfig extension alias points at an OCI
+// registry (br:/oci:) rather than a local artifact file.
+function isOciExtensionRef(ref) {
+  return /^(br|oci):/i.test(ref);
+}
+
+// copyLocalExtensionArtifact - copy a local extension artifact (e.g. the
+// custom-types .tgz a bicepconfig alias references) from the workspace `.radius/`
+// into the compile dir, preserving its relative path so bicep resolves it next
+// to bicepconfig.json. Refuses absolute or `..`-escaping references and is
+// best-effort: a missing file or copy error is logged and skipped.
+function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
+  try {
+    const rel = ref.replace(/^\.[\\/]/, "");
+    if (path.isAbsolute(rel) || rel.split(/[\\/]/).some((seg) => seg === "..")) {
+      log(`Warning: skipping non-local extension artifact reference: ${ref}`);
+      return;
+    }
+    const src = path.resolve(srcRoot, rel);
+    const dest = path.resolve(destRoot, rel);
+    if (!fs.existsSync(src)) {
+      log(`Warning: extension artifact not found, skipping copy: ${src}`);
+      return;
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+  } catch (err) {
+    log(`Warning: could not copy extension artifact ${ref}: ${String(err?.message ?? err)}`);
+  }
+}
+
+/**
+ * writeBicepCompileConfig - populate a temp compile dir with the effective
+ * bicepconfig.json (and any local extension artifacts) a modeled app needs.
+ *
+ * The base is always RADIUS_BICEP_CONFIG, so `extension radius` always resolves.
+ * When `radArtifactsDir` (a workspace `.radius/`) has its own bicepconfig.json,
+ * its extension aliases are merged over the base so a locally published
+ * custom-type extension (e.g. `customTypes` -> ./custom-types.tgz) resolves, and
+ * every alias pointing at a local file (not a `br:`/`oci:` ref) is copied into
+ * `dir` preserving its relative path. `extensibility` is never disabled. A
+ * missing/unreadable workspace config is logged and skipped; the base config
+ * still compiles apps that only use `extension radius`.
+ */
+export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
+  const config = {
+    experimentalFeaturesEnabled: { ...RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled },
+    extensions: { ...RADIUS_BICEP_CONFIG.extensions },
+  };
+  if (radArtifactsDir) {
+    try {
+      const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
+      if (fs.existsSync(wsConfigPath)) {
+        const ws = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
+        if (ws && typeof ws.experimentalFeaturesEnabled === "object") {
+          Object.assign(config.experimentalFeaturesEnabled, ws.experimentalFeaturesEnabled);
+        }
+        config.experimentalFeaturesEnabled.extensibility = true;
+        if (ws && typeof ws.extensions === "object") {
+          for (const [alias, ref] of Object.entries(ws.extensions)) {
+            if (typeof ref !== "string") continue;
+            config.extensions[alias] = ref;
+            if (!isOciExtensionRef(ref)) copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
+          }
+        }
+      }
+    } catch (err) {
+      log(`Warning: could not read workspace bicepconfig.json; using the base Radius config: ${String(err?.message ?? err)}`);
+    }
+  }
+  fs.writeFileSync(path.join(dir, "bicepconfig.json"), JSON.stringify(config, null, 2));
+}
+
 /**
  * buildGraphViaRad - the single graph-assembly entry adapters use. Writes the
  * given Bicep content to a temp file, runs `rad app graph`, and converts the
@@ -814,22 +887,27 @@ export function saveGraphJson(destPath, raw, log = noop) {
  * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
  * `.radius/app-graph.json`, next to the app.bicep it was built from).
  *
+ * `radArtifactsDir`, when set to a workspace `.radius/` directory, makes the
+ * compile use that repo's effective bicepconfig.json and local extension
+ * artifacts (see writeBicepCompileConfig) so apps that declare a locally
+ * published `extension customTypes` compile; otherwise the base Radius config is
+ * used.
+ *
  * The returned array is passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
  * (containerImages and their ghcr-registry-creds secret) are never rendered in
  * any graph state — modeled, planned, deployed, or diff. This is applied only
  * to the returned array; the raw app-graph.json saved above is left complete.
  */
-export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "" } = {}) {
+export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "", radArtifactsDir = "" } = {}) {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
-  const configFile = path.join(dir, "bicepconfig.json");
   const bicepFile = path.join(dir, "app.bicep");
   try {
-    // Order matters: write bicepconfig.json before app.bicep so the Radius
-    // extension registry is in place when rad compiles the Bicep. bicep looks
-    // for bicepconfig.json in the same directory as the .bicep file.
-    fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
+    // Order matters: write bicepconfig.json (and copy any local extension
+    // artifacts) before app.bicep so the extensions are in place when rad
+    // compiles the Bicep. bicep looks for bicepconfig.json next to the .bicep.
+    writeBicepCompileConfig(dir, radArtifactsDir, log);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
     return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));

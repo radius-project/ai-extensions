@@ -11,6 +11,8 @@ import {
   MANAGED_RAD_PATH,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  writeBicepCompileConfig,
+  runRadBicepPublishExtension,
   saveGraphJson,
   normalizeSha256,
   expectedDigest,
@@ -278,6 +280,156 @@ describe("buildGraphViaRad", () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.
     expect(await buildGraphViaRad("")).toEqual([]);
   });
+});
+
+describe("writeBicepCompileConfig", () => {
+  let dir;
+  let ws;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-cfg-"));
+    ws = fs.mkdtempSync(path.join(os.tmpdir(), "rad-ws-"));
+  });
+  afterEach(() => {
+    for (const d of [dir, ws]) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  });
+
+  function readConfig() {
+    return JSON.parse(fs.readFileSync(path.join(dir, "bicepconfig.json"), "utf8"));
+  }
+
+  it("writes only the base Radius config when no workspace artifacts dir is given", () => {
+    writeBicepCompileConfig(dir, "");
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(Object.keys(cfg.extensions)).toEqual(["radius"]);
+    expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+  });
+
+  it("merges workspace extension aliases and copies the local custom-types artifact", () => {
+    // A generated app declares `extension customTypes` -> ./custom-types.tgz, so
+    // the alias must be merged and the tgz copied next to bicepconfig.json in the
+    // temp compile dir, otherwise `rad app graph` cannot resolve the extension.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: {
+        radius: "br:biceptypes.azurecr.io/radius:latest",
+        customTypes: "./custom-types.tgz",
+      },
+    }));
+    fs.writeFileSync(path.join(ws, "custom-types.tgz"), "TGZBYTES");
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
+    expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe("TGZBYTES");
+  });
+
+  it("keeps extensibility enabled and does not copy OCI (br:) extension refs", () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: false },
+      extensions: {
+        radius: "br:biceptypes.azurecr.io/radius:latest",
+        other: "br:ghcr.io/acme/app/ext:1.0.0",
+      },
+    }));
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.other).toBe("br:ghcr.io/acme/app/ext:1.0.0");
+    expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+    expect(fs.existsSync(path.join(dir, "ext"))).toBe(false);
+  });
+
+  it("preserves a traversing alias but refuses to copy outside the compile dir", () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      extensions: {
+        radius: "br:biceptypes.azurecr.io/radius:latest",
+        evil: "../../secret.tgz",
+      },
+    }));
+
+    // Must not throw; the alias is kept but the referenced file is never copied.
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.evil).toBe("../../secret.tgz");
+    expect(fs.existsSync(path.join(dir, "secret.tgz"))).toBe(false);
+  });
+
+  it("falls back to the base config when the workspace bicepconfig.json is unreadable", () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), "{ not valid json");
+    writeBicepCompileConfig(dir, ws);
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+  });
+});
+
+// Opt-in end-to-end check that a generated custom-type app actually compiles
+// through buildGraphViaRad once its extension is published locally. Needs the
+// managed `rad` binary + bundled bicep, so it is skipped unless
+// RUN_LIVE_RAD_TESTS is set (e.g. in a scheduled job), never on the offline PR run.
+const LIVE_RAD = !!process.env.RUN_LIVE_RAD_TESTS;
+describe.skipIf(!LIVE_RAD)("live: custom-type app compiles via buildGraphViaRad (opt-in: RUN_LIVE_RAD_TESTS)", () => {
+  it("resolves `extension customTypes` from a locally published tgz", async () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "rad-live-ws-"));
+    try {
+      const manifest = [
+        "namespace: Radius.Resources",
+        "types:",
+        "  testStores:",
+        "    apiVersions:",
+        "      '2025-08-01-preview':",
+        "        schema:",
+        "          type: object",
+        "          properties:",
+        "            environment:",
+        "              type: string",
+        "            application:",
+        "              type: string",
+        "          required:",
+        "            - environment",
+        "",
+      ].join("\n");
+      fs.writeFileSync(path.join(ws, "custom-types.yaml"), manifest);
+      await runRadBicepPublishExtension({
+        fromFile: path.join(ws, "custom-types.yaml"),
+        target: path.join(ws, "custom-types.tgz"),
+      });
+      fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:latest",
+          customTypes: "./custom-types.tgz",
+        },
+      }));
+      const app = [
+        "extension radius",
+        "extension customTypes",
+        "",
+        "param environment string",
+        "",
+        "resource store 'Radius.Resources/testStores@2025-08-01-preview' = {",
+        "  name: 'store'",
+        "  properties: {",
+        "    environment: environment",
+        "  }",
+        "}",
+        "",
+      ].join("\n");
+      // The assertion that matters: this does not throw. Without the merged
+      // config + copied tgz, rad would fail with BCP204 (extension not recognized).
+      const resources = await buildGraphViaRad(app, ".radius/app.bicep", { radArtifactsDir: ws });
+      expect(Array.isArray(resources)).toBe(true);
+    } finally {
+      try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }, 180000);
 });
 
 describe("saveGraphJson", () => {
