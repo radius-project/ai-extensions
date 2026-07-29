@@ -538,11 +538,49 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
     return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
+/**
+ * CSRF defense-in-depth for the loopback API server.
+ *
+ * The server binds 127.0.0.1 but has no per-instance token, so a page in the
+ * developer's browser can send a CORS "simple" POST (e.g. text/plain, which
+ * skips preflight) to the derived port and trigger a state change without ever
+ * reading the response. Since this surface now includes "create an Entra app",
+ * "assign Azure roles", and "switch the active gh account", reject requests the
+ * browser labels as originating from another site.
+ *
+ * Rules: read-only GET/HEAD always pass. A missing Sec-Fetch-Site header is
+ * allowed — non-browser callers (the extension host, curl) never send it, and
+ * every modern browser does. Only the browser-set `same-site` and `cross-site`
+ * values are rejected; `same-origin` (the extension's own page) and `none`
+ * (user-initiated navigation) pass.
+ *
+ * @param {string} method HTTP method.
+ * @param {string|string[]|undefined|null} secFetchSite The Sec-Fetch-Site header.
+ * @returns {boolean} true when the request should be rejected as cross-site.
+ */
+export function isCrossSiteMutation(method, secFetchSite) {
+    const m = String(method || "").toUpperCase();
+    if (m === "GET" || m === "HEAD") return false;
+    const site = String(Array.isArray(secFetchSite) ? secFetchSite[0] : secFetchSite || "")
+        .trim()
+        .toLowerCase();
+    if (!site) return false; // non-browser client (no header) — allow.
+    return site !== "same-origin" && site !== "none";
+}
+
 function createRequestHandler(instanceId) {
     return async (req, res) => {
         lastWebviewActivityAt = Date.now();
         const url = new URL(req.url, `http://localhost`);
         const pathname = url.pathname;
+        // CSRF defense-in-depth: reject cross-site state-changing requests before
+        // any routing or body parse. See isCrossSiteMutation for the rules.
+        if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(403);
+            res.end(JSON.stringify({ error: "Cross-site request rejected.", code: "cross-site-forbidden" }));
+            return;
+        }
         const requestedPage = url.searchParams.get("page");
         const canvasEntry = servers.get(instanceId);
         if (canvasEntry && requestedPage) {

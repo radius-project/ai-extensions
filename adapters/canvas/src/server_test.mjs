@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup } from "./server.mjs";
+import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -115,6 +115,47 @@ describe("findFederatedCredentialNameCollision", () => {
         expect(findFederatedCredentialNameCollision(null, new Map())).toBeNull();
         expect(findFederatedCredentialNameCollision([], null)).toBeNull();
         expect(findFederatedCredentialNameCollision([{ subject: "s" }], new Map([["n", "x"]]))).toBeNull();
+    });
+});
+
+describe("isCrossSiteMutation", () => {
+    // Read-only methods always pass, regardless of the header.
+    it("allows GET/HEAD from any site", () => {
+        for (const site of ["cross-site", "same-site", "same-origin", "none", "", undefined]) {
+            expect(isCrossSiteMutation("GET", site), "GET " + site).toBe(false);
+            expect(isCrossSiteMutation("HEAD", site), "HEAD " + site).toBe(false);
+        }
+    });
+
+    // The extension's own page (same-origin) and user navigations (none) pass.
+    it("allows same-origin and none state-changing requests", () => {
+        expect(isCrossSiteMutation("POST", "same-origin")).toBe(false);
+        expect(isCrossSiteMutation("POST", "none")).toBe(false);
+        expect(isCrossSiteMutation("DELETE", "same-origin")).toBe(false);
+    });
+
+    // The attack: a browser page on another site issuing a simple POST.
+    it("rejects cross-site and same-site state-changing requests", () => {
+        expect(isCrossSiteMutation("POST", "cross-site")).toBe(true);
+        expect(isCrossSiteMutation("POST", "same-site")).toBe(true);
+        expect(isCrossSiteMutation("PUT", "cross-site")).toBe(true);
+        expect(isCrossSiteMutation("PATCH", "same-site")).toBe(true);
+        expect(isCrossSiteMutation("DELETE", "cross-site")).toBe(true);
+    });
+
+    // Non-browser callers (extension host, curl) never send the header — allow.
+    it("allows state-changing requests with no Sec-Fetch-Site header", () => {
+        expect(isCrossSiteMutation("POST", undefined)).toBe(false);
+        expect(isCrossSiteMutation("POST", null)).toBe(false);
+        expect(isCrossSiteMutation("POST", "")).toBe(false);
+    });
+
+    // Header parsing is case-insensitive, trimmed, and array-tolerant.
+    it("normalizes header value casing, whitespace, and array form", () => {
+        expect(isCrossSiteMutation("post", "  Cross-Site  ")).toBe(true);
+        expect(isCrossSiteMutation("POST", ["cross-site"])).toBe(true);
+        expect(isCrossSiteMutation("POST", ["same-origin"])).toBe(false);
+        expect(isCrossSiteMutation("POST", "SAME-ORIGIN")).toBe(false);
     });
 });
 
