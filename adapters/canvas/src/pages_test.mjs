@@ -312,7 +312,7 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         // both hitting the cache-busting fresh=1 identity endpoint (now carrying
         // ?repo so the server folds in the repo admin preflight).
         expect(html).toContain('id="env-gh-recheck"');
-        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO");
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO");
         expect(html).toContain("idUrl += '&fresh=1'");
         expect(html).toContain("visibilitychange");
         expect(html).toContain("window.addEventListener('focus', envGhAutoRecheck)");
@@ -366,7 +366,7 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         // in, and renders the returned repoAccess message in the account note — an
         // early, additive heads-up beside the account it concerns.
         const html = environmentPage({ contextRepo: "octo/app" });
-        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO");
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO");
         expect(html).toContain("if (id.repoAccess)");
         // A successful account switch must re-run the preflight for the new
         // account (the switch response carries no repoAccess), so the switch
@@ -400,6 +400,18 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         for (const src of scripts) {
             expect(() => new vm.Script(src)).not.toThrow();
         }
+    });
+
+    it("never references the undeclared CONTEXT_REPO — this page's repo var is CTX_REPO", () => {
+        // Regression: loadGitHubIdentity was pasted with `CONTEXT_REPO`, an
+        // identifier declared in OTHER page scripts (graph/diff pages) but never
+        // in environmentPage — this page declares `var CTX_REPO`. At runtime that
+        // read throws `ReferenceError: CONTEXT_REPO is not defined`, halting
+        // showEnvForm before the GitHub account field loads, so the GITHUB card
+        // renders empty. The compile-only init-halt guard can't catch an
+        // undeclared free variable, so assert the identifier never appears here.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).not.toContain("CONTEXT_REPO");
     });
 });
 

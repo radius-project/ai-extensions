@@ -2276,7 +2276,7 @@ function loadGitHubIdentity(fresh) {
     // scopes (e.g. write:packages) are actually observed. repo lets the server
     // fold in the repo admin/read preflight so a non-admin account is flagged
     // here at open, not only at submit.
-    var idUrl = '/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO || '');
+    var idUrl = '/api/github-identity?repo=' + encodeURIComponent(CTX_REPO || '');
     if (fresh) idUrl += '&fresh=1';
     fetch(idUrl)
         .then(function(r) { return r.json(); })
