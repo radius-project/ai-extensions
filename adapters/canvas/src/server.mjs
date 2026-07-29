@@ -20,6 +20,7 @@ import {
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
   buildEnvironmentSuffix,
+  DEFAULT_RADIUS_SCOPE,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
@@ -56,6 +57,7 @@ import {
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
+  fetchDeployedGraph, extractStatusesFromGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
   explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
@@ -2218,24 +2220,123 @@ function createRequestHandler(instanceId) {
                 || entry?.state?.plannedRepo || entry?.state?.graphTargetRepo || '';
             res.setHeader("Content-Type", "application/json");
             if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '' })); return; }
-            // Prefer the live deploy-graph.json on the orphan status branch (source
-            // of truth). Fall back to any graph captured in state this session.
-            let graph = await fetchDeployGraph(repo);
-            if (!graph && entry?.state?.deployedGraph) graph = entry.state.deployedGraph;
-            let resources = Array.isArray(graph) ? graph : (graph?.resources || []);
-            // DEMO: present the deployed topology as container → cache → database.
-            resources = rewireDeployedGraphChain(resources);
-            // Re-derive connections (e.g. database→secret) that rad app graph
-            // omits, so the deployed graph renders connected like the planned one.
+
+            // Resolve the source branch. The URL param wins; otherwise pull
+            // the freshest in-session hint. Falls back to 'main' as a last
+            // resort so the persisted-snapshot fetch still tries.
+            const sourceBranch = (reqUrl.searchParams.get('branch') || '').trim()
+                || entry?.state?.deployingBranch
+                || entry?.state?.plannedBranch
+                || entry?.state?.graphBranch
+                || (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo) ? entry.state.workspaceBranch : "")
+                || "main";
+            const environment = (reqUrl.searchParams.get('environment') || '').trim()
+                || entry?.state?.envName
+                || "";
+
+            // ── Step 1: resolve the modeled scaffold ──────────────────────
+            //
+            // Topology is ALWAYS the modeled graph — the Deployed tab renders
+            // the same top-level nodes the Modeled tab does, so the node set
+            // is fixed for a given branch's app.bicep. Try (in order): the
+            // in-session cache scoped to (repo, branch); a fresh
+            // buildGraphViaRad against the branch's app.bicep; the same
+            // build against a candidate fallback branch when the requested
+            // branch has no app.bicep committed yet (fresh worktree,
+            // just-created feature branch); finally the deploy monitor's
+            // deployingResources/plannedResources if rad itself is
+            // unavailable.
+            let scaffoldResources = null;
+            if (entry?.state?.graphResources
+                && entry.state.graphTargetRepo === repo
+                && entry.state.graphBranch === sourceBranch) {
+                scaffoldResources = entry.state.graphResources;
+            }
+            if (!scaffoldResources && entry) {
+                // Candidate branches to try in order. Deduped, order-preserving.
+                const candidates = [];
+                const pushIf = (b) => { if (b && candidates.indexOf(b) < 0) candidates.push(b); };
+                pushIf(sourceBranch);
+                if (entry?.state?.workspaceRepo === repo) pushIf(entry.state.workspaceBranch);
+                pushIf(entry?.state?.deployingBranch);
+                pushIf(entry?.state?.plannedBranch);
+                pushIf(entry?.state?.graphBranch);
+                pushIf('main');
+                try {
+                    let selection = null;
+                    for (const branch of candidates) {
+                        const s = await fetchBicepSelection(entry, repo, branch);
+                        if (s?.content) { selection = s; break; }
+                    }
+                    if (selection?.content) {
+                        const built = await buildGraphViaRad(
+                            selection.content,
+                            selection.bicepPath || ".radius/app.bicep",
+                        );
+                        if (Array.isArray(built) && built.length > 0) {
+                            entry.state.graphResources = built;
+                            entry.state.graphTargetRepo = repo;
+                            entry.state.graphBranch = sourceBranch;
+                            scaffoldResources = built;
+                        }
+                    }
+                } catch (e) {
+                    console.error(`[radius deployed-graph] scaffold build failed for ${repo}@${sourceBranch}: ${e?.message || e}`);
+                }
+            }
+            if (!scaffoldResources && entry?.state?.deployingResources?.length) {
+                scaffoldResources = entry.state.deployingResources;
+            } else if (!scaffoldResources && entry?.state?.plannedResources?.length) {
+                scaffoldResources = entry.state.plannedResources;
+            }
+
+            // Every node starts grey ⏳ pending. Deep-clone so we don't mutate
+            // the cached scaffold across polls.
+            let resources = Array.isArray(scaffoldResources)
+                ? JSON.parse(JSON.stringify(scaffoldResources))
+                : [];
+            for (const r of resources) {
+                r.deployStatus = 'pending';
+                if (Array.isArray(r.outputResources)) {
+                    for (const o of r.outputResources) o.deployStatus = 'pending';
+                }
+            }
+
+            // ── Step 2: overlay the persisted snapshot's per-resource
+            //          statuses onto the scaffold (if published) ──────────
+            //
+            // The workflow force-publishes rad app graph -o json to
+            // radius-graph:<branch>/.radius/deployments/<scope>-<env>/app-graph.json
+            // on deploy completion. Missing environment → skip (needs the
+            // full key). 404 → no snapshot yet, scaffold stays all-pending.
+            if (environment) {
+                try {
+                    const persisted = await fetchDeployedGraph(repo, {
+                        sourceBranch,
+                        scope: DEFAULT_RADIUS_SCOPE,
+                        environment,
+                    });
+                    if (persisted) {
+                        const statuses = extractStatusesFromGraph(persisted);
+                        for (const r of resources) {
+                            const s = statuses[r.name];
+                            if (s) r.deployStatus = s;
+                        }
+                    }
+                } catch (e) {
+                    // Best-effort: a persisted-snapshot fetch failure just
+                    // means the badges stay grey pending this tick.
+                    console.error(`[radius deployed-graph] persisted fetch failed for ${repo}@${sourceBranch}/${environment}: ${e?.message || e}`);
+                }
+            }
+
+            // Same post-processing every graph state runs through so the
+            // Deployed tab's topology matches the Modeled/Planned tabs.
             resources = normalizeDeployedGraph(resources);
-            // Hide implementation-detail resources (containerImages + their
-            // ghcr-registry-creds secret) from the deployed view too, matching
-            // every other graph state. Applied last so any edges the rewire/
-            // normalize steps synthesized toward those nodes are also stripped.
-            // The raw deploy-graph.json on the status branch is left untouched.
             resources = filterGraphVisualizationResources(resources);
+
             res.writeHead(200);
-            res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
+            res.end(JSON.stringify({ resources, repo, branch: sourceBranch }));
             return;
         }
 
