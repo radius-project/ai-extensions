@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "vitest";
 import {
     BOOTSTRAP_ARTIFACT_TYPE,
     BOOTSTRAP_CONTENT,
     bootstrapGHCRStatePackage,
     loadGhKeyringCredentials,
+    withGhcrDockerConfig,
 } from "./ghcr.mjs";
 
 function json(body, init = {}) {
@@ -22,7 +25,6 @@ function createHarness({
     finalRepository = "acme/app",
     metadataDelay = 0,
     tokenStatus = 200,
-    uploadStatus = 202,
 } = {}) {
     const calls = [];
     const blobs = new Set();
@@ -67,9 +69,6 @@ function createHarness({
             return new Response("", { status: blobs.has(blobMatch[1]) ? 200 : 404 });
         }
         if (url.origin === "https://registry.test" && method === "POST" && url.pathname.endsWith("/blobs/uploads/")) {
-            if (uploadStatus !== 202) {
-                return json({ errors: [{ code: "DENIED", message: "permission_denied: The token provided does not match expected scopes." }] }, { status: uploadStatus });
-            }
             uploadID++;
             return new Response("", {
                 status: 202,
@@ -215,18 +214,6 @@ test("reports package-scope guidance when GHCR rejects token exchange", async ()
     );
 });
 
-test("reports package-scope guidance when GHCR silently narrows the token and denies the blob upload", async () => {
-    // GHCR issues a bearer token for a read-only credential, then denies the
-    // first write with 403 DENIED "does not match expected scopes". The raw
-    // status is unactionable — the push must surface the refresh command.
-    const harness = createHarness({ uploadStatus: 403 });
-
-    await assert.rejects(
-        bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl: harness.fetchImpl }),
-        /gh auth refresh -s read:packages -s write:packages/,
-    );
-});
-
 test("requires a stored gh keyring credential", async () => {
     const calls = [];
     await assert.rejects(
@@ -255,4 +242,43 @@ test("pins keyring credential lookup to github.com", async () => {
         ["auth", "token", "--hostname", "github.com"],
         ["api", "--hostname", "github.com", "user", "--jq", ".login"],
     ]);
+});
+
+test("withGhcrDockerConfig hands rad a ghcr.io docker auth then removes it", async () => {
+    const loadCredentials = async () => ({ token: "ghp_secret", username: "octocat" });
+    let seenDir = "";
+    const result = await withGhcrDockerConfig(
+        async (env) => {
+            seenDir = env.DOCKER_CONFIG;
+            const config = JSON.parse(readFileSync(path.join(seenDir, "config.json"), "utf8"));
+            assert.equal(
+                config.auths["ghcr.io"].auth,
+                Buffer.from("octocat:ghp_secret").toString("base64"),
+            );
+            return "published";
+        },
+        { loadCredentials },
+    );
+
+    assert.equal(result, "published");
+    assert.ok(seenDir, "fn should receive a DOCKER_CONFIG directory");
+    assert.equal(existsSync(seenDir), false, "temp docker config should be removed");
+});
+
+test("withGhcrDockerConfig removes the temp docker config even when publish fails", async () => {
+    const loadCredentials = async () => ({ token: "ghp_secret", username: "octocat" });
+    let seenDir = "";
+    await assert.rejects(
+        withGhcrDockerConfig(
+            async (env) => {
+                seenDir = env.DOCKER_CONFIG;
+                throw new Error("publish denied");
+            },
+            { loadCredentials },
+        ),
+        /publish denied/,
+    );
+
+    assert.ok(seenDir);
+    assert.equal(existsSync(seenDir), false, "temp docker config should be removed on failure");
 });

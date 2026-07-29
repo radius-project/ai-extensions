@@ -263,6 +263,24 @@ export function workspaceGraphJsonPath(state, bicepRepoPath) {
     }
 }
 
+// Absolute path to the workspace directory that holds app.bicep and its local
+// extension artifacts (the repo's `.radius/`, or the app.bicep dir), derived
+// from the modeled bicep path. Used so a local graph compile can pick up the
+// repo's effective bicepconfig.json and locally published custom-type
+// extensions. Returns "" when there is no local workspace path; confined to the
+// workspace root via safeWorkspacePath.
+export function workspaceRadArtifactsDir(state, bicepRepoPath) {
+    if (!state?.workspacePath || !bicepRepoPath) return "";
+    const normalized = bicepRepoPath.replace(/\\/g, "/");
+    const dir = path.posix.dirname(normalized);
+    const rel = dir && dir !== "." ? dir : ".";
+    try {
+        return safeWorkspacePath(state.workspacePath, rel);
+    } catch {
+        return "";
+    }
+}
+
 async function walkWorkspace(workspacePath, dir = "", results = []) {
     const absoluteDir = safeWorkspacePath(workspacePath, dir || ".");
     const entries = await fs.readdir(absoluteDir, { withFileTypes: true });

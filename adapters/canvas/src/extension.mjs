@@ -14,7 +14,7 @@ import {
   fetchBicepFromRepo,
   filterGraphVisualizationResources,
 } from "@radius-project/core";
-import { buildGraphViaRad, ensureRadBinary } from "@radius-project/shared";
+import { buildGraphViaRad, ensureRadBinary, runRadBicepPublishExtension, runRadBicepPublish } from "@radius-project/shared";
 import { github } from "./gh.mjs";
 import {
     defaultBranchForState,
@@ -25,6 +25,7 @@ import {
     toSafeRepoRelPath,
     workspaceFileExists,
 } from "./workspace.mjs";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
     servers,
@@ -43,6 +44,8 @@ import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hook
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
+import { withGhcrDockerConfig } from "./ghcr.mjs";
+import { resolveExistingRadiusArtifact, resolveRadiusArtifactTarget, validateGhcrTargetForRepo } from "./publish-targets.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -455,8 +458,10 @@ const session = await joinSession({
                             fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
                         ]);
 
-                        const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
-                        const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
+                        const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(entry.state, repo, ctx.input.baseBranch), state: entry.state, github, repo, branch: ctx.input.baseBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                        const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(entry.state, repo, ctx.input.headBranch), state: entry.state, github, repo, branch: ctx.input.headBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                        const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir, cleanupRadArtifactsDir: baseRadArtifactsRemote });
+                        const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir, cleanupRadArtifactsDir: headRadArtifactsRemote });
                         // Compute diff using the shared algorithm (see computeGraphDiff).
                         const diffResources = computeGraphDiff(baseResources, headResources);
                         setSourceRefResources(entry, "diff", diffResources, {
@@ -586,8 +591,10 @@ const session = await joinSession({
                         return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
                     }
 
-                    const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
-                    const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} } });
+                    const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(state, repo, baseBranch), state, github, repo, branch: baseBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                    const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(state, repo, headBranch), state, github, repo, branch: headBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                    const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir, cleanupRadArtifactsDir: baseRadArtifactsRemote });
+                    const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir, cleanupRadArtifactsDir: headRadArtifactsRemote });
 
                     // Compute diff using the shared algorithm (see computeGraphDiff)
                     // and render it as PR-embeddable Markdown (see renderPrDiffMarkdown).
@@ -610,6 +617,61 @@ const session = await joinSession({
             },
             handler: async (args) => {
                 return "Open the radius canvas with page 'environment' to create a GitHub environment. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
+            },
+        },
+        {
+            name: "radius_publish_custom_type_extension",
+            description: "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication). Paths are confined to the workspace .radius/ directory.",
+            parameters: {
+                type: "object",
+                properties: {
+                    manifestPath: { type: "string", description: "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml." },
+                    targetPath: { type: "string", description: "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz." },
+                },
+            },
+            handler: async (args) => {
+                try {
+                    const { workspacePath } = await workspaceState();
+                    const fromFile = resolveExistingRadiusArtifact(workspacePath, args.manifestPath, ".radius/custom-types.yaml");
+                    const target = resolveRadiusArtifactTarget(workspacePath, args.targetPath, ".radius/custom-types.tgz");
+                    if (!existsSync(fromFile)) {
+                        return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                    }
+                    await runRadBicepPublishExtension({ fromFile, target, log: (m) => { try { session.log(m); } catch {} } });
+                    return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
+                } catch (err) {
+                    return `⚠️ Could not publish the custom-type extension: ${err.message}`;
+                }
+            },
+        },
+        {
+            name: "radius_publish_recipe",
+            description: "Publishes an authored Radius recipe Bicep file to the user's GitHub Container Registry (ghcr.io) using the extension's managed rad binary and the stored GitHub package credentials, so a generated custom type's recipe pack can reference it. Use this instead of running `rad bicep publish` directly. Prefer an Azure Verified Module (which needs no publish) when one matches the resource. The recipe file must live under the workspace .radius/ directory and the target must publish under the repository being modeled.",
+            parameters: {
+                type: "object",
+                properties: {
+                    file: { type: "string", description: "Path to the recipe Bicep file, relative to the workspace .radius/ directory (e.g. .radius/<type>-recipe.bicep)." },
+                    target: { type: "string", description: "OCI target under the repository being modeled, e.g. br:ghcr.io/<owner>/<repo>/<recipe>:<tag>." },
+                },
+                required: ["file", "target"],
+            },
+            handler: async (args) => {
+                try {
+                    const { workspacePath, workspaceRepo } = await workspaceState();
+                    const targetError = validateGhcrTargetForRepo(args.target, workspaceRepo);
+                    if (targetError) return targetError;
+                    const file = resolveExistingRadiusArtifact(workspacePath, args.file, null);
+                    if (!existsSync(file)) {
+                        return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                    }
+                    const target = String(args.target).trim();
+                    const published = await withGhcrDockerConfig((env) =>
+                        runRadBicepPublish({ file, target, env, log: (m) => { try { session.log(m); } catch {} } }),
+                    );
+                    return `Published recipe to ${published}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
+                } catch (err) {
+                    return `⚠️ Could not publish the recipe: ${err.message}`;
+                }
             },
         },
     ],
@@ -660,7 +722,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
 
-When a recipe is not found for a resource type during planned graph resolution, report the unresolved resource type to the user and explain that a recipe pack providing that type must be registered to the target environment. Do NOT attempt to generate a singleton custom resource type or recipe on-demand — with Radius extensibility, recipes are supplied via recipe packs, not per-type singleton recipes.`
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`
             };
         },
     },
