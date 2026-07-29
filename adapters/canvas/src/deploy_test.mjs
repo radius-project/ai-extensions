@@ -108,14 +108,19 @@ describe("fetchDeployedGraph — durable graph on radius-graph", () => {
     });
 });
 
-describe("fetchLiveDeployedGraph — live snapshot on radius-deploy-status", () => {
-    it("addresses deploy-graph-live.json at the repo root on radius-deploy-status", async () => {
+describe("fetchLiveDeployedGraph — live snapshot on radius-graph (unified layout)", () => {
+    // Same per-(sourceBranch, scope, env) directory as the durable file, so
+    // live and durable share one key and one address family — only the
+    // filename differs (app-graph.live.json vs app-graph.json).
+    const key = { sourceBranch: "main", scope: "default", environment: "aks-dev" };
+
+    it("addresses app-graph.live.json under the per-tuple directory on radius-graph", async () => {
         gh.ghApiGetContent.mockResolvedValue('{"resources":[]}');
 
-        await deploy.fetchLiveDeployedGraph("acme/app");
+        await deploy.fetchLiveDeployedGraph("acme/app", key);
 
         expect(gh.ghApiGetContent).toHaveBeenCalledWith(
-            "/repos/acme/app/contents/deploy-graph-live.json?ref=radius-deploy-status",
+            "/repos/acme/app/contents/main/.radius/deployments/default-aks-dev/app-graph.live.json?ref=radius-graph",
             12000,
         );
     });
@@ -125,7 +130,7 @@ describe("fetchLiveDeployedGraph — live snapshot on radius-deploy-status", () 
             '{"resources":[{"name":"web","provisioningState":"Provisioning"}]}',
         );
 
-        const graph = await deploy.fetchLiveDeployedGraph("acme/app");
+        const graph = await deploy.fetchLiveDeployedGraph("acme/app", key);
 
         expect(graph).toEqual({
             resources: [{ name: "web", provisioningState: "Provisioning" }],
@@ -135,13 +140,13 @@ describe("fetchLiveDeployedGraph — live snapshot on radius-deploy-status", () 
     it("returns null when no live snapshot has been published yet", async () => {
         gh.ghApiGetContent.mockResolvedValue(null);
 
-        expect(await deploy.fetchLiveDeployedGraph("acme/app")).toBeNull();
+        expect(await deploy.fetchLiveDeployedGraph("acme/app", key)).toBeNull();
     });
 
     it("returns null on malformed JSON", async () => {
         gh.ghApiGetContent.mockResolvedValue("partial{");
 
-        expect(await deploy.fetchLiveDeployedGraph("acme/app")).toBeNull();
+        expect(await deploy.fetchLiveDeployedGraph("acme/app", key)).toBeNull();
     });
 });
 

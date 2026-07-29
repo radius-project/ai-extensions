@@ -8,10 +8,10 @@ import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
 import {
     LEGACY_DEPLOY_GRAPH_FILE,
-    LIVE_GRAPH_FILE,
     RADIUS_DEPLOY_STATUS_BRANCH,
     RADIUS_GRAPH_BRANCH,
     deployedGraphPath,
+    liveDeployedGraphPath,
 } from "@radius-project/core";
 
 export function ghJson(args, fallback = null, timeout = 15000) {
@@ -103,9 +103,13 @@ export function fetchDeployState(repo) {
 //                                the radius-graph orphan branch. What Monitor
 //                                Graph opens after a successful deploy.
 //   2. fetchLiveDeployedGraph — structured `rad app graph --preview` snapshot
-//                                the workflow publishes on a loop during
-//                                `rad deploy`. Same schema as the durable file,
-//                                so the renderer treats them interchangeably.
+//                                the workflow publishes on a ~5s loop while
+//                                `rad deploy` runs. Lives in the same
+//                                per-(sourceBranch, scope, env) directory on
+//                                radius-graph as the durable file, distinguished
+//                                only by the filename (app-graph.live.json vs
+//                                app-graph.json), so both readers use the same
+//                                key and `rad app delete` wipes both together.
 //   3. fetchDeployGraph       — legacy single-file location on
 //                                radius-deploy-status. Kept as the fallback so
 //                                the extension keeps working against repos
@@ -129,15 +133,17 @@ export function fetchDeployedGraph(repo, { sourceBranch, scope, environment }) {
 }
 
 /**
- * Fetch the live `rad app graph --preview` snapshot published on the
- * radius-deploy-status branch while `rad deploy` is running. Returns null
- * when the file doesn't exist (deploy hasn't published one yet, or the
- * workflow doesn't publish live snapshots) so callers can chain to the legacy
- * / scaffold fallback.
+ * Fetch the live `rad app graph --preview` snapshot for one (sourceBranch,
+ * scope, env) deployment. Lives on the `radius-graph` orphan branch in the
+ * same directory as the durable {@link fetchDeployedGraph} sibling, so live
+ * and durable share one key and one address family. Returns null when the
+ * file doesn't exist (deploy hasn't published one yet, or the workflow
+ * doesn't publish live snapshots) so callers can chain to legacy / scaffold.
  */
-export function fetchLiveDeployedGraph(repo) {
+export function fetchLiveDeployedGraph(repo, { sourceBranch, scope, environment }) {
+    const path = liveDeployedGraphPath({ sourceBranch, scope, environment });
     return ghApiGetContent(
-        `/repos/${repo}/contents/${LIVE_GRAPH_FILE}?ref=${RADIUS_DEPLOY_STATUS_BRANCH}`,
+        `/repos/${repo}/contents/${path}?ref=${RADIUS_GRAPH_BRANCH}`,
         12000,
     ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
 }
@@ -228,7 +234,7 @@ function toScaffold(resources) {
  *
  * Priority chain (mirrors the read priority documented above the fetchers):
  *   1. Durable  — radius-graph:<branch>/.radius/deployments/<scope>-<env>/app-graph.json
- *   2. Live     — radius-deploy-status:deploy-graph-live.json (structured snapshot loop)
+ *   2. Live     — radius-graph:<branch>/.radius/deployments/<scope>-<env>/app-graph.live.json
  *   3. Legacy   — radius-deploy-status:deploy-graph.json (old workflow single file)
  *   4. Session  — the graph captured by /api/deploy in entry.state.deployedGraph
  *                 for the currently-running / last-finished deploy this session

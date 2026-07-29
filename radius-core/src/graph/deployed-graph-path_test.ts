@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RADIUS_SCOPE,
   LEGACY_DEPLOY_GRAPH_FILE,
-  LIVE_GRAPH_FILE,
   RADIUS_DEPLOY_STATUS_BRANCH,
   RADIUS_GRAPH_BRANCH,
   deployedGraphPath,
+  liveDeployedGraphPath,
 } from "./deployed-graph-path.js";
 
 describe("deployed-graph-path constants", () => {
@@ -14,8 +14,9 @@ describe("deployed-graph-path constants", () => {
     expect(RADIUS_DEPLOY_STATUS_BRANCH).toBe("radius-deploy-status");
   });
 
-  it("names the live and legacy graph files on radius-deploy-status", () => {
-    expect(LIVE_GRAPH_FILE).toBe("deploy-graph-live.json");
+  it("keeps the legacy graph file on radius-deploy-status as the fallback", () => {
+    // Repos that haven't migrated to the per-(branch, scope, env) layout on
+    // radius-graph still get read via this file.
     expect(LEGACY_DEPLOY_GRAPH_FILE).toBe("deploy-graph.json");
   });
 
@@ -99,5 +100,44 @@ describe("deployedGraphPath", () => {
         environment: "   ",
       }),
     ).toThrow(/environment/);
+  });
+});
+
+describe("liveDeployedGraphPath", () => {
+  it("lives in the same per-(sourceBranch, scope, env) directory as the durable file, differing only in filename", () => {
+    // The whole point of the unified layout: one directory holds both
+    // artifacts, so `rad app delete` wipes both together and readers use
+    // one key for both fetchers.
+    const key = { sourceBranch: "main", scope: "default", environment: "aks-dev" };
+    expect(liveDeployedGraphPath(key)).toBe(
+      "main/.radius/deployments/default-aks-dev/app-graph.live.json",
+    );
+    expect(deployedGraphPath(key).replace(/\/app-graph\.json$/, "")).toBe(
+      liveDeployedGraphPath(key).replace(/\/app-graph\.live\.json$/, ""),
+    );
+  });
+
+  it("applies the same slugging + '/'-preserving rules as the durable path", () => {
+    expect(
+      liveDeployedGraphPath({
+        sourceBranch: "feature/x",
+        scope: "My/Scope",
+        environment: "Prod US",
+      }),
+    ).toBe("feature/x/.radius/deployments/my-scope-prod-us/app-graph.live.json");
+  });
+
+  it.each([
+    { sourceBranch: "" },
+    { sourceBranch: "main/../etc" },
+    { sourceBranch: "main\\x" },
+  ])("rejects invalid sourceBranch %j", ({ sourceBranch }) => {
+    expect(() =>
+      liveDeployedGraphPath({
+        sourceBranch,
+        scope: "default",
+        environment: "dev",
+      }),
+    ).toThrow(/sourceBranch/);
   });
 });

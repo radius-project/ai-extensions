@@ -1635,9 +1635,9 @@ function createRequestHandler(instanceId) {
 
             let resources = [];
             let source = "none";
-            // A missing environment is only fatal for the DURABLE tier (which
-            // needs the full (branch, scope, env) key). Live/legacy/session/
-            // scaffold don't need it, so still try them.
+            // A missing environment is only fatal for the DURABLE and LIVE
+            // tiers (which need the full (branch, scope, env) key). Legacy/
+            // session/scaffold don't need it, so still try them.
             try {
                 const resolved = await resolveDeployedGraph({
                     key: { sourceBranch, scope: DEFAULT_RADIUS_SCOPE, environment },
@@ -1645,7 +1645,9 @@ function createRequestHandler(instanceId) {
                         fetchDurable: environment
                             ? (key) => fetchDeployedGraph(repo, key)
                             : null,
-                        fetchLive: () => fetchLiveDeployedGraph(repo),
+                        fetchLive: environment
+                            ? (key) => fetchLiveDeployedGraph(repo, key)
+                            : null,
                         fetchLegacy: () => fetchDeployGraph(repo),
                     },
                     sessionDeployedGraph: entry?.state?.deployedGraph || null,

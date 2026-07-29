@@ -21,10 +21,10 @@ export {
   stripAPIVersion,
   DEFAULT_RADIUS_SCOPE,
   LEGACY_DEPLOY_GRAPH_FILE,
-  LIVE_GRAPH_FILE,
   RADIUS_DEPLOY_STATUS_BRANCH,
   RADIUS_GRAPH_BRANCH,
   deployedGraphPath,
+  liveDeployedGraphPath,
 } from "./graph/index.js";
 export type { DeployedGraphKey } from "./graph/index.js";
 export {

@@ -1,30 +1,28 @@
-// Addressing helper for the durable deployed-application-graph artifact.
+// Addressing helper for the durable + live deployed-application-graph
+// artifacts.
 //
 // After a successful `rad deploy` the workflow captures the concrete deployed
 // graph with `rad app graph -a "$APP" --preview --include-icons` and publishes
 // it to the `radius-graph` orphan branch on the app repo, keyed by the tuple
-// (sourceBranch, scope, env). Each (sourceBranch, scope, env) has exactly one
-// current graph — a redeploy overwrites the same path. Structured live
-// snapshots produced by the same command during a deploy live on
-// `radius-deploy-status` and are addressed by LIVE_GRAPH_FILE below.
+// (sourceBranch, scope, env). Each tuple has exactly one current durable
+// graph — a redeploy overwrites the same path. While `rad deploy` is running
+// the same command is captured on a ~5s loop and published to a sibling
+// `app-graph.live.json` file under the *same* per-tuple directory, so the
+// live snapshot and the terminal one share one address family and only differ
+// in the filename. (Older repos still see the pre-migration
+// `radius-deploy-status:deploy-graph.json` — kept as a fallback via
+// {@link LEGACY_DEPLOY_GRAPH_FILE}.)
 //
 // This module is pure path math — no I/O — so it's usable from both the
 // canvas HTTP reader (adapters/canvas/src/deploy.mjs) and the workflow-side
 // publisher (in radius-project/radius). Keeping the layout in one place is
 // what lets the reader and writer stay in sync without a shared runtime dep.
 
-/** Orphan branch that stores the durable per-deployment graph artifacts. */
+/** Orphan branch that stores both the durable and live per-deployment graph artifacts. */
 export const RADIUS_GRAPH_BRANCH = "radius-graph";
 
-/** Orphan branch used for streaming deploy signal (logs + live snapshot). */
+/** Orphan branch used for streaming deploy signal (logs + legacy graph file). */
 export const RADIUS_DEPLOY_STATUS_BRANCH = "radius-deploy-status";
-
-/**
- * Repository-root file on `radius-deploy-status` where the deploy workflow
- * publishes structured `rad app graph --preview` snapshots on a loop while
- * `rad deploy` runs. Read priority is durable → live → legacy → scaffold.
- */
-export const LIVE_GRAPH_FILE = "deploy-graph-live.json";
 
 /**
  * Legacy single-file location the older deploy workflow force-pushed the
@@ -42,7 +40,7 @@ export const LEGACY_DEPLOY_GRAPH_FILE = "deploy-graph.json";
  */
 export const DEFAULT_RADIUS_SCOPE = "default";
 
-/** Inputs to {@link deployedGraphPath}. */
+/** Inputs to {@link deployedGraphPath} / {@link liveDeployedGraphPath}. */
 export interface DeployedGraphKey {
   /** Repo branch whose `.radius/app.bicep` was deployed. */
   sourceBranch: string;
@@ -86,6 +84,22 @@ function normalizeSourceBranch(sourceBranch: string): string {
   return segments.join("/");
 }
 
+/** Return the per-(sourceBranch, scope, env) directory both artifacts share. */
+function deploymentDir(key: DeployedGraphKey): string {
+  const branch = normalizeSourceBranch(key.sourceBranch);
+  const scope = slugSegment(key.scope);
+  const environment = slugSegment(key.environment);
+  if (!scope) {
+    throw new Error("scope must contain at least one alphanumeric character.");
+  }
+  if (!environment) {
+    throw new Error(
+      "environment must contain at least one alphanumeric character.",
+    );
+  }
+  return `${branch}/.radius/deployments/${scope}-${environment}`;
+}
+
 /**
  * Return the repo-relative path (on the `radius-graph` orphan branch) of the
  * durable deployed application graph for one (sourceBranch, scope, env)
@@ -98,16 +112,21 @@ function normalizeSourceBranch(sourceBranch: string): string {
  * directory so a valid tuple always yields exactly one legal file path.
  */
 export function deployedGraphPath(key: DeployedGraphKey): string {
-  const branch = normalizeSourceBranch(key.sourceBranch);
-  const scope = slugSegment(key.scope);
-  const environment = slugSegment(key.environment);
-  if (!scope) {
-    throw new Error("scope must contain at least one alphanumeric character.");
-  }
-  if (!environment) {
-    throw new Error(
-      "environment must contain at least one alphanumeric character.",
-    );
-  }
-  return `${branch}/.radius/deployments/${scope}-${environment}/app-graph.json`;
+  return `${deploymentDir(key)}/app-graph.json`;
+}
+
+/**
+ * Return the repo-relative path (on the `radius-graph` orphan branch) of the
+ * *live* snapshot for one (sourceBranch, scope, env) deployment — the same
+ * directory as the durable artifact, distinguished only by the filename.
+ *
+ * Layout: `<sourceBranch>/.radius/deployments/<scope>-<env>/app-graph.live.json`.
+ * Overwritten by the workflow on a ~5s loop during `rad deploy`; on success
+ * the durable {@link deployedGraphPath} sibling is written and readers
+ * prefer it. Sharing the parent directory means one branch, one address
+ * family, one delete: `rad app delete` wipes the whole directory on the
+ * `radius-graph` branch and both files disappear together.
+ */
+export function liveDeployedGraphPath(key: DeployedGraphKey): string {
+  return `${deploymentDir(key)}/app-graph.live.json`;
 }
