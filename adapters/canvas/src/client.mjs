@@ -1220,34 +1220,53 @@ function radiusRenderGraph(containerId, resources, options) {
     // Diff mode intentionally shows no legend; status is encoded directly on
     // node borders and edges.
     if (options.showLegend && !diffMode) {
-        // Build a resource-type legend from the categories actually present in
-        // the graph. Nodes render as uniform white cards, so category is conveyed
-        // by the icon (owned by the type/recipe pack); the legend shows that same
-        // icon next to the category name. Order is first-seen so it only lists
-        // what's on screen.
-        var seen = {};
-        var cats = [];
-        function noteCategory(r) {
-            var type = (r && (r.type || r.displayType)) || '';
-            var st = radiusGetTypeStyle(type);
-            if (!st.category || seen[st.category]) return;
-            seen[st.category] = true;
-            cats.push({ name: st.category, icon: radiusResolveIcon(r) });
-        }
-        for (var li = 0; li < resources.length; li++) {
-            noteCategory(resources[li]);
-            var oR = resources[li].outputResources || [];
-            for (var lo = 0; lo < oR.length; lo++) noteCategory(oR[lo]);
-        }
-        if (cats.length > 0) {
-            var legend2 = document.createElement('div');
-            legend2.className = 'legend';
-            var html = '';
-            for (var lc = 0; lc < cats.length; lc++) {
-                html += '<div class="legend-item"><img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(cats[lc].name) + '</div>';
+        if (deployMode) {
+            // Deploy view: legend explains the three lifecycle badges (hourglass /
+            // green check / red cross), not resource categories. Same SVG source
+            // as the corner badges (radiusDeployBadgeSvg) so the icons match 1:1.
+            var deployLegend = document.createElement('div');
+            deployLegend.className = 'legend';
+            var items = [
+                { kind: 'progress', name: 'Pending / In progress' },
+                { kind: 'success',  name: 'Success' },
+                { kind: 'failed',   name: 'Failed' }
+            ];
+            var dhtml = '';
+            for (var di = 0; di < items.length; di++) {
+                dhtml += '<div class="legend-item"><img src="' + escLocal(radiusDeployBadgeSvg(items[di].kind)) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(items[di].name) + '</div>';
             }
-            legend2.innerHTML = html;
-            container.parentNode.insertBefore(legend2, container);
+            deployLegend.innerHTML = dhtml;
+            container.parentNode.insertBefore(deployLegend, container);
+        } else {
+            // Build a resource-type legend from the categories actually present in
+            // the graph. Nodes render as uniform white cards, so category is conveyed
+            // by the icon (owned by the type/recipe pack); the legend shows that same
+            // icon next to the category name. Order is first-seen so it only lists
+            // what's on screen.
+            var seen = {};
+            var cats = [];
+            function noteCategory(r) {
+                var type = (r && (r.type || r.displayType)) || '';
+                var st = radiusGetTypeStyle(type);
+                if (!st.category || seen[st.category]) return;
+                seen[st.category] = true;
+                cats.push({ name: st.category, icon: radiusResolveIcon(r) });
+            }
+            for (var li = 0; li < resources.length; li++) {
+                noteCategory(resources[li]);
+                var oR = resources[li].outputResources || [];
+                for (var lo = 0; lo < oR.length; lo++) noteCategory(oR[lo]);
+            }
+            if (cats.length > 0) {
+                var legend2 = document.createElement('div');
+                legend2.className = 'legend';
+                var html = '';
+                for (var lc = 0; lc < cats.length; lc++) {
+                    html += '<div class="legend-item"><img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(cats[lc].name) + '</div>';
+                }
+                legend2.innerHTML = html;
+                container.parentNode.insertBefore(legend2, container);
+            }
         }
     }
 

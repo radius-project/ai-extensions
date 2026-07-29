@@ -192,6 +192,37 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
     });
 });
 
+describe("CLIENT_GRAPH_JS — Deploy view status legend (Commit 2)", () => {
+    it("renders the three lifecycle badges as the legend when deployMode + showLegend are on", () => {
+        expect(CLIENT_GRAPH_JS).toContain("if (options.showLegend && !diffMode)");
+        expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
+        expect(CLIENT_GRAPH_JS).toContain("'Pending / In progress'");
+        expect(CLIENT_GRAPH_JS).toContain("'Success'");
+        expect(CLIENT_GRAPH_JS).toContain("'Failed'");
+    });
+
+    it("uses radiusDeployBadgeSvg for the legend icons so they match the node corner badges 1:1", () => {
+        expect(CLIENT_GRAPH_JS).toContain("radiusDeployBadgeSvg(items[di].kind)");
+        expect(CLIENT_GRAPH_JS).toContain("{ kind: 'progress'");
+        expect(CLIENT_GRAPH_JS).toContain("{ kind: 'success'");
+        expect(CLIENT_GRAPH_JS).toContain("{ kind: 'failed'");
+    });
+
+    it("does not fall through to the resource-category legend when deployMode is on", () => {
+        // The category branch calls radiusGetTypeStyle to derive category names.
+        // deployMode must not reach it — the two branches are exclusive.
+        const legendBlock = CLIENT_GRAPH_JS.match(/if \(options\.showLegend && !diffMode\) \{[\s\S]*?^\s{4}\}\s*$/m);
+        expect(legendBlock).toBeTruthy();
+        const [block] = legendBlock;
+        const deployIdx = block.indexOf("if (deployMode) {");
+        const elseIdx = block.indexOf("} else {", deployIdx);
+        const categoryIdx = block.indexOf("radiusGetTypeStyle");
+        expect(deployIdx).toBeGreaterThan(-1);
+        expect(elseIdx).toBeGreaterThan(deployIdx);
+        expect(categoryIdx).toBeGreaterThan(elseIdx); // category branch lives inside `else`
+    });
+});
+
 describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
     it("keeps diff node backgrounds white and colors only the border by diff status", () => {
         expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: '#ffffff', border: '#16a34a' };");
