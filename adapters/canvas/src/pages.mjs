@@ -1285,6 +1285,7 @@ function escapeHtmlClient(s) {
     }
 
     var graphController = null;
+    var pollTerminated = false;
 
     function renderGraph(resources) {
         if (statusEl) { statusEl.style.display = 'none'; }
@@ -1325,14 +1326,14 @@ function escapeHtmlClient(s) {
                 } else {
                     renderGraph(resources);
                 }
-                // While a deploy is running, keep pulling the projection so
-                // per-node badges transition as rad deploy prints its lines.
-                // On terminal (success/failed/complete), stop polling — the
-                // current tick already painted the final state from the
-                // monitor's deployingResources snapshot.
-                if (deployState && deployState.status === 'in_progress') {
-                    pollTimer = setTimeout(loadGraph, 3000);
-                }
+                // Keep polling until we have observed a terminal state at least
+                // once. A pending state means a deploy might be kicked off from
+                // another tab while the Deployed page is already open; we need
+                // to see that transition, not sit on a stale greyed skeleton.
+                var st = deployState && deployState.status;
+                var isTerminal = st === 'complete' || st === 'success' || st === 'failed';
+                if (isTerminal) { pollTerminated = true; return; }
+                if (!pollTerminated) { pollTimer = setTimeout(loadGraph, 3000); }
             }).catch(function() { showNothing('Nothing deployed yet'); });
         });
     }

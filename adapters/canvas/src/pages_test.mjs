@@ -346,9 +346,13 @@ describe("deployedGraphPage — Commit 1 baseline (greyed Modeled skeleton)", ()
         expect(html).toContain("graphController.update(resources)");
     });
 
-    it("Commit 4: re-polls /api/deployed-graph every 3s while the deploy is in progress", () => {
-        expect(html).toContain("deployState.status === 'in_progress'");
+    it("re-polls /api/deployed-graph every 3s until a terminal status is observed", () => {
+        // Poll continues on pending too, so a deploy kicked off from another tab
+        // (Deployments) while the Deployed tab is open still updates the graph.
+        expect(html).toContain("var pollTerminated = false;");
+        expect(html).toContain("st === 'complete' || st === 'success' || st === 'failed'");
         expect(html).toContain("setTimeout(loadGraph, 3000)");
+        expect(html).not.toContain("deployState.status === 'in_progress'");
     });
 });
 
