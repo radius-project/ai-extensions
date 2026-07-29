@@ -1491,15 +1491,14 @@ export function environmentPage(state) {
     const envName = state?.envName || 'dev';
     const appFile = state?.appFile || 'app.bicep';
     const existingEnvs = state?.existingEnvs || ['dev', 'staging', 'production'];
-    // Deployment reads files and dispatches workflows via GitHub, so an unpushed
-    // worktree-only branch cannot be deployed. Default to 'main' in that case so
-    // the branch dropdown does not silently mislead the user.
+    // Default to the active session branch. A worktree session's branch may
+    // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
+    // GitHub yet), but we no longer fall back to 'main' for that case: the deploy
+    // path fails fast with a clear "push this branch" message when the ref is
+    // absent on GitHub, so silently substituting 'main' would only deploy the
+    // wrong (or empty) branch. The branch stays user-overridable in the UI.
     const deployContextBranch = state?.contextBranch || 'main';
-    const deployWorkspaceBranch = state?.workspaceBranch || '';
-    const deployBranchShas = state?.branchShas || {};
-    const deployDefaultBranch = (deployWorkspaceBranch && deployContextBranch === deployWorkspaceBranch && deployBranchShas[deployWorkspaceBranch] === 'worktree')
-        ? 'main'
-        : deployContextBranch;
+    const deployDefaultBranch = deployContextBranch;
 
     // If deployment result exists, show it
     if (state?.deployResult) {
@@ -3249,6 +3248,10 @@ function deployLandingView(state) {
     <label for="deploy-env-select">Environment:</label>
     <div class="rad-select-wrap"><select id="deploy-env-select"><option value="">Loading…</option></select></div>
   </div>
+  <div class="rad-field">
+    <label for="deploy-branch-select">Branch:</label>
+    <div class="rad-select-wrap"><select id="deploy-branch-select"><option value="${escapeHtml(ctxBranch)}">${escapeHtml(ctxBranch)}</option></select></div>
+  </div>
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
 
@@ -3370,6 +3373,7 @@ function escapeHtmlClient(s) {
 var deployBtn = document.getElementById('deploy-now-btn');
 var appSelect = document.getElementById('deploy-app-select');
 var envSelect = document.getElementById('deploy-env-select');
+var branchSelect = document.getElementById('deploy-branch-select');
 var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
 var HAS_APPS = false;
@@ -3499,6 +3503,31 @@ function loadEnvironmentsDropdown() {
             refreshDeployBtn();
         })
         .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+}
+
+// Populate the Branch dropdown for the deploy dispatch, defaulting to the
+// current session/worktree branch. The chosen branch is the --ref the deploy
+// workflow runs against, so exposing it lets the user redirect a deploy to a
+// different branch (and see which branch a worktree session will deploy).
+function loadBranches() {
+    if (!branchSelect) return;
+    if (!CTX_REPO) { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; return; }
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            var workspaceBranch = (d && d.workspaceBranch) || CTX_BRANCH || '';
+            if (branches.length === 0) { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; return; }
+            branchSelect.innerHTML = '';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : (b.sha ? ' (' + b.sha.slice(0,7) + ')' : ''));
+                if (b.name === (workspaceBranch || CTX_BRANCH)) o.selected = true;
+                branchSelect.appendChild(o);
+            });
+        })
+        .catch(function() { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; });
 }
 
 function statusCell(status) {
@@ -3824,10 +3853,14 @@ deployBtn.addEventListener('click', function() {
             .catch(function() {});
     }, 2500);
 
+    // The deploy runs against the branch the user selected (defaults to the
+    // session/worktree branch). This value becomes the workflow --ref, so the
+    // dispatched branch always matches what's shown in the Branch dropdown.
+    var deployBranch = (branchSelect && branchSelect.value) || CTX_BRANCH;
     fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: CTX_BRANCH, appFile: '.radius/app.bicep' })
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: deployBranch, appFile: '.radius/app.bicep' })
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .catch(function() {
           clearInterval(wfPoll);
@@ -3858,6 +3891,7 @@ deployBtn.addEventListener('click', function() {
 
 loadApplications();
 loadEnvironmentsDropdown();
+loadBranches();
 loadDeployments();
 <\/script>`, 'deployments');
 }
