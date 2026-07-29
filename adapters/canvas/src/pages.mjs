@@ -267,6 +267,19 @@ ${getInlineVendorStyles()}
     cursor: pointer; pointer-events: auto;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
+  /* Deploy-status badge (hourglass / check / cross) in the top-right of a
+     node card. Only rendered by RadNode when data.deployStatus is set, so
+     modeled/planned graphs stay clean. Background + glyph color come from
+     RADIUS_DEPLOY_STATUS_BADGE inline; the CSS just handles positioning +
+     shape so the badge lines up consistently across every state. */
+  .rad-node__deploy-badge {
+    position: absolute; top: 10px; right: 10px;
+    width: 22px; height: 22px; border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+    pointer-events: none;
+  }
+  .rad-node__deploy-badge svg { width: 14px; height: 14px; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }

@@ -271,6 +271,32 @@ var RADIUS_DEPLOY_STATUS_COLORS = {
     failed:      { bg: '#ffebe9', border: '#cf222e' }
 };
 
+// Per-status glyph shown in a small badge at the top-right of each node card
+// so the deploy phase is legible at a glance, in addition to the border/fill
+// color change on the card itself. Returned as a React element (or null for
+// "no badge" — e.g. modeled/planned nodes that carry no deployStatus). The
+// badge participates in the same incremental re-render pipeline as the rest
+// of the node data, so a resource going pending → in_progress → success/failed
+// just flips its glyph and background color in place; nothing else re-mounts.
+// Glyphs are built via React.createElement (never via raw-HTML injection) so
+// the client keeps its XSS discipline — the paths below are still hardcoded
+// constants, but going through the factory keeps the assertion in
+// client_test.mjs happy regardless of the actual injection risk.
+var RADIUS_DEPLOY_STATUS_BADGE = {
+    pending:     { glyph: 'hourglass', bg: '#e5e7eb', fg: '#57606a', label: 'Pending' },
+    in_progress: { glyph: 'hourglass', bg: '#fff8c5', fg: '#7d4e00', label: 'In progress' },
+    waiting:     { glyph: 'hourglass', bg: '#fff8c5', fg: '#7d4e00', label: 'Waiting' },
+    postponed:   { glyph: 'hourglass', bg: '#fff8c5', fg: '#7d4e00', label: 'Postponed' },
+    success:     { glyph: 'check',     bg: '#2da44e', fg: '#ffffff', label: 'Succeeded' },
+    failed:      { glyph: 'xmark',     bg: '#cf222e', fg: '#ffffff', label: 'Failed' }
+};
+// Path strings kept as constants for readability; consumed by h('path', {d: …}).
+var RADIUS_DEPLOY_STATUS_GLYPH_PATHS = {
+    hourglass: 'M4 1.75A.75.75 0 0 1 4.75 1h6.5a.75.75 0 0 1 0 1.5H11v1.586a2 2 0 0 1-.586 1.414L8.31 7.604a.5.5 0 0 0 0 .707l2.104 2.103A2 2 0 0 1 11 11.828V13.5h.25a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1 0-1.5H5v-1.672a2 2 0 0 1 .586-1.414L7.69 8.31a.5.5 0 0 0 0-.707L5.586 5.5A2 2 0 0 1 5 4.086V2.5h-.25A.75.75 0 0 1 4 1.75Z',
+    check:     'M13.78 4.22a.75.75 0 0 1 0 1.06L6.53 12.53a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z',
+    xmark:     'M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 1 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z'
+};
+
 function radiusGetIconSvg(type) {
     if (!type) return '';
     var t = type.toLowerCase();
@@ -932,12 +958,37 @@ function radiusRenderGraph(containerId, resources, options) {
             type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
             onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.toggle(d, e.currentTarget.closest('.rad-node')); }
         }, '\u2022\u2022\u2022');
+        // Deploy-status badge (hourglass / ✓ / ✗) in the top-right of the card.
+        // Only rendered when the resource carries a deployStatus — modeled and
+        // planned graphs leave it empty, so their nodes stay clean. The badge
+        // uses React state (via the rest of the card), so a pending → in_progress
+        // → success/failed transition flips its glyph + background in place —
+        // the card doesn't re-mount, which is why the Deployed tab's ~5s poll no
+        // longer flashes the whole canvas.
+        var statusBadge = null;
+        if (d.deployStatus && RADIUS_DEPLOY_STATUS_BADGE[d.deployStatus]) {
+            var badgeSpec = RADIUS_DEPLOY_STATUS_BADGE[d.deployStatus];
+            var glyphPath = RADIUS_DEPLOY_STATUS_GLYPH_PATHS[badgeSpec.glyph];
+            if (glyphPath) {
+                statusBadge = h('span', {
+                    className: 'rad-node__deploy-badge nodrag nopan',
+                    title: badgeSpec.label,
+                    'aria-label': badgeSpec.label,
+                    style: { background: badgeSpec.bg, color: badgeSpec.fg }
+                },
+                    h('svg', { viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' },
+                        h('path', { d: glyphPath })
+                    )
+                );
+            }
+        }
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
             style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
+            statusBadge,
             h('div', { className: 'rad-node__head' }, iconEl, h('span', { className: 'rad-node__title' }, d.nodeName)),
             h('div', { className: 'rad-node__type' }, d.typeLabel),
             srcRow
