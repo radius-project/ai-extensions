@@ -45,7 +45,7 @@ import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
 import { withGhcrDockerConfig } from "./ghcr.mjs";
-import { resolveRadiusArtifactPath, validateGhcrTargetForRepo } from "./publish-targets.mjs";
+import { resolveExistingRadiusArtifact, resolveRadiusArtifactTarget, validateGhcrTargetForRepo } from "./publish-targets.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -632,8 +632,8 @@ const session = await joinSession({
             handler: async (args) => {
                 try {
                     const { workspacePath } = await workspaceState();
-                    const fromFile = resolveRadiusArtifactPath(workspacePath, args.manifestPath, ".radius/custom-types.yaml");
-                    const target = resolveRadiusArtifactPath(workspacePath, args.targetPath, ".radius/custom-types.tgz");
+                    const fromFile = resolveExistingRadiusArtifact(workspacePath, args.manifestPath, ".radius/custom-types.yaml");
+                    const target = resolveRadiusArtifactTarget(workspacePath, args.targetPath, ".radius/custom-types.tgz");
                     if (!existsSync(fromFile)) {
                         return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
                     }
@@ -660,7 +660,7 @@ const session = await joinSession({
                     const { workspacePath, workspaceRepo } = await workspaceState();
                     const targetError = validateGhcrTargetForRepo(args.target, workspaceRepo);
                     if (targetError) return targetError;
-                    const file = resolveRadiusArtifactPath(workspacePath, args.file, null);
+                    const file = resolveExistingRadiusArtifact(workspacePath, args.file, null);
                     if (!existsSync(file)) {
                         return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
                     }

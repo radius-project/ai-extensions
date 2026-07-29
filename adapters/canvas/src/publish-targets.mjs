@@ -1,12 +1,29 @@
-import { isAbsolute, resolve, sep } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { toSafeRepoRelPath } from "./workspace.mjs";
 
-// Resolve a tool-supplied artifact path and confine it to the workspace's
-// `.radius/` directory. Model-callable publish tools use this so a generated
-// value can never read or overwrite files outside the repo's `.radius`
-// artifacts: absolute paths, parent-directory traversal, and anything that
-// escapes `.radius/` are rejected. Returns an absolute path inside `.radius/`.
-export function resolveRadiusArtifactPath(workspacePath, value, fallback) {
+function isUnder(root, p) {
+    const rootWithSep = root.endsWith(sep) ? root : root + sep;
+    return p === root || p.startsWith(rootWithSep);
+}
+
+// Walk up from `p` until an existing directory is found, so a path that does not
+// exist yet (a new write target) can still be canonicalized against its nearest
+// real ancestor.
+function nearestExistingParent(p) {
+    let dir = p;
+    while (!existsSync(dir)) {
+        const parent = dirname(dir);
+        if (parent === dir) return dir; // filesystem root
+        dir = parent;
+    }
+    return dir;
+}
+
+// Lexical confinement of a tool-supplied path under the workspace `.radius/`:
+// rejects absolute paths, `..` traversal, null bytes (via toSafeRepoRelPath),
+// and any result that escapes `.radius/`. Returns { radiusRoot, resolved, raw }.
+function lexicalRadiusPath(workspacePath, value, fallback) {
     if (!workspacePath) {
         throw new Error("No repository workspace is open; cannot resolve a .radius artifact path.");
     }
@@ -15,16 +32,50 @@ export function resolveRadiusArtifactPath(workspacePath, value, fallback) {
     if (isAbsolute(raw)) {
         throw new Error(`Path must be relative to the workspace .radius directory, not absolute: ${raw}`);
     }
-    // Reuse the shared repo-path guard: rejects Windows-absolute paths, `..`
-    // traversal, and null bytes. Then confine the result under `.radius/`.
     const rel = toSafeRepoRelPath(raw).replace(/^\.radius\//, "");
     const radiusRoot = resolve(workspacePath, ".radius");
     const resolved = resolve(radiusRoot, rel);
-    const rootWithSep = radiusRoot.endsWith(sep) ? radiusRoot : radiusRoot + sep;
-    if (resolved !== radiusRoot && !resolved.startsWith(rootWithSep)) {
+    if (!isUnder(radiusRoot, resolved)) {
         throw new Error(`Path escapes the workspace .radius directory: ${raw}`);
     }
-    return resolved;
+    return { radiusRoot, resolved, raw };
+}
+
+// Canonical (symlink-aware) confinement on top of the lexical check. Lexical
+// checks alone miss a symlink inside `.radius/` that points outside the
+// workspace (e.g. `.radius/link` -> /etc), which would let the recipe tool read
+// an outside file or the extension tool's `--force` target write outside
+// `.radius/`. So this canonicalizes the real `.radius/` root and the deepest
+// existing part of the path (the path itself if it exists, else its nearest
+// existing parent) and verifies the canonical path stays under the canonical
+// root. Returns the canonical path for an existing file, or the intended path
+// under the verified-real parent for a new target.
+function confineUnderRadius(workspacePath, value, fallback) {
+    const { radiusRoot, resolved, raw } = lexicalRadiusPath(workspacePath, value, fallback);
+    // No `.radius/` yet: nothing to canonicalize against; the lexical check
+    // already confined the path and the caller reports a missing source.
+    if (!existsSync(radiusRoot)) return resolved;
+    const realRoot = realpathSync(radiusRoot);
+    const probe = existsSync(resolved) ? resolved : nearestExistingParent(resolved);
+    const realProbe = realpathSync(probe);
+    if (!isUnder(realRoot, realProbe)) {
+        throw new Error(`Path escapes the workspace .radius directory via a symlink: ${raw}`);
+    }
+    return existsSync(resolved) ? realProbe : resolved;
+}
+
+// Resolve a source path that the tool reads or compiles (a recipe .bicep or a
+// manifest). Symlink escapes are rejected; existence is left to the caller.
+export function resolveExistingRadiusArtifact(workspacePath, value, fallback) {
+    return confineUnderRadius(workspacePath, value, fallback);
+}
+
+// Resolve a path the tool writes, possibly creating it (the extension `.tgz`,
+// published with `--force`). The final file may not exist yet, so the nearest
+// existing ancestor is canonicalized to catch a symlinked intermediate
+// directory pointing outside the workspace.
+export function resolveRadiusArtifactTarget(workspacePath, value, fallback) {
+    return confineUnderRadius(workspacePath, value, fallback);
 }
 
 // Validate that a GHCR recipe target publishes under the repository being

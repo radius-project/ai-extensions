@@ -1,42 +1,48 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "vitest";
-import { resolveRadiusArtifactPath, validateGhcrTargetForRepo } from "./publish-targets.mjs";
+import {
+    resolveExistingRadiusArtifact,
+    resolveRadiusArtifactTarget,
+    validateGhcrTargetForRepo,
+} from "./publish-targets.mjs";
 
 const WS = path.join(os.tmpdir(), "ws");
 const RADIUS = path.join(WS, ".radius");
 
-test("resolveRadiusArtifactPath confines relative paths under .radius/", () => {
-    assert.equal(resolveRadiusArtifactPath(WS, "custom-types.yaml", null), path.join(RADIUS, "custom-types.yaml"));
+test("resolveRadiusArtifactTarget confines relative paths under .radius/", () => {
+    assert.equal(resolveRadiusArtifactTarget(WS, "custom-types.yaml", null), path.join(RADIUS, "custom-types.yaml"));
     // A leading .radius/ is accepted and normalized (not doubled).
-    assert.equal(resolveRadiusArtifactPath(WS, ".radius/custom-types.tgz", null), path.join(RADIUS, "custom-types.tgz"));
-    assert.equal(resolveRadiusArtifactPath(WS, "sub/dir/x.bicep", null), path.join(RADIUS, "sub/dir/x.bicep"));
+    assert.equal(resolveRadiusArtifactTarget(WS, ".radius/custom-types.tgz", null), path.join(RADIUS, "custom-types.tgz"));
+    assert.equal(resolveRadiusArtifactTarget(WS, "sub/dir/x.bicep", null), path.join(RADIUS, "sub/dir/x.bicep"));
 });
 
-test("resolveRadiusArtifactPath uses the fallback when no value is given", () => {
+test("resolveRadiusArtifactTarget uses the fallback when no value is given", () => {
     assert.equal(
-        resolveRadiusArtifactPath(WS, "", ".radius/custom-types.yaml"),
+        resolveRadiusArtifactTarget(WS, "", ".radius/custom-types.yaml"),
         path.join(RADIUS, "custom-types.yaml"),
     );
     assert.equal(
-        resolveRadiusArtifactPath(WS, "   ", "custom-types.tgz"),
+        resolveRadiusArtifactTarget(WS, "   ", "custom-types.tgz"),
         path.join(RADIUS, "custom-types.tgz"),
     );
 });
 
-test("resolveRadiusArtifactPath rejects absolute paths", () => {
-    assert.throws(() => resolveRadiusArtifactPath(WS, "/etc/passwd", null), /not absolute/);
+test("radius artifact resolvers reject absolute paths", () => {
+    assert.throws(() => resolveRadiusArtifactTarget(WS, "/etc/passwd", null), /not absolute/);
+    assert.throws(() => resolveExistingRadiusArtifact(WS, "/etc/passwd", null), /not absolute/);
 });
 
-test("resolveRadiusArtifactPath rejects parent-directory traversal", () => {
-    assert.throws(() => resolveRadiusArtifactPath(WS, "../../secret.tgz", null), /invalid path/);
-    assert.throws(() => resolveRadiusArtifactPath(WS, ".radius/../secret", null), /invalid path/);
+test("radius artifact resolvers reject parent-directory traversal", () => {
+    assert.throws(() => resolveRadiusArtifactTarget(WS, "../../secret.tgz", null), /invalid path/);
+    assert.throws(() => resolveExistingRadiusArtifact(WS, ".radius/../secret", null), /invalid path/);
 });
 
-test("resolveRadiusArtifactPath requires a workspace and a path", () => {
-    assert.throws(() => resolveRadiusArtifactPath("", "custom-types.yaml", null), /No repository workspace/);
-    assert.throws(() => resolveRadiusArtifactPath(WS, "", null), /file path is required/);
+test("radius artifact resolvers require a workspace and a path", () => {
+    assert.throws(() => resolveRadiusArtifactTarget("", "custom-types.yaml", null), /No repository workspace/);
+    assert.throws(() => resolveRadiusArtifactTarget(WS, "", null), /file path is required/);
 });
 
 test("validateGhcrTargetForRepo accepts an immutable target under the modeled repo", () => {
@@ -66,3 +72,73 @@ test("validateGhcrTargetForRepo rejects the mutable :latest tag", () => {
 test("validateGhcrTargetForRepo requires a known workspace repo", () => {
     assert.match(validateGhcrTargetForRepo("br:ghcr.io/acme/app:1.0.0", ""), /Cannot determine the repository/);
 });
+
+// Symlink-escape confinement. Creating symlinks can require privileges on some
+// platforms (notably Windows), so detect capability and skip if unavailable
+// rather than failing.
+function symlinkCapable() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "symcap-"));
+    try {
+        fs.symlinkSync(os.tmpdir(), path.join(dir, "l"), "dir");
+        return true;
+    } catch {
+        return false;
+    } finally {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+}
+const SYMLINK_OK = symlinkCapable();
+
+test.skipIf(!SYMLINK_OK)("rejects a target reached through a symlinked directory that escapes .radius/", () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    try {
+        fs.mkdirSync(path.join(ws, ".radius"), { recursive: true });
+        fs.symlinkSync(outside, path.join(ws, ".radius", "link"), "dir");
+        // Lexically fine (no `..`), but `.radius/link` resolves outside the workspace.
+        assert.throws(() => resolveRadiusArtifactTarget(ws, "link/evil.tgz", null), /via a symlink/);
+    } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+    }
+});
+
+test.skipIf(!SYMLINK_OK)("rejects an existing source reached through a symlink out of .radius/", () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    try {
+        fs.mkdirSync(path.join(ws, ".radius"), { recursive: true });
+        fs.writeFileSync(path.join(outside, "secret.bicep"), "secret");
+        fs.symlinkSync(outside, path.join(ws, ".radius", "link"), "dir");
+        assert.throws(() => resolveExistingRadiusArtifact(ws, "link/secret.bicep", null), /via a symlink/);
+    } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+    }
+});
+
+test.skipIf(!SYMLINK_OK)("rejects a --force target that is itself a symlink pointing outside .radius/", () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    try {
+        fs.mkdirSync(path.join(ws, ".radius"), { recursive: true });
+        fs.writeFileSync(path.join(outside, "target.tgz"), "");
+        fs.symlinkSync(path.join(outside, "target.tgz"), path.join(ws, ".radius", "custom-types.tgz"), "file");
+        assert.throws(() => resolveRadiusArtifactTarget(ws, "custom-types.tgz", null), /via a symlink/);
+    } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+    }
+});
+
+test.skipIf(!SYMLINK_OK)("allows a real subdirectory under .radius/", () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
+    try {
+        fs.mkdirSync(path.join(ws, ".radius", "sub"), { recursive: true });
+        const p = resolveRadiusArtifactTarget(ws, "sub/custom-types.tgz", null);
+        assert.ok(p.endsWith(path.join("sub", "custom-types.tgz")));
+    } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+    }
+});
+
