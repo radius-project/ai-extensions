@@ -906,7 +906,8 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
  * compile use that repo's effective bicepconfig.json and local extension
  * artifacts (see writeBicepCompileConfig) so apps that declare a locally
  * published `extension customTypes` compile; otherwise the base Radius config is
- * used.
+ * used. When `cleanupRadArtifactsDir` is true (e.g. a temp dir staged from a
+ * committed branch), `radArtifactsDir` is removed after the compile.
  *
  * The returned array is passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
@@ -914,7 +915,7 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
  * any graph state — modeled, planned, deployed, or diff. This is applied only
  * to the returned array; the raw app-graph.json saved above is left complete.
  */
-export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "", radArtifactsDir = "" } = {}) {
+export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "", radArtifactsDir = "", cleanupRadArtifactsDir = false } = {}) {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
   const bicepFile = path.join(dir, "app.bicep");
@@ -928,5 +929,8 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    if (cleanupRadArtifactsDir && radArtifactsDir) {
+      try { fs.rmSync(radArtifactsDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 }

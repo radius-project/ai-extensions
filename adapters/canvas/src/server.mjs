@@ -43,8 +43,8 @@ import {
   resolveSessionId,
   toSafeRepoRelPath,
   workspaceGraphJsonPath,
-  workspaceRadArtifactsDir,
 } from "./workspace.mjs";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
@@ -2177,8 +2177,8 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const radArtifactsDir = (entry && selection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath, radArtifactsDir });
+                const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && selection.fromWorkspace), state: entry?.state, github, repo, branch, bicepRepoPath: selection.bicepPath || ".radius/app.bicep", log: sendProgress });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: sendProgress, saveGraphJsonTo: graphJsonPath, radArtifactsDir, cleanupRadArtifactsDir: radArtifactsRemote });
                 sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -2320,8 +2320,8 @@ function createRequestHandler(instanceId) {
                 }
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
-                const radArtifactsDir = (entry && selection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath, radArtifactsDir });
+                const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && selection.fromWorkspace), state: entry?.state, github, repo, branch, bicepRepoPath: selection.bicepPath || ".radius/app.bicep", log: addProgress });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath, radArtifactsDir, cleanupRadArtifactsDir: radArtifactsRemote });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
@@ -2797,8 +2797,8 @@ function createRequestHandler(instanceId) {
                 }
                 addProgress('Found app.bicep — parsing resources...');
 
-                const radArtifactsDir = (entry && selection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, selection.bicepPath) : "";
-                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, radArtifactsDir });
+                const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && selection.fromWorkspace), state: entry?.state, github, repo, branch, bicepRepoPath: selection.bicepPath || ".radius/app.bicep", log: addProgress });
+                const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, radArtifactsDir, cleanupRadArtifactsDir: radArtifactsRemote });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
                 // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
@@ -2932,10 +2932,10 @@ function createRequestHandler(instanceId) {
                     return;
                 }
 
-                const baseRadArtifactsDir = (entry && baseSelection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, baseSelection.bicepPath) : "";
-                const headRadArtifactsDir = (entry && headSelection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, headSelection.bicepPath) : "";
-                const baseResources = await buildGraphViaRad(baseSelection.content || '', baseSelection.bicepPath || ".radius/app.bicep", { radArtifactsDir: baseRadArtifactsDir });
-                const headResources = await buildGraphViaRad(headSelection.content || '', headSelection.bicepPath || ".radius/app.bicep", { radArtifactsDir: headRadArtifactsDir });
+                const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && baseSelection.fromWorkspace), state: entry?.state, github, repo, branch: data.base, bicepRepoPath: baseSelection.bicepPath || ".radius/app.bicep" });
+                const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && headSelection.fromWorkspace), state: entry?.state, github, repo, branch: data.head, bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep" });
+                const baseResources = await buildGraphViaRad(baseSelection.content || '', baseSelection.bicepPath || ".radius/app.bicep", { radArtifactsDir: baseRadArtifactsDir, cleanupRadArtifactsDir: baseRadArtifactsRemote });
+                const headResources = await buildGraphViaRad(headSelection.content || '', headSelection.bicepPath || ".radius/app.bicep", { radArtifactsDir: headRadArtifactsDir, cleanupRadArtifactsDir: headRadArtifactsRemote });
 
                 // Compute diff using the shared algorithm (see computeGraphDiff).
                 const diffResources = computeGraphDiff(baseResources, headResources);
@@ -3058,8 +3058,8 @@ function createRequestHandler(instanceId) {
                                 const selection = await fetchBicepSelection(entry, repo, branch);
                                 const content = selection.content;
                                 if (content) {
-                                    const radArtifactsDir = (entry && selection.fromWorkspace) ? workspaceRadArtifactsDir(entry.state, selection.bicepPath) : "";
-                                    const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog, radArtifactsDir });
+                                    const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && selection.fromWorkspace), state: entry?.state, github, repo, branch, bicepRepoPath: selection.bicepPath || ".radius/app.bicep", log: addLog });
+                                    const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog, radArtifactsDir, cleanupRadArtifactsDir: radArtifactsRemote });
                                     const recipes = await fetchRecipePack(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });

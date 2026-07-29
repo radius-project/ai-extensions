@@ -24,8 +24,8 @@ import {
     parseRepoFromRemote,
     toSafeRepoRelPath,
     workspaceFileExists,
-    workspaceRadArtifactsDir,
 } from "./workspace.mjs";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
     servers,
@@ -458,10 +458,10 @@ const session = await joinSession({
                             fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
                         ]);
 
-                        const baseRadArtifactsDir = isWorkspaceSelection(entry.state, repo, ctx.input.baseBranch) ? workspaceRadArtifactsDir(entry.state, ".radius/app.bicep") : "";
-                        const headRadArtifactsDir = isWorkspaceSelection(entry.state, repo, ctx.input.headBranch) ? workspaceRadArtifactsDir(entry.state, ".radius/app.bicep") : "";
-                        const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir });
-                        const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir });
+                        const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(entry.state, repo, ctx.input.baseBranch), state: entry.state, github, repo, branch: ctx.input.baseBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                        const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(entry.state, repo, ctx.input.headBranch), state: entry.state, github, repo, branch: ctx.input.headBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                        const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir, cleanupRadArtifactsDir: baseRadArtifactsRemote });
+                        const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir, cleanupRadArtifactsDir: headRadArtifactsRemote });
                         // Compute diff using the shared algorithm (see computeGraphDiff).
                         const diffResources = computeGraphDiff(baseResources, headResources);
                         setSourceRefResources(entry, "diff", diffResources, {
@@ -591,10 +591,10 @@ const session = await joinSession({
                         return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
                     }
 
-                    const baseRadArtifactsDir = isWorkspaceSelection(state, repo, baseBranch) ? workspaceRadArtifactsDir(state, ".radius/app.bicep") : "";
-                    const headRadArtifactsDir = isWorkspaceSelection(state, repo, headBranch) ? workspaceRadArtifactsDir(state, ".radius/app.bicep") : "";
-                    const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir });
-                    const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir });
+                    const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(state, repo, baseBranch), state, github, repo, branch: baseBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                    const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: isWorkspaceSelection(state, repo, headBranch), state, github, repo, branch: headBranch, bicepRepoPath: ".radius/app.bicep", log: (m) => { try { session.log(m); } catch {} } });
+                    const baseResources = await buildGraphViaRad(baseContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: baseRadArtifactsDir, cleanupRadArtifactsDir: baseRadArtifactsRemote });
+                    const headResources = await buildGraphViaRad(headContent || '', ".radius/app.bicep", { log: (m) => { try { session.log(m); } catch {} }, radArtifactsDir: headRadArtifactsDir, cleanupRadArtifactsDir: headRadArtifactsRemote });
 
                     // Compute diff using the shared algorithm (see computeGraphDiff)
                     // and render it as PR-embeddable Markdown (see renderPrDiffMarkdown).

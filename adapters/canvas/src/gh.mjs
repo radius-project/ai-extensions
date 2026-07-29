@@ -379,6 +379,31 @@ export function ghApiGetContent(apiPath, timeout = 15000) {
     });
 }
 
+// Fetch a file's raw bytes from the GitHub contents API. Resolves a Buffer on
+// success, null when the file is absent or unreadable, or { tooLarge: true }
+// when the file exceeds the contents API inline limit (~1MB): GitHub then
+// returns an empty `content` with `encoding` "none", and the blob/raw API would
+// be needed. Used to stage binary extension artifacts (e.g. custom-types.tgz)
+// from a committed branch, which ghApiGetContent would corrupt by decoding as
+// UTF-8.
+export function ghApiGetContentBytes(apiPath, timeout = 20000) {
+    return new Promise((resolve) => {
+        cliExec("gh", ["api", apiPath, "--jq", "{content: .content, encoding: .encoding}"], { timeout }, (err, stdout) => {
+            if (err || !stdout || !stdout.trim()) { resolve(null); return; }
+            try {
+                const parsed = JSON.parse(stdout);
+                if (parsed && parsed.encoding === "base64" && parsed.content) {
+                    resolve(Buffer.from(parsed.content, "base64"));
+                    return;
+                }
+                // encoding "none" with empty content == file too large for the
+                // contents API's inline response.
+                resolve({ tooLarge: true });
+            } catch (e) { resolve(null); }
+        });
+    });
+}
+
 export function ghApiListNames(apiPath, timeout = 15000) {
     return new Promise((resolve) => {
         cliExec("gh", ["api", apiPath, "--jq", `[.[].name]`], { timeout }, (err, stdout) => {
@@ -437,6 +462,7 @@ export function fetchRepoTree(repo, branch = 'main') {
 
 export const github = {
     getContent: (apiPath) => ghApiGetContent(apiPath),
+    getContentBytes: (apiPath) => ghApiGetContentBytes(apiPath),
     listNames: (apiPath) => ghApiListNames(apiPath),
     treePaths: (repo, branch = 'main') => fetchRepoTree(repo, branch),
 };
