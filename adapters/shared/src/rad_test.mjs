@@ -13,6 +13,9 @@ import {
   buildGraphViaRad,
   writeBicepCompileConfig,
   runRadBicepPublishExtension,
+  spawnRad,
+  bicepPublishExtensionArgs,
+  bicepPublishArgs,
   saveGraphJson,
   normalizeSha256,
   expectedDigest,
@@ -430,6 +433,62 @@ describe.skipIf(!LIVE_RAD)("live: custom-type app compiles via buildGraphViaRad 
       try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best-effort */ }
     }
   }, 180000);
+});
+
+describe("bicep publish arg builders", () => {
+  it("builds publish-extension args with --force", () => {
+    expect(bicepPublishExtensionArgs("/a/from.yaml", "/a/out.tgz")).toEqual(
+      ["bicep", "publish-extension", "--from-file", "/a/from.yaml", "--target", "/a/out.tgz", "--force"],
+    );
+  });
+  it("builds publish args (no --force, auth flows through env)", () => {
+    expect(bicepPublishArgs("/a/recipe.bicep", "br:ghcr.io/acme/app/r:1.0.0")).toEqual(
+      ["bicep", "publish", "--file", "/a/recipe.bicep", "--target", "br:ghcr.io/acme/app/r:1.0.0"],
+    );
+  });
+});
+
+// spawnRad drives a real child process, so the fake `rad` is an executable
+// shebang script; that only works on POSIX. Skip (don't drop) on Windows.
+const describeSpawn = process.platform === "win32" ? describe.skip : describe;
+describeSpawn("spawnRad", () => {
+  let dir;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "spawnrad-")); });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ } });
+
+  function fakeRad(body) {
+    const p = path.join(dir, "rad");
+    fs.writeFileSync(p, `#!/usr/bin/env node\n${body}\n`, "utf8");
+    fs.chmodSync(p, 0o755);
+    return p;
+  }
+
+  it("resolves with stdout/stderr on a zero exit", async () => {
+    const bin = fakeRad(`process.stdout.write("out");process.stderr.write("err");process.exit(0);`);
+    const { stdout, stderr } = await spawnRad(bin, ["x"], { timeout: 5000 });
+    expect(stdout).toBe("out");
+    expect(stderr).toBe("err");
+  });
+
+  it("rejects with the exit code and both streams on a non-zero exit", async () => {
+    // rad prints BCP* compile errors to stdout, so stdout must survive on the error.
+    const bin = fakeRad(`process.stdout.write("BCP204 boom");process.exit(3);`);
+    await expect(spawnRad(bin, ["x"], { timeout: 5000, label: "rad bicep publish" })).rejects.toMatchObject({
+      message: expect.stringContaining("rad bicep publish exited with code 3"),
+      stdout: "BCP204 boom",
+    });
+  });
+
+  it("rejects with a timeout when the process does not exit", async () => {
+    const bin = fakeRad(`setTimeout(() => {}, 60000);`);
+    await expect(spawnRad(bin, ["x"], { timeout: 300, label: "rad bicep publish" })).rejects.toThrow(
+      /timed out after 300ms/,
+    );
+  }, 10000);
+
+  it("rejects when the binary cannot be spawned", async () => {
+    await expect(spawnRad(path.join(dir, "does-not-exist"), ["x"], { timeout: 2000 })).rejects.toBeInstanceOf(Error);
+  });
 });
 
 describe("saveGraphJson", () => {

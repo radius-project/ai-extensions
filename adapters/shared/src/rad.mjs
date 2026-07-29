@@ -502,25 +502,18 @@ export function ensureRadBinary({ log = noop } = {}) {
 }
 
 /**
- * spawnManagedRad - run the extension-managed `rad` binary with `args` and
- * resolve with { stdout, stderr } on a zero exit (rejecting with those streams
- * attached otherwise). This is the single place that owns the process handling
- * every managed-rad invocation needs: rad shells out to bicep as a grandchild,
- * so we spawn detached (rad leads its own process group) and kill the whole tree
- * on timeout, and we use an exit/close grace window because that bicep
- * grandchild can inherit and hold the stdio pipes open.
- *
- * `label` only names the command in timeout/exit error messages. `env` is merged
- * over `process.env`. Honors #170: callers are tools, not a user shell; the
- * binary is the managed one resolved by ensureRadBinary (never PATH/.rad/bin).
- *
- * NOTE: runRadAppGraph predates this helper and keeps its own inline spawn to
- * avoid churn in that heavily-tested path; it can be migrated onto this helper
- * in a follow-up.
+ * spawnRad - the process-handling core every managed-rad invocation needs:
+ * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
+ * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
+ * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
+ * grandchild, so it spawns detached (rad leads its own process group), kills the
+ * whole tree on timeout, and uses an exit/close grace window because that
+ * grandchild can inherit and hold the stdio pipes open. `label` only names the
+ * command in timeout/exit error messages; `env` is merged over process.env.
+ * Exported for tests; managed-binary resolution lives in spawnManagedRad.
  */
-async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
-  const radPath = await ensureRadBinary({ log });
-  return await new Promise((resolve, reject) => {
+export function spawnRad(radPath, args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
+  return new Promise((resolve, reject) => {
     const child = spawn(radPath, args, {
       cwd,
       env: { ...process.env, ...env },
@@ -591,6 +584,28 @@ async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = 
 }
 
 /**
+ * spawnManagedRad - resolve the managed `rad` binary (ensureRadBinary; never
+ * PATH/.rad/bin, honoring #170) and run it via spawnRad, merging `env` over
+ * process.env. runRadAppGraph predates this helper and keeps its own inline
+ * spawn to avoid churn in that heavily tested path.
+ */
+async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
+  const radPath = await ensureRadBinary({ log });
+  return await spawnRad(radPath, args, { cwd, env, timeout, label, log });
+}
+
+/**
+ * Argument builders for the two publish commands. Exported so tests can assert
+ * the exact rad CLI invocation without spawning a process.
+ */
+export function bicepPublishExtensionArgs(fromFile, target) {
+  return ["bicep", "publish-extension", "--from-file", fromFile, "--target", target, "--force"];
+}
+export function bicepPublishArgs(file, target) {
+  return ["bicep", "publish", "--file", file, "--target", target];
+}
+
+/**
  * runRadBicepPublishExtension - compile a resource-type manifest into a local
  * Bicep extension via the managed rad binary:
  *   rad bicep publish-extension --from-file <manifest> --target <target> --force
@@ -603,7 +618,7 @@ export async function runRadBicepPublishExtension({ fromFile, target, log = noop
   const to = path.resolve(target);
   try {
     await spawnManagedRad(
-      ["bicep", "publish-extension", "--from-file", from, "--target", to, "--force"],
+      bicepPublishExtensionArgs(from, to),
       { cwd: path.dirname(to), timeout, label: "rad bicep publish-extension", log },
     );
     return to;
@@ -625,7 +640,7 @@ export async function runRadBicepPublish({ file, target, env = {}, log = noop, t
   const src = path.resolve(file);
   try {
     await spawnManagedRad(
-      ["bicep", "publish", "--file", src, "--target", target],
+      bicepPublishArgs(src, target),
       { cwd: path.dirname(src), env, timeout, label: "rad bicep publish", log },
     );
     return target;
