@@ -567,6 +567,31 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
         expect(res.ok).toBe(false);
         expect(res.error).toContain("no such account");
     });
+
+    it("restores a persisted account choice via setPreferredGhLogin so it survives a restart", async () => {
+        // Simulate a fresh process (post-restart): the injected token has the
+        // workflow scope, so with no preference the strategy would act as the
+        // token account (tokuser). Restoring the persisted choice must override
+        // that and make setup act as the chosen keyring account instead — the
+        // fix for the silent revert on restart.
+        const gh = await loadGh("linux", {
+            token: "tok",
+            withToken: STATUS.tokenWithWorkflow,
+            keyring: STATUS.keyringWithWorkflow,
+        });
+        expect((await gh.getGitHubIdentity()).actingLogin).toBe("tokuser");
+
+        gh.setPreferredGhLogin("keyuser");
+        const id = await gh.getGitHubIdentity();
+        expect(id.preferredLogin).toBe("keyuser");
+        expect(id.actingLogin).toBe("keyuser");
+
+        // A blank login clears the preference back to automatic resolution.
+        gh.setPreferredGhLogin("");
+        const cleared = await gh.getGitHubIdentity();
+        expect(cleared.preferredLogin).toBe(null);
+        expect(cleared.actingLogin).toBe("tokuser");
+    });
 });
 
 describe.sequential("getGhPackageCredentials", () => {

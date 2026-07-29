@@ -179,6 +179,18 @@ export function primeGhIdentity() {
     return ensureGhStrategy();
 }
 
+// Restore a previously chosen account (see server startup). Sets the sticky
+// preference in memory only — persistence is owned by the server/shared layer,
+// so this module stays free of disk I/O. Resets the identity cache so the next
+// resolution honors the restored choice. A blank login clears the preference
+// (back to "decide automatically").
+export function setPreferredGhLogin(login) {
+    const next = (login || "").trim() || null;
+    if (next === _preferredLogin) return;
+    _preferredLogin = next;
+    resetGhIdentityCache();
+}
+
 // Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
 // status`. Call after anything that changes the active account (a switch). The
 // sticky user preference is intentionally preserved across resets.

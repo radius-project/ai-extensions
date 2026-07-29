@@ -83,3 +83,21 @@ export function deleteCredentialProfile(repo, name) {
     saveCredentials();
     return next.length !== list.length;
 }
+
+// ── Preferred GitHub identity ────────────────────────────────────────────────
+// The account the user explicitly chose for setup to act as (via the Create
+// Environment dialog's account switcher). gh accounts are machine-global, so
+// this preference is stored machine-wide (not per-repo) and restored at server
+// startup — otherwise the in-memory choice dies with the process and the token
+// strategy silently reverts to the injected token's account on the next restart.
+export function getPreferredGitHubLogin() {
+    const v = sharedCredentials.preferredGitHubLogin;
+    return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
+export function setPreferredGitHubLogin(login) {
+    const next = String(login || '').trim();
+    if (next) sharedCredentials.preferredGitHubLogin = next;
+    else delete sharedCredentials.preferredGitHubLogin;
+    saveCredentials();
+}

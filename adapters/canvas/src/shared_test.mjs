@@ -4,6 +4,8 @@ import {
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,
+    getPreferredGitHubLogin,
+    setPreferredGitHubLogin,
 } from "./shared.mjs";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
@@ -58,5 +60,24 @@ describe("credential profiles", () => {
         saveCredentialProfile(REPO, { name: "gone", provider: "aws" });
         expect(deleteCredentialProfile(REPO, "gone")).toBe(true);
         expect(listCredentialProfiles(REPO)).toEqual([]);
+    });
+});
+
+describe("preferred GitHub login", () => {
+    beforeEach(() => setPreferredGitHubLogin(""));
+
+    it("is empty by default", () => {
+        expect(getPreferredGitHubLogin()).toBe("");
+    });
+
+    it("persists and trims the chosen login so it survives a restart", () => {
+        setPreferredGitHubLogin("  chosen-user  ");
+        expect(getPreferredGitHubLogin()).toBe("chosen-user");
+    });
+
+    it("clears the preference when set to blank", () => {
+        setPreferredGitHubLogin("chosen-user");
+        setPreferredGitHubLogin("");
+        expect(getPreferredGitHubLogin()).toBe("");
     });
 });

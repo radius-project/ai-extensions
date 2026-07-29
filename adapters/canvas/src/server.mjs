@@ -23,8 +23,8 @@ import {
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
-import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache, primeGhIdentity } from "./gh.mjs";
+import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile, getPreferredGitHubLogin, setPreferredGitHubLogin } from "./shared.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache, primeGhIdentity, setPreferredGhLogin } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -812,6 +812,12 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: result.error || "Failed to switch account." }));
                     return;
                 }
+                // Persist the explicit choice machine-wide so it survives a
+                // restart. Without this the in-memory preference dies with the
+                // process and the token strategy reverts to the injected token's
+                // account — the same wrong-identity failure this flow exists to
+                // prevent, deferred by one process lifetime.
+                setPreferredGitHubLogin(login);
                 res.writeHead(200);
                 res.end(JSON.stringify({ success: true, identity: await getGitHubIdentity() }));
             } catch (e) {
@@ -3969,6 +3975,11 @@ function listenOn(server, port) {
 
 async function startServer(instanceId, page = "environment") {
     const handler = createRequestHandler(instanceId);
+    // Restore the user's explicitly chosen GitHub account (if any) before priming
+    // so the very first strategy resolution honors it. This is what makes the
+    // account choice stable across restarts.
+    const persistedLogin = getPreferredGitHubLogin();
+    if (persistedLogin) setPreferredGhLogin(persistedLogin);
     // Warm the GitHub identity cache in the background at boot so the first gh
     // calls find the token strategy already resolved instead of paying (or
     // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
