@@ -6,6 +6,7 @@
 
 import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
+import { RADIUS_GRAPH_BRANCH, deployedGraphPath } from "@radius-project/core";
 
 export function ghJson(args, fallback = null, timeout = 15000) {
     return new Promise((resolve) => {
@@ -93,6 +94,66 @@ export function fetchDeployState(repo) {
 export function fetchDeployGraph(repo) {
     return ghApiGetContent(`/repos/${repo}/contents/deploy-graph.json?ref=radius-deploy-status`, 12000)
         .then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+}
+
+/**
+ * Fetch the persisted deployed application graph for one
+ * (sourceBranch, scope, environment) deployment from the `radius-graph`
+ * orphan branch. Returns the parsed JSON object (same shape
+ * `rad app graph -o json` emits) or `null` when the file isn't published
+ * yet, so callers can render just the modeled scaffold in that case.
+ */
+export function fetchDeployedGraph(repo, { sourceBranch, scope, environment }) {
+    const path = deployedGraphPath({ sourceBranch, scope, environment });
+    return ghApiGetContent(
+        `/repos/${repo}/contents/${path}?ref=${RADIUS_GRAPH_BRANCH}`,
+        12000,
+    ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+}
+
+/**
+ * Map a raw `provisioningState` / `provisioningStatus` string as emitted
+ * by `rad app graph -o json` (which lifts the value from each concrete
+ * resource's ARM-style status) to the four-state vocabulary the canvas
+ * uses on node cards. Case-insensitive and tolerant of provider-specific
+ * spellings (Azure uses `Succeeded`, some resources emit `Ok`, in-flight
+ * states include `Provisioning` / `Updating` / `Accepted` / `Creating`).
+ * Anything unrecognized (including empty, `NotSpecified`) falls back to
+ * `pending` so a not-yet-touched resource stays grey. Pure.
+ */
+export function mapProvisioningStateToDeployStatus(state) {
+    const v = String(state || "").toLowerCase().trim();
+    if (!v) return "pending";
+    if (v === "succeeded" || v === "success" || v === "ok") return "success";
+    if (v === "failed" || v === "canceled" || v === "cancelled") return "failed";
+    if (v === "accepted" || v === "creating" || v === "updating" || v === "provisioning" || v === "running" || v === "deleting") return "in_progress";
+    return "pending";
+}
+
+/**
+ * Walk a persisted deployed-graph JSON blob (as returned by
+ * {@link fetchDeployedGraph}) and produce a `{ [resourceName]: deployStatus }`
+ * map from each top-level resource's `provisioningState`. The map is
+ * consumed by the /api/deployed-graph handler as the "persisted overlay"
+ * — for each modeled scaffold node, look up its name and stamp the
+ * derived deployStatus. Names not present in the map stay at whatever
+ * the scaffold gave them (typically `pending`).
+ *
+ * Accepts both the `{ resources: [...] }` shape rad app graph emits and
+ * a flat array. Returns an empty object for anything unusable.
+ */
+export function extractStatusesFromGraph(graph) {
+    const out = {};
+    if (!graph) return out;
+    const arr = Array.isArray(graph) ? graph : (graph.resources || []);
+    if (!Array.isArray(arr)) return out;
+    for (const r of arr) {
+        if (!r || !r.name) continue;
+        const raw = r.provisioningState || r.provisioningStatus;
+        if (raw === undefined || raw === null || raw === "") continue;
+        out[r.name] = mapProvisioningStateToDeployStatus(raw);
+    }
+    return out;
 }
 
 export function normalizeDeployedGraph(resources) {
