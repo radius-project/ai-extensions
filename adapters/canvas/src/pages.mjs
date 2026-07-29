@@ -1565,8 +1565,8 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
         <input type="hidden" id="az-selected-app-id" value="" />
         <div class="rad-field__help">
-          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). Reused if it already exists.
-          <a href="#" id="az-use-existing-link">Use an existing application…</a>
+          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may 
+         <a href="#" id="az-use-existing-link">use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
         <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
