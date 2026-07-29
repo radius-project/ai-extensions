@@ -1575,8 +1575,8 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
     <!-- 4 · Landing zone -->
     <div class="rad-section" id="env-infra-section">
-      <div class="rad-section__title">4 · Landing zone</div>
-      <div class="rad-section__desc">Where your app runs in this subscription.</div>
+      <div class="rad-section__title">4 · Infrastructure</div>
+      <div class="rad-section__desc">Configure the compute infrastructure for your environment.</div>
 
       <!-- Azure infra -->
       <div id="panel-azure">
