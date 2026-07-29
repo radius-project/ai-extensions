@@ -19,7 +19,11 @@ export {
   MODELED_GRAPH_DEFAULTS,
   buildResourceID,
   stripAPIVersion,
+  DEFAULT_RADIUS_SCOPE,
+  RADIUS_GRAPH_BRANCH,
+  deployedGraphPath,
 } from "./graph/index.js";
+export type { DeployedGraphKey } from "./graph/index.js";
 export {
   RECIPE_PACK_REPO,
   RECIPE_PACK_REF,
