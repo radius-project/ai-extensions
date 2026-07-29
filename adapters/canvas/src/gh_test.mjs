@@ -51,8 +51,13 @@ function setPlatform(platform) {
 // Load gh.mjs with a controlled environment. `withToken`/`keyring` are the
 // `gh auth status` texts returned for the injected-token vs token-stripped
 // probes; `token` sets the ambient injected GH_TOKEN the strategy evaluates.
+// `userTokens` maps a login to the token `gh auth token --user <login>` yields.
+// `switchError`, when set, makes `gh auth switch` fail with that message.
+// `prime: true` awaits the async identity probe (so the token-stripping strategy
+// is resolved) and clears the recorded probe calls, leaving the next spawn as
+// mock.calls[0] — mirroring gh commands that run after identity resolution.
 async function loadGh(platform, opts = {}) {
-    const { withToken = "", keyring = "", token = null, userTokens = {} } = opts;
+    const { withToken = "", keyring = "", token = null, userTokens = {}, switchError = null, prime = false } = opts;
     setPlatform(platform);
     if (token === null) {
         delete process.env.GH_TOKEN;
@@ -60,27 +65,40 @@ async function loadGh(platform, opts = {}) {
     } else {
         process.env.GH_TOKEN = token;
     }
-    childProcess.execFileSync.mockImplementation((_file, args, options) => {
+    // The identity layer now drives `gh auth status`, `gh auth token`, and
+    // `gh auth switch` through async execFile (the read-only probes used to be
+    // synchronous execFileSync), so one router serves them all.
+    childProcess.execFile.mockImplementation((_file, args, options, cb) => {
         const a = args || [];
-        // `gh auth token --user <login>` — return that login's keyring token.
+        const done = (err, out) => {
+            cb(err, out || "", err ? String((err && err.message) || err) : "");
+            return { stdin: { end() {} } };
+        };
+        if (a[0] === "auth" && a[1] === "switch") {
+            return done(switchError ? new Error(switchError) : null, "");
+        }
         if (a[0] === "auth" && a[1] === "token") {
             const ui = a.indexOf("--user");
             if (ui !== -1) {
                 const login = a[ui + 1];
-                if (Object.prototype.hasOwnProperty.call(userTokens, login)) {
-                    return Buffer.from(userTokens[login]);
-                }
-                const err = new Error("no token for user");
-                throw err;
+                if (Object.prototype.hasOwnProperty.call(userTokens, login)) return done(null, userTokens[login]);
+                return done(new Error("no token for user"), "");
             }
         }
-        // `gh auth status` — return the token-present vs token-stripped view.
-        const env = (options && options.env) || {};
-        const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
-        return Buffer.from(hasTok ? withToken : keyring);
+        if (a[0] === "auth" && a[1] === "status") {
+            const env = (options && options.env) || {};
+            const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
+            return done(null, hasTok ? withToken : keyring);
+        }
+        return done(null, "");
     });
     vi.resetModules();
-    return import("./gh.mjs");
+    const gh = await import("./gh.mjs");
+    if (prime) {
+        await gh.primeGhIdentity();
+        childProcess.execFile.mockClear();
+    }
+    return gh;
 }
 
 describe.sequential("cliExec", () => {
@@ -150,6 +168,7 @@ describe.sequential("cliExec", () => {
 
     it("strips ambient tokens for a full-path gh invocation when the token lacks workflow and a keyring login has it", async () => {
         const { cliExec } = await loadGh("linux", {
+            prime: true,
             token: "tok",
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.keyringWithWorkflow,
@@ -180,6 +199,7 @@ describe.sequential("cliExec", () => {
 
     it("removes ambient GitHub tokens when the token lacks workflow and a keyring login has it", async () => {
         const { cliExec } = await loadGh("win32", {
+            prime: true,
             token: "ambient-gh",
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.keyringWithWorkflow,
@@ -204,6 +224,7 @@ describe.sequential("cliExec", () => {
 
     it("keeps ambient GitHub tokens when the injected token already has workflow (even with a keyring login)", async () => {
         const { cliExec } = await loadGh("win32", {
+            prime: true,
             token: "ambient-gh",
             withToken: STATUS.tokenWithWorkflow,
             keyring: STATUS.keyringWithWorkflow,
@@ -232,6 +253,7 @@ describe.sequential("cliExec", () => {
 
     it("preserves ambient GitHub tokens when no keyring login exists", async () => {
         const { cliExec } = await loadGh("win32", {
+            prime: true,
             token: "ambient-gh",
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.empty,
@@ -277,6 +299,7 @@ describe.sequential("cliExec", () => {
 
     it("strips COPILOT_AGENT_SESSION_ID on the gh path (on top of ghChildEnv)", async () => {
         const { cliExec } = await loadGh("linux", {
+            prime: true,
             token: "ambient-gh",
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.keyringWithWorkflow,
@@ -464,7 +487,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             withToken: STATUS.tokenWithWorkflow,
             keyring: STATUS.keyringWithWorkflow,
         });
-        const id = getGitHubIdentity();
+        const id = await getGitHubIdentity();
         expect(id.actingLogin).toBe("tokuser");
         expect(id.displayLogin).toBe("tokuser");
         expect(id.mismatch).toBe(false);
@@ -478,7 +501,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             withToken: STATUS.tokenWithWorkflow,
             keyring: STATUS.keyringWithWorkflow,
         });
-        const id = getGitHubIdentity();
+        const id = await getGitHubIdentity();
         expect(id.actingHasPackages).toBe(false);
         expect(id.accounts.every((a) => a.hasPackages === false)).toBe(true);
     });
@@ -493,7 +516,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             withToken: STATUS.tokenPubActive,
             keyring: STATUS.keyringPubAndEmu,
         });
-        const id = getGitHubIdentity();
+        const id = await getGitHubIdentity();
         expect(id.actingLogin).toBe("pubuser");
         expect(id.actingHasPackages).toBe(true);
         const pub = id.accounts.find((a) => a.login === "pubuser");
@@ -505,7 +528,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             withToken: STATUS.tokenNoWorkflow,
             keyring: STATUS.keyringWithWorkflow,
         });
-        const id = getGitHubIdentity();
+        const id = await getGitHubIdentity();
         expect(id.displayLogin).toBe("tokuser");
         expect(id.actingLogin).toBe("keyuser");
         expect(id.mismatch).toBe(true);
@@ -517,18 +540,18 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             withToken: STATUS.tokenWithWorkflow,
             keyring: STATUS.keyringWithWorkflow,
         });
-        expect(gh.getGitHubIdentity().actingLogin).toBe("tokuser");
+        expect((await gh.getGitHubIdentity()).actingLogin).toBe("tokuser");
 
-        childProcess.execFile.mockImplementation((_file, args, _opts, cb) => {
-            cb(null, "", "");
-            return { stdin: { end() {} } };
-        });
+        // loadGh's router already answers `gh auth switch` (plus the re-primed
+        // status probes after the cache reset). Clear the prime's recorded calls
+        // so the switch spawn is calls[0].
+        childProcess.execFile.mockClear();
         const res = await gh.switchGhAccount("keyuser");
         expect(res).toEqual({ ok: true });
         const [, args] = childProcess.execFile.mock.calls[0];
         expect(args).toEqual(["auth", "switch", "--user", "keyuser"]);
 
-        const id = gh.getGitHubIdentity();
+        const id = await gh.getGitHubIdentity();
         expect(id.preferredLogin).toBe("keyuser");
         expect(id.actingLogin).toBe("keyuser");
     });
@@ -538,10 +561,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
             token: "tok",
             withToken: STATUS.tokenWithWorkflow,
             keyring: STATUS.keyringWithWorkflow,
-        });
-        childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
-            cb(new Error("boom"), "", "no such account");
-            return { stdin: { end() {} } };
+            switchError: "no such account",
         });
         const res = await gh.switchGhAccount("ghost");
         expect(res.ok).toBe(false);
@@ -570,7 +590,7 @@ describe.sequential("getGhPackageCredentials", () => {
         });
         // Acting identity is pubuser (token has workflow → token kept). GHCR
         // creds must pin to pubuser's keyring token, never the active EMU one.
-        expect(getGhPackageCredentials()).toEqual({ token: "keyring-pub-token", username: "pubuser" });
+        expect(await getGhPackageCredentials()).toEqual({ token: "keyring-pub-token", username: "pubuser" });
     });
 
     it("honors an explicit switch to a keyring account for package auth", async () => {
@@ -580,12 +600,8 @@ describe.sequential("getGhPackageCredentials", () => {
             keyring: STATUS.keyringPubAndEmu,
             userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" },
         });
-        childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
-            cb(null, "", "");
-            return { stdin: { end() {} } };
-        });
         await gh.switchGhAccount("emuuser");
-        expect(gh.getGhPackageCredentials()).toEqual({ token: "keyring-emu-token", username: "emuuser" });
+        expect(await gh.getGhPackageCredentials()).toEqual({ token: "keyring-emu-token", username: "emuuser" });
     });
 
     it("falls back to the injected token when the acting login has no keyring entry", async () => {
@@ -595,7 +611,7 @@ describe.sequential("getGhPackageCredentials", () => {
             keyring: STATUS.empty,
             userTokens: {},
         });
-        expect(getGhPackageCredentials()).toEqual({ token: "injected-solo", username: "tokuser" });
+        expect(await getGhPackageCredentials()).toEqual({ token: "injected-solo", username: "tokuser" });
     });
 
     it("throws when no GitHub account can be resolved", async () => {
@@ -605,6 +621,6 @@ describe.sequential("getGhPackageCredentials", () => {
             keyring: STATUS.empty,
             userTokens: {},
         });
-        expect(() => getGhPackageCredentials()).toThrow(/No GitHub account/);
+        await expect(getGhPackageCredentials()).rejects.toThrow(/No GitHub account/);
     });
 });

@@ -3,7 +3,7 @@
 // (`github`) injected into radius-core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment, and
 // gh always prefers that env token over the user's stored (keyring) login. That
@@ -24,8 +24,12 @@ function ghExecutable() {
 let _preferredLogin = null;
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
-// the derived token strategy. Reset by resetGhIdentityCache() after a switch.
+// the derived token strategy. `_ghSnapshotPromise` is the in-flight/settled
+// single-flight probe; `_ghSnapshot` is its resolved value, readable
+// synchronously by the hot path once primed. Reset by resetGhIdentityCache()
+// after a switch.
 let _ghSnapshot = null;
+let _ghSnapshotPromise = null;
 let _ghStrategy = null;
 
 // Parse `gh auth status` text into structured accounts. Pure so it can be unit
@@ -95,47 +99,57 @@ export function decideGhTokenStrategy({
     return { useKeyring: false, reason: "no-workflow-scope-available" };
 }
 
-// Run `gh auth status` synchronously, returning its combined output. gh exits
-// non-zero when not logged in but still prints useful text, so we recover it
-// from the thrown error rather than treating it as empty.
-function ghAuthStatusTextSync(env) {
-    try {
-        return execFileSync(ghExecutable(), ["auth", "status"], {
+// Run `gh auth status` asynchronously, returning its combined output. gh exits
+// non-zero when not logged in but still prints useful text, so execFile's
+// callback hands us stdout/stderr even on a non-zero exit — we recover the text
+// rather than treating it as empty. Async on purpose: a synchronous spawn here
+// froze the whole event loop for up to the timeout (twice, so ~16s worst case)
+// on a slow/locked-down network.
+function ghAuthStatusText(env) {
+    return new Promise((resolve) => {
+        execFile(ghExecutable(), ["auth", "status"], {
             env,
-            stdio: ["ignore", "pipe", "pipe"],
             timeout: 8000,
             windowsHide: true,
-        }).toString();
-    } catch (e) {
-        const out = e && e.stdout ? e.stdout.toString() : "";
-        const err = e && e.stderr ? e.stderr.toString() : "";
-        return out + err;
-    }
+        }, (_e, stdout, stderr) => {
+            resolve(((stdout || "") + (stderr || "")).toString());
+        });
+    });
 }
 
 // Snapshot the accounts gh sees with the injected token present vs stripped.
-// Memoized: the first gh call in the process pays the (network) cost once.
-function ghSnapshot() {
-    if (_ghSnapshot) return _ghSnapshot;
-    const base = process.env;
-    const hasToken = !!(base.GH_TOKEN || base.GITHUB_TOKEN);
-    const stripped = { ...base };
-    delete stripped.GH_TOKEN;
-    delete stripped.GITHUB_TOKEN;
-    const withTokenAccts = parseGhAuthStatus(ghAuthStatusTextSync(base));
-    const keyringAccts = parseGhAuthStatus(ghAuthStatusTextSync(stripped));
-    const tokenAcct = hasToken
-        ? withTokenAccts.find((a) => /TOKEN/i.test(a.source)) || null
-        : null;
-    const keyringActive = keyringAccts.find((a) => a.active) || keyringAccts[0] || null;
-    _ghSnapshot = { hasToken, withTokenAccts, keyringAccts, tokenAcct, keyringActive };
-    return _ghSnapshot;
+// Single-flight and memoized: the FIRST caller starts one probe; every caller
+// (including ones that arrive while it is still in flight) awaits that same
+// Promise, so concurrent gh work never spawns duplicate `gh auth status` runs.
+// The resolved value is also cached in _ghSnapshot for the synchronous hot path.
+function ensureGhSnapshot() {
+    if (_ghSnapshotPromise) return _ghSnapshotPromise;
+    _ghSnapshotPromise = (async () => {
+        const base = process.env;
+        const hasToken = !!(base.GH_TOKEN || base.GITHUB_TOKEN);
+        const stripped = { ...base };
+        delete stripped.GH_TOKEN;
+        delete stripped.GITHUB_TOKEN;
+        const [withTokenText, keyringText] = await Promise.all([
+            ghAuthStatusText(base),
+            ghAuthStatusText(stripped),
+        ]);
+        const withTokenAccts = parseGhAuthStatus(withTokenText);
+        const keyringAccts = parseGhAuthStatus(keyringText);
+        const tokenAcct = hasToken
+            ? withTokenAccts.find((a) => /TOKEN/i.test(a.source)) || null
+            : null;
+        const keyringActive = keyringAccts.find((a) => a.active) || keyringAccts[0] || null;
+        _ghSnapshot = { hasToken, withTokenAccts, keyringAccts, tokenAcct, keyringActive };
+        return _ghSnapshot;
+    })();
+    return _ghSnapshotPromise;
 }
 
 // Resolve (memoized) the token strategy from the current snapshot + preference.
-function ghStrategy() {
+async function ensureGhStrategy() {
     if (_ghStrategy) return _ghStrategy;
-    const s = ghSnapshot();
+    const s = await ensureGhSnapshot();
     _ghStrategy = decideGhTokenStrategy({
         hasToken: s.hasToken,
         tokenLogin: s.tokenAcct ? s.tokenAcct.login : "",
@@ -147,21 +161,45 @@ function ghStrategy() {
     return _ghStrategy;
 }
 
+// Synchronous read of the resolved strategy for the hot path (ghChildEnv, called
+// on every gh spawn). Returns the safe default (keep the injected token — the
+// identity the host UI shows) until the async probe has resolved, so a spawn
+// never blocks on the network. The default is superseded the moment the strategy
+// resolves, which always happens before any workflow-scope write in the deploy
+// flow (that flow resolves the identity up front).
+function ghStrategyCached() {
+    return _ghStrategy || { useKeyring: false, reason: "identity-not-yet-resolved" };
+}
+
+// Kick off (and await) the async `gh auth status` probes backing the identity
+// strategy. Callers that need the token-stripping decision in effect for the gh
+// calls that follow (the deploy flow, the identity endpoints, server startup)
+// await this first. Single-flight/memoized, so calling it repeatedly is cheap.
+export function primeGhIdentity() {
+    return ensureGhStrategy();
+}
+
 // Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
 // status`. Call after anything that changes the active account (a switch). The
 // sticky user preference is intentionally preserved across resets.
 export function resetGhIdentityCache() {
     _ghSnapshot = null;
+    _ghSnapshotPromise = null;
     _ghStrategy = null;
 }
 
 // Build the child environment for a `gh` invocation. Strips the injected
 // GH_TOKEN/GITHUB_TOKEN only when the resolved strategy says to fall back to the
 // keyring credential; otherwise passes the token through so gh keeps the
-// identity the user sees.
+// identity the user sees. Stays synchronous (cliExec spawns synchronously) and
+// reads only the cached strategy — it never blocks a spawn on the networked
+// probe. Until the strategy resolves it uses the safe default (keep the token);
+// priming happens at server startup and whenever the identity is resolved
+// (the identity endpoints and the deploy flow), which is before any
+// workflow-scope write, so the strategy is in effect when it matters.
 function ghChildEnv(baseEnv) {
     const env = { ...(baseEnv || process.env) };
-    if (ghStrategy().useKeyring) {
+    if (ghStrategyCached().useKeyring) {
         delete env.GH_TOKEN;
         delete env.GITHUB_TOKEN;
     }
@@ -172,9 +210,9 @@ function ghChildEnv(baseEnv) {
 // list. `actingLogin` is who gh mutates as (after the strategy decision);
 // `displayLogin` is who the injected token represents (what the host UI shows).
 // A mismatch means setup would act as a different account than the user thinks.
-export function getGitHubIdentity() {
-    const s = ghSnapshot();
-    const strat = ghStrategy();
+export async function getGitHubIdentity() {
+    const s = await ensureGhSnapshot();
+    const strat = await ensureGhStrategy();
     const displayLogin = s.hasToken && s.tokenAcct
         ? s.tokenAcct.login
         : (s.keyringActive ? s.keyringActive.login : "");
@@ -255,15 +293,16 @@ function ghKeyringTokenForUser(login) {
     delete env.GH_TOKEN;
     delete env.GITHUB_TOKEN;
     delete env.GH_HOST;
-    try {
-        return execFileSync(
+    return new Promise((resolve) => {
+        execFile(
             ghExecutable(),
             ["auth", "token", "--hostname", "github.com", "--user", login],
-            { env, stdio: ["ignore", "pipe", "ignore"], timeout: 8000, windowsHide: true },
-        ).toString().trim();
-    } catch {
-        return "";
-    }
+            { env, timeout: 8000, windowsHide: true },
+            (e, stdout) => {
+                resolve(e ? "" : (stdout || "").toString().trim());
+            },
+        );
+    });
 }
 
 // Resolve GitHub credentials for GHCR / GitHub Packages operations that match
@@ -283,15 +322,15 @@ function ghKeyringTokenForUser(login) {
 //      error the caller surfaces with refresh guidance.
 // Throws when no credential can be resolved. `username` is always the acting
 // login so the Basic-auth pair matches the token.
-export function getGhPackageCredentials() {
-    const id = getGitHubIdentity();
+export async function getGhPackageCredentials() {
+    const id = await getGitHubIdentity();
     const login = id.actingLogin;
     if (!login) {
         throw new Error("No GitHub account is available for package setup. Sign in with: gh auth login");
     }
     const acct = (id.accounts || []).find((a) => a.login === login) || null;
     if (acct && acct.switchable) {
-        const token = ghKeyringTokenForUser(login);
+        const token = await ghKeyringTokenForUser(login);
         if (token) return { token, username: login };
     }
     const injected = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "").trim();

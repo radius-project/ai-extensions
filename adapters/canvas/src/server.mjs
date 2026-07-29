@@ -24,7 +24,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache, primeGhIdentity } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -790,7 +790,7 @@ function createRequestHandler(instanceId) {
                 // stale pre-refresh scopes and the warning would never clear.
                 if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
                 res.writeHead(200);
-                res.end(JSON.stringify(getGitHubIdentity()));
+                res.end(JSON.stringify(await getGitHubIdentity()));
             } catch (e) {
                 res.writeHead(200);
                 res.end(JSON.stringify({ error: e.message, accounts: [] }));
@@ -813,7 +813,7 @@ function createRequestHandler(instanceId) {
                     return;
                 }
                 res.writeHead(200);
-                res.end(JSON.stringify({ success: true, identity: getGitHubIdentity() }));
+                res.end(JSON.stringify({ success: true, identity: await getGitHubIdentity() }));
             } catch (e) {
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: e.message }));
@@ -1059,7 +1059,7 @@ function createRequestHandler(instanceId) {
                 // than the one the host UI shows (e.g. an enterprise/EMU login
                 // that may lack access to the target repo or Azure tenant).
                 try {
-                    const ghId = getGitHubIdentity();
+                    const ghId = await getGitHubIdentity();
                     if (ghId && ghId.actingLogin) {
                         steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
                         if (ghId.mismatch && ghId.displayLogin) {
@@ -1876,7 +1876,7 @@ function createRequestHandler(instanceId) {
                 // of setup runs as the intended account.
                 let packageCredentials;
                 try {
-                    packageCredentials = getGhPackageCredentials();
+                    packageCredentials = await getGhPackageCredentials();
                 } catch (e) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(403);
@@ -1890,7 +1890,7 @@ function createRequestHandler(instanceId) {
                 // upload — after the rest of setup has already run. actingHasPackages
                 // is read keyring-first, matching the credential getGhPackageCredentials
                 // pins, so it reflects the token this push actually uses.
-                const ghPkgIdentity = getGitHubIdentity();
+                const ghPkgIdentity = await getGitHubIdentity();
                 if (ghPkgIdentity && ghPkgIdentity.actingLogin && !ghPkgIdentity.actingHasPackages) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(403);
@@ -3969,6 +3969,11 @@ function listenOn(server, port) {
 
 async function startServer(instanceId, page = "environment") {
     const handler = createRequestHandler(instanceId);
+    // Warm the GitHub identity cache in the background at boot so the first gh
+    // calls find the token strategy already resolved instead of paying (or
+    // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
+    // self-healing, so a failure here just means the next caller re-primes.
+    primeGhIdentity().catch(() => {});
     const server = createServer(handler);
     let port = 0;
     // Try the stable, instanceId-derived port first; fall back to an ephemeral
