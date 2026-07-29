@@ -3380,10 +3380,11 @@ function createRequestHandler(instanceId) {
                         // Merge parseRadDeployProgress output into the per-Radius-resource
                         // deployStatus. Only per-resource lines count for terminal state:
                         //   - global "in_progress"  → any pending resource moves to in_progress
-                        //   - byName "success"      → resource moves to success (unless already failed)
+                        //   - byName "success" OR name present in the `Resources:` block
+                        //     → resource moves to success (unless already failed)
                         //   - byName "failed"       → resource moves to failed (terminal)
-                        // The `Deployment Complete` marker is treated as informational only;
-                        // resources never flip to success without their own `Completed <name>`.
+                        // The `Deployment Complete` marker on its own is informational; only
+                        // an explicit per-resource signal flips a node to success.
                         const mergeRadProgress = (prog) => {
                             if (prog.global === 'in_progress') {
                                 for (const r of resources) {
@@ -3394,16 +3395,16 @@ function createRequestHandler(instanceId) {
                                 }
                             }
                             for (const r of resources) {
-                                const s = prog.byName[r.name];
-                                if (!s) continue;
                                 const cur = r.deployStatus;
                                 if (cur === 'failed') continue;
-                                if (s === 'success' && cur !== 'success') {
-                                    setStatus(r, 'success');
-                                    addLog('  ✓ ' + r.name + ' deployed');
-                                } else if (s === 'failed') {
+                                const s = prog.byName[r.name];
+                                const listed = prog.deployedNames.has(r.name);
+                                if (s === 'failed') {
                                     setStatus(r, 'failed');
                                     addLog('  ✗ ' + r.name + ' failed');
+                                } else if ((s === 'success' || listed) && cur !== 'success') {
+                                    setStatus(r, 'success');
+                                    addLog('  ✓ ' + r.name + ' deployed');
                                 }
                             }
                         };
@@ -3510,17 +3511,18 @@ function createRequestHandler(instanceId) {
                                 }
 
                                 // ── Terminal per-node status (unified rule) ─────
-                                // Only a `Completed <name>` line from rad deploy stdout
-                                // counts as success. Every other resource — whether the
-                                // parser saw a `Failed` line, saw nothing at all (deploy
-                                // never reached it), or the workflow itself concluded with
-                                // non-success — is marked failed. The workflow's own
-                                // conclusion only decides the run's overall status/label
-                                // and the log messages below; it never converts an unseen
-                                // resource to green.
+                                // A resource is success only when rad deploy's own stdout
+                                // says so — either via a `Completed <name>` line or by
+                                // appearing in the `Resources:` block emitted after
+                                // `Deployment Complete`. Everything else — parser saw a
+                                // `Failed` line, saw nothing at all (deploy never reached
+                                // it), or the workflow itself concluded non-success — is
+                                // marked failed. The workflow's own conclusion never
+                                // converts an unseen resource to green.
                                 resources.forEach(r => {
-                                    if (parsedProg.byName[r.name] === 'success') setStatus(r, 'success');
-                                    else setStatus(r, 'failed');
+                                    const deployedSuccess = parsedProg.byName[r.name] === 'success'
+                                        || parsedProg.deployedNames.has(r.name);
+                                    setStatus(r, deployedSuccess ? 'success' : 'failed');
                                 });
 
                                 if (conclusion === 'success') {

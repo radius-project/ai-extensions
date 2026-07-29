@@ -263,6 +263,10 @@ describe("parseRadDeployProgress", () => {
             postgresql: "success",
             frontend: "success",
         });
+        // The Resources: block after Deployment Complete lists every deployed
+        // resource — parsed into deployedNames as an independent success signal.
+        expect(out.deployedNames).toBeInstanceOf(Set);
+        expect([...out.deployedNames].sort()).toEqual(["frontend", "postgresql", "todolist"]);
     });
 
     it("reports global in_progress before any Completed line", () => {
@@ -320,16 +324,68 @@ describe("parseRadDeployProgress", () => {
         expect(out.byName.postgresql).toBe("failed");
     });
 
+    it("treats resources listed in the Resources: block as success when rad omits per-resource Completed lines (real success-run format)", () => {
+        // Verbatim from a successful run: rad deploy prints Deployment Complete
+        // then a Resources: block naming every deployed resource, with NO
+        // per-resource `Completed <name>` lines. Only signal of per-resource
+        // success on this run.
+        const log = [
+            "Deploying template '.radius/app.bicep' into environment '/planes/radius/local/resourcegroups/default/providers/Radius.Core/environments/nitenv' from workspace 'default'...",
+            "",
+            "Deployment In Progress...",
+            "",
+            "",
+            "Deployment Complete",
+            "",
+            "Resources:",
+            "    todo-list-app-image Radius.Compute/containerImages",
+            "    todo-list-app       Radius.Compute/containers",
+            "    todo-list-app       Radius.Core/applications",
+            "    mysql28             Radius.Data/mySqlDatabases",
+            "    radius-ghcr-registry-creds Radius.Security/secrets",
+        ].join("\n");
+        const modeledApp = [
+            { name: "todo-list-app", type: "Radius.Compute/containers" },
+            { name: "mysql28", type: "Radius.Data/mySqlDatabases" },
+        ];
+        const out = parseRadDeployProgress(log, modeledApp);
+        expect(out.global).toBe("complete");
+        expect(out.byName).toEqual({});
+        expect([...out.deployedNames].sort()).toEqual(["mysql28", "todo-list-app"]);
+    });
+
+    it("ends the Resources: block on the next non-indented line", () => {
+        // Guard: a later section header must not leak into deployedNames even if
+        // its first token happens to be a modeled resource name.
+        const log = [
+            "Deployment Complete",
+            "",
+            "Resources:",
+            "   frontend        Applications.Core/containers",
+            "Something else outside the block",
+            "   postgresql      Radius.Data/postgreSqlDatabases",
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect([...out.deployedNames].sort()).toEqual(["frontend"]);
+    });
+
     it("returns an empty result for empty / missing input", () => {
-        expect(parseRadDeployProgress("", modeled)).toEqual({ global: null, byName: {} });
-        expect(parseRadDeployProgress(null, modeled)).toEqual({ global: null, byName: {} });
-        expect(parseRadDeployProgress(undefined, modeled)).toEqual({ global: null, byName: {} });
+        for (const empty of ["", null, undefined]) {
+            const out = parseRadDeployProgress(empty, modeled);
+            expect(out.global).toBeNull();
+            expect(out.byName).toEqual({});
+            expect(out.deployedNames).toEqual(new Set());
+        }
     });
 
     it("survives a modeled list with no names without throwing", () => {
         const log = "Completed            frontend        Applications.Core/containers";
-        expect(parseRadDeployProgress(log, [])).toEqual({ global: null, byName: {} });
-        expect(parseRadDeployProgress(log, null)).toEqual({ global: null, byName: {} });
+        for (const empty of [[], null]) {
+            const out = parseRadDeployProgress(log, empty);
+            expect(out.global).toBeNull();
+            expect(out.byName).toEqual({});
+            expect(out.deployedNames).toEqual(new Set());
+        }
     });
 });
 

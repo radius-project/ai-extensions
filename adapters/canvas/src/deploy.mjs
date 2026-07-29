@@ -102,34 +102,49 @@ export function findDeployJobId(detail, stepName = "Run rad commands") {
 }
 
 // Column-1 keyword parser for `rad deploy` stdout captured in the job log.
-// Recognizes the global lifecycle markers ("Deployment In Progress...",
-// "Deployment Complete") and per-resource terminal lines ("Completed <name>
-// <type>", "Failed <name> <type>"). `resources` is the modeled resource list —
-// only names present there populate `byName`, so unrelated tokens can't inject
-// status. Pure — no I/O.
+// Recognizes:
+//   - global lifecycle markers: `Deployment In Progress...` / `Deployment Complete`
+//   - per-resource terminal lines: `Completed <name> <type>` / `Failed <name> <type>`
+//   - the `Resources:` block rad prints after `Deployment Complete` on success,
+//     whose indented `<name> <type>` entries name every resource that was
+//     deployed (this is the only per-resource success signal on success runs,
+//     since current rad deploy does not emit `Completed <name>` lines).
+// `resources` is the modeled resource list — only names present there populate
+// `byName` and `deployedNames`. Pure — no I/O.
 export function parseRadDeployProgress(logText, resources) {
-    const out = { global: null, byName: {} };
+    const out = { global: null, byName: {}, deployedNames: new Set() };
     if (!logText) return out;
     const names = new Set(
         (Array.isArray(resources) ? resources : []).map(r => r && r.name).filter(Boolean)
     );
+    let inResourcesBlock = false;
     for (const raw of logText.split(/\r?\n/)) {
-        // Strip the two prefix formats we can encounter, in order:
-        //   1. `<job>\t<step>\t` prefix from `gh run view --log` (job/step names
-        //      contain spaces so we look for the tab delimiters).
-        //   2. ISO timestamp from `gh api /jobs/{id}/logs`, or the timestamp
-        //      that remains after step 1 (`gh run view --log` embeds one too).
-        const line = raw
+        // Strip either the `gh run view --log` job/step tab prefix or the
+        // `gh api /jobs/{id}/logs` ISO timestamp prefix. Preserve indentation
+        // after both so the `Resources:` block's indented entries are still
+        // recognizable.
+        const stripped = raw
             .replace(/^[^\t]+\t[^\t]+\t/, '')
-            .replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '')
-            .trim();
-        if (!line) continue;
-        if (/^Deployment In Progress/i.test(line)) { out.global = 'in_progress'; continue; }
-        if (/^Deployment Complete\b/i.test(line))   { out.global = 'complete';    continue; }
-        const m = line.match(/^(Completed|Failed)\s+(\S+)\s+(\S+)/);
-        if (!m) continue;
-        const status = m[1] === 'Completed' ? 'success' : 'failed';
-        if (names.has(m[2])) out.byName[m[2]] = status;
+            .replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '');
+        const trimmed = stripped.trim();
+        if (!trimmed) continue;
+        if (/^Deployment In Progress/i.test(trimmed)) { out.global = 'in_progress'; inResourcesBlock = false; continue; }
+        if (/^Deployment Complete\b/i.test(trimmed))   { out.global = 'complete';    inResourcesBlock = false; continue; }
+        if (/^Resources:\s*$/i.test(trimmed)) { inResourcesBlock = true; continue; }
+        const m = trimmed.match(/^(Completed|Failed)\s+(\S+)\s+(\S+)/);
+        if (m) {
+            const status = m[1] === 'Completed' ? 'success' : 'failed';
+            if (names.has(m[2])) out.byName[m[2]] = status;
+            inResourcesBlock = false;
+            continue;
+        }
+        if (inResourcesBlock) {
+            // Block entries are indented `<name> <type>`. A non-indented line
+            // ends the block (some other section is starting).
+            if (!/^\s/.test(stripped)) { inResourcesBlock = false; continue; }
+            const rm = trimmed.match(/^(\S+)\s+(\S+)/);
+            if (rm && names.has(rm[1])) out.deployedNames.add(rm[1]);
+        }
     }
     return out;
 }
