@@ -198,7 +198,7 @@ describe("findDeployJobId", () => {
         const detail = {
             jobs: [
                 { id: 111, steps: [{ name: "Checkout" }, { name: "Setup" }] },
-                { id: 222, steps: [{ name: "Deploy Application" }] },
+                { id: 222, steps: [{ name: "Run rad commands" }] },
                 { id: 333, steps: [{ name: "Teardown" }] },
             ],
         };
@@ -211,7 +211,7 @@ describe("findDeployJobId", () => {
     });
 
     it("falls back to databaseId when the job carries no id", () => {
-        const detail = { jobs: [{ databaseId: 555, steps: [{ name: "Deploy Application" }] }] };
+        const detail = { jobs: [{ databaseId: 555, steps: [{ name: "Run rad commands" }] }] };
         expect(findDeployJobId(detail)).toBe(555);
     });
 
@@ -304,6 +304,20 @@ describe("parseRadDeployProgress", () => {
         const out = parseRadDeployProgress(log, modeled);
         expect(out.global).toBe("in_progress");
         expect(out.byName.frontend).toBe("success");
+    });
+
+    it("tolerates the `<job>\\t<step>\\t<timestamp>` prefix from `gh run view --log`", () => {
+        // Real format captured from a failed run: the job name carries spaces so
+        // we can't split on whitespace — we strip on tabs then the timestamp.
+        const log = [
+            "Azure / Deploy with Radius\tRun rad commands\t2026-07-29T22:20:39.1395328Z Deployment In Progress...",
+            "Azure / Deploy with Radius\tRun rad commands\t2026-07-29T22:21:10.0756405Z Completed            frontend        Applications.Core/containers",
+            "Azure / Deploy with Radius\tRun rad commands\t2026-07-29T22:21:10.0757000Z Failed               postgresql      Radius.Data/postgreSqlDatabases",
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.global).toBe("in_progress");
+        expect(out.byName.frontend).toBe("success");
+        expect(out.byName.postgresql).toBe("failed");
     });
 
     it("returns an empty result for empty / missing input", () => {

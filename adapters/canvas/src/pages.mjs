@@ -1327,6 +1327,9 @@ function escapeHtmlClient(s) {
                 }
                 // While a deploy is running, keep pulling the projection so
                 // per-node badges transition as rad deploy prints its lines.
+                // On terminal (success/failed/complete), stop polling — the
+                // current tick already painted the final state from the
+                // monitor's deployingResources snapshot.
                 if (deployState && deployState.status === 'in_progress') {
                     pollTimer = setTimeout(loadGraph, 3000);
                 }

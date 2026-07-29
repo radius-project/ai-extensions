@@ -2257,43 +2257,44 @@ function createRequestHandler(instanceId) {
                 return;
             }
 
-            // Live-status projection: while a run is in flight for this session,
-            // build statusById from the monitor loop's live per-resource state.
-            // Otherwise fall back to the terminal graph if one was captured this
-            // session; else greyed.
+            // Status projection: any observed run (in-flight or terminal) drives
+            // per-node status from the monitor loop's deployingResources snapshot,
+            // so a completed FAILED run still renders red instead of collapsing
+            // back to greyed. A completed SUCCESS run additionally validates node
+            // membership against the deployedGraph captured from `rad app graph`.
             let mode = 'greyed';
             const statusById = {};
-            const isLive = entry?.state?.deployStatus === 'in_progress';
-            if (isLive) {
+            const runState = entry?.state?.deployStatus;
+            const observedRun = runState && runState !== 'pending';
+            if (observedRun) {
                 const liveResources = Array.isArray(entry?.state?.deployingResources)
                     ? entry.state.deployingResources : [];
                 const liveByKey = new Map();
                 for (const r of liveResources) {
-                    const key = r?.id || r?.name;
-                    if (key && r?.deployStatus) liveByKey.set(key, r.deployStatus);
+                    if (!r || !r.deployStatus) continue;
+                    if (r.id) liveByKey.set(r.id, r.deployStatus);
+                    if (r.name) liveByKey.set(r.name, r.deployStatus);
                 }
                 for (const r of modeled) {
                     const key = r.id || r.name;
                     const s = liveByKey.get(r.id) || liveByKey.get(r.name);
                     statusById[key] = s || 'pending';
                 }
-                mode = 'live';
-            } else {
-                const terminal = entry?.state?.deployedGraph;
-                if (terminal) {
-                    const terminalResources = Array.isArray(terminal) ? terminal : (terminal?.resources || []);
-                    const terminalKeys = new Set();
-                    for (const r of terminalResources) {
-                        if (r?.id) terminalKeys.add(r.id);
-                        if (r?.name) terminalKeys.add(r.name);
-                    }
-                    for (const r of modeled) {
-                        if (terminalKeys.has(r.id) || terminalKeys.has(r.name)) {
-                            statusById[r.id || r.name] = 'success';
-                        }
-                    }
-                    if (Object.keys(statusById).length > 0) mode = 'terminal';
+                mode = runState === 'in_progress' ? 'live' : 'terminal';
+            } else if (entry?.state?.deployedGraph) {
+                const terminal = entry.state.deployedGraph;
+                const terminalResources = Array.isArray(terminal) ? terminal : (terminal?.resources || []);
+                const terminalKeys = new Set();
+                for (const r of terminalResources) {
+                    if (r?.id) terminalKeys.add(r.id);
+                    if (r?.name) terminalKeys.add(r.name);
                 }
+                for (const r of modeled) {
+                    if (terminalKeys.has(r.id) || terminalKeys.has(r.name)) {
+                        statusById[r.id || r.name] = 'success';
+                    }
+                }
+                if (Object.keys(statusById).length > 0) mode = 'terminal';
             }
 
             const resources = projectDeployedGraph(modeled, statusById);
@@ -3374,14 +3375,15 @@ function createRequestHandler(instanceId) {
                         // append new ones.
                         let liveLogShown = 0;
                         let deployStarted = false;
-                        const DEPLOY_STEP = 'Deploy Application';
+                        const DEPLOY_STEP = 'Run rad commands';
 
                         // Merge parseRadDeployProgress output into the per-Radius-resource
-                        // deployStatus. Merge rules match docs/design/2026-07-deployed-application-graph.md:
+                        // deployStatus. Only per-resource lines count for terminal state:
                         //   - global "in_progress"  → any pending resource moves to in_progress
                         //   - byName "success"      → resource moves to success (unless already failed)
                         //   - byName "failed"       → resource moves to failed (terminal)
-                        //   - global "complete"     → any remaining in_progress becomes success
+                        // The `Deployment Complete` marker is treated as informational only;
+                        // resources never flip to success without their own `Completed <name>`.
                         const mergeRadProgress = (prog) => {
                             if (prog.global === 'in_progress') {
                                 for (const r of resources) {
@@ -3402,11 +3404,6 @@ function createRequestHandler(instanceId) {
                                 } else if (s === 'failed') {
                                     setStatus(r, 'failed');
                                     addLog('  ✗ ' + r.name + ' failed');
-                                }
-                            }
-                            if (prog.global === 'complete') {
-                                for (const r of resources) {
-                                    if (r.deployStatus === 'in_progress') setStatus(r, 'success');
                                 }
                             }
                         };
@@ -3512,11 +3509,21 @@ function createRequestHandler(instanceId) {
                                     addLog('  ⏱ Deployment finished at ' + new Date(finishedAt).toISOString() + ' (' + secs + 's)');
                                 }
 
+                                // ── Terminal per-node status (unified rule) ─────
+                                // Only a `Completed <name>` line from rad deploy stdout
+                                // counts as success. Every other resource — whether the
+                                // parser saw a `Failed` line, saw nothing at all (deploy
+                                // never reached it), or the workflow itself concluded with
+                                // non-success — is marked failed. The workflow's own
+                                // conclusion only decides the run's overall status/label
+                                // and the log messages below; it never converts an unseen
+                                // resource to green.
+                                resources.forEach(r => {
+                                    if (parsedProg.byName[r.name] === 'success') setStatus(r, 'success');
+                                    else setStatus(r, 'failed');
+                                });
+
                                 if (conclusion === 'success') {
-                                    // Overall success ⇒ every resource provisioned. Force all
-                                    // nodes green; a transient "failed" token in the live log
-                                    // must never leave a node red on a successful deployment.
-                                    resources.forEach(r => setStatus(r, 'success'));
                                     // Extract the deployed application graph the workflow
                                     // appended by running `rad app graph <app>` after `rad deploy`.
                                     // Its JSON block is inline in the same job log we already have.
@@ -3534,11 +3541,6 @@ function createRequestHandler(instanceId) {
                                     addLog('🎉 Deployment complete! Application deployed to ' + (provider === 'aws' ? 'AWS' : 'Azure') + '.');
                                     addLog('Click on deployed resources to view them in the ' + (provider === 'aws' ? 'AWS Console' : 'Azure Portal') + '.');
                                 } else {
-                                    resources.forEach(r => {
-                                        const s = parsedProg.byName[r.name];
-                                        if (s === 'success' && r.deployStatus !== 'failed') setStatus(r, 'success');
-                                        else if (s === 'failed' || r.deployStatus === 'pending' || r.deployStatus === 'in_progress') setStatus(r, 'failed');
-                                    });
                                     entry.state.deployStatus = 'failed';
                                     addLog('');
                                     addLog('❌ Deployment failed. Conclusion: ' + conclusion);

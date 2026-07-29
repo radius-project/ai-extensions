@@ -85,10 +85,12 @@ export function fetchJobLog(repo, jobId) {
     });
 }
 
-// Pick the job that runs the named step (default: the `rad deploy` step in the
-// run-rad-commands provider workflow). `detail` is the shape getRunDetail
-// returns: { jobs: [{ id, steps: [{ name }] }] }. Pure lookup — no I/O.
-export function findDeployJobId(detail, stepName = "Deploy Application") {
+// Pick the job that runs the named step (default: the `Run rad commands` step
+// in the run-rad-commands provider workflow — the composite action's outer
+// step whose stdout carries `rad deploy` output). `detail` is the shape
+// getRunDetail returns: { jobs: [{ id, steps: [{ name }] }] }. Pure lookup —
+// no I/O.
+export function findDeployJobId(detail, stepName = "Run rad commands") {
     if (!detail || !Array.isArray(detail.jobs)) return null;
     for (const job of detail.jobs) {
         if (!job || !Array.isArray(job.steps)) continue;
@@ -112,9 +114,15 @@ export function parseRadDeployProgress(logText, resources) {
         (Array.isArray(resources) ? resources : []).map(r => r && r.name).filter(Boolean)
     );
     for (const raw of logText.split(/\r?\n/)) {
-        // Drop a `gh api .../jobs/<id>/logs` ISO timestamp prefix if present so
-        // the column-1 keyword match still lands on the real first column.
-        const line = raw.replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '').trim();
+        // Strip the two prefix formats we can encounter, in order:
+        //   1. `<job>\t<step>\t` prefix from `gh run view --log` (job/step names
+        //      contain spaces so we look for the tab delimiters).
+        //   2. ISO timestamp from `gh api /jobs/{id}/logs`, or the timestamp
+        //      that remains after step 1 (`gh run view --log` embeds one too).
+        const line = raw
+            .replace(/^[^\t]+\t[^\t]+\t/, '')
+            .replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '')
+            .trim();
         if (!line) continue;
         if (/^Deployment In Progress/i.test(line)) { out.global = 'in_progress'; continue; }
         if (/^Deployment Complete\b/i.test(line))   { out.global = 'complete';    continue; }
