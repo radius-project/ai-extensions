@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup, isRepoNotFoundError, extractErrorLines } from "./deploy.mjs";
+import {
+    explainOidcEnterpriseClaim,
+    explainRepoAccessForEnvSetup,
+    isRepoNotFoundError,
+    extractErrorLines,
+    findDeployJobId,
+    parseRadDeployProgress,
+} from "./deploy.mjs";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
 // a personal-account repo hits a tenant that enforces the enterprise claim.
@@ -182,5 +189,131 @@ describe("isRepoNotFoundError", () => {
         expect(isRepoNotFoundError("")).toBe(false);
         expect(isRepoNotFoundError(undefined)).toBe(false);
         expect(isRepoNotFoundError(null)).toBe(false);
+    });
+});
+
+describe("findDeployJobId", () => {
+    it("returns the id of the job containing the named step", () => {
+        const detail = {
+            jobs: [
+                { id: 111, steps: [{ name: "Checkout" }, { name: "Setup" }] },
+                { id: 222, steps: [{ name: "Deploy Application" }] },
+                { id: 333, steps: [{ name: "Teardown" }] },
+            ],
+        };
+        expect(findDeployJobId(detail)).toBe(222);
+    });
+
+    it("honors a custom step name", () => {
+        const detail = { jobs: [{ id: 42, steps: [{ name: "rad deploy" }] }] };
+        expect(findDeployJobId(detail, "rad deploy")).toBe(42);
+    });
+
+    it("falls back to databaseId when the job carries no id", () => {
+        const detail = { jobs: [{ databaseId: 555, steps: [{ name: "Deploy Application" }] }] };
+        expect(findDeployJobId(detail)).toBe(555);
+    });
+
+    it("returns null when no job step matches", () => {
+        const detail = { jobs: [{ id: 1, steps: [{ name: "Checkout" }] }] };
+        expect(findDeployJobId(detail)).toBeNull();
+    });
+
+    it("returns null for missing / malformed detail", () => {
+        expect(findDeployJobId(null)).toBeNull();
+        expect(findDeployJobId({})).toBeNull();
+        expect(findDeployJobId({ jobs: null })).toBeNull();
+        expect(findDeployJobId({ jobs: [{ steps: null }] })).toBeNull();
+    });
+});
+
+describe("parseRadDeployProgress", () => {
+    // Column-oriented sample copied verbatim from the User experience section
+    // of docs/design/2026-07-deployed-application-graph.md so any drift is caught.
+    const SAMPLE = [
+        "Building app.bicep...",
+        "Deploying template 'app.bicep' for application 'todolist' and environment '/planes/radius/local/resourceGroups/my-group/providers/applications.core/environments/my-env' from workspace 'my-workspace'...",
+        "",
+        "Deployment In Progress...",
+        "",
+        "Completed            todolist        Applications.Core/applications",
+        "Completed            postgresql      Radius.Data/postgreSqlDatabases",
+        "Completed            frontend        Applications.Core/containers",
+        "",
+        "Deployment Complete",
+        "",
+        "Resources:",
+        "   todolist        Applications.Core/applications",
+        "   frontend        Applications.Core/containers",
+        "   postgresql      Radius.Data/postgreSqlDatabases",
+    ].join("\n");
+
+    const modeled = [
+        { name: "todolist", type: "Applications.Core/applications" },
+        { name: "postgresql", type: "Radius.Data/postgreSqlDatabases" },
+        { name: "frontend", type: "Applications.Core/containers" },
+    ];
+
+    it("maps each Completed line to success and reports the global 'complete' marker", () => {
+        const out = parseRadDeployProgress(SAMPLE, modeled);
+        expect(out.global).toBe("complete");
+        expect(out.byName).toEqual({
+            todolist: "success",
+            postgresql: "success",
+            frontend: "success",
+        });
+    });
+
+    it("reports global in_progress before any Completed line", () => {
+        const partial = ["Deployment In Progress...", ""].join("\n");
+        const out = parseRadDeployProgress(partial, modeled);
+        expect(out.global).toBe("in_progress");
+        expect(out.byName).toEqual({});
+    });
+
+    it("maps a Failed line to failed", () => {
+        const log = [
+            "Deployment In Progress...",
+            "Completed            frontend        Applications.Core/containers",
+            "Failed               postgresql      Radius.Data/postgreSqlDatabases",
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName.frontend).toBe("success");
+        expect(out.byName.postgresql).toBe("failed");
+    });
+
+    it("ignores unknown status keywords", () => {
+        const log = "Provisioning         frontend        Applications.Core/containers";
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName).toEqual({});
+        expect(out.global).toBeNull();
+    });
+
+    it("ignores a resource name that is not in the modeled list", () => {
+        const log = "Completed            unknown         Applications.Core/containers";
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName).toEqual({});
+    });
+
+    it("tolerates the `gh api /jobs/{id}/logs` ISO timestamp prefix on each line", () => {
+        const log = [
+            "2026-07-29T12:00:00.0000000Z Deployment In Progress...",
+            "2026-07-29T12:00:05.1234567Z Completed            frontend        Applications.Core/containers",
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.global).toBe("in_progress");
+        expect(out.byName.frontend).toBe("success");
+    });
+
+    it("returns an empty result for empty / missing input", () => {
+        expect(parseRadDeployProgress("", modeled)).toEqual({ global: null, byName: {} });
+        expect(parseRadDeployProgress(null, modeled)).toEqual({ global: null, byName: {} });
+        expect(parseRadDeployProgress(undefined, modeled)).toEqual({ global: null, byName: {} });
+    });
+
+    it("survives a modeled list with no names without throwing", () => {
+        const log = "Completed            frontend        Applications.Core/containers";
+        expect(parseRadDeployProgress(log, [])).toEqual({ global: null, byName: {} });
+        expect(parseRadDeployProgress(log, null)).toEqual({ global: null, byName: {} });
     });
 });

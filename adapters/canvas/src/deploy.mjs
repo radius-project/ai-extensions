@@ -73,6 +73,61 @@ export function fetchRunLog(repo, runId) {
     });
 }
 
+// Fetch the plain-text log for a single Actions job while the run is still in
+// flight. `gh run view <id> --log` only works after the run completes; this
+// endpoint returns the running job's log and grows as the job writes it.
+export function fetchJobLog(repo, jobId) {
+    return new Promise((resolve) => {
+        if (!repo || !jobId) { resolve(null); return; }
+        cliExec("gh", ["api", `/repos/${repo}/actions/jobs/${jobId}/logs`],
+            { timeout: 30000, maxBuffer: 1024 * 1024 * 20 }, (err, stdout) => {
+            if (err || !stdout) { resolve(null); return; }
+            resolve(stdout);
+        });
+    });
+}
+
+// Pick the job that runs the named step (default: the `rad deploy` step in the
+// run-rad-commands provider workflow). `detail` is the shape getRunDetail
+// returns: { jobs: [{ id, steps: [{ name }] }] }. Pure lookup — no I/O.
+export function findDeployJobId(detail, stepName = "Deploy Application") {
+    if (!detail || !Array.isArray(detail.jobs)) return null;
+    for (const job of detail.jobs) {
+        if (!job || !Array.isArray(job.steps)) continue;
+        if (job.steps.some(s => s && s.name === stepName)) {
+            return job.id || job.databaseId || null;
+        }
+    }
+    return null;
+}
+
+// Column-1 keyword parser for `rad deploy` stdout captured in the job log.
+// Recognizes the global lifecycle markers ("Deployment In Progress...",
+// "Deployment Complete") and per-resource terminal lines ("Completed <name>
+// <type>", "Failed <name> <type>"). `resources` is the modeled resource list —
+// only names present there populate `byName`, so unrelated tokens can't inject
+// status. Pure — no I/O.
+export function parseRadDeployProgress(logText, resources) {
+    const out = { global: null, byName: {} };
+    if (!logText) return out;
+    const names = new Set(
+        (Array.isArray(resources) ? resources : []).map(r => r && r.name).filter(Boolean)
+    );
+    for (const raw of logText.split(/\r?\n/)) {
+        // Drop a `gh api .../jobs/<id>/logs` ISO timestamp prefix if present so
+        // the column-1 keyword match still lands on the real first column.
+        const line = raw.replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '').trim();
+        if (!line) continue;
+        if (/^Deployment In Progress/i.test(line)) { out.global = 'in_progress'; continue; }
+        if (/^Deployment Complete\b/i.test(line))   { out.global = 'complete';    continue; }
+        const m = line.match(/^(Completed|Failed)\s+(\S+)\s+(\S+)/);
+        if (!m) continue;
+        const status = m[1] === 'Completed' ? 'success' : 'failed';
+        if (names.has(m[2])) out.byName[m[2]] = status;
+    }
+    return out;
+}
+
 export function fetchLiveDeployLog(repo) {
     return ghApiGetContent(`/repos/${repo}/contents/deploy-progress.log?ref=radius-deploy-status`, 12000);
 }
