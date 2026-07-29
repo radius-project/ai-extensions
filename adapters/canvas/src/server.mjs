@@ -1901,7 +1901,7 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(403);
                     res.end(JSON.stringify({
-                        error: `The GitHub account @${ghPkgIdentity.actingLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgIdentity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry.`,
+                        error: `The GitHub account @${ghPkgIdentity.actingLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgIdentity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`,
                         code: 'ghcr-scope-required',
                         steps,
                     }));

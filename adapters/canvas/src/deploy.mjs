@@ -319,7 +319,8 @@ export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissi
     if (readFailed) {
         return 'Can\u2019t read repository "' + repo + '" as GitHub account "' + who + '". ' +
             'Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). ' +
-            'Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry.';
+            'Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry. ' +
+            'Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back.';
     }
     if (permissions && permissions.admin === true) return '';
     // Read OK but not admin — report the current best role so the user knows
