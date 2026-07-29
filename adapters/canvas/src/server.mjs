@@ -1622,16 +1622,49 @@ function createRequestHandler(instanceId) {
             // Priority chain: durable → live → legacy → session cache → modeled
             // scaffold → none. The pure resolver in deploy.mjs owns the order;
             // this handler only injects the real fetchers and the modeled graph
-            // (when it matches the requested repo+branch) as the scaffold source.
-            // Rebuilding the modeled graph via `rad app graph` here would be too
-            // expensive for a 5s poll, so we reuse whatever the Modeled tab has
-            // already cached in-session.
-            const scaffoldResources =
+            // as the scaffold source.
+            //
+            // The scaffold used to require the Modeled tab to have been opened
+            // in this session (so entry.state.graphResources was cached and
+            // scoped to the requested repo+branch). Landing straight on the
+            // Deployed tab meant every tier returned null → source='none' →
+            // "Nothing deployed yet". Instead, if no in-session scaffold matches,
+            // build one lazily via the same buildGraphViaRad the Modeled tab
+            // uses, then cache it in entry.state.graphResources so subsequent
+            // polls hit the fast path.
+            let scaffoldResources =
                 entry?.state?.graphResources
                 && entry.state.graphTargetRepo === repo
                 && entry.state.graphBranch === sourceBranch
                     ? entry.state.graphResources
                     : null;
+            if (!scaffoldResources && entry) {
+                try {
+                    const selection = await fetchBicepSelection(entry, repo, sourceBranch);
+                    if (selection.content) {
+                        const built = await buildGraphViaRad(
+                            selection.content,
+                            selection.bicepPath || ".radius/app.bicep",
+                        );
+                        if (Array.isArray(built) && built.length > 0) {
+                            // Cache both the resources and the (repo, branch)
+                            // provenance so the fast path on the next poll picks
+                            // them up, and so a future Modeled-tab open sees the
+                            // same cache. buildGraphViaRad already applies
+                            // filterGraphVisualizationResources internally.
+                            entry.state.graphResources = built;
+                            entry.state.graphTargetRepo = repo;
+                            entry.state.graphBranch = sourceBranch;
+                            scaffoldResources = built;
+                        }
+                    }
+                } catch (e) {
+                    // Lazy-build is best-effort — a failure just means we fall
+                    // through to source='none' this tick, same as before. Log
+                    // for observability so a persistent failure is visible.
+                    console.error(`[radius deployed-graph] lazy scaffold build failed for ${repo}@${sourceBranch}: ${e?.message || e}`);
+                }
+            }
 
             let resources = [];
             let source = "none";
