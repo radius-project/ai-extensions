@@ -280,6 +280,7 @@ ${getInlineVendorStyles()}
   }
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
   .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
+  .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
   .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
   .rad-node__source {
@@ -3789,13 +3790,7 @@ function deployProgressView(state) {
   <div style="font-size:13px; font-weight:600; color:#cf222e; margin-bottom:6px;">❌ Deployment failed</div>
   <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--font-mono, monospace); font-size:12px; color:#82071e; max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
 </div>
-<div class="legend" style="margin-bottom:12px;">
-  <div class="legend-item"><div class="legend-dot" style="background:#8b949e;"></div> Not Started</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#d29922;"></div> In Progress</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#1a7f37;"></div> Deployed</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#cf222e;"></div> Failed</div>
-</div>
-<h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Planned Application Graph</h2>
+<h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Application Graph</h2>
 <div id="graph-container" style="height:400px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; margin-bottom:16px;"></div>
 <div id="deploy-log-section">
   <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Deployment Logs</h2>
