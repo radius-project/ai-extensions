@@ -674,6 +674,19 @@ function createRequestHandler(instanceId) {
                 const tenantId = (data.tenantId || '').trim();
                 const subscriptionId = (data.subscriptionId || '').trim();
 
+                // Reject a non-GUID subscriptionId before it reaches the az argv.
+                // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
+                // quotes args containing whitespace, so a value like "x&calc" would
+                // be parsed by cmd.exe as a command separator. An empty value is
+                // allowed (fall back to the ambient CLI context). Mirrors the guard
+                // already enforced in /api/azure-auto-setup.
+                if (subscriptionId && !isUuid(subscriptionId)) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ error: `Invalid subscriptionId "${subscriptionId}" (expected a GUID).` }));
+                    return;
+                }
+
                 // NOTE: we intentionally do NOT run `az login` here. Interactive
                 // login opens a browser/device-code flow that blocks indefinitely
                 // and would hang this server. Instead we verify the user's existing
@@ -3804,6 +3817,17 @@ function createRequestHandler(instanceId) {
             try {
                 const data = JSON.parse(body);
                 const result = { clusters: [], resourceGroups: [], namespaces: [], vpcs: [], subnets: [] };
+
+                // Reject a non-GUID subscriptionId before it reaches the az argv.
+                // On Windows cliExec routes az through `cmd.exe /c` and libuv only
+                // quotes args with whitespace, so "x&calc" would be split by cmd.exe
+                // as a command separator. Empty is allowed (ambient CLI context).
+                if (data.subscriptionId && !isUuid(String(data.subscriptionId).trim())) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`, clusters: [], resourceGroups: [], namespaces: ['default'], vpcs: [], subnets: [] }));
+                    return;
+                }
 
                 if (data.provider === "azure") {
                     // Set tenant/subscription context before querying

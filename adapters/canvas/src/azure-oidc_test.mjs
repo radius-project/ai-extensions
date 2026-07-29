@@ -45,6 +45,17 @@ describe("validators", () => {
     expect(isUuid(undefined)).toBe(false);
   });
 
+  it("isUuid rejects shell-metacharacter injection (subscriptionId → az on Windows cmd.exe)", () => {
+    // /api/discover and /api/verify-azure-login pass subscriptionId into
+    // `az account set --subscription`. On Windows cliExec routes az through
+    // `cmd.exe /c` and libuv only quotes args with whitespace, so an unquoted
+    // "&"/"|" would be parsed as a command separator. isUuid is the guard.
+    expect(isUuid("00000000-0000-0000-0000-000000000000&calc")).toBe(false);
+    expect(isUuid("x&calc")).toBe(false);
+    expect(isUuid(UUID + " & calc")).toBe(false);
+    expect(isUuid(UUID + "|whoami")).toBe(false);
+  });
+
   it("isValidRepoSlug accepts a real owner/repo", () => {
     expect(isValidRepoSlug("octo-org/octo-repo")).toBe(true);
     expect(isValidRepoSlug("a/b")).toBe(true);
