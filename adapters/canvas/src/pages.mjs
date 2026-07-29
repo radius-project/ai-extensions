@@ -1289,6 +1289,7 @@ function escapeHtmlClient(s) {
         radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
             branch: 'main',
+            deployMode: true,
             showLegend: true
         });
     }
@@ -1297,26 +1298,23 @@ function escapeHtmlClient(s) {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
         if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
-        // Prefer a live/in-progress deployment so the graph fills in as it deploys.
+        // Stream deployment logs under the graph whenever a deploy is running or
+        // has produced output (independent of the graph fetch).
         fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
-            var liveRes = (s && s.resources) || [];
             var st = s && s.status;
-            // Stream deployment logs under the graph whenever a deploy is running
-            // or has produced log output.
             if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
                 startLogStream();
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success')) {
-                renderGraph(liveRes);
-                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
-                return;
-            }
-            // Fall back to the terminal deployed graph from the status branch.
-            fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
-                var resources = (d && d.resources) || [];
-                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-                renderGraph(resources);
-            }).catch(function() { showNothing('Nothing deployed yet'); });
+        }).catch(function() {});
+
+        var app = appSelect.value, env = envSelect.value;
+        var url = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)
+            + (app ? '&application=' + encodeURIComponent(app) : '')
+            + (env ? '&environment=' + encodeURIComponent(env) : '');
+        fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+            var resources = (d && d.resources) || [];
+            if (!resources.length) { showNothing('Nothing deployed yet'); return; }
+            renderGraph(resources);
         }).catch(function() { showNothing('Nothing deployed yet'); });
     }
 

@@ -10,3 +10,5 @@ export {
 export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";
 export { filterGraphVisualizationResources } from "./visualization.js";
+export { projectDeployedGraph } from "./deployed.js";
+export type { DeployStatus } from "./deployed.js";

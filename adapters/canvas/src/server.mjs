@@ -16,6 +16,7 @@ import {
   fetchRecipePack,
   resolveRecipeOutputs,
   filterGraphVisualizationResources,
+  projectDeployedGraph,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -2216,26 +2217,73 @@ function createRequestHandler(instanceId) {
             const repo = (reqUrl.searchParams.get('repo') || '').trim()
                 || entry?.state?.contextRepo || entry?.state?.deployingRepo
                 || entry?.state?.plannedRepo || entry?.state?.graphTargetRepo || '';
+            const application = (reqUrl.searchParams.get('application') || '').trim();
+            const environment = (reqUrl.searchParams.get('environment') || '').trim();
             res.setHeader("Content-Type", "application/json");
-            if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '' })); return; }
-            // Prefer the live deploy-graph.json on the orphan status branch (source
-            // of truth). Fall back to any graph captured in state this session.
-            let graph = await fetchDeployGraph(repo);
-            if (!graph && entry?.state?.deployedGraph) graph = entry.state.deployedGraph;
-            let resources = Array.isArray(graph) ? graph : (graph?.resources || []);
-            // DEMO: present the deployed topology as container → cache → database.
-            resources = rewireDeployedGraphChain(resources);
-            // Re-derive connections (e.g. database→secret) that rad app graph
-            // omits, so the deployed graph renders connected like the planned one.
-            resources = normalizeDeployedGraph(resources);
-            // Hide implementation-detail resources (containerImages + their
-            // ghcr-registry-creds secret) from the deployed view too, matching
-            // every other graph state. Applied last so any edges the rewire/
-            // normalize steps synthesized toward those nodes are also stripped.
-            // The raw deploy-graph.json on the status branch is left untouched.
-            resources = filterGraphVisualizationResources(resources);
+            if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '', mode: 'greyed' })); return; }
+
+            const branch = (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo))
+                ? entry.state.workspaceBranch : "main";
+
+            // Fixed topology comes from the app.bicep on the selected repo/branch,
+            // same path graphPage uses. This keeps the Deployed shape identical to
+            // the Modeled shape, even before a deploy has ever run.
+            let modeled = [];
+            try {
+                const selection = await fetchBicepSelection(entry, repo, branch);
+                if (selection.content) {
+                    const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({
+                        isLocal: !!(entry && selection.fromWorkspace),
+                        state: entry?.state,
+                        github,
+                        repo,
+                        branch,
+                        bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+                        log: () => {},
+                    });
+                    modeled = await buildGraphViaRad(selection.content, selection.bicepPath || ".radius/app.bicep", {
+                        log: () => {},
+                        radArtifactsDir,
+                        cleanupRadArtifactsDir: radArtifactsRemote,
+                    });
+                }
+            } catch (e) {
+                // Modeled resolution failed; fall through and return an empty greyed
+                // response so the page can render its own error state.
+                modeled = [];
+            }
+
+            if (!Array.isArray(modeled) || modeled.length === 0) {
+                res.writeHead(200);
+                res.end(JSON.stringify({ resources: [], repo, branch, mode: 'greyed' }));
+                return;
+            }
+
+            // Live-status projection lands in Commit 4. For now: if a terminal
+            // deployedGraph was captured this session for the same modeled shape,
+            // mark every matching node success; otherwise greyed.
+            let mode = 'greyed';
+            const statusById = {};
+            const terminal = entry?.state?.deployedGraph;
+            if (terminal) {
+                const terminalResources = Array.isArray(terminal) ? terminal : (terminal?.resources || []);
+                const terminalKeys = new Set();
+                for (const r of terminalResources) {
+                    if (r?.id) terminalKeys.add(r.id);
+                    if (r?.name) terminalKeys.add(r.name);
+                }
+                for (const r of modeled) {
+                    if (terminalKeys.has(r.id) || terminalKeys.has(r.name)) {
+                        statusById[r.id || r.name] = 'success';
+                    }
+                }
+                if (Object.keys(statusById).length > 0) mode = 'terminal';
+            }
+
+            const resources = projectDeployedGraph(modeled, statusById);
+            console.log(`🗺  Deployed graph (mode=${mode}) rendered for ${application || '<app>'}@${environment || '<env>'}`);
             res.writeHead(200);
-            res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
+            res.end(JSON.stringify({ resources, repo, branch, mode }));
             return;
         }
 

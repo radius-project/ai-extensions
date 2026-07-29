@@ -16,10 +16,12 @@ export {
   applicationGraphToResources,
   computeGraphDiff,
   filterGraphVisualizationResources,
+  projectDeployedGraph,
   MODELED_GRAPH_DEFAULTS,
   buildResourceID,
   stripAPIVersion,
 } from "./graph/index.js";
+export type { DeployStatus } from "./graph/index.js";
 export {
   RECIPE_PACK_REPO,
   RECIPE_PACK_REF,

@@ -324,6 +324,25 @@ describe("graphDiffPage — passes repo/branch context so source links + popup w
     });
 });
 
+describe("deployedGraphPage — Commit 1 baseline (greyed Modeled skeleton)", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+
+    it("mounts the graph with deployMode and showLegend on first paint", () => {
+        expect(html).toContain("deployMode: true");
+        expect(html).toContain("showLegend: true");
+    });
+
+    it("calls /api/deployed-graph with repo and forwards application + environment", () => {
+        expect(html).toContain("/api/deployed-graph?repo=");
+        expect(html).toContain("&application=");
+        expect(html).toContain("&environment=");
+    });
+
+    it("no longer treats /api/deploy-status resources as the topology source", () => {
+        expect(html).not.toContain("liveRes.length && (st === 'in_progress' || st === 'success')");
+    });
+});
+
 describe("remaining pages smoke-render without removed tokens", () => {
     const cases = [
         ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],
