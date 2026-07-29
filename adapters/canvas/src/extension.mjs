@@ -12,8 +12,9 @@ import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
+  filterGraphVisualizationResources,
 } from "@radius-project/core";
-import { buildGraphViaRad, runRadBicepPublishExtension, runRadBicepPublish } from "@radius-project/shared";
+import { buildGraphViaRad, ensureRadBinary, runRadBicepPublishExtension, runRadBicepPublish } from "@radius-project/shared";
 import { github } from "./gh.mjs";
 import {
     defaultBranchForState,
@@ -212,8 +213,12 @@ const session = await joinSession({
                                 repo: entry.state.contextRepo || entry.state.workspaceRepo || "",
                                 branch: entry.state.contextBranch || entry.state.workspaceBranch || "",
                             };
-                            setSourceRefResources(entry, "graph", ctx.input.resources, context);
-                            setSourceRefResources(entry, "planned", ctx.input.resources, context);
+                            // Filter out implementation-detail resources (containerImages
+                            // and their ghcr-registry-creds secret) so they are never
+                            // rendered — matching the buildGraphViaRad data path.
+                            const resources = filterGraphVisualizationResources(ctx.input.resources);
+                            setSourceRefResources(entry, "graph", resources, context);
+                            setSourceRefResources(entry, "planned", resources, context);
                             // No authoritative app.bicep fetch on this path — clear any
                             // provenance flag left over from a prior HTTP load so the page
                             // falls back to (fail-closed) repo+branch matching against the
@@ -244,8 +249,12 @@ const session = await joinSession({
                         const entry = await getOrCreateServer(ctx.instanceId, "graph-diff");
                         // Compute diff from base/head if provided
                         if (ctx.input?.baseResources && ctx.input?.headResources) {
+                            // Filter both sides before diffing so containerImages and
+                            // their ghcr-registry-creds secret never appear in the diff.
+                            const baseResources = filterGraphVisualizationResources(ctx.input.baseResources);
+                            const headResources = filterGraphVisualizationResources(ctx.input.headResources);
                             // Compute diff using the shared algorithm (see computeGraphDiff).
-                            const diffResources = computeGraphDiff(ctx.input.baseResources, ctx.input.headResources);
+                            const diffResources = computeGraphDiff(baseResources, headResources);
                             setSourceRefResources(entry, "diff", diffResources, {
                                 repo: ctx.input.repo,
                                 baseBranch: ctx.input.baseBranch,
@@ -529,7 +538,10 @@ const session = await joinSession({
                 required: ["resources"],
             },
             handler: async (args) => {
-                return `Graph data received with ${args.resources?.length || 0} resources. Use invoke_canvas_action with actionName 'render_graph' and the resources data to display the graph.`;
+                // Filter for an accurate count; the render_graph action re-applies
+                // the same visualization filter before display.
+                const resources = filterGraphVisualizationResources(args.resources || []);
+                return `Graph data received with ${resources.length} resources. Use invoke_canvas_action with actionName 'render_graph' and the resources data to display the graph.`;
             },
         },
         {
@@ -547,8 +559,12 @@ const session = await joinSession({
                 required: ["baseResources", "headResources", "repo", "baseBranch", "headBranch"],
             },
             handler: async (args) => {
+                // Filter both sides before diffing so containerImages and their
+                // ghcr-registry-creds secret never appear in the diff or its counts.
+                const baseResources = filterGraphVisualizationResources(args.baseResources);
+                const headResources = filterGraphVisualizationResources(args.headResources);
                 // Compute diff using the shared algorithm (see computeGraphDiff).
-                const diffResources = computeGraphDiff(args.baseResources, args.headResources);
+                const diffResources = computeGraphDiff(baseResources, headResources);
                 return JSON.stringify({
                     message: `Diff computed: ${diffResources.filter(r=>r.diffStatus==='added').length} added, ${diffResources.filter(r=>r.diffStatus==='removed').length} removed, ${diffResources.filter(r=>r.diffStatus==='modified').length} modified`,
                     resources: diffResources,
@@ -717,6 +733,15 @@ When planned graph resolution cannot resolve a resource type, distinguish two ca
         },
     },
 });
+
+// Prepare the `rad` binary once per extension load. This is the preferred place
+// to download/reconcile rad and run the `rad version --cli` check; doing it here
+// (fire-and-forget) keeps that work off the hot path of most graph builds.
+// If the warm-up has not finished yet (or no binary exists), the first graph
+// build may still await ensureRadBinary() as a fallback.
+// @radius-project/shared, shared because the canvas server runs in-process).
+ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { /* ignore */ } } })
+    .catch((e) => { try { console.error(`[radius] rad binary preparation failed (will retry on first use): ${e?.message || e}`); } catch { /* ignore */ } });
 
 // Wire the server-side app.bicep handoff to the SDK session. Graph/generate
 // routes fire when a repo/branch is selected (not just on canvas open), so this

@@ -34,7 +34,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { applicationGraphToResources } from "@radius-project/core";
+import { applicationGraphToResources, filterGraphVisualizationResources } from "@radius-project/core";
 
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
@@ -137,9 +137,10 @@ async function waitForFile(file, timeoutMs, intervalMs = 500) {
   return isExecutableFile(file);
 }
 
-// Terminates rad and its bicep grandchild. On Windows, `taskkill /t` kills the
-// whole tree; on POSIX, rad leads its own process group (spawned detached) so a
-// negative pid signals every process in that group. Falls back to a direct kill.
+// Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
+// the whole process tree; on POSIX, rad is a process-group leader (spawned
+// detached), so signalling the group (-pid) stops rad and its children together.
+// Best-effort — any failure is swallowed.
 function killChildTree(child) {
   if (!child || child.pid == null) return;
   try {
@@ -186,23 +187,21 @@ export function parseRadVersionOutput(stdout) {
  * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
  * it can't be determined. `rad version --cli` skips the control-plane check but
  * still shells out to the bicep binary (getCliVersionInfo -> bicep.Version() ->
- * `bicep --version`), so it inherits the same Windows/bicep hazard as
- * runRadAppGraph: rad+bicep can deadlock at startup inside Node's default Job
- * Object. We defend the same way — `detached: true` to escape that Job Object,
- * plus a timeout + process-tree kill as a hard backstop — so a wedged rad can
- * never stall binary resolution beyond `timeout`. (If bicep isn't installed,
- * rad returns fast with a "bicep not installed" note and still emits `version`.)
- * Never throws — a null result means "version unknown", which callers treat as
- * "leave the existing binary in place".
+ * `bicep --version`). A timeout plus process-tree kill is a hard backstop so a
+ * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
+ * installed, rad returns fast with a "bicep not installed" note and still emits
+ * `version`.) Never throws — a null result means "version unknown", which callers
+ * treat as "leave the existing binary in place".
  */
 export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      // detached so rad (and its bicep grandchild) lead their own process group,
-      // escaping Node's Windows Job Object where rad/bicep can deadlock at startup,
-      // and so killChildTree can reap the whole tree on timeout (mirrors
-      // runRadAppGraph); windowsHide avoids a flashing console window.
+      // detached: on Windows, spawning rad inside the parent's job/process group
+      // can wedge the child so it never exits; giving it its own process group
+      // avoids that. The timeout + killChildTree below are the hard backstop.
+      // (windowsHide is best-effort: Windows ignores it under detached, so a
+      // brief console window may still appear.)
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
@@ -647,6 +646,26 @@ function radErrorDetail(err) {
 }
 
 /**
+ * resolveRadForGraph - resolve a `rad` binary to run `rad app graph` WITHOUT
+ * running the version check or a download on the hot path. The `rad version --cli`
+ * check (and any resulting upgrade) runs in the ensureRadBinary() warm-up on every
+ * extension load; a graph build reuses that result rather than repeating it.
+ * Resolution order:
+ *   1. the binary the load-time ensureRadBinary() has already cached, else
+ *   2. a binary already present on disk (RADIUS_RAD_BINARY or the managed path),
+ *      used as-is with no version check, else
+ *   3. as a fallback when the cache is empty and nothing is on disk yet (e.g. the
+ *      load-time ensure has not finished resolving), call ensureRadBinary(),
+ *      reusing the in-flight load-time ensure if one is running.
+ */
+export async function resolveRadForGraph({ log = noop } = {}) {
+  if (cachedRadPath && isExecutableFile(cachedRadPath)) return cachedRadPath;
+  const existing = resolveExistingRadBinary();
+  if (existing) return existing;
+  return ensureRadBinary({ log });
+}
+
+/**
  * runRadAppGraph - run
  * `rad app graph <file>.bicep --include-icons` in a throwaway working dir and
  * return the parsed app-graph.json it writes there. The modeled command must not
@@ -658,27 +677,25 @@ function radErrorDetail(err) {
  * failure to save is logged but never fails the graph build.
  */
 export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 120000, saveGraphJsonTo = "" } = {}) {
-  const radPath = await ensureRadBinary({ log });
+  const radPath = await resolveRadForGraph({ log });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
   const absoluteBicep = path.resolve(bicepFilePath);
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
     await new Promise((resolve, reject) => {
-      // `rad app graph` shells out to bicep as a grandchild. Spawn rad detached
-      // on every platform so it leads its own process group:
-      //   - Windows: escapes Node's default Job Object, inside which rad/bicep
-      //     deadlock at startup (rad produces zero output and never exits, then
-      //     surfaces only when the timeout fires).
-      //   - POSIX: makes rad a group leader so a timeout can kill the whole
-      //     rad+bicep tree via the negative pid (see killChildTree).
-      // We keep the child reference (no unref) so Node still awaits it and reads
-      // the app-graph.json it wrote.
+      // `rad app graph` shells out to bicep as a grandchild and writes
+      // app-graph.json into the temp cwd. The child reference is kept (no unref)
+      // so Node awaits it and reads the file it wrote. The timeout below is a
+      // hard backstop.
       const child = spawn(radPath, ["app", "graph", absoluteBicep, ...MODELED_APP_GRAPH_FLAGS], {
         cwd,
         // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
         // committing to the radius-graph orphan branch. stdin is ignored so rad
-        // never blocks waiting for interactive input.
+        // never blocks waiting for interactive input. detached: on Windows,
+        // running rad inside the parent's job/process group can wedge it so it
+        // never exits; its own process group avoids that (timeout + killChildTree
+        // back it up). windowsHide is best-effort under detached.
         env: { ...process.env, GITHUB_ACTIONS: "" },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
@@ -739,10 +756,9 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
       });
 
       // Prefer `close`: it fires once the process exited AND all stdio flushed,
-      // so stdout/stderr are complete. But rad's bicep grandchild can inherit
-      // and hold the pipes open, in which case `close` never fires. So on `exit`
-      // (process gone, code known) we start a short grace window for `close`; if
-      // it elapses we finalize with whatever output we captured, avoiding a hang.
+      // so stdout/stderr are complete. As a safety net, a short grace window
+      // after `exit` (process gone, code known) finalizes with whatever output
+      // was captured if `close` is delayed, so the build can never hang.
       child.on("exit", (code, signal) => {
         exited = { code, signal };
         if (settled || graceTimer) return;
@@ -797,6 +813,12 @@ export function saveGraphJson(destPath, raw, log = noop) {
  * `saveGraphJsonTo`, when set to an absolute path, persists the raw
  * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
  * `.radius/app-graph.json`, next to the app.bicep it was built from).
+ *
+ * The returned array is passed through `filterGraphVisualizationResources`, the
+ * shared visualization filter, so implementation-detail resources
+ * (containerImages and their ghcr-registry-creds secret) are never rendered in
+ * any graph state — modeled, planned, deployed, or diff. This is applied only
+ * to the returned array; the raw app-graph.json saved above is left complete.
  */
 export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "" } = {}) {
   if (!content) return [];
@@ -810,7 +832,7 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
-    return applicationGraphToResources(appGraph, definitionFile);
+    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }

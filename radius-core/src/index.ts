@@ -15,29 +15,33 @@ export {
   addInboundConnections,
   applicationGraphToResources,
   computeGraphDiff,
+  filterGraphVisualizationResources,
   MODELED_GRAPH_DEFAULTS,
   buildResourceID,
   stripAPIVersion,
 } from "./graph/index.js";
 export {
-  parseTerraformResources,
-  formatTerraformType,
-  formatTerraformModule,
-  mapFileToResourceType,
-  parseRecipeResources,
-  formatResourceType,
-  radiusTypeToContribDir,
+  RECIPE_PACK_REPO,
+  RECIPE_PACK_REF,
+  recipePackPathForProvider,
+  recipePackContentPath,
+  normalizeRecipeSource,
+  deriveConcreteResource,
+  parseRecipePack,
   fetchBicepFromRepo,
-  loadRecipeResources,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
 } from "./modeling/index.js";
+export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
 export {
   getPlatform,
   listPlatforms,
   generatePortalUrl,
   azure,
   aws,
+  buildOidcSubject,
+  buildEnvironmentSuffix,
+  buildFederatedCredentialName,
 } from "./platforms/index.js";
 export type {
   ComputePlatform,
@@ -45,6 +49,8 @@ export type {
   PortalContext,
   SecretSpec,
   PlatformCapabilities,
+  OidcSubjectConfig,
+  BuildOidcSubjectInput,
 } from "./platforms/index.js";
 export {
   generateVerifyWorkflow,

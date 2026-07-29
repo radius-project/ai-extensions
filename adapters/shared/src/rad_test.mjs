@@ -157,6 +157,122 @@ describe("parseRadVersionOutput", () => {
   });
 });
 
+describe("resolveRadForGraph", () => {
+  const RELEASES_API = "https://api.github.com/repos/radius-project/radius/releases/latest";
+  const savedEnv = {};
+  let managedBackup = null;
+  let managedMode = null;
+
+  function mockHttpsGet(responses, calls) {
+    return vi.spyOn(https, "get").mockImplementation((url, options, callback) => {
+      const key = String(url);
+      calls.push(key);
+      const response = responses[key];
+      if (!response) throw new Error(`Unexpected URL: ${key}`);
+
+      const req = new EventEmitter();
+      req.destroy = (err) => { if (err) req.emit("error", err); };
+      req.on = req.addListener.bind(req);
+
+      const resp = new EventEmitter();
+      resp.statusCode = response.statusCode ?? 200;
+      resp.headers = response.headers ?? {};
+      resp.resume = () => {};
+      process.nextTick(() => {
+        callback(resp);
+        if (response.body !== undefined) {
+          resp.emit("data", Buffer.from(response.body));
+        }
+        resp.emit("end");
+      });
+      return req;
+    });
+  }
+
+  async function primeCachedRadViaEnsure(calls) {
+    vi.resetModules();
+    const mod = await import("./rad.mjs");
+    const asset = mod.releaseAsset();
+    const tag = "v0.2.0";
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
+    mockHttpsGet({
+      [RELEASES_API]: {
+        body: JSON.stringify({ tag_name: tag, assets: [{ name: asset, digest: "" }] }),
+      },
+      [downloadUrl]: {
+        body: "#!/usr/bin/env node\nprocess.stdout.write('{}');\n",
+      },
+    }, calls);
+    const resolved = await mod.resolveRadForGraph();
+    return { mod, resolved };
+  }
+
+  beforeEach(() => {
+    savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
+    savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK = process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    if (fs.existsSync(MANAGED_RAD_PATH)) {
+      managedBackup = fs.readFileSync(MANAGED_RAD_PATH);
+      managedMode = fs.statSync(MANAGED_RAD_PATH).mode;
+    } else {
+      managedBackup = null;
+      managedMode = null;
+    }
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+  });
+
+  afterEach(() => {
+    if (savedEnv.RADIUS_RAD_BINARY === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = savedEnv.RADIUS_RAD_BINARY;
+    if (savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK === undefined) delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    else process.env.RADIUS_RAD_SKIP_VERSION_CHECK = savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
+    fs.rmSync(MANAGED_RAD_PATH, { force: true });
+    if (managedBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
+      if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("uses an on-disk binary as-is when no cached path exists", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.mjs");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-existing-"));
+    const override = path.join(tmp, RAD);
+    fs.writeFileSync(override, "");
+    process.env.RADIUS_RAD_BINARY = override;
+
+    await expect(mod.resolveRadForGraph()).resolves.toBe(override);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("falls back to ensureRadBinary when no cached or on-disk binary exists", async () => {
+    delete process.env.RADIUS_RAD_BINARY;
+    const calls = [];
+    const { resolved } = await primeCachedRadViaEnsure(calls);
+
+    expect(resolved).toBe(MANAGED_RAD_PATH);
+    expect(calls).toContain(RELEASES_API);
+  });
+
+  it("prefers the cached ensure result over a later on-disk override", async () => {
+    delete process.env.RADIUS_RAD_BINARY;
+    const calls = [];
+    const { mod, resolved: cached } = await primeCachedRadViaEnsure(calls);
+    expect(cached).toBe(MANAGED_RAD_PATH);
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-override-"));
+    const override = path.join(tmp, RAD);
+    fs.writeFileSync(override, "");
+    process.env.RADIUS_RAD_BINARY = override;
+
+    await expect(mod.resolveRadForGraph()).resolves.toBe(cached);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
 describe("buildGraphViaRad", () => {
   it("returns an empty array for empty content without invoking rad", async () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.

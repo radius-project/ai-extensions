@@ -9,3 +9,4 @@ export {
 } from "./model.js";
 export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";
+export { filterGraphVisualizationResources } from "./visualization.js";

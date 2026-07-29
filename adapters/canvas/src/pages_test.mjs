@@ -6,6 +6,7 @@
 // module's branches stay exercised.
 
 import { describe, it, expect } from "vitest";
+import vm from "node:vm";
 import {
     pageShell,
     oidcPage,
@@ -166,12 +167,15 @@ describe("plannedGraphPage", () => {
     it("renders the empty (plan) branch with no removed tokens", () => {
         const html = plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" });
         expect(html).toContain("Plan Deployment");
+        expect(html).toContain("radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH)");
         for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
     });
 
     it("renders the with-resources branch with no removed tokens", () => {
         const html = plannedGraphPage({ plannedResources: sampleResources, plannedRepo: "octo/app" });
         expect(typeof html).toBe("string");
+        expect(html).toContain("plannedMode: true");
+        expect(html).not.toContain("Cloud Resource");
         for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
     });
 });
@@ -197,6 +201,109 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("/api/save-credential-profile");
         // The old inline provider picker was removed from the env-create form.
         expect(html).not.toContain('id="env-provider-select"');
+    });
+
+    it("progressively discloses a Service Management Reference input and retries with it", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // The SMR modal + input are present but hidden by default (no field on
+        // first submit).
+        expect(html).toContain('id="env-smr-modal"');
+        expect(html).toContain('id="env-smr-input"');
+        expect(html).toContain("Service Management Reference");
+        expect(html).toContain("Service Tree ID GUID");
+        // The client reacts to the machine-readable code and forwards the value.
+        expect(html).toContain("service-management-reference-required");
+        expect(html).toContain("serviceManagementReference");
+        expect(html).toContain("runAzureAutoSetupInteractive");
+    });
+
+    it("renders the app-registration picker + editable name + use-existing action", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Editable deploy-identity name prefilled from the repo.
+        expect(html).toContain('id="az-app-name-input"');
+        expect(html).toContain("radius-deploy-octo-app");
+        // Opt-in cross-repo "use existing" advanced action + its endpoint.
+        expect(html).toContain('id="az-use-existing-link"');
+        expect(html).toContain("/api/list-azure-app-registrations");
+        // Duplicate/selection picker modal + its machine-readable trigger code.
+        expect(html).toContain('id="env-appselect-modal"');
+        expect(html).toContain("app-selection-required");
+        expect(html).toContain("showAppPicker");
+    });
+
+    it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Step 3 header + provider-federated app registration copy.
+        expect(html).toContain("3 · Deploy identity");
+        expect(html).toContain("Azure app registration");
+        expect(html).toContain("The Microsoft Entra app GitHub Actions signs in as");
+        expect(html).toContain("no stored secrets");
+    });
+
+    it("wires the New Environment button to open the env form (regression guard)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // d97b6d1 accidentally dropped this handler when the use-existing IIFE was
+        // inserted, leaving #new-env-btn dead. Assert the exact wiring so a future
+        // deletion of the primary entry point fails the suite.
+        expect(html).toContain("getElementById('new-env-btn')");
+        expect(html).toMatch(/getElementById\('new-env-btn'\)\.addEventListener\('click',\s*function\(\)\s*\{\s*showEnvForm/);
+    });
+
+    it("makes the shared-identity pin reversible and reset on context change", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Hidden pin + note + explicit reversal affordance.
+        expect(html).toContain('id="az-selected-app-id"');
+        expect(html).toContain('id="az-selected-app-note"');
+        expect(html).toContain('id="az-clear-pin-link"');
+        // Central reset helper is defined and called from both the fresh-form and
+        // profile-change paths so a stale pin can't leak into the wrong context.
+        expect(html).toContain("function clearSharedAppPin");
+        expect(html).toMatch(/clearSharedAppPin\(\)/);
+    });
+
+    it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Repro: open the env form, use the combo's "+ Create new profile" action
+        // to add a profile on the Credentials subtab, then switch back to
+        // Environments. switchSubtab() must refresh the combo (preserving the
+        // current selection) so the new profile appears without a full canvas
+        // reload — but only while the form is visible, so discovery doesn't fire
+        // on the hidden landing view.
+        expect(html).toMatch(/if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/);
+    });
+
+    it("surfaces the write:packages scope in the account picker and identity warning", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Per-account label flags a missing packages scope (sibling of the
+        // existing workflow-scope flag).
+        expect(html).toContain("missing ");
+        expect(html).toContain("hasPackages");
+        expect(html).toContain("actingHasPackages");
+        // The identity warning builds the concrete refresh command including
+        // read:packages + write:packages when the acting account lacks it.
+        expect(html).toContain("read:packages");
+        expect(html).toContain("write:packages");
+        // Default (non-warning) note names both scopes setup needs.
+        expect(html).toContain("<code>write:packages</code>");
+    });
+
+    it("always sends appName on create so explicit-empty is server-detectable", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Omitted vs explicit-blank must be distinguishable server-side.
+        expect(html).toContain("params.appName !== undefined");
+    });
+
+    it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
+        // The client scripts live inside a template literal, so an escaped
+        // apostrophe (\\') un-escapes to a raw ' in the emitted JS and breaks a
+        // single-quoted string, halting page init so the tables never load.
+        // Compile every emitted script to catch that class of bug at build time.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+        expect(scripts.length).toBeGreaterThan(0);
+        for (const src of scripts) {
+            expect(() => new vm.Script(src)).not.toThrow();
+        }
     });
 });
 

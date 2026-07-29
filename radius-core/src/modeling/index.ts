@@ -1,25 +1,23 @@
-// modeling/ — pure repository-modeling helpers: Terraform parsing, recipe
-// parsing, and resource-type mapping, plus the GitHub-fetching orchestration
-// (behind the GitHub port) that fetches the skill-generated app.bicep and
-// resolves recipe outputs for the planned graph.
+// modeling/ — pure repository-modeling helpers: recipe-pack parsing and
+// concrete-resource derivation, plus the GitHub-fetching orchestration (behind
+// the GitHub port) that fetches the skill-generated app.bicep and resolves the
+// default recipe pack's outputs for the planned graph.
 
 export {
-  parseTerraformResources,
-  formatTerraformType,
-  formatTerraformModule,
-} from "./terraform.js";
-export {
-  mapFileToResourceType,
-  parseRecipeResources,
-  formatResourceType,
-  radiusTypeToContribDir,
-} from "./recipes.js";
+  RECIPE_PACK_REPO,
+  RECIPE_PACK_REF,
+  recipePackPathForProvider,
+  recipePackContentPath,
+  normalizeRecipeSource,
+  deriveConcreteResource,
+  parseRecipePack,
+} from "./recipe-pack.js";
+export type { ConcreteResource, RecipePackEntry } from "./recipe-pack.js";
 
 export {
   fetchBicepFromRepo,
 } from "./repo.js";
 export {
-  loadRecipeResources,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
 } from "./recipe-resolver.js";

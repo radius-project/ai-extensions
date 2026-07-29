@@ -9,20 +9,29 @@
 // extension.ts.
 
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
-  fetchRecipesFromGitHub,
+  fetchRecipePack,
   resolveRecipeOutputs,
+  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
+  buildEnvironmentSuffix,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials } from "./gh.mjs";
+import {
+  resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
+  selectMissingFederatedCredentials,
+  decideExistingClientId, isAzResourceNotFound,
+  decideAppSelection, parseServedReposFromSubjects, validateAppRegistrationName,
+  isUuid, isValidRepoSlug, isAksClusterName, isResourceGroupName, GITHUB_API_VERSION,
+} from "./azure-oidc.mjs";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import { appParams, resolveDeployParams, partitionParams, buildDeployRadCommand, buildAppGraphRadCommand, extractAppName } from "./bicep.mjs";
 import {
@@ -48,6 +57,7 @@ import {
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
+  explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
   parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
@@ -193,6 +203,34 @@ function ghOrThrow(args, timeout = 12000) {
     });
 }
 
+// Preflight the acting gh account's access to `repo` BEFORE any Azure/GitHub
+// mutation (App Registration create, environment PUT). Uses ghApiJson, which
+// routes through cliExec→ghChildEnv and therefore acts as the same active
+// keyring account the later mutations use. Returns a clear, actionable error
+// string when the account can't read the repo or lacks admin, else ''.
+//
+// Keying on ghApiJson's parsed HTTP status (not string-matched error text) makes
+// the two failure modes unambiguous: a 404 means the account genuinely can't see
+// the repo (readFailed), while any other non-ok result — a transient error, a
+// non-JSON body, or an unparseable status — is treated as ambiguous and returns
+// '' so the preflight never silently misdirects; the real op then surfaces the
+// true error. GitHub still enforces permissions server-side regardless.
+async function preflightRepoAdmin(repo) {
+    let login = '';
+    const who = await ghApiJson('user');
+    if (who.ok) login = (who.json && who.json.login) || '';
+    let readFailed = false, permissions = null;
+    const res = await ghApiJson(`repos/${repo}`);
+    if (res.ok) {
+        permissions = (res.json && res.json.permissions) || null;
+    } else if (res.status === 404) {
+        readFailed = true;
+    } else {
+        return ''; // ambiguous/transient — don't block or mislead; let the real op surface the true error
+    }
+    return explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions });
+}
+
 // How many of an environment's newest deployment records to resolve
 // concurrently before falling back to a serial walk. The relevant deploy/delete
 // record is almost always in the newest handful.
@@ -218,6 +256,23 @@ async function resolveRepoAppName(repo, branch) {
         if (name) { appName = name; break; }
     }
     return appName;
+}
+
+// Derive the deployment status for a single deploy record from the linked
+// workflow run's completion state, falling back to the deployment-status record
+// when no run information is available.  Exported for unit tests.
+//
+// `rec` must carry: { runConclusion, runStatus, state }
+// Returns one of: "success" | "failed" | "pending"
+export function resolveDeployStatus(rec) {
+    if (rec.runConclusion === "success") return "success";
+    if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
+    if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
+    // No linked run (or unknown run state): fall back to the deployment
+    // record's own state so we still reflect a terminal outcome.
+    if (rec.state === "success") return "success";
+    if (rec.state === "failure" || rec.state === "error") return "failed";
+    return "pending";
 }
 
 // Resolve the CURRENT application deployment for a single environment, or null
@@ -257,16 +312,18 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
         else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
         let runPath = "";
+        let runStatus = "";
         let runConclusion = "";
         if (m) {
-            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.conclusion // \"\")"]);
-            const rt = runInfo.indexOf("\t");
-            runPath = rt === -1 ? runInfo : runInfo.slice(0, rt);
-            runConclusion = rt === -1 ? "" : runInfo.slice(rt + 1);
+            const runInfo = await ghOrThrow(["api", `/repos/${repo}/actions/runs/${m[1]}`, "--jq", "(.path // \"\") + \"\\t\" + (.status // \"\") + \"\\t\" + (.conclusion // \"\")"]);
+            const parts = runInfo.split("\t");
+            runPath = parts[0] || "";
+            runStatus = parts[1] || "";
+            runConclusion = parts[2] || "";
         }
         const isDeploy = new RegExp(`(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
         const isDelete = new RegExp(`(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`).test(runPath);
-        return { id, state, runUrl, isDeploy, isDelete, runConclusion };
+        return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
     };
 
     // Apply the selection rules to a resolved record:
@@ -278,9 +335,19 @@ async function resolveEnvDeployment(repo, environment, appName) {
         if (rec.isDelete && rec.runConclusion === "success") return null;
         if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success") return 'skip';
         let status = "pending";
-        if (rec.isDelete) status = "deleting"; // delete still in progress
-        else if (rec.state === "success") status = "success";
-        else if (rec.state === "failure" || rec.state === "error") status = "failed";
+        if (rec.isDelete) {
+            status = "deleting"; // delete still in progress
+        } else {
+            // Deploy status is derived from the WORKFLOW RUN's completion, not the
+            // GitHub deployment-status record. A failed deploy often leaves that
+            // record stuck at "pending"/"in_progress" (the workflow never posts a
+            // terminal "failure" status), which previously mis-reported a failed
+            // deploy as "pending" and wrongly kept the Deploy button greyed out.
+            // Treat the run as authoritative: only a run that has NOT completed is
+            // "pending"; a completed run is "success" or "failed" by its
+            // conclusion, and a failed deploy does not block a redeploy.
+            status = resolveDeployStatus(rec);
+        }
         return { app: appName, environment, provider, status, deploymentId: rec.id, runUrl: rec.runUrl };
     };
 
@@ -625,6 +692,44 @@ function createRequestHandler(instanceId) {
             return;
         }
 
+        // Report the GitHub identity setup will act as, plus switchable accounts.
+        // Used by the Create Environment dialog to warn when the acting account
+        // differs from the one the host UI shows, or lacks the workflow scope.
+        if (pathname === "/api/github-identity" && req.method === "GET") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                res.writeHead(200);
+                res.end(JSON.stringify(getGitHubIdentity()));
+            } catch (e) {
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: e.message, accounts: [] }));
+            }
+            return;
+        }
+
+        // Switch the active GitHub account setup acts as.
+        if (pathname === "/api/github-account" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const data = JSON.parse(body || "{}");
+                const login = (data.login || "").trim();
+                const result = await switchGhAccount(login);
+                if (!result.ok) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: result.error || "Failed to switch account." }));
+                    return;
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, identity: getGitHubIdentity() }));
+            } catch (e) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message }));
+            }
+            return;
+        }
+
         // Create / update a credential profile (already verified client-side).
         if (pathname === "/api/save-credential-profile" && req.method === "POST") {
             let body = "";
@@ -747,18 +852,73 @@ function createRequestHandler(instanceId) {
         if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
+            // Cleaned up in finally; declared here so it's reachable from finally.
+            let fedTmpFile = null;
             try {
                 const data = JSON.parse(body);
                 const targetRepo = data.repo || '';
                 const envName = data.environment || 'dev';
                 const resourceGroup = data.resourceGroup || '';
                 const clusterName = data.cluster || '';
+                const serviceManagementReference = data.serviceManagementReference || '';
+                // ROUND 9 app-registration selection inputs:
+                //   data.appId     — an explicit App Registration the user picked
+                //                    (duplicate picker or the opt-in "use an
+                //                    existing application" cross-repo flow).
+                //   data.createNew — user explicitly chose "create a new
+                //                    application instead" from the picker.
+                //   data.appName   — an editable display name for a NEW app.
+                const explicitAppId = (data.appId || '').trim();
+                const createNewApp = data.createNew === true;
+                // Distinguish "field omitted" from "explicitly sent blank": a
+                // present-but-blank name is a user error (invalid-app-name), not
+                // a silent fall-back to the derived default.
+                const appNameProvided = typeof data.appName === 'string';
+                const requestedAppName = appNameProvided ? data.appName : '';
+                // Subscription the user selected (profile). Required so we can pin
+                // the az CLI context to it before the Graph calls (issue #125).
                 const requestedSubscriptionId = (data.subscriptionId || '').trim();
 
-                if (!targetRepo || !resourceGroup || !clusterName) {
+                function fail(status, error, code, extra) {
                     res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'repo, resourceGroup, and cluster are required.' }));
+                    res.writeHead(status);
+                    res.end(JSON.stringify({ error, ...(code ? { code } : {}), ...(extra || {}) }));
+                }
+
+                if (!targetRepo || !resourceGroup || !clusterName) {
+                    fail(400, 'repo, resourceGroup, and cluster are required.', 'missing-params');
+                    return;
+                }
+                // Validate every value that reaches an `az`/`gh` argv. execFile
+                // does not use a shell, but a leading '-' could still be parsed
+                // as a flag, and a bad repo slug would corrupt the OIDC subject.
+                if (!isValidRepoSlug(targetRepo)) {
+                    fail(400, `Invalid repository "${targetRepo}". Expected "owner/repo".`, 'invalid-repo');
+                    return;
+                }
+                if (!isResourceGroupName(resourceGroup)) {
+                    fail(400, `Invalid resource group name "${resourceGroup}".`, 'invalid-resource-group');
+                    return;
+                }
+                if (!isAksClusterName(clusterName)) {
+                    fail(400, `Invalid cluster name "${clusterName}".`, 'invalid-cluster');
+                    return;
+                }
+                if (data.tenantId && !isUuid(data.tenantId)) {
+                    fail(400, `Invalid tenantId "${data.tenantId}" (expected a GUID).`, 'invalid-tenant');
+                    return;
+                }
+                if (data.subscriptionId && !isUuid(data.subscriptionId)) {
+                    fail(400, `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`, 'invalid-subscription');
+                    return;
+                }
+                // The Service Management Reference is only surfaced by the UI
+                // AFTER a first attempt fails with the Entra policy error
+                // (progressive disclosure), so it is optional here. When present
+                // it must be a GUID (for Microsoft-internal tenants this is the
+                // Service Tree ID).
+                if (serviceManagementReference && !isUuid(serviceManagementReference)) {
+                    fail(400, `Invalid Service Management Reference "${serviceManagementReference}". It must be a GUID (for Microsoft-internal tenants, your Service Tree ID).`, 'invalid-smr');
                     return;
                 }
 
@@ -767,32 +927,54 @@ function createRequestHandler(instanceId) {
                 // below fall back to the ambient default context and create the
                 // App Registration / SP in the wrong tenant (issue #125).
                 if (!requestedSubscriptionId) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.' }));
+                    fail(400, 'subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.', 'subscription-required');
                     return;
                 }
 
+                // Preflight repo access + admin BEFORE creating any App
+                // Registration. Catches both a wrong-active-gh-account 404 and an
+                // insufficient-permission (non-admin) 404, which GitHub otherwise
+                // returns as bare, unhelpful 404s later in the flow.
+                const accessMsg = await preflightRepoAdmin(targetRepo);
+                if (accessMsg) { fail(403, accessMsg, 'repo-admin-required'); return; }
+
+                // Run `az` non-interactively: close stdin so it can never block on
+                // an interactive prompt inside this GUI host process.
                 function runCmd(cmd, args) {
                     return new Promise((resolve) => {
-                        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
+                        try { child.stdin?.end(); } catch { /* best-effort */ }
                     });
                 }
+                const ghJsonRunner = (apiPath) =>
+                    ghApiJson(apiPath, { headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION } });
 
                 const steps = [];
 
-                // Step 1: Pin the az CLI context to the SELECTED profile.
-                //
-                // Microsoft Graph / AAD commands (`az ad app create`, `az ad sp
-                // create`, `az ad app federated-credential create`) do not accept
-                // a `--subscription` flag — they target the tenant of the active
-                // `az` login context. If we rely on the ambient `az account`
-                // default, the App Registration / SP can be created in the wrong
-                // tenant (see issue #125). So we explicitly switch the active
-                // subscription first and then verify the resulting tenant matches
-                // the selected profile before creating anything.
+                // Record the GitHub identity setup is acting as, so the setup
+                // log makes it obvious when mutations run as a different account
+                // than the one the host UI shows (e.g. an enterprise/EMU login
+                // that may lack access to the target repo or Azure tenant).
+                try {
+                    const ghId = getGitHubIdentity();
+                    if (ghId && ghId.actingLogin) {
+                        steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
+                        if (ghId.mismatch && ghId.displayLogin) {
+                            steps.push(`Note: the app shows @${ghId.displayLogin} but setup is acting as @${ghId.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`);
+                        }
+                    }
+                } catch { /* identity is advisory — never block setup on it */ }
+
+                // Step 1: Pin the az CLI context to the SELECTED profile, then
+                // confirm login and align the tenant. Microsoft Graph / AAD
+                // commands (`az ad app create`, `az ad sp create`, `az ad app
+                // federated-credential create`) do NOT accept a `--subscription`
+                // flag — they target the tenant of the active `az` login context.
+                // If we rely on the ambient default the App Registration / SP can
+                // be created in the wrong tenant (issue #125), so we switch the
+                // active subscription first and then verify the resulting tenant.
                 let tenantId = (data.tenantId || '').trim();
                 let subscriptionId = requestedSubscriptionId;
 
@@ -800,107 +982,460 @@ function createRequestHandler(instanceId) {
                 const setResult = await runCmd('az', ['account', 'set', '--subscription', subscriptionId]);
                 if (setResult.code !== 0) {
                     // Surface the CLI stderr — the failure may be a logged-out
-                    // session, expired credentials, or a tenant restriction,
-                    // not just an unknown subscription.
+                    // session, expired credentials, or a tenant restriction, not
+                    // just an unknown subscription.
                     const detail = (setResult.stderr || '').trim();
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, steps }));
+                    fail(400, `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? ' Azure CLI: ' + detail : ''}`, 'az-subscription-set-failed', { steps });
                     return;
                 }
 
-                // Read the now-active account — this is the source of truth for
-                // what the subsequent `az ad` (Graph) calls will actually target.
+                // Read the now-active account — the source of truth for what the
+                // subsequent `az ad` (Graph) calls will actually target.
                 steps.push('Checking Azure CLI login...');
                 const acctResult = await runCmd('az', ['account', 'show', '--output', 'json']);
                 if (acctResult.code !== 0) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Azure CLI not logged in. Run "az login" first.', steps }));
+                    fail(400, 'Azure CLI not logged in. Run "az login" first.', 'az-not-logged-in', { steps });
                     return;
                 }
-                const account = JSON.parse(acctResult.stdout);
+                let account;
+                try {
+                    account = JSON.parse(acctResult.stdout);
+                } catch (e) {
+                    fail(400, 'Could not parse "az account show" output.', 'az-account-parse', { steps });
+                    return;
+                }
                 const activeTenantId = account.tenantId || '';
                 // Prefer the active account's id as the canonical subscription
                 // after switching context.
                 subscriptionId = account.id || subscriptionId;
 
-                // Guard against an unexpected/empty payload before continuing —
-                // an empty subscription or tenant would otherwise produce a
-                // malformed role-assignment scope and unclear downstream errors.
-                if (!subscriptionId || !activeTenantId) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Could not determine the active Azure subscription and tenant. Run "az login" and "az account set --subscription <id>", then try again.', steps }));
-                    return;
-                }
-
-                // If the selected profile's tenant differs from the active
-                // session's tenant, stop with an actionable message instead of
-                // silently creating resources in the wrong (default) tenant.
+                // Fail with guidance when the selected tenant is not the active
+                // one — otherwise the app would land in the wrong directory.
                 if (tenantId && activeTenantId && tenantId.toLowerCase() !== activeTenantId.toLowerCase()) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${activeTenantId}, not the selected tenant ${tenantId}. Run "az login --tenant ${tenantId}" in your terminal, then try again.`, steps }));
+                    fail(400,
+                        `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
+                        `Run "az login --tenant ${tenantId}" and retry.`,
+                        'az-tenant-mismatch', { steps });
                     return;
                 }
                 tenantId = tenantId || activeTenantId;
-                steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 2: Create a fresh App Registration. We always auto-create
-                // new credentials rather than reusing an existing Client ID.
-                const appName = `radius-deploy-${targetRepo.replace('/', '-')}`;
-                steps.push(`Creating App Registration: ${appName}...`);
-                const appResult = await runCmd('az', ['ad', 'app', 'create', '--display-name', appName, '--query', 'appId', '-o', 'tsv']);
-                if (appResult.code !== 0) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: 'Failed to create App Registration: ' + appResult.stderr, steps }));
+                // Validate the resolved subscription id before it reaches an
+                // `az` scope argument, and ensure the tenant is known.
+                if (!isUuid(subscriptionId)) {
+                    fail(400, `Resolved subscription id "${subscriptionId}" is not a valid GUID.`, 'invalid-subscription', { steps });
                     return;
                 }
-                const clientId = appResult.stdout.trim();
-                steps.push(`✅ App Registration created: ${clientId}`);
+                if (!activeTenantId) {
+                    fail(400, 'Could not determine the active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.', 'az-account-incomplete', { steps });
+                    return;
+                }
+                steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
-                // Step 3: Create Service Principal
+                // Step 2: Resolve the federated credential(s) BEFORE creating
+                // anything. This reads the canonical repo + subject customization
+                // from GitHub. For the default (not customized) subject we create
+                // BOTH the mutable and immutable forms so whichever GitHub mints
+                // at token time matches; for a customized subject we build the
+                // single exact subject (failing loud only if a repo/repository
+                // claim needs an immutability decision it cannot make).
+                steps.push('Resolving GitHub OIDC subject...');
+                // Note: enterprise-claim rejection (AADSTS7002381) is handled at
+                // Actions-run failure time via explainOidcEnterpriseClaim (deploy.mjs),
+                // which surfaces a tenant-agnostic explanation. Package-scope /
+                // workflow-permission changes remain out of scope for this fix.
+                let oidc;
+                try {
+                    oidc = await resolveOidcSubject(
+                        {
+                            targetRepo,
+                            envName,
+                            suffix: buildEnvironmentSuffix(envName),
+                        },
+                        ghJsonRunner,
+                    );
+                } catch (e) {
+                    fail(400, e.message, e.code || 'oidc-subject-failed', { steps });
+                    return;
+                }
+                steps.push(`✅ OIDC subject(s): ${oidc.federatedCredentials.map((f) => f.subject).join(', ')}`);
+
+                // Step 3: Resolve the target App Registration idempotently
+                // (lookup-then-create). Creating unconditionally would spawn a
+                // new app on every run (Azure AD allows duplicate display
+                // names) — tenant sprawl, a new clientId that orphans the
+                // AZURE_CLIENT_ID already wired into the GitHub environment, and
+                // a fresh app with no Service Management Reference (forcing the
+                // user to redo the approval-gated SMR). Instead we reuse an
+                // existing app the caller OWNS when one exists.
+                // The default per-repo deploy identity name. Editable: when the
+                // user supplies data.appName (create path), we validate and use
+                // it instead — but only for the name lookup / create below, never
+                // to repoint an already-wired AZURE_CLIENT_ID. When an explicit
+                // appId is chosen the name is irrelevant (we reuse that app), so
+                // validation is skipped there.
+                let appName = `radius-deploy-${oidc.fullName.replace('/', '-')}`;
+                if (!explicitAppId) {
+                    // Always validate the FINAL effective name — including the
+                    // derived default, which for a very long owner/repo could
+                    // exceed Entra's 120-char limit. A present-but-blank name is
+                    // an explicit error rather than a silent derive.
+                    if (appNameProvided) {
+                        const nameCheck = validateAppRegistrationName(requestedAppName);
+                        if (!nameCheck.ok) {
+                            fail(400, nameCheck.reason, 'invalid-app-name', { steps });
+                            return;
+                        }
+                        appName = nameCheck.name;
+                    } else {
+                        const nameCheck = validateAppRegistrationName(appName);
+                        if (!nameCheck.ok) {
+                            fail(400, 'The derived App Registration name is invalid: ' + nameCheck.reason + ' Supply a shorter appName.', 'invalid-app-name', { steps });
+                            return;
+                        }
+                        appName = nameCheck.name;
+                    }
+                }
+
+                // The repo's existing AZURE_CLIENT_ID (if any). Read from the
+                // request body first, else the GitHub environment variable. We
+                // prefer the identity already wired into the environment so a
+                // repo rename or a hand-made app is never silently repointed.
+                let existingClientId = (data.clientId || '').trim();
+                if (!existingClientId) {
+                    const varRes = await ghJsonRunner(
+                        `/repos/${oidc.fullName}/environments/${encodeURIComponent(envName)}/variables/AZURE_CLIENT_ID`,
+                    );
+                    if (varRes?.ok && varRes.json && typeof varRes.json.value === 'string') {
+                        existingClientId = varRes.json.value.trim();
+                    }
+                    // A 404 (no environment/variable yet) is expected on a first
+                    // run; a hard transport/permission failure is non-fatal here
+                    // (the name lookup below still resolves the app).
+                }
+
+                // Signed-in user id + ownership check, fetched once and cached —
+                // reused for both the existingClientId path and name scoping.
+                let signedInUserId = null;
+                const getSignedInUserId = async () => {
+                    if (signedInUserId !== null) return { ok: true, id: signedInUserId };
+                    const meRes = await runCmd('az', ['ad', 'signed-in-user', 'show', '--query', 'id', '-o', 'tsv']);
+                    if (meRes.code !== 0) return { ok: false, stderr: meRes.stderr };
+                    signedInUserId = meRes.stdout.trim().toLowerCase();
+                    return { ok: true, id: signedInUserId };
+                };
+                const isOwnedBySignedInUser = async (appId) => {
+                    const me = await getSignedInUserId();
+                    if (!me.ok) return { ok: false, stderr: me.stderr };
+                    const ownRes = await runCmd('az', ['ad', 'app', 'owner', 'list', '--id', appId, '--query', '[].id', '-o', 'tsv']);
+                    if (ownRes.code !== 0) return { ok: false, stderr: ownRes.stderr };
+                    const owners = ownRes.stdout.split(/\s+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+                    return { ok: true, owned: owners.includes(me.id) };
+                };
+
+                // TODO(defer): TOCTOU race — two concurrent requests could both
+                // observe "no app" and each create one. Left unhandled by design:
+                // this is a single-user local canvas server, so concurrent
+                // same-repo setup is implausible; a mutex+re-list+delete-loser is
+                // disproportionate.
+                let clientId;
+
+                // Step 3a: existingClientId-first. If AZURE_CLIENT_ID already
+                // points at an app we own, reuse it directly — the wired identity
+                // wins over any name match, so we never overwrite a working
+                // deployment's identity or churn its FICs/role.
+                if (existingClientId) {
+                    steps.push(`Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`);
+                    const showRes = await runCmd('az', ['ad', 'app', 'show', '--id', existingClientId, '--query', 'id', '-o', 'tsv']);
+                    let showStatus;
+                    if (showRes.code === 0 && showRes.stdout.trim()) {
+                        showStatus = 'found';
+                    } else if (isAzResourceNotFound(showRes.stderr)) {
+                        showStatus = 'not-found';
+                    } else {
+                        showStatus = 'lookup-failed';
+                    }
+                    let owned = false;
+                    if (showStatus === 'found') {
+                        const own = await isOwnedBySignedInUser(existingClientId);
+                        if (!own.ok) {
+                            fail(400, `Could not read owners of the existing AZURE_CLIENT_ID app ${existingClientId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
+                            return;
+                        }
+                        owned = own.owned;
+                    }
+                    const decision = decideExistingClientId({ clientId: existingClientId, showStatus, owned });
+                    if (decision.action === 'fatal') {
+                        fail(400, `Could not verify the repository's AZURE_CLIENT_ID (${existingClientId}): ` + showRes.stderr, decision.code, { steps, azError: showRes.stderr });
+                        return;
+                    }
+                    if (decision.action === 'error') {
+                        fail(400, `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration owned by another user. Verify or clear the variable and retry.`, decision.code, { steps });
+                        return;
+                    }
+                    if (decision.action === 'reuse') {
+                        clientId = existingClientId;
+                        // Reuse path: never touch the existing Service Management
+                        // Reference — it may be approval-gated.
+                        steps.push(`✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${clientId}`);
+                    }
+                    // 'fallthrough' (empty / stale not-found) → name lookup below.
+                }
+
+                // Step 3b: explicit selection, or name lookup + ownership scoping
+                // (only when the wired identity did not already resolve the app).
+                if (!clientId) {
+                    // Per-candidate FIC → served-repos enrichment. Best-effort: a
+                    // FIC-list failure just omits servesRepos for that candidate.
+                    const listServesRepos = async (appId) => {
+                        const ficRes = await runCmd('az', [
+                            'ad', 'app', 'federated-credential', 'list',
+                            '--id', appId, '--query', '[].subject', '-o', 'json',
+                        ]);
+                        if (ficRes.code !== 0) return undefined;
+                        try {
+                            return parseServedReposFromSubjects(JSON.parse(ficRes.stdout));
+                        } catch { return undefined; }
+                    };
+
+                    // Explicit choice: the duplicate picker or the opt-in "use an
+                    // existing application" (cross-repo) flow resubmits with an
+                    // appId. Verify ownership of THAT exact app and reuse it — this
+                    // deliberately bypasses the name lookup so a shared,
+                    // non-name-matched identity is honored. Ownership is still
+                    // enforced (an app we don't own would fail FIC/role writes and
+                    // could hijack another user's identity).
+                    if (explicitAppId) {
+                        if (!isUuid(explicitAppId)) {
+                            fail(400, 'The selected App Registration id is not a valid GUID.', 'invalid-app-id', { steps });
+                            return;
+                        }
+                        const own = await isOwnedBySignedInUser(explicitAppId);
+                        if (!own.ok) {
+                            fail(400, `Could not read owners of App Registration ${explicitAppId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
+                            return;
+                        }
+                        if (!own.owned) {
+                            fail(400, 'The selected App Registration is owned by another user. Choose one you own or create a new application.', 'app-registration-not-owned', { steps, appName });
+                            return;
+                        }
+                        clientId = explicitAppId;
+                        // Reuse path: never touch SMR (may be approval-gated).
+                        steps.push(`✅ Using the selected App Registration: ${clientId}`);
+                    }
+
+                    if (!clientId) {
+                        steps.push(`Looking up existing App Registration: ${appName}...`);
+                        const listRes = await runCmd('az', [
+                            'ad', 'app', 'list',
+                            // single-quote-safe: appName was replaced with the
+                            // validateAppRegistrationName() result above, whose
+                            // allow-list forbids quotes, so it cannot break out of
+                            // this OData single-quoted string literal.
+                            '--filter', `displayName eq '${appName}'`,
+                            '--query', '[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime}',
+                            '-o', 'json',
+                        ]);
+                        if (listRes.code !== 0) {
+                            // FATAL: a silent fall-through to create would resurrect
+                            // the sprawl bug this fix exists to prevent.
+                            fail(400, 'Failed to look up existing App Registrations: ' + listRes.stderr, 'app-lookup-failed', { steps, azError: listRes.stderr });
+                            return;
+                        }
+                        // `az ... -o json` returns a literal `[]` for no matches, so
+                        // an empty string is anomalous. Only a genuine array
+                        // proceeds; a non-array or unparseable result is FATAL. A
+                        // legitimately EMPTY array still proceeds to create.
+                        let matches;
+                        try {
+                            const parsed = JSON.parse(listRes.stdout);
+                            if (!Array.isArray(parsed)) {
+                                fail(400, 'The App Registration lookup returned an unexpected (non-array) result.', 'app-lookup-parse', { steps });
+                                return;
+                            }
+                            matches = parsed;
+                        } catch (e) {
+                            fail(400, 'Could not parse the App Registration lookup result.', 'app-lookup-parse', { steps });
+                            return;
+                        }
+
+                        // Scope matches to apps the signed-in user owns; reusing an
+                        // app we don't own would fail on FIC/role writes and risks
+                        // hijacking another user's app in a shared tenant.
+                        let ownedMatches = [];
+                        for (const m of matches) {
+                            if (!m || !m.appId) continue;
+                            const own = await isOwnedBySignedInUser(m.appId);
+                            if (!own.ok) {
+                                fail(400, `Could not read owners of App Registration ${m.appId}: ` + own.stderr, 'app-owner-lookup-failed', { steps, azError: own.stderr });
+                                return;
+                            }
+                            if (own.owned) ownedMatches.push(m);
+                        }
+
+                        const selection = decideAppSelection({
+                            ownedMatches,
+                            hasUnownedMatch: matches.length > ownedMatches.length,
+                            existingClientId,
+                            createNew: createNewApp,
+                        });
+
+                        if (selection.action === 'error') {
+                            fail(400, selection.reason, selection.code, { steps, appName });
+                            return;
+                        }
+
+                        if (selection.action === 'needs-selection') {
+                            // >1 owned name-matches and no explicit choice yet.
+                            // Enrich each candidate with the repos it already serves
+                            // (from its FIC subjects) so the user can choose
+                            // knowingly, then ask the frontend to prompt.
+                            const candidates = [];
+                            for (const c of selection.candidates) {
+                                const servesRepos = await listServesRepos(c.appId);
+                                candidates.push({
+                                    appId: c.appId,
+                                    displayName: c.displayName,
+                                    createdDateTime: c.createdDateTime,
+                                    ...(servesRepos ? { servesRepos } : {}),
+                                });
+                            }
+                            fail(400,
+                                'Multiple owned App Registrations found — choose which identity to use.',
+                                'app-selection-required',
+                                { steps, appName, candidates, defaultAppId: selection.defaultAppId });
+                            return;
+                        }
+
+                        if (selection.action === 'reuse') {
+                            clientId = selection.appId;
+                            // Reuse path: never touch the existing Service Management
+                            // Reference — it may be approval-gated. SMR only applies
+                            // when creating a new app below.
+                            steps.push(`✅ Reusing existing App Registration: ${clientId}`);
+                        } else {
+                            // Create a fresh App Registration. Attempt WITHOUT a
+                            // Service Management Reference first; only if Entra policy
+                            // rejects it do we ask the user for one (progressive
+                            // disclosure) — `az ad app create` fails atomically, so
+                            // the retry is clean with no orphaned app. The creator is
+                            // automatically an owner.
+                            steps.push(`Creating App Registration: ${appName}...`);
+                            const appResult = await runCmd('az', buildAppCreateArgs({ appName, serviceManagementReference }));
+                            if (appResult.code !== 0) {
+                                if (!serviceManagementReference && isServiceManagementReferenceError(appResult.stderr)) {
+                                    fail(400,
+                                        'This Entra tenant requires a Service Management Reference on new App Registrations. ' +
+                                        'Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.',
+                                        'service-management-reference-required',
+                                        { steps, azError: appResult.stderr });
+                                    return;
+                                }
+                                fail(400, 'Failed to create App Registration: ' + appResult.stderr, 'app-create-failed', { steps, azError: appResult.stderr });
+                                return;
+                            }
+                            clientId = appResult.stdout.trim();
+                            steps.push(`✅ App Registration created: ${clientId}`);
+                        }
+                    }
+                }
+
+                // Step 4: Create Service Principal (FATAL on failure). Once the
+                // app exists, any later failure returns clientId/appName so the
+                // user can find and clean it up manually (full rollback deferred).
                 steps.push('Creating Service Principal...');
                 const spResult = await runCmd('az', ['ad', 'sp', 'create', '--id', clientId]);
                 if (spResult.code !== 0 && !spResult.stderr.includes('already exists')) {
-                    // SP might already exist, try to get it
+                    // The SP may already exist under a different identity; confirm.
                     const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
                     if (spShow.code !== 0) {
-                        steps.push('⚠️ Could not create/find Service Principal: ' + spResult.stderr);
+                        fail(400, 'Could not create or find the Service Principal: ' + spResult.stderr, 'sp-failed', { steps, clientId, appName, azError: spResult.stderr });
+                        return;
                     }
                 }
                 steps.push('✅ Service Principal ready');
 
-                // Step 4: Create Federated Credential for GitHub Actions OIDC
-                steps.push('Creating federated credential for GitHub OIDC...');
-                const fedParams = JSON.stringify({
-                    name: `github-actions-${envName}`,
-                    issuer: 'https://token.actions.githubusercontent.com',
-                    subject: `repo:${targetRepo}:environment:${envName}`,
-                    audiences: ['api://AzureADTokenExchange']
-                });
-                const { writeFileSync, unlinkSync } = await import("node:fs");
+                // Step 5: Create the Federated Credential(s) (FATAL on failure).
+                // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
+                // FIC whose subject already exists, so we stay under Azure's
+                // ~20-FIC/app cap and don't churn credentials. The "already
+                // exists" stderr guard remains as a backstop.
+                const { writeFileSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
-                const fedTmpFile = join(tmpdir(), 'fed-cred-' + Date.now() + '.json');
-                writeFileSync(fedTmpFile, fedParams);
-                const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
-                try { unlinkSync(fedTmpFile); } catch {}
-                if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Federated credential warning: ' + fedResult.stderr);
-                } else {
-                    steps.push('✅ Federated credential created');
+                let existingSubjects = [];
+                const ficListRes = await runCmd('az', ['ad', 'app', 'federated-credential', 'list', '--id', clientId, '--query', '[].subject', '-o', 'json']);
+                if (ficListRes.code === 0) {
+                    try {
+                        const parsed = JSON.parse(ficListRes.stdout || '[]');
+                        if (Array.isArray(parsed)) existingSubjects = parsed;
+                    } catch { /* fall back to attempting all, guarded by stderr */ }
+                }
+                const ficsToCreate = selectMissingFederatedCredentials(oidc.federatedCredentials, existingSubjects);
+                const skippedCount = oidc.federatedCredentials.length - ficsToCreate.length;
+                if (skippedCount > 0) {
+                    steps.push(`✅ ${skippedCount} federated credential(s) already present — skipping`);
+                }
+                for (const fic of ficsToCreate) {
+                    steps.push(`Creating federated credential "${fic.name}"...`);
+                    const fedParams = JSON.stringify({
+                        name: fic.name,
+                        issuer: 'https://token.actions.githubusercontent.com',
+                        subject: fic.subject,
+                        audiences: ['api://AzureADTokenExchange']
+                    });
+                    // Unpredictable filename so a shared tmpdir can't be
+                    // pre-created or read by another local user.
+                    fedTmpFile = join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`);
+                    writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
+                    const fedResult = await runCmd('az', ['ad', 'app', 'federated-credential', 'create', '--id', clientId, '--parameters', '@' + fedTmpFile]);
+                    try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
+                    fedTmpFile = null;
+                    if (fedResult.code !== 0 && !fedResult.stderr.includes('already exists')) {
+                        fail(400, `Failed to create federated credential "${fic.name}": ` + fedResult.stderr, 'federated-credential-failed', { steps, clientId, appName, azError: fedResult.stderr });
+                        return;
+                    }
+                    steps.push(`✅ Federated credential "${fic.name}" created`);
                 }
 
-                // Step 5: Assign Contributor role on the resource group
+                // Step 6: Assign Contributor role on the resource group (FATAL).
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
                 const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--subscription', subscriptionId, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
+                    fail(400, 'Failed to assign Contributor role: ' + roleResult.stderr, 'role-assignment-failed', { steps, clientId, appName, azError: roleResult.stderr });
+                    return;
+                }
+                steps.push('✅ Contributor role assigned');
+
+                // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
+                // cluster (best-effort). Contributor on the resource group is a
+                // MANAGEMENT-plane role — it lets the identity read/manage the
+                // cluster *resource*, but on clusters with Azure RBAC for
+                // Kubernetes enabled (the default for AKS Automatic) every
+                // kubectl/data-plane call (e.g. `kubectl get services`) is
+                // authorized by Azure roles scoped to the cluster, NOT by
+                // Contributor. Without this the deploy identity signs in but
+                // gets "cannot list resource ... : User does not have access to
+                // the resource in Azure" and the run fails at Verify AKS Access.
+                // Cluster Admin is required because the Radius control plane
+                // installs cluster-scoped resources (CRDs, namespaces). This is
+                // a no-op on clusters that use only Kubernetes RBAC, so we
+                // attempt it whenever an AKS cluster is targeted and treat a
+                // failure as a warning rather than aborting the whole setup.
+                const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
+                steps.push(`Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`);
+                const aksRoleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Azure Kubernetes Service RBAC Cluster Admin', '--scope', clusterScope, '--subscription', subscriptionId, '--output', 'none']);
+                if (aksRoleResult.code === 0 || aksRoleResult.stderr.includes('already exists')) {
+                    steps.push('✅ AKS RBAC Cluster Admin role assigned');
                 } else {
-                    steps.push('✅ Contributor role assigned');
+                    // Non-fatal: control-plane access is already in place, and
+                    // clusters without Azure RBAC for Kubernetes don't need this.
+                    // Surface actionable guidance so an Automatic-cluster user can
+                    // grant it manually if the deploy later fails on AKS access.
+                    steps.push('⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. ' +
+                        'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
+                        `Grant it manually: az role assignment create --assignee ${clientId} --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
+                        'Details: ' + aksRoleResult.stderr);
                 }
 
                 // Return all credentials for the environment setup
@@ -914,12 +1449,92 @@ function createRequestHandler(instanceId) {
                     resourceGroup,
                     cluster: clusterName,
                     appName,
+                    subjects: oidc.federatedCredentials.map((f) => f.subject),
                     steps
                 }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: e.message }));
+            } finally {
+                if (fedTmpFile) {
+                    try { (await import("node:fs")).unlinkSync(fedTmpFile); } catch { /* best-effort */ }
+                }
+            }
+            return;
+        }
+
+        // List all App Registrations owned by the signed-in user, enriched with
+        // the repos each already serves (from its FIC subjects). Backs the
+        // opt-in "use an existing application" cross-repo picker on the
+        // Environment page. Runs under the same agent-session-stripped cliExec
+        // env as the rest of the Azure setup.
+        if (pathname === "/api/list-azure-app-registrations" && req.method === "GET") {
+            function runCmd(cmd, args) {
+                return new Promise((resolve) => {
+                    const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                    });
+                    try { child.stdin?.end(); } catch { /* best-effort */ }
+                });
+            }
+            const listServesRepos = async (appId) => {
+                const ficRes = await runCmd('az', [
+                    'ad', 'app', 'federated-credential', 'list',
+                    '--id', appId, '--query', '[].subject', '-o', 'json',
+                ]);
+                if (ficRes.code !== 0) return undefined;
+                try { return parseServedReposFromSubjects(JSON.parse(ficRes.stdout)); } catch { return undefined; }
+            };
+            try {
+                // `--show-mine` scopes to apps the signed-in user owns, so we
+                // avoid an O(N) owner lookup across the whole tenant.
+                const listRes = await runCmd('az', [
+                    'ad', 'app', 'list', '--show-mine',
+                    '--query', '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}',
+                    '-o', 'json',
+                ]);
+                if (listRes.code !== 0) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Failed to list App Registrations: ' + listRes.stderr, code: 'app-list-failed', azError: listRes.stderr }));
+                    return;
+                }
+                let parsed;
+                try { parsed = JSON.parse(listRes.stdout); } catch { parsed = null; }
+                if (!Array.isArray(parsed)) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'The App Registration list returned an unexpected result.', code: 'app-list-parse' }));
+                    return;
+                }
+                // Enrich servesRepos in bounded-parallel batches so the picker
+                // loads quickly even for users who own many apps (avoids an N+1
+                // serial chain of `az` calls) without spawning an unbounded
+                // number of concurrent az processes.
+                const validApps = parsed.filter((a) => a && a.appId);
+                const apps = [];
+                const CONCURRENCY = 6;
+                for (let i = 0; i < validApps.length; i += CONCURRENCY) {
+                    const batch = validApps.slice(i, i + CONCURRENCY);
+                    const enriched = await Promise.all(batch.map(async (a) => {
+                        const servesRepos = await listServesRepos(a.appId);
+                        return {
+                            appId: a.appId,
+                            displayName: a.displayName,
+                            createdDateTime: a.createdDateTime,
+                            ...(servesRepos ? { servesRepos } : {}),
+                        };
+                    }));
+                    for (const e of enriched) apps.push(e);
+                }
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ apps }));
+            } catch (e) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: e.message, code: 'app-list-failed' }));
             }
             return;
         }
@@ -971,6 +1586,24 @@ function createRequestHandler(instanceId) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'No target repository specified.' }));
+                    return;
+                }
+
+                if (!isValidRepoSlug(targetRepo)) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: `Invalid repository "${targetRepo}". Expected "owner/repo".`, code: 'invalid-repo' }));
+                    return;
+                }
+
+                // Preflight repo access + admin BEFORE any GitHub mutation.
+                // Reachable directly when credentials already exist and
+                // azure-auto-setup is skipped, so guarding here too is required.
+                const accessMsg = await preflightRepoAdmin(targetRepo);
+                if (accessMsg) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ error: accessMsg, code: 'repo-admin-required' }));
                     return;
                 }
 
@@ -1031,9 +1664,42 @@ function createRequestHandler(instanceId) {
                 const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
 
                 steps.push('Creating private GHCR state package "' + stateRegistry + '"...');
+                // Authenticate GHCR as the identity setup acts as (the account
+                // shown/selected in the dialog), not whatever keyring account is
+                // active. On multi-account machines the active keyring login can
+                // be an enterprise/EMU account GHCR rejects, even though the rest
+                // of setup runs as the intended account.
+                let packageCredentials;
+                try {
+                    packageCredentials = getGhPackageCredentials();
+                } catch (e) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ error: `Could not authenticate to GitHub Packages for this repository. ${e.message}`, code: 'ghcr-auth-failed', steps }));
+                    return;
+                }
+                // Fail fast when the acting account lacks write:packages, BEFORE
+                // the bootstrap push. GHCR's token endpoint silently issues a
+                // pull-only token for a read-only credential, so without this gate
+                // the missing scope only surfaces as a cryptic 403 deep in the blob
+                // upload — after the rest of setup has already run. actingHasPackages
+                // is read keyring-first, matching the credential getGhPackageCredentials
+                // pins, so it reflects the token this push actually uses.
+                const ghPkgIdentity = getGitHubIdentity();
+                if (ghPkgIdentity && ghPkgIdentity.actingLogin && !ghPkgIdentity.actingHasPackages) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(403);
+                    res.end(JSON.stringify({
+                        error: `The GitHub account @${ghPkgIdentity.actingLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth refresh -h github.com -u ${ghPkgIdentity.actingLogin} -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry.`,
+                        code: 'ghcr-scope-required',
+                        steps,
+                    }));
+                    return;
+                }
                 const statePackage = await bootstrapGHCRStatePackage({
                     targetRepository: targetRepo,
                     registry: stateRegistry,
+                    credentials: packageCredentials,
                 });
                 steps.push(`✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`);
 
@@ -1560,6 +2226,12 @@ function createRequestHandler(instanceId) {
             // Re-derive connections (e.g. database→secret) that rad app graph
             // omits, so the deployed graph renders connected like the planned one.
             resources = normalizeDeployedGraph(resources);
+            // Hide implementation-detail resources (containerImages + their
+            // ghcr-registry-creds secret) from the deployed view too, matching
+            // every other graph state. Applied last so any edges the rewire/
+            // normalize steps synthesized toward those nodes are also stripped.
+            // The raw deploy-graph.json on the status branch is left untouched.
+            resources = filterGraphVisualizationResources(resources);
             res.writeHead(200);
             res.end(JSON.stringify({ resources, repo, branch: (entry?.state?.workspaceBranch && repoMatchesWorkspace(entry.state, repo)) ? entry.state.workspaceBranch : "main" }));
             return;
@@ -2013,6 +2685,8 @@ function createRequestHandler(instanceId) {
                 const log = await fetchRunLog(repo, runId);
                 const lines = extractErrorLines(log, 8);
                 if (lines.length) errMsg += '\n' + lines.join('\n');
+                const oidcClaimHelp = explainOidcEnterpriseClaim(log);
+                if (oidcClaimHelp) errMsg = oidcClaimHelp + '\n\n\u2014 raw error \u2014\n' + errMsg;
                 respond({ state: "failed", runId, runUrl, error: errMsg });
             } catch (e) {
                 respond({ state: "unknown", error: e.message });
@@ -2123,11 +2797,21 @@ function createRequestHandler(instanceId) {
                 const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress });
                 addProgress(`Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`);
 
-                // Fetch recipes from GitHub (radius-project/resource-types-contrib)
+                // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
                 let recipes = [];
-                addProgress('Fetching recipes from GitHub...');
-                recipes = await fetchRecipesFromGitHub(github, provider);
-                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from GitHub.`);
+                addProgress('Fetching the default recipe pack from GitHub...');
+                recipes = await fetchRecipePack(github, provider);
+                addProgress(`Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`);
+
+                // Surface pack recipes we couldn't map to a concrete resource so
+                // the gap is visible (rather than silently rendering the abstract
+                // type). Empty today for the Azure pack; fires if the pack adds a
+                // recipe source the curated map doesn't yet cover.
+                const unmappedRecipes = (Array.isArray(recipes) ? recipes : [])
+                    .filter(r => !r.concreteResources || r.concreteResources.length === 0);
+                if (unmappedRecipes.length) {
+                    addProgress(`Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map(r => r.resourceType).join(', ')}); those nodes show their abstract Radius type.`);
+                }
 
                 // For each abstract resource, resolve its recipe and concrete output resources
                 addProgress('Resolving recipe outputs for planned resources...');
@@ -2369,7 +3053,7 @@ function createRequestHandler(instanceId) {
                                 const content = selection.content;
                                 if (content) {
                                     const parsed = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addLog });
-                                    const recipes = await fetchRecipesFromGitHub(github, provider);
+                                    const recipes = await fetchRecipePack(github, provider);
                                     const planned = await resolveRecipeOutputs(github, parsed, recipes, provider);
                                     planned.forEach(r => { r.deployStatus = 'pending'; if (r.outputResources) r.outputResources.forEach(o => { o.deployStatus = 'pending'; }); });
                                     const committed = setSourceRefResources(entry, "planned", planned, {
@@ -2852,6 +3536,13 @@ function createRequestHandler(instanceId) {
                                     // output; fall back to the full run log.
                                     let failLog = live;
                                     if (!failLog) failLog = await fetchRunLog(repo, dRunId);
+                                    // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the Azure Login
+                                    // step, BEFORE rad runs — so it appears in the run log, not the live rad-deploy log.
+                                    // A stale live-deploy log from a prior attempt (persisted on the status branch) could
+                                    // otherwise mask it, so always consult the current run log for THIS run for the claim.
+                                    const runLogForClaim = live ? await fetchRunLog(repo, dRunId) : failLog;
+                                    const claimHelp = explainOidcEnterpriseClaim(runLogForClaim);
+                                    if (claimHelp) dErr = claimHelp + '\n\n\u2014 raw error \u2014\n' + dErr;
                                     const detailBlock = extractRadDeployError(failLog);
                                     if (detailBlock) {
                                         dErr += '\n\n' + detailBlock;
@@ -2931,11 +3622,11 @@ function createRequestHandler(instanceId) {
                     try {
                         const aksJson = await runCommand("az", ["aks", "list", "--query", "[].{id:name, name:name, resourceGroup:resourceGroup}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.clusters = JSON.parse(aksJson);
-                    } catch (e) { result.clusters = []; }
+                    } catch (e) { result.clusters = []; result.errors = result.errors || {}; result.errors.clusters = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const rgJson = await runCommand("az", ["group", "list", "--query", "[].{id:name, name:name}", "-o", "json", ...subArgs], { timeout: 30000 });
                         result.resourceGroups = JSON.parse(rgJson);
-                    } catch (e) { result.resourceGroups = []; }
+                    } catch (e) { result.resourceGroups = []; result.errors = result.errors || {}; result.errors.resourceGroups = String((e && e.message) || e).slice(0, 800); }
                     // If we got a cluster, try to get namespaces from it
                     if (result.clusters.length > 0) {
                         try {
@@ -2959,15 +3650,15 @@ function createRequestHandler(instanceId) {
                         const eksJson = await runCommand("aws", ["eks", "list-clusters", "--query", "clusters", "--output", "json"], { timeout: 15000 });
                         const clusterNames = JSON.parse(eksJson);
                         result.clusters = clusterNames.map(n => ({ id: n, name: n }));
-                    } catch (e) { result.clusters = []; }
+                    } catch (e) { result.clusters = []; result.errors = result.errors || {}; result.errors.clusters = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const vpcJson = await runCommand("aws", ["ec2", "describe-vpcs", "--query", "Vpcs[].{id:VpcId, name:VpcId}", "--output", "json"], { timeout: 15000 });
                         result.vpcs = JSON.parse(vpcJson);
-                    } catch (e) { result.vpcs = []; }
+                    } catch (e) { result.vpcs = []; result.errors = result.errors || {}; result.errors.vpcs = String((e && e.message) || e).slice(0, 800); }
                     try {
                         const subnetJson = await runCommand("aws", ["ec2", "describe-subnets", "--query", "Subnets[].{id:SubnetId, name:SubnetId}", "--output", "json"], { timeout: 15000 });
                         result.subnets = JSON.parse(subnetJson);
-                    } catch (e) { result.subnets = []; }
+                    } catch (e) { result.subnets = []; result.errors = result.errors || {}; result.errors.subnets = String((e && e.message) || e).slice(0, 800); }
                     result.namespaces = ['default', 'kube-system', 'radius-system'];
                 }
 
