@@ -102,6 +102,8 @@ source: 'mcr.microsoft.com/bicep/avm/res/<service>/<resource>:<x.y.z>'
 
 For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3`. Use an AVM module only when a maintained module matches the required Azure resource exactly and can be pinned to a version. Do NOT use a loose or approximate match; if you are not confident it is an exact fit, author a recipe instead (4b). The module's inputs and outputs are wired through the recipe pack entry's `parameters` and `outputs` maps (step 5).
 
+Do NOT guess the module's parameter or output names. Verify them against the module's real interface: an existing recipe pack that already uses the same AVM module (in `resource-types-contrib/recipepack/azure/`) or the module's published spec. Use the exact output names the module emits (for example the AVM `service-bus/namespace` module emits `primaryConnectionString`, not an invented name like `serviceBusConnectionString`), set the parameters the module requires (such as the SKU), and set auth-relevant parameters the connection depends on (for example `disableLocalAuth: false` when the output is a shared-access connection string). Pin the version whose interface you verified.
+
 #### 4b. Authored recipe (fallback): `.radius/<type>-recipe.bicep`
 
 When no AVM module fits, author a Bicep recipe. A recipe takes a single `context` object and returns a `result` object with exactly three maps. Model it on an existing recipe such as `Data/mySqlDatabases/recipes/kubernetes/bicep/kubernetes-mysql.bicep`:
@@ -176,8 +178,8 @@ resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
 ```
 
 Notes:
-- `parameters` values use Radius `{{context.resource...}}` templating (not Bicep expressions); this is how developer inputs reach the module.
-- `outputs` maps the recipe's outputs to the type's `readOnly` property names. Non-secret outputs are mapped at the top level of `outputs` (`<typeProperty>: '<moduleOutputName>'`), and sensitive outputs go under the nested `secrets` map. This recipe-pack mapping shape is deliberately different from an authored recipe's own return value in 4b, which is `output result object = { resources, values, secrets }`.
+- `parameters` values use Radius `{{context.resource...}}` templating (not Bicep expressions); this is how developer inputs reach the module. For an AVM module, include every parameter the module requires plus any that affect the outputs you consume (for example set `disableLocalAuth: false` when reading a shared-access connection string).
+- `outputs` maps the recipe's outputs to the type's `readOnly` property names. Non-secret outputs are mapped at the top level of `outputs` (`<typeProperty>: '<moduleOutputName>'`), and sensitive outputs go under the nested `secrets` map. Use the module's actual output names (verify them, do not guess). This recipe-pack mapping shape is deliberately different from an authored recipe's own return value in 4b, which is `output result object = { resources, values, secrets }`.
 - An authored recipe (4b) already returns `values`/`secrets` keyed by the type's property names, so in the recipe pack its `outputs` mapping is usually the identity (and can be omitted); an AVM module (4a) needs a real mapping because its output names differ (for example `host: 'fqdn'`).
 - Do NOT fabricate a per-type singleton recipe inline in `app.bicep`; the recipe pack is how the type is resolved at deploy time. Registering the pack on the target Environment is a deployment concern (see the radius-deploy flow); modeling only writes the pack file.
 
