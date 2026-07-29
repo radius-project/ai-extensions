@@ -259,17 +259,62 @@ export const CLIENT_GRAPH_JS = `
 window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 
 // Deploy-status → card colors, applied when radiusRenderGraph runs with
-// { deployMode: true } (the live "Deploying" page). Folds what used to be set
-// imperatively onto graph nodes into the declarative React Flow renderer.
-// Keys/colors mirror the deploying page's former STATUS_COLORS map.
+// { deployMode: true } (the live "Deploying" page). In-flight/queued resources
+// read gray, a completed resource turns blue, and a failed one turns red.
+// Managed-cluster resources stay gray throughout (see getNodeColors); their
+// overall status is conveyed by the corner status badge instead of the fill.
 var RADIUS_DEPLOY_STATUS_COLORS = {
     pending:     { bg: '#f6f8fa', border: '#8b949e' },
-    in_progress: { bg: '#fff8c5', border: '#d29922' },
-    postponed:   { bg: '#fff8c5', border: '#d29922' },
-    waiting:     { bg: '#fff8c5', border: '#d29922' },
-    success:     { bg: '#dcffe4', border: '#1a7f37' },
+    in_progress: { bg: '#f6f8fa', border: '#8b949e' },
+    postponed:   { bg: '#f6f8fa', border: '#8b949e' },
+    waiting:     { bg: '#f6f8fa', border: '#8b949e' },
+    success:     { bg: '#ddf4ff', border: '#0969da' },
     failed:      { bg: '#ffebe9', border: '#cf222e' }
 };
+
+// Maps a deploy status to the corner status badge shown on each node while a
+// deployment is in flight: a resource that is queued or deploying shows an
+// hourglass, a completed one a green check, and a failed one a red X.
+function radiusDeployBadgeKind(status) {
+    var s = status || 'pending';
+    if (s === 'success') return 'success';
+    if (s === 'failed') return 'failed';
+    return 'progress';
+}
+
+function radiusIsManagedClusterType(type) {
+    return String(type || '').split('@')[0].toLowerCase() === 'microsoft.containerservice/managedclusters';
+}
+
+function radiusIsManagedClusterResource(resource) {
+    if (!resource) return false;
+    if (radiusIsManagedClusterType(resource.type)) return true;
+    var outputs = resource.outputResources || [];
+    for (var i = 0; i < outputs.length; i++) {
+        if (radiusIsManagedClusterType(outputs[i] && outputs[i].type)) return true;
+    }
+    return false;
+}
+
+// Inline SVG (as a data URI, mirroring radiusGetIconSvg) for a status badge.
+var __radDeployBadgeSvgCache = {};
+function radiusDeployBadgeSvg(kind) {
+    var k = kind || 'progress';
+    if (__radDeployBadgeSvgCache[k]) return __radDeployBadgeSvgCache[k];
+    var svg;
+    if (k === 'success') {
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="4" fill="#1a7f37"/><path d="M4.3 8.2l2.3 2.3 4.8-5" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    } else if (k === 'failed') {
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#cf222e" stroke-width="2.4" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+    } else {
+        // Hourglass (queued / in progress).
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#9a6700"><path d="M4 1.75a.75.75 0 000 1.5h.5V4.6c0 .93.44 1.8 1.18 2.36L6.83 8l-1.15.94A2.95 2.95 0 004.5 11.3v1.45H4a.75.75 0 000 1.5h8a.75.75 0 000-1.5h-.5V11.3a2.95 2.95 0 00-1.18-2.36L9.17 8l1.15-.94A2.95 2.95 0 0011.5 4.6V3.25h.5a.75.75 0 000-1.5H4zm2 1.5h4V4.6c0 .5-.23.97-.62 1.28L8 7.05 6.62 5.88A1.65 1.65 0 016 4.6V3.25z"/></svg>';
+    }
+    svg = svg.replace('<svg ', '<svg width="40" height="40" ');
+    var uri = 'data:image/svg+xml,' + encodeURIComponent(svg);
+    __radDeployBadgeSvgCache[k] = uri;
+    return uri;
+}
 
 function radiusGetIconSvg(type) {
     if (!type) return '';
@@ -659,8 +704,13 @@ function radiusRenderGraph(containerId, resources, options) {
                 default: return { bg: '#ffffff', border: '#d0d7de' };
             }
         }
-        // Live deployment status colors (the "Deploying" page passes deployMode).
+        // The "Deploying" page passes deployMode. A managed-cluster node always
+        // stays gray — its overall status is conveyed by the corner status badge,
+        // not the fill. Other resources, including ordinary compute nodes, take the live
+        // deploy-status colors (gray while queued/deploying, blue when complete,
+        // red on failure).
         if (deployMode) {
+            if (radiusIsManagedClusterResource(r)) return RADIUS_DEPLOY_STATUS_COLORS.pending;
             var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
         }
@@ -752,14 +802,14 @@ function radiusRenderGraph(containerId, resources, options) {
         for (var i = 0; i < resList.length; i++) {
             var r = resList[i];
             var colors = getNodeColors(r);
-            // Planned nodes keep the modeled resource's identity — its name, icon,
-            // and everything else — and change ONLY the type label to the concrete
-            // type the recipe pack resolves to (e.g. Data/mySqlDatabases ->
-            // Microsoft.DBforMySQL/flexibleServers). The icon therefore stays the
-            // modeled resource's own (pack-supplied r.icon, or its type glyph), not
-            // the generic glyph of the resolved output.
-            var resolvedResource = plannedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
-            var shortType = plannedMode && resolvedResource
+            // Planned and deploying graphs share the same shape: the modeled
+            // resource keeps its identity (name, icon) and only the type label
+            // changes to the concrete type the recipe pack resolves to (e.g.
+            // Data/mySqlDatabases -> Microsoft.DBforMySQL/flexibleServers). The
+            // deploying graph therefore matches the planned graph's look; only
+            // its borders/lines are solid instead of dashed.
+            var resolvedResource = (plannedMode || deployMode) ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
+            var shortType = (plannedMode || deployMode) && resolvedResource
                 ? radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)
                 : radiusFormatTypeLabel(r.type);
             // Collect any cloud (ARM) output resources so the node popup can link
@@ -776,7 +826,7 @@ function radiusRenderGraph(containerId, resources, options) {
             var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;
             pushNode(r.id || r.name, {
                 borderColor: colors.border,
-                borderWidth: diffMode ? 2 : (deployMode ? 3 : 1),
+                borderWidth: diffMode ? 2 : 1,
                 borderStyle: plannedMode ? 'dashed' : 'solid',
                 bgColor: colors.bg,
                 icon: radiusResolveIcon(r),
@@ -792,6 +842,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
                 deployStatus: r.deployStatus || '',
+                deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : '',
                 portalUrl: r.portalUrl || '',
                 cloudResources: JSON.stringify(cloudOutputs)
             });
@@ -806,10 +857,12 @@ function radiusRenderGraph(containerId, resources, options) {
                     }
                 }
             }
-            // Other graph modes may expand concrete recipe outputs for deployment
-            // detail. Planned mode deliberately keeps the modeled graph's one-node-
-            // per-resource topology and projects the resolved type onto that node.
-            if (!plannedMode && r.outputResources && r.outputResources.length > 0) {
+            // The modeled and diff graphs expand concrete recipe outputs as child
+            // nodes for detail. Planned and deploying graphs deliberately keep the
+            // modeled graph's one-node-per-resource topology and project the
+            // resolved type onto that node, so the deploying graph matches the
+            // planned graph's shape.
+            if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0) {
                 for (var k = 0; k < r.outputResources.length; k++) {
                     var out = r.outputResources[k];
                     // Skip a concrete resource another top-level resource owns.
@@ -818,13 +871,13 @@ function radiusRenderGraph(containerId, resources, options) {
                     }
                     var outId = (r.id || r.name) + '/output/' + k + '/' + out.name;
                     var outLabel = out.displayType || out.type || out.name;
-                    // Output nodes stay neutral grey unless a live deploy status
-                    // is available (deployMode), in which case they take the same
-                    // status colors as their parent.
-                    var outColors = (deployMode && out.deployStatus) ? getNodeColors(out) : { bg: '#f6f8fa', border: '#8c959f' };
+                    // Output child nodes only appear in the modeled/diff graphs
+                    // (the planned and deploying graphs skip this block), so they
+                    // always render as neutral grey.
+                    var outColors = { bg: '#f6f8fa', border: '#8c959f' };
                     pushNode(outId, {
                         borderColor: outColors.border,
-                        borderWidth: (deployMode && out.deployStatus) ? 2 : 1,
+                        borderWidth: 1,
                         bgColor: outColors.bg,
                         icon: radiusResolveIcon(out),
                         nodeName: out.name || outLabel,
@@ -932,12 +985,18 @@ function radiusRenderGraph(containerId, resources, options) {
             type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
             onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.toggle(d, e.currentTarget.closest('.rad-node')); }
         }, '\u2022\u2022\u2022');
+        // Deploy-status badge (hourglass / green check / red X) shown top-right
+        // while a deployment is in flight; absent outside deployMode.
+        var badge = d.deployBadge
+            ? h('img', { className: 'rad-node__badge', src: d.deployBadge, alt: '' })
+            : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
             style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
+            badge,
             h('div', { className: 'rad-node__head' }, iconEl, h('span', { className: 'rad-node__title' }, d.nodeName)),
             h('div', { className: 'rad-node__type' }, d.typeLabel),
             srcRow
