@@ -242,7 +242,7 @@ describe("buildOidcSubject", () => {
       );
     });
 
-    it("throws with the key name on an unknown claim key", () => {
+    it("throws with the key name and actionable recourse on an unknown claim key", () => {
       expect(() =>
         buildOidcSubject({
           ...base,
@@ -253,6 +253,36 @@ describe("buildOidcSubject", () => {
           },
         }),
       ).toThrow(/job_workflow_ref/);
+      // Message names the org-level customization and points at the follow-up.
+      expect(() =>
+        buildOidcSubject({
+          ...base,
+          subjectConfig: {
+            useDefault: false,
+            useImmutableSubject: false,
+            includeClaimKeys: ["repository", "job_workflow_ref"],
+          },
+        }),
+      ).toThrow(/customize the subject claims[\s\S]*issues\/185/);
+    });
+
+    it("lists every unmapped claim key in one error", () => {
+      let message = "";
+      try {
+        buildOidcSubject({
+          ...base,
+          subjectConfig: {
+            useDefault: false,
+            useImmutableSubject: false,
+            includeClaimKeys: ["actor", "job_workflow_ref", "runner_environment"],
+          },
+        });
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain('"actor"');
+      expect(message).toContain('"job_workflow_ref"');
+      expect(message).toContain('"runner_environment"');
     });
 
     it("throws when use_default=false but no claim keys are provided", () => {

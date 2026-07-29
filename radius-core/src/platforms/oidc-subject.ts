@@ -105,6 +105,23 @@ function immutableSlug(
 }
 
 /**
+ * The `include_claim_keys` values buildOidcSubject knows how to translate into a
+ * federated-credential subject. Anything outside this set is an org/repo-level
+ * subject customization the extension cannot map yet and is reported up front
+ * (see the unmapped-key guard in buildOidcSubject). Keep in sync with the switch
+ * in buildOidcSubject.
+ */
+const SUPPORTED_CLAIM_KEYS: ReadonlySet<string> = new Set([
+  "repository",
+  "repository_id",
+  "repository_owner",
+  "repository_owner_id",
+  "environment",
+  "context",
+  "repo",
+]);
+
+/**
  * Build the federated-credential `subject` string GitHub will actually present.
  *
  * Rules:
@@ -139,6 +156,27 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
     throw new Error(
       `OIDC config for ${canonical} has use_default=false but no claim keys ` +
         `(include_claim_keys is empty).`,
+    );
+  }
+
+  // Surface EVERY unmapped claim up front (an org can customize several at once,
+  // e.g. keep `repository` and add `job_workflow_ref`) so the user isn't sent
+  // through fix-one-hit-the-next. Keep SUPPORTED_CLAIM_KEYS in sync with the
+  // switch below. See issue #185 for the assisted manual-subject follow-up.
+  const unmapped = keys.filter((key) => !SUPPORTED_CLAIM_KEYS.has(key));
+  if (unmapped.length > 0) {
+    const list = unmapped.map((k) => `"${k}"`).join(", ");
+    throw new Error(
+      `The OIDC subject for ${canonical} uses claim key(s) ${list} that this ` +
+        `extension cannot map to a federated credential yet. These are valid ` +
+        `GitHub OIDC claims, set by an organization- or repository-level ` +
+        `"customize the subject claims" policy that every repo in the org ` +
+        `inherits — not a mistake on your part. Radius refuses to guess a ` +
+        `subject here because a wrong one would authorize the wrong workflow. ` +
+        `To proceed: reset this repository's OIDC subject-claim customization ` +
+        `to GitHub's default for the deploy environment, or track assisted ` +
+        `manual-subject entry at ` +
+        `https://github.com/radius-project/ai-extensions/issues/185.`,
     );
   }
 
@@ -187,10 +225,13 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
         parts.push(`repo:${slugForRepoKeys()}`);
         break;
       default:
+        // Unreachable for caller input: the unmapped-key guard above rejects
+        // any key outside SUPPORTED_CLAIM_KEYS before the loop. This remains as
+        // a defensive internal invariant in case the set and switch drift.
         throw new Error(
-          `Unsupported OIDC claim key "${key}" in the subject template for ` +
-            `${canonical}. The Radius extension needs to be updated to map ` +
-            `this claim before a federated credential can be created safely.`,
+          `Internal error: claim key "${key}" for ${canonical} is listed as ` +
+            `supported but has no mapping. SUPPORTED_CLAIM_KEYS and the ` +
+            `buildOidcSubject switch are out of sync.`,
         );
     }
   }
