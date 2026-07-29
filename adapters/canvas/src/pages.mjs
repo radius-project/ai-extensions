@@ -3517,13 +3517,24 @@ function loadBranches() {
         .then(function(d) {
             var branches = (d && d.branches) || [];
             var workspaceBranch = (d && d.workspaceBranch) || CTX_BRANCH || '';
+            // The branch we want selected by default (and dispatched against):
+            // the server-reported worktree branch, else the session branch.
+            var desired = workspaceBranch || CTX_BRANCH || '';
             if (branches.length === 0) { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; return; }
+            // The desired branch can be absent from /api/discover-branches (e.g. an
+            // unpushed worktree branch the server didn't inject because the repo
+            // didn't match the workspace). Insert it so the dropdown — and the
+            // dispatch that reads branchSelect.value — never silently falls back to
+            // the first returned branch and deploys the wrong ref.
+            if (desired && !branches.some(function(b) { return b.name === desired; })) {
+                branches.unshift({ name: desired, sha: 'worktree' });
+            }
             branchSelect.innerHTML = '';
             branches.forEach(function(b) {
                 var o = document.createElement('option');
                 o.value = b.name;
                 o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : (b.sha ? ' (' + b.sha.slice(0,7) + ')' : ''));
-                if (b.name === (workspaceBranch || CTX_BRANCH)) o.selected = true;
+                if (b.name === desired) o.selected = true;
                 branchSelect.appendChild(o);
             });
         })
