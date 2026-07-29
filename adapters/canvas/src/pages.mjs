@@ -1573,14 +1573,14 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-field__help" id="env-identity-aws" style="display:none;">GitHub Actions assumes the IAM role from your credential profile — no extra identity to configure here.</div>
     </div>
 
-    <!-- 4 · Landing zone -->
+    <!-- 4 · Infrastructure -->
     <div class="rad-section" id="env-infra-section">
       <div class="rad-section__title">4 · Infrastructure</div>
       <div class="rad-section__desc">Configure the compute infrastructure for your environment.</div>
 
       <!-- Azure infra -->
       <div id="panel-azure">
-        <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+        <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
         </div>
@@ -1605,7 +1605,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
       <!-- AWS infra -->
       <div id="panel-aws" style="display:none;">
-        <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+        <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="aws-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
         </div>
