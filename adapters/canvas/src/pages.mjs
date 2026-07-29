@@ -1519,7 +1519,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
                 <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
               </div>
             </div>
-            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code>, which changes your machine's active GitHub account for every tool in this terminal — not just Radius — and stays changed after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
+            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code> which changes the active GitHub account for every terminal and tool on this machine, remaining changed even after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
             <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
             <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
           </div>
