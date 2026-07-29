@@ -79,74 +79,9 @@ export function buildAppCreateArgs({ appName, serviceManagementReference } = {})
 }
 
 /**
- * Pure disambiguation for the lookup-then-create idempotency flow. Given the
- * app registrations whose display name matches AND are owned by the signed-in
- * user (plus whether any *unowned* app shares the name), decide whether to
- * reuse an existing app or create a new one.
- *
- * Rules:
- * - 0 owned matches, no unowned match  → create a fresh app.
- * - 0 owned matches, an unowned match  → error `app-registration-not-owned`
- *   (never silently create a duplicate or reuse another user's app in a shared
- *   tenant — FIC/role writes would fail).
- * - exactly 1 owned match              → reuse it.
- * - >1 owned matches                   → prefer the appId equal to the repo's
- *   existing AZURE_CLIENT_ID (if among the owned matches); else the oldest by
- *   createdDateTime for stability. Never picks arbitrarily/first-unsorted.
- *
- * @param {{ownedMatches?: {appId:string,id?:string,createdDateTime?:string}[], hasUnownedMatch?: boolean, existingClientId?: string}} input
- * @returns {{action:'reuse'|'create'|'error', appId?:string, code?:string, reason?:string, duplicates?:boolean}}
- */
-export function selectAppRegistration({ ownedMatches = [], hasUnownedMatch = false, existingClientId } = {}) {
-  const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter((m) => m && m.appId);
-
-  if (owned.length === 0) {
-    if (hasUnownedMatch) {
-      return {
-        action: "error",
-        code: "app-registration-not-owned",
-        reason:
-          "An App Registration with this name already exists but is owned by another user. " +
-          "Reusing it would fail (federated-credential and role writes require ownership). " +
-          "Coordinate with the owner or rename, then retry.",
-      };
-    }
-    return { action: "create" };
-  }
-
-  if (owned.length === 1) {
-    return { action: "reuse", appId: owned[0].appId, duplicates: false };
-  }
-
-  // More than one owned match — disambiguate deterministically.
-  const norm = (v) => String(v || "").trim().toLowerCase();
-  if (existingClientId) {
-    const preferred = owned.find((m) => norm(m.appId) === norm(existingClientId));
-    if (preferred) {
-      return {
-        action: "reuse",
-        appId: preferred.appId,
-        duplicates: true,
-        reason: "matched the repository's existing AZURE_CLIENT_ID",
-      };
-    }
-  }
-  const oldest = [...owned].sort((a, b) => {
-    const ta = Date.parse(a.createdDateTime || "");
-    const tb = Date.parse(b.createdDateTime || "");
-    return (Number.isNaN(ta) ? Infinity : ta) - (Number.isNaN(tb) ? Infinity : tb);
-  })[0];
-  return {
-    action: "reuse",
-    appId: oldest.appId,
-    duplicates: true,
-    reason: "oldest owned match (duplicate app registrations detected)",
-  };
-}
-
-/**
  * Pure disambiguation for Step 3b that supports an interactive picker and an
- * explicit opt-in choice, layered on top of `selectAppRegistration`'s heuristic.
+ * explicit opt-in choice, using the same lookup-then-create ownership heuristic
+ * as the zero-click default.
  *
  * The App Registration is a per-repo CI/CD deploy identity. The zero-click
  * default stays per-repo, but:
@@ -273,8 +208,9 @@ export function parseServedReposFromSubjects(subjects) {
 
 /**
  * Short human label summarizing the repos an App Registration already serves,
- * for the identity-picker rows. Pure; mirrored in the browser as
- * formatServesReposLabelClient (pages.mjs) since that file can't import here.
+ * for the identity-picker rows. Pure and self-contained so it can be serialized
+ * into the browser bundle via .toString() (see pages.mjs) — the client runs this
+ * exact function rather than a hand-copied twin.
  *
  * @param {string[]} list
  * @returns {string}
@@ -332,7 +268,9 @@ export function selectMissingFederatedCredentials(desired = [], existingSubjects
  * `/api/discover` handler now records per-resource failures on `data.errors`
  * (instead of disguising them as empty arrays), so a real `az`/`aws` failure —
  * e.g. an ARM token not yet silently acquirable on Corpnet — surfaces as
- * "Discovery failed: <stderr>" rather than a misleading "Found 0 …".
+ * "Discovery failed: <stderr>" rather than a misleading "Found 0 …". Pure and
+ * self-contained so it is serialized into the browser bundle via .toString()
+ * (see pages.mjs `discoverResources`) — the client runs this exact function.
  *
  * @param {{clusters?:any[], resourceGroups?:any[], vpcs?:any[], subnets?:any[], error?:string, errors?:Record<string,string>}} data
  * @param {'azure'|'aws'} provider

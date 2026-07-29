@@ -351,6 +351,21 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("loadGitHubIdentity(true);");
     });
 
+    it("single-sources the tested azure-oidc helpers into the client via .toString() (no hand-copied twins)", () => {
+        // Comment #10: formatServesReposLabel / discoverStatusText were duplicated
+        // as untested browser copies. They are now serialized from azure-oidc.mjs
+        // into the client bundle, so the shipping client runs the exact tested
+        // code and the call sites reference the real functions.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("function formatServesReposLabel(");
+        expect(html).toContain("function discoverStatusText(");
+        expect(html).toContain("discoverStatusText(data, 'azure')");
+        expect(html).toContain("discoverStatusText(data, 'aws')");
+        expect(html).toContain("formatServesReposLabel(serves)");
+        // The hand-copied twins must be gone.
+        expect(html).not.toContain("formatServesReposLabelClient");
+    });
+
     it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
         // The client scripts live inside a template literal, so an escaped
         // apostrophe (\\') un-escapes to a raw ' in the emitted JS and breaks a

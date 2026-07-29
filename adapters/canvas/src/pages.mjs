@@ -5,6 +5,7 @@
 // ./shared.mjs. No I/O, routing, or business logic here.
 
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
+import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.mjs";
 import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
@@ -2516,22 +2517,14 @@ function discoverResources(provider, subId, tenantId) {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (provider === 'azure') {
-                var azErrs = data.errors || {};
-                var azErrMsg = data.error || azErrs.resourceGroups || azErrs.clusters || '';
-                if (statusEl) statusEl.textContent = azErrMsg
-                    ? 'Discovery failed: ' + azErrMsg
-                    : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
+                if (statusEl) statusEl.textContent = discoverStatusText(data, 'azure');
                 window.__azureClusters = data.clusters || [];
                 populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster…');
                 populateSelect('azure-rg-select', data.resourceGroups || [], 'Select resource group…');
                 populateSelect('azure-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
                 setupAzureInfraFilter();
             } else {
-                var awsErrs = data.errors || {};
-                var awsErrMsg = data.error || awsErrs.vpcs || awsErrs.clusters || awsErrs.subnets || '';
-                if (statusEl) statusEl.textContent = awsErrMsg
-                    ? 'Discovery failed: ' + awsErrMsg
-                    : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
+                if (statusEl) statusEl.textContent = discoverStatusText(data, 'aws');
                 populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster…');
                 populateSelect('aws-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
@@ -2625,14 +2618,16 @@ function promptSmr() {
     });
 }
 
-// Short "serves repos" summary for a candidate row. Mirrors the pure helper
-// formatServesReposLabel in azure-oidc.mjs (unit-tested there) — kept inline
-// because pages.mjs ships as a browser template string and can't import it.
-function formatServesReposLabelClient(list) {
-    if (!Array.isArray(list) || !list.length) return '';
-    if (list.length <= 3) return 'Serves: ' + list.join(', ');
-    return 'Serves: ' + list.slice(0, 3).join(', ') + ' +' + (list.length - 3) + ' more';
-}
+// Single source of truth: these two pure helpers are authored and unit-tested
+// in azure-oidc.mjs, then serialized into this browser bundle via .toString()
+// so the SHIPPING client runs the exact tested code instead of a hand-copied
+// twin that drifts and has no coverage. Emitted as function declarations (they
+// hoist, so earlier call sites in this script — e.g. discoverResources — resolve
+// them). Both are self-contained (no external refs) and the build runs with
+// minify off, so their source round-trips cleanly. The pages_test init-halt
+// guard compiles the emitted scripts, catching any serialization breakage.
+${formatServesReposLabel.toString()}
+${discoverStatusText.toString()}
 
 // Render the identity picker. opts.candidates is a list of
 // {appId, displayName, createdDateTime, servesRepos?}. Resolves with
@@ -2677,7 +2672,7 @@ function showAppPicker(opts) {
             line2.textContent = secondary;
             body.appendChild(line2);
         }
-        var servesText = formatServesReposLabelClient(serves);
+        var servesText = formatServesReposLabel(serves);
         if (servesText) {
             var line3 = document.createElement('div');
             line3.style.cssText = 'font-size:11px; color:var(--rad-info,#0969da); margin-top:2px; word-break:break-all;';

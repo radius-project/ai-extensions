@@ -8,7 +8,6 @@ import {
   isServiceManagementReferenceError,
   fetchGitHubJson,
   resolveOidcSubject,
-  selectAppRegistration,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
@@ -347,54 +346,6 @@ describe("resolveOidcSubject", () => {
     );
     expect(calls[0]).toBe("/repos/octo-org/octo-repo");
     expect(calls[1]).toBe("/repos/octo-org/octo-repo/actions/oidc/customization/sub");
-  });
-});
-
-describe("selectAppRegistration", () => {
-  it("creates when there are no matches at all", () => {
-    expect(selectAppRegistration({ ownedMatches: [], hasUnownedMatch: false })).toEqual({ action: "create" });
-  });
-
-  it("errors app-registration-not-owned when the only match is unowned", () => {
-    const r = selectAppRegistration({ ownedMatches: [], hasUnownedMatch: true });
-    expect(r.action).toBe("error");
-    expect(r.code).toBe("app-registration-not-owned");
-    expect(r.reason).toMatch(/owned by another user/i);
-  });
-
-  it("reuses the single owned match", () => {
-    const r = selectAppRegistration({ ownedMatches: [{ appId: "aaa" }], hasUnownedMatch: false });
-    expect(r).toMatchObject({ action: "reuse", appId: "aaa", duplicates: false });
-  });
-
-  it("prefers the owned match equal to the existing AZURE_CLIENT_ID", () => {
-    const owned = [
-      { appId: "old", createdDateTime: "2020-01-01T00:00:00Z" },
-      { appId: "wired", createdDateTime: "2023-01-01T00:00:00Z" },
-    ];
-    const r = selectAppRegistration({ ownedMatches: owned, existingClientId: "WIRED" });
-    expect(r).toMatchObject({ action: "reuse", appId: "wired", duplicates: true });
-    expect(r.reason).toMatch(/AZURE_CLIENT_ID/);
-  });
-
-  it("falls back to the oldest owned match when no existingClientId matches", () => {
-    const owned = [
-      { appId: "newer", createdDateTime: "2023-05-01T00:00:00Z" },
-      { appId: "oldest", createdDateTime: "2019-02-01T00:00:00Z" },
-      { appId: "mid", createdDateTime: "2021-01-01T00:00:00Z" },
-    ];
-    const r = selectAppRegistration({ ownedMatches: owned, existingClientId: "not-present" });
-    expect(r).toMatchObject({ action: "reuse", appId: "oldest", duplicates: true });
-    expect(r.reason).toMatch(/oldest/i);
-  });
-
-  it("treats missing createdDateTime as newest (never chosen over a dated one)", () => {
-    const owned = [
-      { appId: "undated" },
-      { appId: "dated", createdDateTime: "2020-01-01T00:00:00Z" },
-    ];
-    const r = selectAppRegistration({ ownedMatches: owned });
-    expect(r.appId).toBe("dated");
   });
 });
 
