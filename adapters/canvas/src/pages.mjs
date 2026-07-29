@@ -1439,7 +1439,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
 <!-- ══════════════ ENVIRONMENTS SUBTAB ══════════════ -->
 <section id="pane-environments" style="${activeSubtab === 'environments' ? '' : 'display:none;'}">
-<p class="rad-lede" style="margin-bottom:20px;">An environment is a deployment target — a landing zone like <strong>prod</strong> or <strong>test</strong>. Name it, then connect GitHub so it can deploy your app here over OIDC.</p>
+<p class="rad-lede" style="margin-bottom:20px;">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
 
 <!-- Landing: New Environment button + environments table -->
 <div id="env-landing">
