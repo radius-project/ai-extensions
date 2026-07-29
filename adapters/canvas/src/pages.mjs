@@ -2649,6 +2649,14 @@ function showAppPicker(opts) {
     listEl.innerHTML = '';
     var candidates = opts.candidates || [];
     var chosen = { value: opts.defaultAppId || (candidates[0] && candidates[0].appId) || '' };
+    // appId -> row body element still awaiting its lazy "Serves:" label.
+    var servesSlots = {};
+    function appendServes(bodyEl, text) {
+        var line3 = document.createElement('div');
+        line3.style.cssText = 'font-size:11px; color:var(--rad-info,#0969da); margin-top:2px; word-break:break-all;';
+        line3.textContent = text;
+        bodyEl.appendChild(line3);
+    }
 
     function row(value, primary, secondary, serves) {
         var id = 'appsel-' + (value || 'create');
@@ -2674,10 +2682,11 @@ function showAppPicker(opts) {
         }
         var servesText = formatServesReposLabel(serves);
         if (servesText) {
-            var line3 = document.createElement('div');
-            line3.style.cssText = 'font-size:11px; color:var(--rad-info,#0969da); margin-top:2px; word-break:break-all;';
-            line3.textContent = servesText;
-            body.appendChild(line3);
+            appendServes(body, servesText);
+        } else if (value && value !== '__create__') {
+            // No server-provided label: remember the row so it can be filled
+            // lazily once /api/azure-app-serves-repos resolves for this app.
+            servesSlots[value] = body;
         }
         label.appendChild(radio);
         label.appendChild(body);
@@ -2692,6 +2701,31 @@ function showAppPicker(opts) {
         row('__create__', 'Create a new application instead', 'A fresh per-repo deploy identity that only this repository can use.');
         if (!chosen.value) chosen.value = '__create__';
     }
+
+    // Lazy-load the per-app "Serves:" labels so the picker renders immediately
+    // instead of blocking on one az federated-credential list per owned app.
+    // Bounded concurrency; each label is best-effort and skipped on failure or
+    // if its row was replaced by a later picker.
+    (function loadServesLabels() {
+        var pending = Object.keys(servesSlots);
+        if (!pending.length) return;
+        var pos = 0;
+        var CONC = 6;
+        function pump() {
+            if (pos >= pending.length) return;
+            var appId = pending[pos++];
+            var bodyEl = servesSlots[appId];
+            fetch('/api/azure-app-serves-repos?appId=' + encodeURIComponent(appId))
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var text = formatServesReposLabel(d && d.servesRepos);
+                    if (text && bodyEl && bodyEl.isConnected) appendServes(bodyEl, text);
+                })
+                .catch(function() { /* label is best-effort */ })
+                .then(function() { pump(); });
+        }
+        for (var i = 0; i < Math.min(CONC, pending.length); i++) pump();
+    })();
 
     modal.style.display = 'flex';
     return new Promise(function(resolve, reject) {

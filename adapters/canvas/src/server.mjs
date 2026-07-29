@@ -1706,14 +1706,6 @@ function createRequestHandler(instanceId) {
                     try { child.stdin?.end(); } catch { /* best-effort */ }
                 });
             }
-            const listServesRepos = async (appId) => {
-                const ficRes = await runCmd('az', [
-                    'ad', 'app', 'federated-credential', 'list',
-                    '--id', appId, '--query', '[].subject', '-o', 'json',
-                ]);
-                if (ficRes.code !== 0) return undefined;
-                try { return parseServedReposFromSubjects(JSON.parse(ficRes.stdout)); } catch { return undefined; }
-            };
             try {
                 // `--show-mine` scopes to apps the signed-in user owns, so we
                 // avoid an O(N) owner lookup across the whole tenant.
@@ -1736,26 +1728,21 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify({ error: 'The App Registration list returned an unexpected result.', code: 'app-list-parse' }));
                     return;
                 }
-                // Enrich servesRepos in bounded-parallel batches so the picker
-                // loads quickly even for users who own many apps (avoids an N+1
-                // serial chain of `az` calls) without spawning an unbounded
-                // number of concurrent az processes.
-                const validApps = parsed.filter((a) => a && a.appId);
-                const apps = [];
-                const CONCURRENCY = 6;
-                for (let i = 0; i < validApps.length; i += CONCURRENCY) {
-                    const batch = validApps.slice(i, i + CONCURRENCY);
-                    const enriched = await Promise.all(batch.map(async (a) => {
-                        const servesRepos = await listServesRepos(a.appId);
-                        return {
-                            appId: a.appId,
-                            displayName: a.displayName,
-                            createdDateTime: a.createdDateTime,
-                            ...(servesRepos ? { servesRepos } : {}),
-                        };
+                // Return the owned apps immediately. The `servesRepos` label
+                // (which repos each app already deploys) needs one
+                // `az ad app federated-credential list` per app, so computing it
+                // up front made the picker block on N process spawns before any
+                // row rendered (a user owning 100 apps paid ~100 spawns). The
+                // client now lazy-loads that label per row via
+                // /api/azure-app-serves-repos, so the list appears at once and
+                // the labels fill in progressively.
+                const apps = parsed
+                    .filter((a) => a && a.appId)
+                    .map((a) => ({
+                        appId: a.appId,
+                        displayName: a.displayName,
+                        createdDateTime: a.createdDateTime,
                     }));
-                    for (const e of enriched) apps.push(e);
-                }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ apps }));
@@ -1764,6 +1751,42 @@ function createRequestHandler(instanceId) {
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: e.message, code: 'app-list-failed' }));
             }
+            return;
+        }
+
+        // Lazy per-app companion to /api/list-azure-app-registrations: computes
+        // the "already serves" repo label for ONE App Registration from its
+        // federated-credential subjects. The picker calls this per row after the
+        // list renders, so owning many apps no longer blocks the picker on an
+        // up-front N+1 chain of `az` spawns. Best-effort: any failure yields a
+        // null label rather than an error the row would have to surface.
+        if (pathname === "/api/azure-app-serves-repos" && req.method === "GET") {
+            const appId = url.searchParams.get("appId") || "";
+            if (!isUuid(appId)) {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'A valid appId is required.', code: 'app-serves-bad-id' }));
+                return;
+            }
+            function runCmd(cmd, args) {
+                return new Promise((resolve) => {
+                    const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
+                    });
+                    try { child.stdin?.end(); } catch { /* best-effort */ }
+                });
+            }
+            let servesRepos = null;
+            const ficRes = await runCmd('az', [
+                'ad', 'app', 'federated-credential', 'list',
+                '--id', appId, '--query', '[].subject', '-o', 'json',
+            ]);
+            if (ficRes.code === 0) {
+                try { servesRepos = parseServedReposFromSubjects(JSON.parse(ficRes.stdout)) || null; } catch { servesRepos = null; }
+            }
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(200);
+            res.end(JSON.stringify({ servesRepos }));
             return;
         }
 

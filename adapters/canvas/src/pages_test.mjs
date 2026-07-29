@@ -229,6 +229,11 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain('id="env-appselect-modal"');
         expect(html).toContain("app-selection-required");
         expect(html).toContain("showAppPicker");
+        // The "Serves:" label is lazy-loaded per app so the picker renders
+        // immediately instead of blocking on one az FIC-list per owned app.
+        expect(html).toContain("/api/azure-app-serves-repos?appId=");
+        expect(html).toContain("servesSlots");
+        expect(html).toContain("loadServesLabels");
     });
 
     it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
