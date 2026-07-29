@@ -2212,7 +2212,17 @@ function renderGitHubIdentity() {
     if (envGhNote) {
         var warn = '';
         var scopeWarn = false;
-        if (id.mismatch && id.displayLogin) {
+        var repoWarn = false;
+        if (id.repoAccess) {
+            // The acting account can't admin (or can't read) the target repo, so
+            // Create Environment would 403 at submit. Surface it HERE at open,
+            // next to the account it concerns, rather than after the user fills
+            // in all four steps. The submit-time preflight stays authoritative;
+            // this is an early, additive heads-up. Offer Re-check so switching
+            // accounts (or being granted access) clears it without reopening.
+            warn = id.repoAccess;
+            repoWarn = true;
+        } else if (id.mismatch && id.displayLogin) {
             warn = 'The app shows @' + id.displayLogin + ' but setup will act as @' + id.actingLogin +
                 '. If deployment fails with a permission error, switch to the account that has access to this repo and your Azure tenant.';
         } else if (!id.actingHasWorkflow || !id.actingHasPackages) {
@@ -2239,8 +2249,8 @@ function renderGitHubIdentity() {
         // Remember whether a fixable scope warning is on screen, and offer the
         // manual Re-check control only in that case. Returning from the terminal
         // (window refocus) auto re-checks while this is true; see below.
-        envGhScopeWarn = scopeWarn;
-        if (envGhRecheck) envGhRecheck.style.display = scopeWarn ? '' : 'none';
+        envGhScopeWarn = scopeWarn || repoWarn;
+        if (envGhRecheck) envGhRecheck.style.display = (scopeWarn || repoWarn) ? '' : 'none';
         if (warn) {
             envGhNote.textContent = warn;
             envGhNote.style.color = 'var(--rad-warning, #9a6700)';
@@ -2262,8 +2272,12 @@ function loadGitHubIdentity(fresh) {
     if (fresh && envGhRecheck) { envGhRecheck.disabled = true; envGhRecheck.textContent = 'Checking…'; }
     else if (envGhValue) envGhValue.textContent = 'Detecting…';
     // fresh=1 asks the server to drop its memoized gh snapshot so newly added
-    // scopes (e.g. write:packages) are actually observed.
-    fetch('/api/github-identity' + (fresh ? '?fresh=1' : ''))
+    // scopes (e.g. write:packages) are actually observed. repo lets the server
+    // fold in the repo admin/read preflight so a non-admin account is flagged
+    // here at open, not only at submit.
+    var idUrl = '/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO || '');
+    if (fresh) idUrl += '&fresh=1';
+    fetch(idUrl)
         .then(function(r) { return r.json(); })
         .then(function(d) { GH_IDENTITY = d || {}; renderGitHubIdentity(); })
         .catch(function() { if (envGhField) envGhField.style.display = 'none'; })
@@ -2298,11 +2312,15 @@ function switchGitHubAccount(login) {
     })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
-            if (res.ok && res.d && res.d.identity) {
-                GH_IDENTITY = res.d.identity;
+            if (res.ok) {
+                // Re-fetch identity WITH the repo so the admin/read preflight
+                // re-runs for the freshly switched account — the switch response
+                // resolves identity without the repo, so it carries no repoAccess.
+                loadGitHubIdentity(true);
+                return;
             }
             renderGitHubIdentity();
-            if (!res.ok && envGhNote) {
+            if (envGhNote) {
                 envGhNote.textContent = (res.d && res.d.error) || 'Could not switch account.';
                 envGhNote.style.color = 'var(--rad-danger, #cf222e)';
                 envGhNote.style.display = '';

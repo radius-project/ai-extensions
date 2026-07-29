@@ -789,8 +789,25 @@ function createRequestHandler(instanceId) {
                 // force `gh auth status` to be re-read; otherwise we'd return the
                 // stale pre-refresh scopes and the warning would never clear.
                 if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
+                // Resolve identity first — this primes the token strategy, so the
+                // repo preflight below (via ghApiJson→ghChildEnv) acts as the same
+                // account setup will. When the dialog passes its repo, fold in the
+                // admin/read preflight so a non-admin (write/maintain) account is
+                // surfaced HERE, at dialog open next to the account it concerns,
+                // instead of only after the user fills the form and submits. This
+                // mirrors the submit-time gates (which stay authoritative); a
+                // missing/invalid repo just skips the preflight — the identity
+                // response must still render.
+                const identity = await getGitHubIdentity();
+                const repoParam = (url.searchParams.get("repo") || "").trim();
+                if (repoParam && isValidRepoSlug(repoParam)) {
+                    try {
+                        const accessMsg = await preflightRepoAdmin(repoParam);
+                        if (accessMsg) identity.repoAccess = accessMsg;
+                    } catch { /* preflight is advisory here; never fail identity on it */ }
+                }
                 res.writeHead(200);
-                res.end(JSON.stringify(await getGitHubIdentity()));
+                res.end(JSON.stringify(identity));
             } catch (e) {
                 res.writeHead(200);
                 res.end(JSON.stringify({ error: e.message, accounts: [] }));

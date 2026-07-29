@@ -304,9 +304,11 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).not.toMatch(/gh auth refresh[^'"`]*-u /);
         // After running the command out-of-band the UX must be able to detect the
         // change: a manual Re-check button plus an auto re-check on window refocus,
-        // both hitting the cache-busting ?fresh=1 identity endpoint.
+        // both hitting the cache-busting fresh=1 identity endpoint (now carrying
+        // ?repo so the server folds in the repo admin preflight).
         expect(html).toContain('id="env-gh-recheck"');
-        expect(html).toContain("'/api/github-identity' + (fresh ? '?fresh=1' : '')");
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO");
+        expect(html).toContain("idUrl += '&fresh=1'");
         expect(html).toContain("visibilitychange");
         expect(html).toContain("window.addEventListener('focus', envGhAutoRecheck)");
     });
@@ -332,6 +334,21 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Omitted vs explicit-blank must be distinguishable server-side.
         expect(html).toContain("params.appName !== undefined");
+    });
+
+    it("surfaces repo admin access at open: fetches identity with ?repo and renders repoAccess", () => {
+        // Comment #9: the repo admin preflight was submit-only, so a write/maintain
+        // developer only hit the 403 after filling the whole form. The client now
+        // passes its repo to /api/github-identity so the server folds the preflight
+        // in, and renders the returned repoAccess message in the account note — an
+        // early, additive heads-up beside the account it concerns.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CONTEXT_REPO");
+        expect(html).toContain("if (id.repoAccess)");
+        // A successful account switch must re-run the preflight for the new
+        // account (the switch response carries no repoAccess), so the switch
+        // handler re-loads identity rather than trusting res.d.identity.
+        expect(html).toContain("loadGitHubIdentity(true);");
     });
 
     it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
