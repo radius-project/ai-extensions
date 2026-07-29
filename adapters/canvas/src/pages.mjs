@@ -3518,6 +3518,20 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
                   '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
                 '</div>';
         }
+    } else if (kind === 'app-bicep-not-committed') {
+        var br2 = branch || 'your branch';
+        var pushCmd2 = 'git add .radius/app.bicep && git commit -m "add radius app definition" && git push -u origin ' + br2;
+        if (title) title.innerHTML = 'Radius application not committed';
+        if (sub) {
+            sub.style.color = 'var(--rad-text-secondary)';
+            sub.innerHTML =
+                '<div style="color:var(--rad-text);">Branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br2) + '</code> is on GitHub, but there\\'s no <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">.radius/app.bicep</code> committed on that ref for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
+                '<div style="margin-top:10px; color:var(--rad-text-secondary);">The deploy workflow reads the Radius application definition from the checked-out ref, so it needs to be committed and pushed first:</div>' +
+                '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-surface-2,#f0f1f2); border:1px solid var(--rad-border,#d0d7de); border-radius:6px; padding:8px 10px;">' +
+                  '<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">' + escapeHtmlClient(pushCmd2) + '</code>' +
+                  '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
+                '</div>';
+        }
     } else {
         if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
         if (sub) {
@@ -3530,11 +3544,15 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
     if (links) links.style.display = 'none';
     if (failActions) failActions.style.display = 'block';
     if (modal) modal.style.display = 'flex';
-    // Wire the copy button (present only for the branch-not-pushed panel).
+    // Wire the copy button (present on branch-not-pushed and
+    // app-bicep-not-committed panels — both offer a git command to run).
     var copyBtn = document.getElementById('deploy-copy-push');
     if (copyBtn) {
         copyBtn.addEventListener('click', function() {
-            var cmd = 'git push -u origin ' + (branch || '');
+            var br3 = branch || '';
+            var cmd = (kind === 'app-bicep-not-committed')
+                ? 'git add .radius/app.bicep && git commit -m "add radius app definition" && git push -u origin ' + br3
+                : 'git push -u origin ' + br3;
             var done = function() { copyBtn.textContent = 'Copied'; setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500); };
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(cmd).then(done).catch(function() {});

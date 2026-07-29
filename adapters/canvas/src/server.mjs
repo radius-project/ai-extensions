@@ -3218,6 +3218,30 @@ function createRequestHandler(instanceId) {
                                     return;
                                 }
                             }
+
+                            // Second fast-fail: the branch is pushed, but the
+                            // deploy target file (.radius/app.bicep or app.bicep)
+                            // is missing from that ref. Without the bicep the
+                            // workflow's very first step — the recipe-pack
+                            // download that writes .radius/radius-env.bicep —
+                            // fails with a cryptic "curl: (23) Failure writing
+                            // output to destination" because the parent
+                            // .radius/ directory doesn't exist in the
+                            // checkout. Catch it here with actionable guidance
+                            // instead of letting the runner produce that error.
+                            const bicepOnRef = await fetchFileFromRepo(repo, '.radius/app.bicep', deployRef);
+                            const rootBicepOnRef = bicepOnRef ? null : await fetchFileFromRepo(repo, 'app.bicep', deployRef);
+                            if (!bicepOnRef && !rootBicepOnRef) {
+                                const pushCmd = 'git add .radius/app.bicep && git commit -m "add radius app definition" && git push -u origin ' + deployRef;
+                                addLog('❌ No .radius/app.bicep (or root app.bicep) found on branch "' + deployRef + '" of ' + repo + '.');
+                                addLog('   The Radius application definition needs to be committed and pushed before deploy.');
+                                addLog('   Commit it and redeploy:  ' + pushCmd);
+                                entry.state.deployError = 'Branch "' + deployRef + '" is on GitHub, but no .radius/app.bicep (or root app.bicep) is committed on that ref. The deploy workflow reads the bicep from the checked-out ref to build the recipe pack, so it needs to be committed and pushed first:\n\n    ' + pushCmd;
+                                entry.state.deployErrorKind = 'app-bicep-not-committed';
+                                entry.state.deployErrorBranch = deployRef;
+                                entry.state.deployStatus = 'failed';
+                                return;
+                            }
                         }
                         const runGhDeploy = (args, envOverride) => new Promise((resolve) => {
                             cliExec('gh', args, { timeout: 30000, ...(envOverride ? { env: envOverride } : {}) }, (err, stdout, stderr) => {
