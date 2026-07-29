@@ -55,13 +55,10 @@ import {
   DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE,
 } from "./infra.mjs";
 import {
-  findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
-  fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
+  findWorkflowRun, getRunDetail, fetchRunLog,
   fetchJobLog, findDeployJobId, parseRadDeployProgress, extractAppGraphJson,
-  normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
-  applyActivityToResources, extractErrorLines, extractRadDeployError,
+  extractErrorLines, extractRadDeployError,
   explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
-  parseResourceProgress, parseRadDeployLog,
 } from "./deploy.mjs";
 import {
   graphPage, plannedGraphPage, graphDiffPage,
