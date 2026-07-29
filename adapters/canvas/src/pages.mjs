@@ -1169,7 +1169,7 @@ ${graphHeader('deployed')}
 
 <div class="rad-card" style="margin:0;">
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
-  <div id="deployed-status" class="status info">Loading deployed application graph…</div>
+  <div id="deployed-status" class="status info" style="display:none;"></div>
   <div id="graph-container"></div>
 </div>
 
@@ -1227,6 +1227,12 @@ function escapeHtmlClient(s) {
     var container = document.getElementById('graph-container');
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
+    // Cached React Flow controller so subsequent polls call .update(resources)
+    // instead of re-mounting the graph on every 3s tick. update() preserves
+    // the viewport and only animates changed nodes; the difference between
+    // a re-mount and update() is the difference between a full-canvas flash
+    // and a badge glyph animating in place.
+    var graphController = null;
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
@@ -1282,42 +1288,109 @@ function escapeHtmlClient(s) {
     function showNothing(msg) {
         if (statusEl) { statusEl.style.display = 'none'; }
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
+        // The React root just got replaced by innerHTML — drop the controller
+        // so the next render mounts fresh instead of update()-ing an orphan.
+        graphController = null;
     }
 
     function renderGraph(resources) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        radiusRenderGraph('graph-container', resources, {
+        if (graphController && typeof graphController.update === 'function') {
+            // Incremental update: React reconciles only the changed node
+            // props (status badge glyph + card border color) instead of
+            // remounting the whole canvas. No flash on re-polls.
+            graphController.update(resources);
+            return;
+        }
+        graphController = radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
             branch: 'main',
-            showLegend: true
+            showLegend: true,
+            deployMode: true
         });
+    }
+
+    // Merge per-resource deploy status (from /api/deploy-status's activity-log
+    // parser) onto the base topology (from /api/deployed-graph, the modeled
+    // scaffold with a possible persisted-snapshot overlay). Matches by
+    // top-level resource name so the base's node set stays fixed — new nodes
+    // never appear mid-deploy and old ones never disappear post-deploy.
+    // Log statuses win over persisted statuses because the log is fresher
+    // during an in-progress deploy. Non-mutating: returns a shallow-cloned
+    // resources array.
+    function mergeStatusIntoResources(baseResources, statusResources) {
+        if (!Array.isArray(baseResources) || baseResources.length === 0) return baseResources || [];
+        var statusByName = {};
+        if (Array.isArray(statusResources)) {
+            for (var i = 0; i < statusResources.length; i++) {
+                var sr = statusResources[i];
+                if (sr && sr.name && sr.deployStatus) statusByName[sr.name] = sr.deployStatus;
+            }
+        }
+        var merged = [];
+        for (var j = 0; j < baseResources.length; j++) {
+            var r = baseResources[j];
+            var mapped = statusByName[r.name];
+            if (!mapped) { merged.push(r); continue; }
+            var clone = {};
+            for (var k in r) if (Object.prototype.hasOwnProperty.call(r, k)) clone[k] = r[k];
+            clone.deployStatus = mapped;
+            merged.push(clone);
+        }
+        return merged;
     }
 
     function loadGraph() {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
-        // Prefer a live/in-progress deployment so the graph fills in as it deploys.
-        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
-            var liveRes = (s && s.resources) || [];
+        // Two-source render:
+        //   1. /api/deployed-graph → base topology (modeled scaffold, optionally
+        //      with statuses overlaid from the persisted app-graph.json on
+        //      the radius-graph orphan branch).
+        //   2. /api/deploy-status → per-resource statuses stamped by the
+        //      activity-log parser as rad deploy runs (or the last run's
+        //      final statuses if the deploy just finished this session).
+        // Merge (2) onto (1) by name. Node set never changes mid-deploy —
+        // only the per-node badge does: grey ⏳ → yellow ⏳ → green ✓ / red ✗.
+        var app = appSelect.value || wantApp || '';
+        var env = envSelect.value || wantEnv || '';
+        var qs = '?repo=' + encodeURIComponent(CONTEXT_REPO)
+            + (app ? '&application=' + encodeURIComponent(app) : '')
+            + (env ? '&environment=' + encodeURIComponent(env) : '');
+        Promise.all([
+            fetch('/api/deployed-graph' + qs).then(function(r) { return r.json(); }).catch(function() { return { resources: [] }; }),
+            fetch('/api/deploy-status').then(function(r) { return r.json(); }).catch(function() { return {}; })
+        ]).then(function(pair) {
+            var d = pair[0] || {};
+            var s = pair[1] || {};
+            var base = (d && d.resources) || [];
+            var statusRes = (s && s.resources) || [];
             var st = s && s.status;
-            // Stream deployment logs under the graph whenever a deploy is running
-            // or has produced log output.
-            if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
+
+            // Stream deployment logs under the graph whenever a deploy is
+            // running or has produced log output.
+            if (st === 'in_progress' || st === 'complete' || (s && s.logTotal)) {
                 startLogStream();
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success')) {
-                renderGraph(liveRes);
-                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
+
+            if (!base.length) {
+                // Truly nothing — no bicep in the repo, no scaffold could
+                // be built. Retry only while a deploy is actively running.
+                showNothing('Nothing deployed yet');
+                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 5000); }
                 return;
             }
-            // Fall back to the terminal deployed graph from the status branch.
-            fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
-                var resources = (d && d.resources) || [];
-                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-                renderGraph(resources);
-            }).catch(function() { showNothing('Nothing deployed yet'); });
-        }).catch(function() { showNothing('Nothing deployed yet'); });
+
+            renderGraph(mergeStatusIntoResources(base, statusRes));
+
+            // Polling policy: only during an in-progress deploy. When idle,
+            // whatever we just rendered (scaffold with persisted overlay,
+            // scaffold alone, or scaffold + log statuses) is the final state
+            // until a redeploy or a fresh Monitor Graph click.
+            if (st === 'in_progress') {
+                pollTimer = setTimeout(loadGraph, 3000);
+            }
+        });
     }
 
     function loadApplications() {
