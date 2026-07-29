@@ -806,9 +806,10 @@ function createRequestHandler(instanceId) {
 
                 function runCmd(cmd, args) {
                     return new Promise((resolve) => {
-                        cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
+                        const child = cliExec(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
                             resolve({ code: err ? err.code || 1 : 0, stdout: stdout || '', stderr: stderr || '' });
                         });
+                        child.stdin?.end();
                     });
                 }
 
