@@ -14,5 +14,7 @@ export {
   resolveExistingRadBinary,
   ensureRadBinary,
   runRadAppGraph,
+  runRadBicepPublishExtension,
+  runRadBicepPublish,
   buildGraphViaRad,
 } from "./rad.mjs";

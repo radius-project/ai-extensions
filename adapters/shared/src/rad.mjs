@@ -502,6 +502,165 @@ export function ensureRadBinary({ log = noop } = {}) {
 }
 
 /**
+ * spawnRad - the process-handling core every managed-rad invocation needs:
+ * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
+ * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
+ * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
+ * grandchild, so it spawns detached (rad leads its own process group), kills the
+ * whole tree on timeout, and uses an exit/close grace window because that
+ * grandchild can inherit and hold the stdio pipes open. `label` only names the
+ * command in timeout/exit error messages; `env` is merged over process.env.
+ * Exported for tests; managed-binary resolution lives in spawnManagedRad.
+ */
+export function spawnRad(radPath, args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(radPath, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: true,
+    });
+
+    const MAX = 32 * 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let graceTimer = null;
+    let exited = null;
+    child.stdout?.on("data", (c) => { if (stdout.length < MAX) stdout += c.toString(); });
+    child.stderr?.on("data", (c) => { if (stderr.length < MAX) stderr += c.toString(); });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      killChildTree(child);
+      const err = new Error(`${label} timed out after ${timeout}ms`);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    }, timeout);
+
+    function finalize(code, signal) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      try { child.stdout?.destroy(); } catch { /* best-effort */ }
+      try { child.stderr?.destroy(); } catch { /* best-effort */ }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
+        // both streams on the error for callers to surface.
+        const err = new Error(`${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      }
+    }
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+
+    child.on("exit", (code, signal) => {
+      exited = { code, signal };
+      if (settled || graceTimer) return;
+      graceTimer = setTimeout(() => finalize(code, signal), 2000);
+    });
+    child.on("close", (code, signal) => {
+      if (exited) finalize(exited.code, exited.signal);
+      else finalize(code, signal);
+    });
+  });
+}
+
+/**
+ * spawnManagedRad - resolve the managed `rad` binary (ensureRadBinary; never
+ * PATH/.rad/bin, honoring #170) and run it via spawnRad, merging `env` over
+ * process.env. runRadAppGraph predates this helper and keeps its own inline
+ * spawn to avoid churn in that heavily tested path.
+ */
+async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
+  const radPath = await ensureRadBinary({ log });
+  return await spawnRad(radPath, args, { cwd, env, timeout, label, log });
+}
+
+/**
+ * Argument builders for the two publish commands. Exported so tests can assert
+ * the exact rad CLI invocation without spawning a process.
+ */
+export function bicepPublishExtensionArgs(fromFile, target) {
+  return ["bicep", "publish-extension", "--from-file", fromFile, "--target", target, "--force"];
+}
+export function bicepPublishArgs(file, target) {
+  return ["bicep", "publish", "--file", file, "--target", target];
+}
+
+/**
+ * runRadBicepPublishExtension - compile a resource-type manifest into a local
+ * Bicep extension via the managed rad binary:
+ *   rad bicep publish-extension --from-file <manifest> --target <target> --force
+ * `target` is a local file path (a .tgz), so this needs no registry auth.
+ * Returns the resolved target path on success; throws with rad's output on
+ * failure.
+ */
+export async function runRadBicepPublishExtension({ fromFile, target, log = noop, timeout = 120000 } = {}) {
+  const from = path.resolve(fromFile);
+  const to = path.resolve(target);
+  try {
+    await spawnManagedRad(
+      bicepPublishExtensionArgs(from, to),
+      { cwd: path.dirname(to), timeout, label: "rad bicep publish-extension", log },
+    );
+    return to;
+  } catch (err) {
+    throw new Error(`rad bicep publish-extension failed: ${radErrorDetail(err)}`);
+  }
+}
+
+/**
+ * runRadBicepPublish - publish a Bicep file to an OCI registry via the managed
+ * rad binary:
+ *   rad bicep publish --file <file> --target <br:HOST/PATH:TAG>
+ * Publishing to a registry requires the process environment to already be
+ * authenticated for that registry; the caller passes that auth through `env`
+ * (for example the GHCR credentials the extension already manages). Returns the
+ * target reference on success; throws with rad's output on failure.
+ */
+export async function runRadBicepPublish({ file, target, env = {}, log = noop, timeout = 120000 } = {}) {
+  const src = path.resolve(file);
+  try {
+    await spawnManagedRad(
+      bicepPublishArgs(src, target),
+      { cwd: path.dirname(src), env, timeout, label: "rad bicep publish", log },
+    );
+    return target;
+  } catch (err) {
+    throw new Error(`rad bicep publish failed: ${radErrorDetail(err)}`);
+  }
+}
+
+/**
+ * radErrorDetail - pull the most useful message out of a rejected spawnManagedRad
+ * error, preferring stderr, then stdout (rad prints BCP* errors there), then the
+ * error message.
+ */
+function radErrorDetail(err) {
+  const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
+  const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
+  return stderr || stdout || (err && err.message) || "unknown error";
+}
+
+/**
  * resolveRadForGraph - resolve a `rad` binary to run `rad app graph` WITHOUT
  * running the version check or a download on the hot path. The `rad version --cli`
  * check (and any resulting upgrade) runs in the ensureRadBinary() warm-up on every
@@ -660,6 +819,79 @@ export function saveGraphJson(destPath, raw, log = noop) {
   }
 }
 
+// isOciExtensionRef - true when a bicepconfig extension alias points at an OCI
+// registry (br:/oci:) rather than a local artifact file.
+function isOciExtensionRef(ref) {
+  return /^(br|oci):/i.test(ref);
+}
+
+// copyLocalExtensionArtifact - copy a local extension artifact (e.g. the
+// custom-types .tgz a bicepconfig alias references) from the workspace `.radius/`
+// into the compile dir, preserving its relative path so bicep resolves it next
+// to bicepconfig.json. Refuses absolute or `..`-escaping references and is
+// best-effort: a missing file or copy error is logged and skipped.
+function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
+  try {
+    const rel = ref.replace(/^\.[\\/]/, "");
+    if (path.isAbsolute(rel) || rel.split(/[\\/]/).some((seg) => seg === "..")) {
+      log(`Warning: skipping non-local extension artifact reference: ${ref}`);
+      return;
+    }
+    const src = path.resolve(srcRoot, rel);
+    const dest = path.resolve(destRoot, rel);
+    if (!fs.existsSync(src)) {
+      log(`Warning: extension artifact not found, skipping copy: ${src}`);
+      return;
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+  } catch (err) {
+    log(`Warning: could not copy extension artifact ${ref}: ${String(err?.message ?? err)}`);
+  }
+}
+
+/**
+ * writeBicepCompileConfig - populate a temp compile dir with the effective
+ * bicepconfig.json (and any local extension artifacts) a modeled app needs.
+ *
+ * The base is always RADIUS_BICEP_CONFIG, so `extension radius` always resolves.
+ * When `radArtifactsDir` (a workspace `.radius/`) has its own bicepconfig.json,
+ * its extension aliases are merged over the base so a locally published
+ * custom-type extension (e.g. `customTypes` -> ./custom-types.tgz) resolves, and
+ * every alias pointing at a local file (not a `br:`/`oci:` ref) is copied into
+ * `dir` preserving its relative path. `extensibility` is never disabled. A
+ * missing/unreadable workspace config is logged and skipped; the base config
+ * still compiles apps that only use `extension radius`.
+ */
+export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
+  const config = {
+    experimentalFeaturesEnabled: { ...RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled },
+    extensions: { ...RADIUS_BICEP_CONFIG.extensions },
+  };
+  if (radArtifactsDir) {
+    try {
+      const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
+      if (fs.existsSync(wsConfigPath)) {
+        const ws = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
+        if (ws && typeof ws.experimentalFeaturesEnabled === "object") {
+          Object.assign(config.experimentalFeaturesEnabled, ws.experimentalFeaturesEnabled);
+        }
+        config.experimentalFeaturesEnabled.extensibility = true;
+        if (ws && typeof ws.extensions === "object") {
+          for (const [alias, ref] of Object.entries(ws.extensions)) {
+            if (typeof ref !== "string") continue;
+            config.extensions[alias] = ref;
+            if (!isOciExtensionRef(ref)) copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
+          }
+        }
+      }
+    } catch (err) {
+      log(`Warning: could not read workspace bicepconfig.json; using the base Radius config: ${String(err?.message ?? err)}`);
+    }
+  }
+  fs.writeFileSync(path.join(dir, "bicepconfig.json"), JSON.stringify(config, null, 2));
+}
+
 /**
  * buildGraphViaRad - the single graph-assembly entry adapters use. Writes the
  * given Bicep content to a temp file, runs `rad app graph`, and converts the
@@ -670,26 +902,35 @@ export function saveGraphJson(destPath, raw, log = noop) {
  * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
  * `.radius/app-graph.json`, next to the app.bicep it was built from).
  *
+ * `radArtifactsDir`, when set to a workspace `.radius/` directory, makes the
+ * compile use that repo's effective bicepconfig.json and local extension
+ * artifacts (see writeBicepCompileConfig) so apps that declare a locally
+ * published `extension customTypes` compile; otherwise the base Radius config is
+ * used. When `cleanupRadArtifactsDir` is true (e.g. a temp dir staged from a
+ * committed branch), `radArtifactsDir` is removed after the compile.
+ *
  * The returned array is passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
  * (containerImages and their ghcr-registry-creds secret) are never rendered in
  * any graph state — modeled, planned, deployed, or diff. This is applied only
  * to the returned array; the raw app-graph.json saved above is left complete.
  */
-export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "" } = {}) {
+export async function buildGraphViaRad(content, definitionFile = ".radius/app.bicep", { log = noop, saveGraphJsonTo = "", radArtifactsDir = "", cleanupRadArtifactsDir = false } = {}) {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
-  const configFile = path.join(dir, "bicepconfig.json");
   const bicepFile = path.join(dir, "app.bicep");
   try {
-    // Order matters: write bicepconfig.json before app.bicep so the Radius
-    // extension registry is in place when rad compiles the Bicep. bicep looks
-    // for bicepconfig.json in the same directory as the .bicep file.
-    fs.writeFileSync(configFile, RADIUS_BICEP_CONFIG_JSON);
+    // Order matters: write bicepconfig.json (and copy any local extension
+    // artifacts) before app.bicep so the extensions are in place when rad
+    // compiles the Bicep. bicep looks for bicepconfig.json next to the .bicep.
+    writeBicepCompileConfig(dir, radArtifactsDir, log);
     fs.writeFileSync(bicepFile, content);
     const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
     return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    if (cleanupRadArtifactsDir && radArtifactsDir) {
+      try { fs.rmSync(radArtifactsDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 }

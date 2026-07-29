@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "vitest";
 import {
     BOOTSTRAP_ARTIFACT_TYPE,
     BOOTSTRAP_CONTENT,
     bootstrapGHCRStatePackage,
     loadGhKeyringCredentials,
+    withGhcrDockerConfig,
 } from "./ghcr.mjs";
 
 function json(body, init = {}) {
@@ -255,4 +258,43 @@ test("pins keyring credential lookup to github.com", async () => {
         ["auth", "token", "--hostname", "github.com"],
         ["api", "--hostname", "github.com", "user", "--jq", ".login"],
     ]);
+});
+
+test("withGhcrDockerConfig hands rad a ghcr.io docker auth then removes it", async () => {
+    const loadCredentials = async () => ({ token: "ghp_secret", username: "octocat" });
+    let seenDir = "";
+    const result = await withGhcrDockerConfig(
+        async (env) => {
+            seenDir = env.DOCKER_CONFIG;
+            const config = JSON.parse(readFileSync(path.join(seenDir, "config.json"), "utf8"));
+            assert.equal(
+                config.auths["ghcr.io"].auth,
+                Buffer.from("octocat:ghp_secret").toString("base64"),
+            );
+            return "published";
+        },
+        { loadCredentials },
+    );
+
+    assert.equal(result, "published");
+    assert.ok(seenDir, "fn should receive a DOCKER_CONFIG directory");
+    assert.equal(existsSync(seenDir), false, "temp docker config should be removed");
+});
+
+test("withGhcrDockerConfig removes the temp docker config even when publish fails", async () => {
+    const loadCredentials = async () => ({ token: "ghp_secret", username: "octocat" });
+    let seenDir = "";
+    await assert.rejects(
+        withGhcrDockerConfig(
+            async (env) => {
+                seenDir = env.DOCKER_CONFIG;
+                throw new Error("publish denied");
+            },
+            { loadCredentials },
+        ),
+        /publish denied/,
+    );
+
+    assert.ok(seenDir);
+    assert.equal(existsSync(seenDir), false, "temp docker config should be removed on failure");
 });

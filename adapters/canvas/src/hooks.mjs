@@ -25,7 +25,7 @@ export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 const SKILL_HANDOFF =
     "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const RECIPE_PACK_NOTE =
-    "Do not fabricate singleton recipes for custom types; recipes are supplied by recipe packs registered on the environment at deploy time.";
+    "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
 
 // Turns a branches array (which may contain undefined/empty entries meaning
 // "the default branch for the current state") into a human-readable phrase

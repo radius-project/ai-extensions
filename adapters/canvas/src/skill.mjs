@@ -26,6 +26,7 @@ import namingConventions from "../../../plugins/radius/skills/radius-app-bicep/r
 // Cross-skill reference: SKILL.md links the app-graph skill's source-code
 // discovery methodology, so the standalone bundle must inline it too.
 import sourceCodeReferences from "../../../plugins/radius/skills/radius-app-graph/references/source-code-references.md";
+import customResourceTypes from "../../../plugins/radius/skills/radius-app-bicep/references/custom-resource-types.md";
 import todoListAppExample from "../../../plugins/radius/skills/radius-app-bicep/references/todo-list-app-example.md";
 
 // Ordered to match the paths referenced from SKILL.md so the inlined content
@@ -41,6 +42,7 @@ const REFERENCES = [
     // Keyed by the exact path SKILL.md links (a sibling skill), so the agent can
     // correlate the in-text link with the appended section.
     ["../radius-app-graph/references/source-code-references.md", sourceCodeReferences],
+    ["references/custom-resource-types.md", customResourceTypes],
     ["references/todo-list-app-example.md", todoListAppExample],
 ];
 

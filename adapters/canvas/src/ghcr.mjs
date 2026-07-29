@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export const BOOTSTRAP_TAG = "bootstrap";
 export const BOOTSTRAP_ARTIFACT_TYPE = "application/vnd.radius.statearchive.bootstrap.v1";
@@ -305,6 +308,30 @@ export async function loadGhKeyringCredentials({
         throw new Error(
             `A stored GitHub CLI login with package access is required. ${PACKAGE_AUTH_GUIDANCE}`,
         );
+    }
+}
+
+/**
+ * withGhcrDockerConfig - run `fn(env)` with a throwaway DOCKER_CONFIG directory
+ * authenticated to ghcr.io from the stored GitHub CLI credential, then delete
+ * it. `rad bicep publish` shells out to ORAS, which reads registry credentials
+ * from a docker `config.json`; this hands it GHCR auth without a user
+ * `docker login`. The temp config holds the credential and is removed in
+ * `finally`, so the token never persists on disk beyond the publish call.
+ */
+export async function withGhcrDockerConfig(fn, { loadCredentials = loadGhKeyringCredentials } = {}) {
+    const { token, username } = await loadCredentials();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "radius-ghcr-"));
+    try {
+        const auth = Buffer.from(`${username}:${token}`).toString("base64");
+        writeFileSync(
+            path.join(dir, "config.json"),
+            JSON.stringify({ auths: { "ghcr.io": { auth } } }),
+            { mode: 0o600 },
+        );
+        return await fn({ DOCKER_CONFIG: dir });
+    } finally {
+        try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
     }
 }
 
