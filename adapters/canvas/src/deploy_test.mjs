@@ -6,6 +6,7 @@ import {
     extractErrorLines,
     findDeployJobId,
     parseRadDeployProgress,
+    extractAppGraphJson,
 } from "./deploy.mjs";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
@@ -315,5 +316,79 @@ describe("parseRadDeployProgress", () => {
         const log = "Completed            frontend        Applications.Core/containers";
         expect(parseRadDeployProgress(log, [])).toEqual({ global: null, byName: {} });
         expect(parseRadDeployProgress(log, null)).toEqual({ global: null, byName: {} });
+    });
+});
+
+describe("extractAppGraphJson", () => {
+    // A `rad app graph <app>` response inlined in the job log after the
+    // `Deployment Complete` block. Shape mirrors what applicationGraphToResources
+    // consumes (id, name, type, connections, outputResources).
+    const APP_GRAPH = {
+        resources: [
+            { id: "app/todolist", name: "todolist", type: "Applications.Core/applications", connections: [], outputResources: [] },
+            { id: "app/frontend", name: "frontend", type: "Applications.Core/containers", connections: [{ id: "app/postgresql", direction: "Outbound" }], outputResources: [] },
+            { id: "app/postgresql", name: "postgresql", type: "Radius.Data/postgreSqlDatabases", connections: [], outputResources: [] },
+        ],
+    };
+
+    it("returns the ApplicationGraphResponse at the tail of the job log", () => {
+        const log = [
+            "Building app.bicep...",
+            "Deployment In Progress...",
+            "Completed            frontend        Applications.Core/containers",
+            "Deployment Complete",
+            "",
+            "Resources:",
+            "   frontend        Applications.Core/containers",
+            "",
+            JSON.stringify(APP_GRAPH),
+        ].join("\n");
+        const parsed = extractAppGraphJson(log);
+        expect(parsed).toEqual(APP_GRAPH);
+    });
+
+    it("prefers the trailing rad-app-graph JSON over an earlier rad Error block", () => {
+        const errorBlock = 'Error: { "code": "X", "message": "y" }';
+        const log = [
+            "Deployment In Progress...",
+            errorBlock,
+            "Completed            frontend        Applications.Core/containers",
+            "Deployment Complete",
+            JSON.stringify(APP_GRAPH),
+        ].join("\n");
+        const parsed = extractAppGraphJson(log);
+        expect(parsed).toEqual(APP_GRAPH);
+    });
+
+    it("returns null for a log with no top-level JSON object at the tail", () => {
+        const log = [
+            "Deployment In Progress...",
+            "Completed            frontend        Applications.Core/containers",
+            "Deployment Complete",
+            "Resources:",
+            "   frontend        Applications.Core/containers",
+        ].join("\n");
+        expect(extractAppGraphJson(log)).toBeNull();
+    });
+
+    it("returns null when the trailing JSON candidate is not well-formed", () => {
+        const log = [
+            "Deployment Complete",
+            "{ \"resources\": [ { unterminated",
+        ].join("\n");
+        expect(extractAppGraphJson(log)).toBeNull();
+    });
+
+    it("ignores JSON that is not an ApplicationGraphResponse (missing resources array)", () => {
+        // A trailing object without a `.resources` array must be skipped so we
+        // never mistake a random JSON log line for the deployed graph.
+        const log = ["Deployment Complete", JSON.stringify({ foo: "bar" })].join("\n");
+        expect(extractAppGraphJson(log)).toBeNull();
+    });
+
+    it("returns null for empty / missing input", () => {
+        expect(extractAppGraphJson("")).toBeNull();
+        expect(extractAppGraphJson(null)).toBeNull();
+        expect(extractAppGraphJson(undefined)).toBeNull();
     });
 });

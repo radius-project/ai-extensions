@@ -57,7 +57,7 @@ import {
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
-  fetchJobLog, findDeployJobId, parseRadDeployProgress,
+  fetchJobLog, findDeployJobId, parseRadDeployProgress, extractAppGraphJson,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
   explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
@@ -3520,20 +3520,17 @@ function createRequestHandler(instanceId) {
                                     // nodes green; a transient "failed" token in the live log
                                     // must never leave a node red on a successful deployment.
                                     resources.forEach(r => setStatus(r, 'success'));
-                                    // Fetch + store the REAL deployed application graph the
-                                    // workflow published to the orphan status branch.
+                                    // Extract the deployed application graph the workflow
+                                    // appended by running `rad app graph <app>` after `rad deploy`.
+                                    // Its JSON block is inline in the same job log we already have.
                                     addLog('🗺  Retrieving deployed application graph…');
-                                    let deployed = null;
-                                    for (let g = 0; g < 6 && !deployed; g++) {
-                                        deployed = await fetchDeployGraph(repo);
-                                        if (!deployed) await delay(2500);
-                                    }
+                                    const deployed = extractAppGraphJson(live || '');
                                     if (deployed) {
                                         entry.state.deployedGraph = deployed;
                                         entry.state.deployedGraphRepo = repo;
                                         addLog('  ✓ Deployed graph saved.');
                                     } else {
-                                        addLog('  ⚠ Deployed graph not available yet (continuing).');
+                                        addLog('  ⚠ Deployed graph not found in the job log (continuing).');
                                     }
                                     entry.state.deployStatus = 'complete';
                                     addLog('');

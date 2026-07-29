@@ -128,6 +128,52 @@ export function parseRadDeployProgress(logText, resources) {
     return out;
 }
 
+// Extract the deployed-graph JSON block that `rad app graph <app>` prints
+// after `rad deploy` on a successful run. The workflow appends the command in
+// the same job (see buildAppGraphRadCommand in server.mjs), so its stdout is
+// inline in the job log. Strategy: scan for the last well-formed top-level
+// JSON object anywhere in `logText` — either an ApplicationGraphResponse
+// (`{ "resources": [...] }`) or a bare `{ ... }` object. Returns the parsed
+// object or `null` if none is found. Pure — no I/O.
+export function extractAppGraphJson(logText) {
+    if (!logText) return null;
+    // Walk from the end so a first-attempt failure (e.g. an earlier "Error: {"
+    // block) does not shadow the true final graph object.
+    for (let i = logText.length - 1; i >= 0; i--) {
+        if (logText[i] !== '}') continue;
+        // Match this closing brace to its opening brace, respecting strings.
+        let depth = 0;
+        let inString = false;
+        let stringQuote = '';
+        for (let j = i; j >= 0; j--) {
+            const c = logText[j];
+            if (inString) {
+                if (c === '\\') { j--; continue; } // escaped char inside string
+                if (c === stringQuote) inString = false;
+                continue;
+            }
+            if (c === '"' || c === "'") { inString = true; stringQuote = c; continue; }
+            if (c === '}') depth++;
+            else if (c === '{') {
+                depth--;
+                if (depth === 0) {
+                    const candidate = logText.slice(j, i + 1);
+                    try {
+                        const parsed = JSON.parse(candidate);
+                        // Prefer objects that look like a rad app graph response.
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                            if (Array.isArray(parsed.resources)) return parsed;
+                        }
+                        // Keep scanning — the earlier match may not be the graph.
+                    } catch (e) { /* not JSON — keep scanning */ }
+                    break; // move to the next `}` further left
+                }
+            }
+        }
+    }
+    return null;
+}
+
 export function fetchLiveDeployLog(repo) {
     return ghApiGetContent(`/repos/${repo}/contents/deploy-progress.log?ref=radius-deploy-status`, 12000);
 }
