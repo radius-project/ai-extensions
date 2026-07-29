@@ -442,6 +442,12 @@ export async function resolveOidcSubject(
   }
 
   // 2. OIDC subject customization — only after repo access succeeds.
+  // Response schema (REST API version 2026-03-10):
+  // https://docs.github.com/en/rest/actions/oidc — GET .../actions/oidc/customization/sub
+  // returns { use_default (bool, required), include_claim_keys (string[]),
+  // use_immutable_subject (bool), sub_claim_prefix (string) }. The latter two
+  // arrived with GitHub's immutable-subject rollout and are absent on older GHES,
+  // so both are read defensively below (a missing field is not an error).
   const custRes = await fetchGitHubJson(
     runner,
     `/repos/${fullName}/actions/oidc/customization/sub`,

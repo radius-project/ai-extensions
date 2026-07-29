@@ -3,8 +3,9 @@
 // GitHub's OIDC `sub` claim is NOT always `repo:{owner}/{repo}:{suffix}`.
 // Orgs/repos can customize it (GET
 // /repos/{owner}/{repo}/actions/oidc/customization/sub -> {use_default,
-// include_claim_keys}), and as of GitHub's July 2026 immutable-subject rollout
-// the default itself can become
+// include_claim_keys, use_immutable_subject, sub_claim_prefix}; see
+// https://docs.github.com/en/rest/actions/oidc), and with GitHub's
+// immutable-subject rollout the default itself can become
 // `repo:{owner}@{ownerId}/{repo}@{repoId}:{suffix}`. A subject that doesn't
 // match what GitHub actually mints fails deploy-time Azure login with
 // `AADSTS700213: No matching federated identity record found`.
