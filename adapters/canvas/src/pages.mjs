@@ -1153,7 +1153,7 @@ ${graphHeader('deployed')}
 
 <div class="rad-card" style="margin:0;">
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
-  <div id="deployed-status" class="status info">Loading deployed application graph…</div>
+  <div id="deployed-status" class="status info" style="display:none;"></div>
   <div id="graph-container"></div>
 </div>
 
@@ -1307,29 +1307,37 @@ function escapeHtmlClient(s) {
     function loadGraph() {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
+        // No "Loading…" banner on re-polls: the graph is already visible from
+        // the previous render, and .update() animates only the changed nodes.
+        // Flashing a banner on every 3s tick would defeat that.
         // Prefer a live/in-progress deployment so the graph fills in as it deploys.
         fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
             var liveRes = (s && s.resources) || [];
             var st = s && s.status;
             // Stream deployment logs under the graph whenever a deploy is running
             // or has produced log output.
-            if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
+            if (st === 'in_progress' || st === 'complete' || (s && s.logTotal)) {
                 startLogStream();
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success')) {
+            // Live in-session resources are the freshest source while a deploy
+            // is running (or has just completed). deployStatus is stamped per
+            // node from the activity log parser in server.mjs.
+            if (liveRes.length && (st === 'in_progress' || st === 'complete')) {
                 renderGraph(liveRes);
+                // Stop polling once the deploy has finished — a redeploy or a
+                // fresh Monitor Graph click restarts loadGraph. Otherwise the
+                // canvas would tick forever on a done deploy for no reason.
                 if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
                 return;
             }
-            // No in-session live deploy: fall through to the /api/deployed-graph
+            // No in-session live deploy yet: fall through to the /api/deployed-graph
             // priority chain (durable → live → legacy → session cache → scaffold).
             // The chain always returns *something* — including a greyed modeled
             // scaffold — so the user sees the app topology even before the first
             // deploy has run. Response includes source ('durable' | 'live' |
-            // 'legacy' | 'scaffold' | 'none') so we can decide when to stop
-            // polling: durable is terminal, everything else warrants another
-            // ~5s poll in case the workflow just published a fresher tier.
+            // 'legacy' | 'scaffold' | 'none') so we can decide whether to keep
+            // polling.
+            var isDeploying = (st === 'in_progress');
             var app = appSelect.value || wantApp || '';
             var env = envSelect.value || wantEnv || '';
             var qs = '?repo=' + encodeURIComponent(CONTEXT_REPO)
@@ -1340,27 +1348,24 @@ function escapeHtmlClient(s) {
                 var resources = (d && d.resources) || [];
                 var source = (d && d.source) || 'none';
                 if (!resources.length) {
-                    // No graph at any tier — not even a modeled scaffold, so the
-                    // repo has no app.bicep the canvas has seen yet. Retry more
-                    // slowly than the deploy-tracking poll below; typically the
-                    // user needs to open the Modeled tab first to hydrate the
-                    // scaffold, which will make a scaffold-tier response show up
-                    // on the next poll.
                     showNothing('Nothing deployed yet');
-                    pollTimer = setTimeout(loadGraph, 15000);
+                    // Only keep polling while a deploy is actively running.
+                    // If no deploy is happening and no graph exists at any
+                    // tier, the tab has nothing to progress toward — user
+                    // needs to run a deploy or open the Modeled tab first.
+                    if (isDeploying) { pollTimer = setTimeout(loadGraph, 5000); }
                     return;
                 }
                 renderGraph(resources);
                 if (source === 'durable') {
-                    // Terminal — the workflow published the final graph. Stop
-                    // polling; a redeploy or a fresh Monitor Graph click starts
-                    // this over.
+                    // Terminal — the workflow published the final graph.
                     return;
                 }
-                // Scaffold / live / legacy tiers can all be upgraded by a
-                // freshly-published durable file, so keep polling until we get
-                // one. 5s matches the deploy-workflow's expected publish cadence.
-                pollTimer = setTimeout(loadGraph, 5000);
+                // For scaffold/live/legacy/session tiers: only keep polling
+                // while a deploy is running. When idle, whatever the chain
+                // returned (scaffold or a stale live/legacy snapshot) is what
+                // the user sees until they trigger a new deploy.
+                if (isDeploying) { pollTimer = setTimeout(loadGraph, 5000); }
             }).catch(function() { showNothing('Nothing deployed yet'); });
         }).catch(function() { showNothing('Nothing deployed yet'); });
     }

@@ -188,7 +188,12 @@ describe("resolveDeployedGraph — /api/deployed-graph priority chain", () => {
         });
 
         expect(result.source).toBe("durable");
-        expect(result.resources).toEqual([{ name: "web", provisioningState: "Succeeded" }]);
+        // graphToResources() stamps deployStatus from provisioningState so
+        // node cards render the correct status badge without every caller
+        // having to remember to normalize.
+        expect(result.resources).toEqual([
+            { name: "web", provisioningState: "Succeeded", deployStatus: "success" },
+        ]);
         expect(fetchers.fetchDurable).toHaveBeenCalledWith(key);
         expect(fetchers.fetchLive).not.toHaveBeenCalled();
         expect(fetchers.fetchLegacy).not.toHaveBeenCalled();
@@ -203,7 +208,9 @@ describe("resolveDeployedGraph — /api/deployed-graph priority chain", () => {
         const result = await deploy.resolveDeployedGraph({ key, fetchers });
 
         expect(result.source).toBe("live");
-        expect(result.resources).toEqual([{ name: "web", provisioningState: "Provisioning" }]);
+        expect(result.resources).toEqual([
+            { name: "web", provisioningState: "Provisioning", deployStatus: "in_progress" },
+        ]);
         expect(fetchers.fetchLegacy).not.toHaveBeenCalled();
     });
 
@@ -306,5 +313,108 @@ describe("resolveDeployedGraph — /api/deployed-graph priority chain", () => {
         expect(result.source).toBe("live");
         expect(result.resources).toEqual([{ name: "live-web" }]);
         expect(fetchers.fetchLive).toHaveBeenCalled();
+    });
+});
+
+describe("mapProvisioningStateToDeployStatus — rad app graph → node badge", () => {
+    it.each([
+        ["Succeeded", "success"],
+        ["succeeded", "success"],
+        ["Success", "success"],
+        ["Ok", "success"],
+        ["Failed", "failed"],
+        ["Canceled", "failed"],
+        ["Cancelled", "failed"],
+        ["Provisioning", "in_progress"],
+        ["Accepted", "in_progress"],
+        ["Creating", "in_progress"],
+        ["Updating", "in_progress"],
+        ["Deleting", "in_progress"],
+        ["Running", "in_progress"],
+    ])("%s → %s", (input, expected) => {
+        expect(deploy.mapProvisioningStateToDeployStatus(input)).toBe(expected);
+    });
+
+    it("falls back to 'pending' for empty / unknown values so untouched nodes stay grey", () => {
+        expect(deploy.mapProvisioningStateToDeployStatus("")).toBe("pending");
+        expect(deploy.mapProvisioningStateToDeployStatus(null)).toBe("pending");
+        expect(deploy.mapProvisioningStateToDeployStatus(undefined)).toBe("pending");
+        expect(deploy.mapProvisioningStateToDeployStatus("Weird")).toBe("pending");
+    });
+});
+
+describe("graphToResources — provisioningState is stamped as deployStatus on every node", () => {
+    it("stamps deployStatus on top-level resources and their outputResources", async () => {
+        // Exercised through resolveDeployedGraph since graphToResources is
+        // module-internal — the resolver is the single choke point every
+        // graph source flows through.
+        const fetchers = {
+            fetchDurable: vi.fn().mockResolvedValue({
+                resources: [
+                    {
+                        name: "app",
+                        provisioningState: "Succeeded",
+                        outputResources: [{ id: "azCluster", provisioningState: "Provisioning" }],
+                    },
+                    { name: "mysql", provisioningStatus: "Failed" },
+                ],
+            }),
+            fetchLive: vi.fn(),
+            fetchLegacy: vi.fn(),
+        };
+
+        const result = await deploy.resolveDeployedGraph({
+            key: { sourceBranch: "main", scope: "default", environment: "aks-dev" },
+            fetchers,
+        });
+
+        expect(result.resources[0].deployStatus).toBe("success");
+        expect(result.resources[0].outputResources[0].deployStatus).toBe("in_progress");
+        // Accepts either spelling of the status field so the workflow can
+        // publish whichever `rad app graph` emits without the canvas caring.
+        expect(result.resources[1].deployStatus).toBe("failed");
+    });
+
+    it("preserves an explicit deployStatus set by the log-driven /api/deploy path", async () => {
+        // The activity-log parser stamps deployStatus directly from the
+        // `rad deploy` output. When that path already ran, the field must
+        // win over a lagging provisioningState from the last-published live
+        // graph — otherwise an earlier 'Provisioning' would clobber the
+        // final 'success' the log confirmed.
+        const fetchers = {
+            fetchDurable: vi.fn().mockResolvedValue({
+                resources: [
+                    { name: "app", provisioningState: "Provisioning", deployStatus: "success" },
+                ],
+            }),
+            fetchLive: vi.fn(),
+            fetchLegacy: vi.fn(),
+        };
+
+        const result = await deploy.resolveDeployedGraph({
+            key: { sourceBranch: "main", scope: "default", environment: "aks-dev" },
+            fetchers,
+        });
+
+        expect(result.resources[0].deployStatus).toBe("success");
+    });
+
+    it("leaves deployStatus unset when no provisioning status is present so the scaffold's 'pending' stamp wins", async () => {
+        // toScaffold() explicitly sets pending — but for non-scaffold sources
+        // (live/durable/legacy), missing provisioningState means the workflow
+        // hasn't observed the resource yet. Don't guess: leave it blank so
+        // the client's default (`RADIUS_DEPLOY_STATUS_BADGE.pending`) kicks in.
+        const fetchers = {
+            fetchDurable: vi.fn().mockResolvedValue({ resources: [{ name: "app" }] }),
+            fetchLive: vi.fn(),
+            fetchLegacy: vi.fn(),
+        };
+
+        const result = await deploy.resolveDeployedGraph({
+            key: { sourceBranch: "main", scope: "default", environment: "aks-dev" },
+            fetchers,
+        });
+
+        expect(result.resources[0]).not.toHaveProperty("deployStatus");
     });
 });

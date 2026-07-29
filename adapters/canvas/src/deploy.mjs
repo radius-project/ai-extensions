@@ -149,13 +149,59 @@ export function fetchDeployGraph(repo) {
     ).then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
 }
 
+// Map a raw `provisioningState` / `provisioningStatus` string as emitted by
+// `rad app graph -o json` (which lifts the value from each concrete resource's
+// ARM-style status) to the four-state vocabulary the canvas uses on node
+// cards (pending / in_progress / success / failed). Case-insensitive and
+// tolerant of provider-specific spellings (Azure uses `Succeeded`, some
+// resources emit `Ok`, in-flight states include `Provisioning` / `Updating`
+// / `Accepted` / `Creating`). Anything unrecognized (including empty) falls
+// back to `pending` so a not-yet-touched resource stays grey. Pure.
+export function mapProvisioningStateToDeployStatus(state) {
+    const v = String(state || "").toLowerCase().trim();
+    if (!v) return "pending";
+    if (v === "succeeded" || v === "success" || v === "ok") return "success";
+    if (v === "failed" || v === "canceled" || v === "cancelled") return "failed";
+    if (v === "accepted" || v === "creating" || v === "updating" || v === "provisioning" || v === "running" || v === "deleting") return "in_progress";
+    return "pending";
+}
+
 // Normalize a raw graph blob (from any of the durable/live/legacy fetchers or
 // the session cache) to a resources array. The workflow-published files are
 // `{ resources: [...] }`, but some legacy shapes were flat arrays; both are
 // accepted so the resolver never has to care which one a fetcher returned.
+//
+// Also stamps each resource (and its outputResources) with a `deployStatus`
+// derived from the raw ARM-style `provisioningState`/`provisioningStatus`
+// field when one is present, unless the resource already carries an explicit
+// `deployStatus` (e.g. from log-driven updates in /api/deploy). Doing the
+// mapping here — the single choke point for every deployed-graph source —
+// guarantees that live/durable graphs published by the workflow render with
+// correct per-node status badges without every caller having to remember to
+// normalize.
 function graphToResources(graph) {
     if (!graph) return [];
-    return Array.isArray(graph) ? graph : (graph.resources || []);
+    const arr = Array.isArray(graph) ? graph : (graph.resources || []);
+    if (!Array.isArray(arr)) return [];
+    for (const r of arr) {
+        if (!r) continue;
+        if (!r.deployStatus) {
+            const s = r.provisioningState || r.provisioningStatus;
+            if (s !== undefined && s !== null && s !== "") {
+                r.deployStatus = mapProvisioningStateToDeployStatus(s);
+            }
+        }
+        if (Array.isArray(r.outputResources)) {
+            for (const o of r.outputResources) {
+                if (!o || o.deployStatus) continue;
+                const s = o.provisioningState || o.provisioningStatus;
+                if (s !== undefined && s !== null && s !== "") {
+                    o.deployStatus = mapProvisioningStateToDeployStatus(s);
+                }
+            }
+        }
+    }
+    return arr;
 }
 
 // Clone a resources array and stamp every node (and its outputResources) as
