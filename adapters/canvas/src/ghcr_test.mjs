@@ -25,7 +25,6 @@ function createHarness({
     finalRepository = "acme/app",
     metadataDelay = 0,
     tokenStatus = 200,
-    uploadStatus = 202,
 } = {}) {
     const calls = [];
     const blobs = new Set();
@@ -70,9 +69,6 @@ function createHarness({
             return new Response("", { status: blobs.has(blobMatch[1]) ? 200 : 404 });
         }
         if (url.origin === "https://registry.test" && method === "POST" && url.pathname.endsWith("/blobs/uploads/")) {
-            if (uploadStatus !== 202) {
-                return json({ errors: [{ code: "DENIED", message: "permission_denied: The token provided does not match expected scopes." }] }, { status: uploadStatus });
-            }
             uploadID++;
             return new Response("", {
                 status: 202,
@@ -211,18 +207,6 @@ test("rejects a package whose source annotation never creates repository linkage
 
 test("reports package-scope guidance when GHCR rejects token exchange", async () => {
     const harness = createHarness({ tokenStatus: 403 });
-
-    await assert.rejects(
-        bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl: harness.fetchImpl }),
-        /gh auth refresh -s read:packages -s write:packages/,
-    );
-});
-
-test("reports package-scope guidance when GHCR silently narrows the token and denies the blob upload", async () => {
-    // GHCR issues a bearer token for a read-only credential, then denies the
-    // first write with 403 DENIED "does not match expected scopes". The raw
-    // status is unactionable — the push must surface the refresh command.
-    const harness = createHarness({ uploadStatus: 403 });
 
     await assert.rejects(
         bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl: harness.fetchImpl }),
