@@ -155,7 +155,7 @@ ${getInlineVendorStyles()}
   label { display: block; font-weight: 600; font-size: 12px; color: var(--rad-text-tertiary); margin: 10px 0 4px; }
   .rad-field { display: flex; flex-direction: column; gap: 4px; }
   .rad-field label { margin: 0; }
-  input, select, .rad-select {
+  input:not([type="radio"]):not([type="checkbox"]), select, .rad-select {
     width: 100%; padding: 8px 10px;
     border: 1px solid var(--rad-stroke-strong);
     border-radius: var(--rad-radius); font-size: 13px;

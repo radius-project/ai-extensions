@@ -46,6 +46,18 @@ describe("pageShell", () => {
         expect(iconStyles).toContain("background: transparent");
         expect(iconStyles).not.toContain("border:");
     });
+
+    it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
+        // The app-registration picker builds each option as a flex row of
+        // [radio][text]. A bare `input` selector in the width:100% rule stretches
+        // the radio to fill the row and shoves the label text far to the right
+        // (see the empty GITHUB-card style regression). The width rule must skip
+        // radios/checkboxes so they keep their intrinsic size.
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain('input:not([type="radio"]):not([type="checkbox"]), select, .rad-select {');
+        // The bare selector (which would balloon the radio) must be gone.
+        expect(html).not.toMatch(/\n\s*input, select, \.rad-select \{/);
+    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
