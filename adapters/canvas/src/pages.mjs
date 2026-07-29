@@ -2478,6 +2478,25 @@ function populateSelect(selectId, items, placeholder) {
     custom.value = '__custom__'; custom.textContent = '+ Enter custom...';
     sel.appendChild(custom);
 }
+// Case-insensitive sort by display name so discovered resource lists render in
+// a predictable order in the dropdowns.
+function sortByName(items) {
+    return (items || []).slice().sort(function(a, b) {
+        var an = String((a && (a.name || a.id)) || a).toLowerCase();
+        var bn = String((b && (b.name || b.id)) || b).toLowerCase();
+        return an < bn ? -1 : an > bn ? 1 : 0;
+    });
+}
+// Populate the AKS cluster dropdown from a (possibly RG-filtered) list, keeping
+// the current selection when it is still present in the new list.
+function renderAzureClusters(list, keepValue) {
+    populateSelect('azure-cluster-select', list, 'Select AKS cluster…');
+    if (!keepValue) return;
+    var sel = document.getElementById('azure-cluster-select');
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === keepValue) { sel.value = keepValue; break; }
+    }
+}
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
     var rgSel = document.getElementById('azure-rg-select');
@@ -2488,6 +2507,19 @@ function setupAzureInfraFilter() {
         for (var i = 0; i < list.length; i++) { if ((list[i].id || list[i].name) === cid) return list[i]; }
         return null;
     }
+    // Selecting a resource group limits the cluster dropdown to the AKS clusters
+    // that live in that resource group. A custom-typed or empty RG shows them all.
+    rgSel.addEventListener('change', function() {
+        var rg = rgSel.value;
+        var all = window.__azureClusters || [];
+        if (rg === '' || rg === '__custom__') { renderAzureClusters(all, clusterSel.value); return; }
+        var filtered = [];
+        for (var i = 0; i < all.length; i++) { if ((all[i].resourceGroup || '') === rg) filtered.push(all[i]); }
+        var keep = '';
+        for (var j = 0; j < filtered.length; j++) { if ((filtered[j].id || filtered[j].name) === clusterSel.value) { keep = clusterSel.value; break; } }
+        renderAzureClusters(filtered, keep);
+    });
+    // Selecting a cluster back-fills its resource group so the two stay linked.
     clusterSel.addEventListener('change', function() {
         var cid = clusterSel.value;
         if (cid === '__custom__' || cid === '') return;
@@ -2518,15 +2550,15 @@ function discoverResources(provider, subId, tenantId) {
         .then(function(data) {
             if (provider === 'azure') {
                 if (statusEl) statusEl.textContent = discoverStatusText(data, 'azure');
-                window.__azureClusters = data.clusters || [];
-                populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster…');
-                populateSelect('azure-rg-select', data.resourceGroups || [], 'Select resource group…');
-                populateSelect('azure-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
+                window.__azureClusters = sortByName(data.clusters || []);
+                renderAzureClusters(window.__azureClusters, '');
+                populateSelect('azure-rg-select', sortByName(data.resourceGroups || []), 'Select resource group…');
+                populateSelect('azure-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
                 setupAzureInfraFilter();
             } else {
                 if (statusEl) statusEl.textContent = discoverStatusText(data, 'aws');
-                populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster…');
-                populateSelect('aws-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
+                populateSelect('aws-cluster-select', sortByName(data.clusters || []), 'Select EKS cluster…');
+                populateSelect('aws-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
                 populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets…');
             }

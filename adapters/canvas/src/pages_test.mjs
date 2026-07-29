@@ -335,9 +335,27 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain('id="env-warning-banner"');
     });
 
+    it("links the Azure RG and cluster dropdowns and sorts discovered resources (Nicole regression)", () => {
+        // Regression: the cluster dropdown listed every AKS cluster regardless of
+        // the selected resource group, the two dropdowns were not linked RG->cluster,
+        // and neither list was sorted. Discovery now sorts clusters/RGs/namespaces,
+        // filters the cluster list to the selected RG, and keeps the cluster->RG
+        // back-fill so the two stay linked both ways.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("function sortByName(");
+        expect(html).toContain("function renderAzureClusters(");
+        expect(html).toContain("window.__azureClusters = sortByName(data.clusters || [])");
+        expect(html).toContain("populateSelect('azure-rg-select', sortByName(data.resourceGroups || [])");
+        expect(html).toContain("populateSelect('azure-namespace-select', sortByName(");
+        // Selecting a resource group filters the cluster list to that RG.
+        expect(html).toContain("if ((all[i].resourceGroup || '') === rg) filtered.push(all[i])");
+        // Selecting a cluster still back-fills its resource group (bidirectional link).
+        expect(html).toContain("rgSel.value = cluster.resourceGroup;");
+    });
+
+
     it("always sends appName on create so explicit-empty is server-detectable", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
-        // Omitted vs explicit-blank must be distinguishable server-side.
         expect(html).toContain("params.appName !== undefined");
     });
 
