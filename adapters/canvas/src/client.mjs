@@ -832,10 +832,15 @@ function radiusRenderGraph(containerId, resources, options) {
                     }
                 }
             }
-            // Other graph modes may expand concrete recipe outputs for deployment
-            // detail. Planned mode deliberately keeps the modeled graph's one-node-
-            // per-resource topology and projects the resolved type onto that node.
-            if (!plannedMode && r.outputResources && r.outputResources.length > 0) {
+            // Modeled and diff modes may expand concrete recipe outputs for
+            // extra topology detail. Planned and deploy modes deliberately
+            // collapse them: Planned projects the resolved concrete type onto
+            // the same one-node-per-Radius-resource card, and Deploy keeps
+            // that same topology so the deployed graph starts as (and stays)
+            // shaped like the modeled/planned graphs — the badge changes from
+            // grey hourglass to green check / red cross, but the node set
+            // does not grow mid-deploy and shrink post-deploy.
+            if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0) {
                 for (var k = 0; k < r.outputResources.length; k++) {
                     var out = r.outputResources[k];
                     // Skip a concrete resource another top-level resource owns.

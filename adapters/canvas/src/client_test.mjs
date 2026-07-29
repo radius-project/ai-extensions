@@ -260,7 +260,11 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
     it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
-        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && r.outputResources && r.outputResources.length > 0)");
+        // Both plannedMode and deployMode collapse outputResources to keep the
+        // one-node-per-Radius-resource topology, so the Deployed tab's node set
+        // matches Modeled/Planned and only the per-node status badge evolves
+        // during a deploy (grey ⏳ → yellow ⏳ → green ✓ / red ✗).
+        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0)");
     });
 
     it("relabels the modeled node with the recipe-resolved concrete type", () => {
