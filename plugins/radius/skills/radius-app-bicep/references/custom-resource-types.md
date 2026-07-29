@@ -74,15 +74,11 @@ Rules:
 - Read-only outputs set `readOnly: true` and are populated by the recipe; do not list them in `required`.
 - A single manifest may declare multiple types under `types:`.
 
-### 2. Publish the extension locally: `rad bicep publish-extension`
+### 2. Publish the extension locally: call `radius_publish_custom_type_extension`
 
-Compile the manifest into a local Bicep extension co-located with `app.bicep`:
+Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). By default it reads `.radius/custom-types.yaml` and writes `.radius/custom-types.tgz`; pass `manifestPath` / `targetPath` only if you used different names.
 
-```
-rad bicep publish-extension --from-file .radius/custom-types.yaml --target .radius/custom-types.tgz
-```
-
-`--target` is a local file path here (not an OCI reference), so the extension ships alongside `app.bicep` and needs no registry. Confirm the exact flags with `rad bicep publish-extension --help` in the session before running.
+`--target` is a local file path here (not an OCI reference), so the extension ships alongside `app.bicep` and needs no registry. The tool runs the extension-managed `rad` binary internally.
 
 ### 3. Wire the extension into `.radius/bicepconfig.json`
 
@@ -135,15 +131,16 @@ output result object = {
 }
 ```
 
-Then publish it to the user's GitHub Container Registry for the repository being modeled and use that path as the recipe pack `source`:
+Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
 
 ```
-rad bicep publish --file .radius/<type>-recipe.bicep --target br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
+file: .radius/<type>-recipe.bicep
+target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 ```
 
-- `<owner>/<repo>` is the repository being modeled; the session's GitHub credentials are used for the push.
+- `<owner>/<repo>` is the repository being modeled; the tool authenticates the push with the session's stored GitHub package credentials, so no separate `docker login` is needed.
 - Pin an immutable `<tag>`; do not publish `latest`.
-- OCI publishing requires a prior registry login (`docker login ghcr.io` or equivalent) with push permission. If the push is not authorized, stop and report it rather than guessing credentials.
+- The push needs `write:packages` on the stored GitHub credential. If the tool reports the push was not authorized, stop and surface it (refresh with `gh auth refresh -s write:packages`) rather than guessing credentials.
 
 ### 5. Author the recipe pack: `.radius/custom-recipe-pack.bicep`
 

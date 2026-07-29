@@ -503,6 +503,150 @@ export function ensureRadBinary({ log = noop } = {}) {
 }
 
 /**
+ * spawnManagedRad - run the extension-managed `rad` binary with `args` and
+ * resolve with { stdout, stderr } on a zero exit (rejecting with those streams
+ * attached otherwise). This is the single place that owns the process handling
+ * every managed-rad invocation needs: rad shells out to bicep as a grandchild,
+ * so we spawn detached (rad leads its own process group) and kill the whole tree
+ * on timeout, and we use an exit/close grace window because that bicep
+ * grandchild can inherit and hold the stdio pipes open.
+ *
+ * `label` only names the command in timeout/exit error messages. `env` is merged
+ * over `process.env`. Honors #170: callers are tools, not a user shell; the
+ * binary is the managed one resolved by ensureRadBinary (never PATH/.rad/bin).
+ *
+ * NOTE: runRadAppGraph predates this helper and keeps its own inline spawn to
+ * avoid churn in that heavily-tested path; it can be migrated onto this helper
+ * in a follow-up.
+ */
+async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
+  const radPath = await ensureRadBinary({ log });
+  return await new Promise((resolve, reject) => {
+    const child = spawn(radPath, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: true,
+    });
+
+    const MAX = 32 * 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let graceTimer = null;
+    let exited = null;
+    child.stdout?.on("data", (c) => { if (stdout.length < MAX) stdout += c.toString(); });
+    child.stderr?.on("data", (c) => { if (stderr.length < MAX) stderr += c.toString(); });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      killChildTree(child);
+      const err = new Error(`${label} timed out after ${timeout}ms`);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    }, timeout);
+
+    function finalize(code, signal) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      try { child.stdout?.destroy(); } catch { /* best-effort */ }
+      try { child.stderr?.destroy(); } catch { /* best-effort */ }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
+        // both streams on the error for callers to surface.
+        const err = new Error(`${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      }
+    }
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+
+    child.on("exit", (code, signal) => {
+      exited = { code, signal };
+      if (settled || graceTimer) return;
+      graceTimer = setTimeout(() => finalize(code, signal), 2000);
+    });
+    child.on("close", (code, signal) => {
+      if (exited) finalize(exited.code, exited.signal);
+      else finalize(code, signal);
+    });
+  });
+}
+
+/**
+ * runRadBicepPublishExtension - compile a resource-type manifest into a local
+ * Bicep extension via the managed rad binary:
+ *   rad bicep publish-extension --from-file <manifest> --target <target> --force
+ * `target` is a local file path (a .tgz), so this needs no registry auth.
+ * Returns the resolved target path on success; throws with rad's output on
+ * failure.
+ */
+export async function runRadBicepPublishExtension({ fromFile, target, log = noop, timeout = 120000 } = {}) {
+  const from = path.resolve(fromFile);
+  const to = path.resolve(target);
+  try {
+    await spawnManagedRad(
+      ["bicep", "publish-extension", "--from-file", from, "--target", to, "--force"],
+      { cwd: path.dirname(to), timeout, label: "rad bicep publish-extension", log },
+    );
+    return to;
+  } catch (err) {
+    throw new Error(`rad bicep publish-extension failed: ${radErrorDetail(err)}`);
+  }
+}
+
+/**
+ * runRadBicepPublish - publish a Bicep file to an OCI registry via the managed
+ * rad binary:
+ *   rad bicep publish --file <file> --target <br:HOST/PATH:TAG>
+ * Publishing to a registry requires the process environment to already be
+ * authenticated for that registry; the caller passes that auth through `env`
+ * (for example the GHCR credentials the extension already manages). Returns the
+ * target reference on success; throws with rad's output on failure.
+ */
+export async function runRadBicepPublish({ file, target, env = {}, log = noop, timeout = 120000 } = {}) {
+  const src = path.resolve(file);
+  try {
+    await spawnManagedRad(
+      ["bicep", "publish", "--file", src, "--target", target],
+      { cwd: path.dirname(src), env, timeout, label: "rad bicep publish", log },
+    );
+    return target;
+  } catch (err) {
+    throw new Error(`rad bicep publish failed: ${radErrorDetail(err)}`);
+  }
+}
+
+/**
+ * radErrorDetail - pull the most useful message out of a rejected spawnManagedRad
+ * error, preferring stderr, then stdout (rad prints BCP* errors there), then the
+ * error message.
+ */
+function radErrorDetail(err) {
+  const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
+  const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
+  return stderr || stdout || (err && err.message) || "unknown error";
+}
+
+/**
  * runRadAppGraph - run
  * `rad app graph <file>.bicep --include-icons` in a throwaway working dir and
  * return the parsed app-graph.json it writes there. The modeled command must not

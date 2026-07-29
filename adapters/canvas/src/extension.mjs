@@ -7,13 +7,13 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute, resolve } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
 } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/shared";
+import { buildGraphViaRad, runRadBicepPublishExtension, runRadBicepPublish } from "@radius-project/shared";
 import { github } from "./gh.mjs";
 import {
     defaultBranchForState,
@@ -42,6 +42,7 @@ import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hook
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
+import { withGhcrDockerConfig } from "./ghcr.mjs";
 
 async function workspaceState() {
     const workspace = await detectWorkspaceContext(session);
@@ -60,6 +61,16 @@ async function fetchBicepForBranch(repo, branch, state) {
         if (local) return local;
     }
     return await fetchBicepFromRepo(github, repo, branch);
+}
+
+// Resolve a tool-supplied file path against the workspace root. Absolute paths
+// pass through unchanged; a blank value falls back to `fallback` (also
+// workspace-relative) or null when no fallback is provided.
+function resolveWorkspacePath(workspacePath, value, fallback) {
+    const rel = value && String(value).trim() ? String(value).trim() : fallback;
+    if (!rel) return null;
+    if (isAbsolute(rel)) return rel;
+    return workspacePath ? join(workspacePath, rel) : resolve(rel);
 }
 
 // When a graph canvas is opened but no .radius/app.bicep exists, hand the work
@@ -594,6 +605,63 @@ const session = await joinSession({
             },
             handler: async (args) => {
                 return "Open the radius canvas with page 'environment' to create a GitHub environment. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
+            },
+        },
+        {
+            name: "radius_publish_custom_type_extension",
+            description: "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication).",
+            parameters: {
+                type: "object",
+                properties: {
+                    manifestPath: { type: "string", description: "Path to the resource-type manifest, absolute or relative to the workspace root. Defaults to .radius/custom-types.yaml." },
+                    targetPath: { type: "string", description: "Path for the compiled extension package (.tgz), absolute or relative to the workspace root. Defaults to .radius/custom-types.tgz." },
+                },
+            },
+            handler: async (args) => {
+                try {
+                    const { workspacePath } = await workspaceState();
+                    const fromFile = resolveWorkspacePath(workspacePath, args.manifestPath, ".radius/custom-types.yaml");
+                    const target = resolveWorkspacePath(workspacePath, args.targetPath, ".radius/custom-types.tgz");
+                    if (!existsSync(fromFile)) {
+                        return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                    }
+                    await runRadBicepPublishExtension({ fromFile, target, log: (m) => { try { session.log(m); } catch {} } });
+                    return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
+                } catch (err) {
+                    return `⚠️ Could not publish the custom-type extension: ${err.message}`;
+                }
+            },
+        },
+        {
+            name: "radius_publish_recipe",
+            description: "Publishes an authored Radius recipe Bicep file to the user's GitHub Container Registry (ghcr.io) using the extension's managed rad binary and the stored GitHub package credentials, so a generated custom type's recipe pack can reference it. Use this instead of running `rad bicep publish` directly. Prefer an Azure Verified Module (which needs no publish) when one matches the resource.",
+            parameters: {
+                type: "object",
+                properties: {
+                    file: { type: "string", description: "Path to the recipe Bicep file, absolute or relative to the workspace root (e.g. .radius/<type>-recipe.bicep)." },
+                    target: { type: "string", description: "OCI target reference, e.g. br:ghcr.io/<owner>/<repo>/<recipe>:<tag>." },
+                },
+                required: ["file", "target"],
+            },
+            handler: async (args) => {
+                try {
+                    const { workspacePath } = await workspaceState();
+                    const file = resolveWorkspacePath(workspacePath, args.file, null);
+                    if (!file) return "A recipe file path is required.";
+                    if (!existsSync(file)) {
+                        return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+                    }
+                    const target = String(args.target || "").trim();
+                    if (!target.startsWith("br:ghcr.io/")) {
+                        return `The recipe target must be a br:ghcr.io/<owner>/<repo>/... reference. Received: ${args.target ?? "(none)"}.`;
+                    }
+                    const published = await withGhcrDockerConfig((env) =>
+                        runRadBicepPublish({ file, target, env, log: (m) => { try { session.log(m); } catch {} } }),
+                    );
+                    return `Published recipe to ${published}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
+                } catch (err) {
+                    return `⚠️ Could not publish the recipe: ${err.message}`;
+                }
             },
         },
     ],
