@@ -39,9 +39,6 @@ export {
   generatePortalUrl,
   azure,
   aws,
-  buildOidcSubject,
-  buildEnvironmentSuffix,
-  buildFederatedCredentialName,
 } from "./platforms/index.js";
 export type {
   ComputePlatform,
@@ -49,8 +46,6 @@ export type {
   PortalContext,
   SecretSpec,
   PlatformCapabilities,
-  OidcSubjectConfig,
-  BuildOidcSubjectInput,
 } from "./platforms/index.js";
 export {
   generateVerifyWorkflow,

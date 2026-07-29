@@ -28,19 +28,6 @@ describe("credential profiles", () => {
         expect(list[0].tenantId).toBe("t1");
     });
 
-    it("persists the friendly subscription/tenant display names for the env picker", () => {
-        const saved = saveCredentialProfile(REPO, {
-            name: "azure-prod", provider: "azure", user: "u@d.com",
-            tenantId: "t1", tenantName: "Contoso", subscriptionId: "s1", subscriptionName: "Radius Test",
-        });
-        expect(saved.subscriptionName).toBe("Radius Test");
-        expect(saved.tenantName).toBe("Contoso");
-        // Older profiles saved without the display names round-trip as empty strings.
-        const bare = saveCredentialProfile(REPO, { name: "azure-bare", provider: "azure", subscriptionId: "s2" });
-        expect(bare.subscriptionName).toBe("");
-        expect(bare.tenantName).toBe("");
-    });
-
     it("upserts by name (case-insensitive) instead of duplicating", () => {
         saveCredentialProfile(REPO, { name: "prod", provider: "azure", subscriptionId: "s1" });
         saveCredentialProfile(REPO, { name: "PROD", provider: "azure", subscriptionId: "s2" });

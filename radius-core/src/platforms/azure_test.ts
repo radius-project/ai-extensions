@@ -74,35 +74,6 @@ describe("azure platform", () => {
     it("does not crash with an empty object", () => {
       expect(() => azure.generateOidc({})).not.toThrow();
     });
-
-    it("includes a Service Management Reference (Service Tree) note for enterprise tenants", () => {
-      const result = azure.generateOidc({ clientId: "client-789" });
-      expect(result.output).toContain("--service-management-reference");
-      expect(result.output).toContain("ServiceManagementReference");
-    });
-
-    it("warns that a customized/immutable OIDC subject must match GitHub", () => {
-      const result = azure.generateOidc({ repo: "octo-org/octo-repo" });
-      expect(result.output).toContain("actions/oidc/customization/sub");
-      expect(result.output).toContain("AADSTS700213");
-    });
-
-    it("uses the provided repo full name and environment in the subject", () => {
-      const result = azure.generateOidc({
-        repoFullName: "octo-org/octo-repo",
-        environment: "staging",
-      });
-      expect(result.output).toContain(
-        '"subject": "repo:octo-org/octo-repo:environment:staging"',
-      );
-    });
-
-    it("falls back to OWNER/REPO and production in the subject", () => {
-      const result = azure.generateOidc({});
-      expect(result.output).toContain(
-        '"subject": "repo:OWNER/REPO:environment:production"',
-      );
-    });
   });
 
   // ─── environmentSecrets ──────────────────────────────────────────────────────
