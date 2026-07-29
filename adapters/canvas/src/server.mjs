@@ -57,6 +57,7 @@ import {
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
+  fetchJobLog, findDeployJobId, parseRadDeployProgress,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
   explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
@@ -2259,25 +2260,43 @@ function createRequestHandler(instanceId) {
                 return;
             }
 
-            // Live-status projection lands in Commit 4. For now: if a terminal
-            // deployedGraph was captured this session for the same modeled shape,
-            // mark every matching node success; otherwise greyed.
+            // Live-status projection: while a run is in flight for this session,
+            // build statusById from the monitor loop's live per-resource state.
+            // Otherwise fall back to the terminal graph if one was captured this
+            // session; else greyed.
             let mode = 'greyed';
             const statusById = {};
-            const terminal = entry?.state?.deployedGraph;
-            if (terminal) {
-                const terminalResources = Array.isArray(terminal) ? terminal : (terminal?.resources || []);
-                const terminalKeys = new Set();
-                for (const r of terminalResources) {
-                    if (r?.id) terminalKeys.add(r.id);
-                    if (r?.name) terminalKeys.add(r.name);
+            const isLive = entry?.state?.deployStatus === 'in_progress';
+            if (isLive) {
+                const liveResources = Array.isArray(entry?.state?.deployingResources)
+                    ? entry.state.deployingResources : [];
+                const liveByKey = new Map();
+                for (const r of liveResources) {
+                    const key = r?.id || r?.name;
+                    if (key && r?.deployStatus) liveByKey.set(key, r.deployStatus);
                 }
                 for (const r of modeled) {
-                    if (terminalKeys.has(r.id) || terminalKeys.has(r.name)) {
-                        statusById[r.id || r.name] = 'success';
-                    }
+                    const key = r.id || r.name;
+                    const s = liveByKey.get(r.id) || liveByKey.get(r.name);
+                    statusById[key] = s || 'pending';
                 }
-                if (Object.keys(statusById).length > 0) mode = 'terminal';
+                mode = 'live';
+            } else {
+                const terminal = entry?.state?.deployedGraph;
+                if (terminal) {
+                    const terminalResources = Array.isArray(terminal) ? terminal : (terminal?.resources || []);
+                    const terminalKeys = new Set();
+                    for (const r of terminalResources) {
+                        if (r?.id) terminalKeys.add(r.id);
+                        if (r?.name) terminalKeys.add(r.name);
+                    }
+                    for (const r of modeled) {
+                        if (terminalKeys.has(r.id) || terminalKeys.has(r.name)) {
+                            statusById[r.id || r.name] = 'success';
+                        }
+                    }
+                    if (Object.keys(statusById).length > 0) mode = 'terminal';
+                }
             }
 
             const resources = projectDeployedGraph(modeled, statusById);
@@ -3352,75 +3371,45 @@ function createRequestHandler(instanceId) {
                         let beatStep = '';
                         let beatStepStartedAt = 0;
                         let lastBeatAt = 0;
-                        // Live `rad deploy` progress (published by the workflow to the
-                        // radius-deploy-status branch). We track how many raw lines we've
-                        // already surfaced so we only append new ones.
+                        // Live `rad deploy` progress (from the workflow's job log,
+                        // fetched via GET /repos/{repo}/actions/jobs/{job_id}/logs). We
+                        // track how many raw lines we've already surfaced so we only
+                        // append new ones.
                         let liveLogShown = 0;
                         let deployStarted = false;
-                        // Track which activity-log status changes we've already
-                        // streamed so we only announce new transitions.
-                        const activitySeen = new Set();
-                        // Track how many control-plane / recipe log lines we've surfaced.
-                        let cpLogShown = 0;
-                        let cpLogTail = '';
                         const DEPLOY_STEP = 'Deploy Application';
 
-                        // Poll the Azure activity log the workflow publishes and
-                        // drive FINE-GRAINED per-resource (output) status, coloring
-                        // each planned graph node individually as Azure creates it.
-                        const pollActivity = async () => {
-                            if (provider !== 'azure' || resources.length === 0) return;
-                            const actText = await fetchLiveActivityLog(repo);
-                            if (!actText) return;
-                            const entries = reduceActivityLog(actText);
-                            if (entries.length === 0) return;
-                            const changes = applyActivityToResources(entries, resources, provider, entry.state);
-                            for (const c of changes) {
-                                if (!activitySeen.has(c)) {
-                                    activitySeen.add(c);
-                                    addLog('    ☁ ' + c);
+                        // Merge parseRadDeployProgress output into the per-Radius-resource
+                        // deployStatus. Merge rules match docs/design/2026-07-deployed-application-graph.md:
+                        //   - global "in_progress"  → any pending resource moves to in_progress
+                        //   - byName "success"      → resource moves to success (unless already failed)
+                        //   - byName "failed"       → resource moves to failed (terminal)
+                        //   - global "complete"     → any remaining in_progress becomes success
+                        const mergeRadProgress = (prog) => {
+                            if (prog.global === 'in_progress') {
+                                for (const r of resources) {
+                                    if (!r.deployStatus || r.deployStatus === 'pending') {
+                                        setStatus(r, 'in_progress');
+                                        addLog('  ◐ ' + r.name + ' provisioning…');
+                                    }
                                 }
                             }
-                        };
-
-                        // Stream the Radius control-plane / recipe log (terraform/bicep
-                        // execution from the radius-system pods). Real-time and carries
-                        // the precise recipe failure cause. We append only new lines.
-                        const pollControlPlane = async () => {
-                            const cpText = await fetchLiveControlPlaneLog(repo);
-                            if (!cpText) return;
-                            cpLogTail = cpText;
-                            const lines = cpText.split(/\r?\n/);
-                            for (let i = cpLogShown; i < lines.length; i++) {
-                                const t = lines[i].replace(/\s+$/, '');
-                                if (t) addLog('    ⚙ ' + t);
-                            }
-                            cpLogShown = lines.length;
-                        };
-
-                        // Advance per-resource status from any live log text so the
-                        // graph shows gray→yellow→green/red per node. rad deploy in CI
-                        // (non-TTY) prints no intermediate per-resource lines, so the
-                        // control-plane/recipe log + activity log are the real signals.
-                        const applyProgress = (text) => {
-                            if (!text) return;
-                            const prog = parseResourceProgress(text, resources);
                             for (const r of resources) {
-                                const s = prog[r.name];
+                                const s = prog.byName[r.name];
                                 if (!s) continue;
                                 const cur = r.deployStatus;
-                                // Mid-deployment a node is NEVER painted red: a transient
-                                // "error"/"failed"/"postponed" line in the live log does not
-                                // mean the deployment failed. Such resources stay yellow
-                                // (in_progress). Only the TERMINAL run conclusion (below)
-                                // decides red vs green, so nodes go red solely on an actual
-                                // failed deployment.
-                                if (s === 'success' && cur !== 'success' && cur !== 'failed') {
+                                if (cur === 'failed') continue;
+                                if (s === 'success' && cur !== 'success') {
                                     setStatus(r, 'success');
                                     addLog('  ✓ ' + r.name + ' deployed');
-                                } else if ((s === 'in_progress' || s === 'failed') && (cur === 'pending' || !cur)) {
-                                    setStatus(r, 'in_progress');
-                                    addLog('  ◐ ' + r.name + ' provisioning…');
+                                } else if (s === 'failed') {
+                                    setStatus(r, 'failed');
+                                    addLog('  ✗ ' + r.name + ' failed');
+                                }
+                            }
+                            if (prog.global === 'complete') {
+                                for (const r of resources) {
+                                    if (r.deployStatus === 'in_progress') setStatus(r, 'success');
                                 }
                             }
                         };
@@ -3459,8 +3448,9 @@ function createRequestHandler(instanceId) {
                                 }
                             }
 
-                            // While `rad deploy` runs, consume the live progress log
-                            // the workflow publishes and drive REAL per-resource state.
+                            // While `rad deploy` runs, read the workflow job log (which
+                            // grows as the runner writes it) and drive REAL per-resource
+                            // state from the column-1 keywords `rad deploy` prints.
                             const deployStep = detail.steps.find(s => s.name === DEPLOY_STEP);
                             if (deployStep && deployStep.status === 'in_progress' && resources.length > 0) {
                                 if (!deployStarted) {
@@ -3469,10 +3459,9 @@ function createRequestHandler(instanceId) {
                                     entry.state.deployStartedAt = deployStepStartedAt;
                                     addLog('🚀 rad deploy running — provisioning resources...');
                                     addLog('  ⏱ Deployment started at ' + new Date(deployStepStartedAt).toISOString());
-                                    // Leave nodes gray; each flips to yellow when its own
-                                    // recipe/operation actually starts (see applyProgress).
                                 }
-                                const live = await fetchLiveDeployLog(repo);
+                                const jobId = findDeployJobId(detail);
+                                const live = jobId ? await fetchJobLog(repo, jobId) : null;
                                 if (live) {
                                     // Append any new raw rad-deploy output lines to the feed.
                                     const lines = live.split(/\r?\n/);
@@ -3481,15 +3470,9 @@ function createRequestHandler(instanceId) {
                                         if (t) addLog('    │ ' + t);
                                     }
                                     liveLogShown = lines.length;
-                                    // Flip resources to their real status as the log reports them.
-                                    applyProgress(live);
+                                    // Flip resources to their real status as `rad deploy` reports them.
+                                    mergeRadProgress(parseRadDeployProgress(live, resources));
                                 }
-                                // Fine-grained Azure activity-log status per resource.
-                                await pollActivity();
-                                // Real-time control-plane / recipe (terraform) output.
-                                await pollControlPlane();
-                                // Drive per-node coloring from the control-plane/recipe log.
-                                applyProgress(cpLogTail);
                                 // Fallback: if nothing has advanced past pending ~25s into
                                 // the deploy (no parseable per-resource signal), mark all
                                 // pending nodes in_progress so the graph isn't stuck gray.
@@ -3501,33 +3484,18 @@ function createRequestHandler(instanceId) {
 
                             if (detail.status === 'completed') {
                                 const conclusion = detail.conclusion;
-                                // Final fine-grained activity sweep before settling.
-                                await pollActivity();
-                                await pollControlPlane();
 
                                 // ── Finalize logs without cutting off ───────────
-                                // The workflow writes the terminal deploy-state marker
-                                // (succeeded/failed) LAST — only after the complete log
-                                // and the deployed graph have been pushed to the status
-                                // branch. Keep fetching the live log until the state is
-                                // terminal AND its length stops growing, so we never drop
-                                // the final rad-deploy output (e.g. the summary table).
-                                let parsed;
-                                let live = null;
-                                let prevLen = -1;
-                                let stableHits = 0;
-                                for (let f = 0; f < 12; f++) {
-                                    const ds = await fetchDeployState(repo);
-                                    const cur = await fetchLiveDeployLog(repo);
-                                    if (cur) live = cur;
-                                    const len = cur ? cur.length : 0;
-                                    const terminal = (ds === 'succeeded' || ds === 'failed');
-                                    if (len === prevLen) stableHits++; else stableHits = 0;
-                                    prevLen = len;
-                                    // Stream any control-plane lines that arrive late too.
-                                    await pollControlPlane();
-                                    if (terminal && (stableHits >= 1 || len === 0)) break;
-                                    if (!terminal || stableHits < 1) await delay(2500);
+                                // The run is complete, so `gh run view --log` returns
+                                // the whole combined log deterministically. Also grab
+                                // one more job-log snapshot in case the runner wrote
+                                // trailing lines after conclusion; take whichever is
+                                // longer so we never drop the summary block.
+                                let live = await fetchRunLog(repo, dRunId);
+                                const finalJobId = findDeployJobId(detail);
+                                if (finalJobId) {
+                                    const jobTail = await fetchJobLog(repo, finalJobId);
+                                    if (jobTail && jobTail.length > (live ? live.length : 0)) live = jobTail;
                                 }
                                 if (live) {
                                     const lines = live.split(/\r?\n/);
@@ -3536,11 +3504,8 @@ function createRequestHandler(instanceId) {
                                         if (t) addLog('    │ ' + t);
                                     }
                                     liveLogShown = lines.length;
-                                    parsed = parseRadDeployLog(live, resources, { stripPrefix: false });
-                                } else {
-                                    const logText = await fetchRunLog(repo, dRunId);
-                                    parsed = parseRadDeployLog(logText, resources);
                                 }
+                                const parsedProg = parseRadDeployProgress(live || '', resources);
 
                                 // Record stop time + duration.
                                 const finishedAt = Date.now();
@@ -3576,8 +3541,9 @@ function createRequestHandler(instanceId) {
                                     addLog('Click on deployed resources to view them in the ' + (provider === 'aws' ? 'AWS Console' : 'Azure Portal') + '.');
                                 } else {
                                     resources.forEach(r => {
-                                        if (parsed[r.name] === 'success') setStatus(r, 'success');
-                                        else if (parsed[r.name] === 'failed' || r.deployStatus === 'pending' || r.deployStatus === 'in_progress') setStatus(r, 'failed');
+                                        const s = parsedProg.byName[r.name];
+                                        if (s === 'success' && r.deployStatus !== 'failed') setStatus(r, 'success');
+                                        else if (s === 'failed' || r.deployStatus === 'pending' || r.deployStatus === 'in_progress') setStatus(r, 'failed');
                                     });
                                     entry.state.deployStatus = 'failed';
                                     addLog('');
@@ -3605,20 +3571,6 @@ function createRequestHandler(instanceId) {
                                         addLog('──────── failure details ────────');
                                         detailBlock.split('\n').forEach(l => addLog('  ' + l));
                                         addLog('─────────────────────────────────');
-                                    }
-                                    // The exact recipe (terraform/bicep) error is emitted by the
-                                    // Radius control plane. Surface its tail if we captured it.
-                                    if (cpLogTail) {
-                                        const cpLines = cpLogTail.split(/\r?\n/).filter(l => l.trim());
-                                        const cpErr = cpLines.filter(l => /error|failed|terraform|tofu|recipe/i.test(l)).slice(-25);
-                                        const cpShow = (cpErr.length ? cpErr : cpLines.slice(-25));
-                                        if (cpShow.length) {
-                                            dErr += '\n\n──── control-plane / recipe log ────\n' + cpShow.join('\n');
-                                            addLog('');
-                                            addLog('──────── control-plane / recipe log ────────');
-                                            cpShow.forEach(l => addLog('  ' + l));
-                                            addLog('─────────────────────────────────────────');
-                                        }
                                     }
                                     dErr += '\n\nView the full run: https://github.com/' + repo + '/actions/runs/' + dRunId;
                                     entry.state.deployError = dErr;

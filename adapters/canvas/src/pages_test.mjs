@@ -341,6 +341,15 @@ describe("deployedGraphPage — Commit 1 baseline (greyed Modeled skeleton)", ()
     it("no longer treats /api/deploy-status resources as the topology source", () => {
         expect(html).not.toContain("liveRes.length && (st === 'in_progress' || st === 'success')");
     });
+
+    it("Commit 4: reuses graphController.update to preserve React Flow viewport across live ticks", () => {
+        expect(html).toContain("graphController.update(resources)");
+    });
+
+    it("Commit 4: re-polls /api/deployed-graph every 3s while the deploy is in progress", () => {
+        expect(html).toContain("deployState.status === 'in_progress'");
+        expect(html).toContain("setTimeout(loadGraph, 3000)");
+    });
 });
 
 describe("remaining pages smoke-render without removed tokens", () => {

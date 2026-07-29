@@ -1284,9 +1284,11 @@ function escapeHtmlClient(s) {
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
     }
 
+    var graphController = null;
+
     function renderGraph(resources) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        radiusRenderGraph('graph-container', resources, {
+        graphController = radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
             branch: 'main',
             deployMode: true,
@@ -1297,25 +1299,39 @@ function escapeHtmlClient(s) {
     function loadGraph() {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
+        if (statusEl && !graphController) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
         // Stream deployment logs under the graph whenever a deploy is running or
-        // has produced output (independent of the graph fetch).
+        // has produced output (independent of the graph fetch). Also drives the
+        // live re-poll cadence below.
+        var deployState = null;
         fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
+            deployState = s;
             var st = s && s.status;
             if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
                 startLogStream();
             }
-        }).catch(function() {});
-
-        var app = appSelect.value, env = envSelect.value;
-        var url = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)
-            + (app ? '&application=' + encodeURIComponent(app) : '')
-            + (env ? '&environment=' + encodeURIComponent(env) : '');
-        fetch(url).then(function(r) { return r.json(); }).then(function(d) {
-            var resources = (d && d.resources) || [];
-            if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-            renderGraph(resources);
-        }).catch(function() { showNothing('Nothing deployed yet'); });
+        }).catch(function() {}).finally(function() {
+            var app = appSelect.value, env = envSelect.value;
+            var url = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)
+                + (app ? '&application=' + encodeURIComponent(app) : '')
+                + (env ? '&environment=' + encodeURIComponent(env) : '');
+            fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+                var resources = (d && d.resources) || [];
+                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
+                // Preserve the React Flow viewport across live status updates by
+                // reusing the mounted controller when we already have one.
+                if (graphController && typeof graphController.update === 'function') {
+                    graphController.update(resources);
+                } else {
+                    renderGraph(resources);
+                }
+                // While a deploy is running, keep pulling the projection so
+                // per-node badges transition as rad deploy prints its lines.
+                if (deployState && deployState.status === 'in_progress') {
+                    pollTimer = setTimeout(loadGraph, 3000);
+                }
+            }).catch(function() { showNothing('Nothing deployed yet'); });
+        });
     }
 
     function loadApplications() {
