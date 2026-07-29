@@ -900,7 +900,10 @@ function createRequestHandler(instanceId) {
                     // SP might already exist, try to get it
                     const spShow = await runCmd('az', ['ad', 'sp', 'show', '--id', clientId, '--query', 'id', '-o', 'tsv']);
                     if (spShow.code !== 0) {
-                        steps.push('⚠️ Could not create/find Service Principal: ' + spResult.stderr);
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: 'Failed to create/find Service Principal: ' + spResult.stderr, steps }));
+                        return;
                     }
                 }
                 steps.push('✅ Service Principal ready');
@@ -930,7 +933,10 @@ function createRequestHandler(instanceId) {
                 steps.push(`Assigning Contributor role on ${resourceGroup}...`);
                 const roleResult = await runCmd('az', ['role', 'assignment', 'create', '--assignee', clientId, '--role', 'Contributor', '--scope', `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`, '--subscription', subscriptionId, '--output', 'none']);
                 if (roleResult.code !== 0 && !roleResult.stderr.includes('already exists')) {
-                    steps.push('⚠️ Role assignment warning: ' + roleResult.stderr);
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Failed to assign Contributor role: ' + roleResult.stderr, steps }));
+                    return;
                 } else {
                     steps.push('✅ Contributor role assigned');
                 }
