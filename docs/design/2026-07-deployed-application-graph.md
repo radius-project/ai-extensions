@@ -2,7 +2,7 @@
 
 - **Author**: Nithya Subramanian (@nithya)
 - **Date**: 2026-07
-- **Status**: Draft
+- **Status**: In review
 
 ## Overview
 
@@ -426,5 +426,7 @@ Each commit is one PR; no commit relies on a change to `radius-project/radius`.
 - **Continuing to depend on the `radius-deploy-status` orphan branch.** Rejected: upstream Repo Radius no longer publishes to it in the flows we exercise, so `fetchLiveDeployLog` / `fetchDeployGraph` return empty and the view stays greyed forever. The job-log path removes the dependency entirely.
 
 ## Design review notes
+
+Implementation of this design landed across seven commits on branch `deployedgraph` (see Development plan section). Reviewer to update the **Status** field above to `Approved` at merge, or record required changes here before requesting a revision.
 
 <!-- Recorded on the PR before merge. -->
