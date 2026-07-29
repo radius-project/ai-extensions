@@ -345,15 +345,70 @@ Two log-panel considerations already handled remain unchanged:
 
 ## Development plan
 
-Deliver incrementally so each step is independently reviewable and shippable behind the existing `deployedGraphPage`. Each step ends with tests green.
+Deliver incrementally so each commit is independently reviewable and shippable behind the existing `deployedGraphPage`. Every commit ends with tests green. Commits 1–2 already deliver the greyed-view-with-legend user experience end-to-end; commits 3–5 wire the live signal and terminal graph; commits 6–7 delete the orphan-branch code path and land the docs.
 
-1. **Wire `Monitor Graph` to a greyed Modeled skeleton (baseline).** No status logic. `/api/deployed-graph` gains the `environment` / `application` query and returns `{ mode: "greyed", resources: <modeled minus outputs> }` from the `rad app graph` path. `deployedGraphPage` mounts `radiusRenderGraph(..., { deployMode: true, showLegend: true })` on first paint and stops calling `showNothing` when a repo + app are known. This alone gives the user the greyed graph they described. Tests: page test asserts the mount options; server test asserts outputs are absent.
-2. **Add the status legend.** Extend the `showLegend` branch in `client.mjs` to render the hourglass / check / cross legend when `deployMode && !diffMode`. Locked in by a client behavioral test.
-3. **Job-log parser + live status projection.** Add `fetchJobLog`, `findDeployJobId`, and `parseRadDeployProgress` to [deploy.mjs](../../adapters/canvas/src/deploy.mjs). Swap the monitor loop's `fetchLiveDeployLog` call for `fetchJobLog(repo, findDeployJobId(detail))`. Server merges the parsed `byName` map into `entry.state.deployingResources` and `/api/deployed-graph` returns `mode: "live"` while the run is `in_progress`. `deployedGraphPage` subscribes to `/api/deploy-status?since=N` and calls `controller.update(resources)` on each transition. Unit tests: the User experience sample stdout → correct `{ global, byName }` map; `Failed <name> <type>` → `failed`; unknown lines → ignored.
-4. **Terminal graph from the same job log.** Extract the `rad app graph` JSON tail from the completed job log, parse via `applicationGraphToResources`, store in `entry.state.deployedGraph`. `/api/deployed-graph` returns `mode: "terminal"` when it is present. Delete the `radius-deploy-status` fetchers (`fetchLiveDeployLog`, `fetchLiveActivityLog`, `fetchLiveControlPlaneLog`, `fetchDeployState`, `fetchDeployGraph`) and their callers (`pollActivity`, `pollControlPlane`, the terminal `fetchDeployGraph` retry loop) in the same PR.
-5. **Cleanup.** Remove `applyActivityToResources`, `reduceActivityLog`, `azureTypeFromResourceId`, `rewireDeployedGraphChain`, `normalizeDeployedGraph`, and `deployedResourceCategory` from `deploy.mjs` (all only referenced by paths deleted in step 4). Regenerate `plugins/radius/extension.mjs`. Update the Modeled/Planned/Diff page smoke tests only where output count changed.
+### Commit 1 — Deployed graph = greyed Modeled skeleton
 
-Each step is a single PR; no step relies on a change to `radius-project/radius`.
+**Outcome:** Clicking **Monitor Graph** on the Deployments page opens a greyed Modeled topology (outputs excluded) even when no deploy has ever run.
+
+- `radius-core/src/graph/deployed.ts` (new) — `projectDeployedGraph(modeled, statusById)`; runs `filterGraphVisualizationResources` from [visualization.ts](../../radius-core/src/graph/visualization.ts#L70), strips `outputResources`, initialises every node's `deployStatus` to `pending` (or `statusById[id||name]`). Export via [radius-core/src/graph/index.ts](../../radius-core/src/graph/index.ts) and [radius-core/src/index.ts](../../radius-core/src/index.ts).
+- [adapters/canvas/src/server.mjs](../../adapters/canvas/src/server.mjs#L2213) — `/api/deployed-graph` accepts `application` + `environment`. When neither an in-flight run nor a captured terminal graph exists, resolve Modeled via the same `fetchBicepSelection` + `buildGraphViaRad` path `graphPage` uses ([server.mjs](../../adapters/canvas/src/server.mjs#L3070)), pipe through `projectDeployedGraph({})`, respond `{ mode: "greyed", resources, repo, branch }`.
+- [adapters/canvas/src/pages.mjs](../../adapters/canvas/src/pages.mjs#L1130) — `deployedGraphPage` stops calling `showNothing("Nothing deployed yet")` when a repo + app are present; mounts `radiusRenderGraph(..., { deployMode: true, showLegend: true, repoUrl, branch })` on first paint.
+- **Tests:** `radius-core/src/graph/deployed_test.ts` (outputs stripped; unknown key → pending; container-images filtered). `pages_test.mjs` asserts `deployMode: true` + `showLegend: true`. `server_test.mjs` (or `deploy_test.mjs`) asserts `mode: "greyed"` shape.
+
+### Commit 2 — Status legend on Deployed
+
+**Outcome:** Legend shows hourglass / green check / red cross with labels next to the graph.
+
+- [adapters/canvas/src/client.mjs](../../adapters/canvas/src/client.mjs#L1222) — extend the `options.showLegend && !diffMode` branch so `deployMode` renders the status legend (using `radiusDeployBadgeSvg` from [client.mjs](../../adapters/canvas/src/client.mjs#L266)) instead of the category legend. Modeled/Planned keep the category legend.
+- **Tests:** `client_test.mjs` — deployMode + showLegend produces three items with hourglass / check / cross badges.
+
+### Commit 3 — Job-log transport + `rad deploy` parser
+
+**Outcome:** Introduce the new signal source without wiring it up yet, so it can be reviewed as a pure helper module.
+
+- [adapters/canvas/src/deploy.mjs](../../adapters/canvas/src/deploy.mjs) — add:
+    - `fetchJobLog(repo, jobId)` — `gh api /repos/${repo}/actions/jobs/${jobId}/logs`.
+    - `findDeployJobId(detail, stepName = "Deploy Application")` — pure lookup over `detail.jobs[].steps[]`.
+    - `parseRadDeployProgress(logText, resources)` — column-1 keyword parser: `Deployment In Progress...` → `global: "in_progress"`; `Deployment Complete` → `global: "complete"`; `Completed <name> <type>` → `byName[name] = "success"`; `Failed <name> <type>` → `byName[name] = "failed"`.
+- **Tests:** `deploy_test.mjs` — feed the exact sample stdout from User experience; assert the resulting `{ global, byName }`. Cases for `Failed` line, unknown keyword ignored, empty input, resource-name-not-in-modeled ignored, `findDeployJobId` returning `null` when no matching step exists.
+
+*No behaviour change on the running system — dead code until commit 4.*
+
+### Commit 4 — Live status projection
+
+**Outcome:** During a deploy, badges transition per-node in the Deployed tab as `rad deploy` prints its lines.
+
+- [adapters/canvas/src/server.mjs](../../adapters/canvas/src/server.mjs) monitor loop (around L3419) — replace `fetchLiveDeployLog(repo)` with `fetchJobLog(repo, findDeployJobId(detail))`. Feed the delta into the log ring buffer, then call `parseRadDeployProgress` and merge into `entry.state.deployingResources` using the merge rules (pending→in_progress on `global`, terminal success/failed by name, `complete`→any in_progress becomes success, run conclusion !== success → pending/in_progress become failed).
+- Remove `pollActivity` / `pollControlPlane` calls from this loop (their fetchers stay for now — deleted in commit 6).
+- `/api/deployed-graph` handler — when `entry.state.deployStatus === "in_progress"` for the requested `(app, env)`, build `statusById` from `entry.state.deployingResources` and respond `{ mode: "live", resources: projectDeployedGraph(modeled, statusById) }`.
+- [adapters/canvas/src/pages.mjs](../../adapters/canvas/src/pages.mjs#L1130) `deployedGraphPage` — subscribe to `/api/deploy-status?since=N`, call `controller.update(resources)` from `radiusRenderGraph` ([client.mjs](../../adapters/canvas/src/client.mjs#L1257)) on each status change; stop polling on a terminal status.
+- **Tests:** `server_test.mjs` — synthetic tick with `Completed frontend Applications.Core/containers` flips the matching node to `success`; `Failed mysql …` flips to `failed`; workflow conclusion `failure` after `Completed …` for A but not B → B becomes `failed`, A stays `success`.
+
+### Commit 5 — Terminal graph from the same job log
+
+**Outcome:** After a successful run, the Deployed tab shows the cluster-reported graph, still Modeled-shaped, all green.
+
+- [adapters/canvas/src/deploy.mjs](../../adapters/canvas/src/deploy.mjs) — add `extractAppGraphJson(logText)` that walks the log tail after the `Resources:` marker and returns the last balanced `{…}` block.
+- [adapters/canvas/src/server.mjs](../../adapters/canvas/src/server.mjs) — on run conclusion `success`, run `extractAppGraphJson(logTxt)` → `JSON.parse` → `applicationGraphToResources` → `entry.state.deployedGraph`. Replace the `for (let g = 0; g < 6 && !deployed; g++) { deployed = await fetchDeployGraph(repo); … }` retry loop.
+- `/api/deployed-graph` — when `entry.state.deployedGraph` is present, reduce to Modeled shape via `projectDeployedGraph`, respond `{ mode: "terminal" }`.
+- **Tests:** `deploy_test.mjs` — `extractAppGraphJson` against a synthetic log with the `Resources:` block followed by a valid JSON tail; malformed tail returns `null`. `server_test.mjs` — terminal request returns `mode: "terminal"` and all `success`.
+
+### Commit 6 — Remove the orphan-branch code path
+
+**Outcome:** Delete everything the new path replaces. Pure removal; no behavioural change.
+
+- [adapters/canvas/src/deploy.mjs](../../adapters/canvas/src/deploy.mjs) — delete `fetchLiveDeployLog`, `fetchLiveActivityLog`, `fetchLiveControlPlaneLog`, `fetchDeployState`, `fetchDeployGraph`, `applyActivityToResources`, `reduceActivityLog`, `azureTypeFromResourceId`, `rewireDeployedGraphChain`, `normalizeDeployedGraph`, `deployedResourceCategory`, and the top-of-file comment about the orphan branch.
+- [adapters/canvas/src/server.mjs](../../adapters/canvas/src/server.mjs) — drop the corresponding imports, the `pollActivity` / `pollControlPlane` helpers, and any output-resource `deployStatus` mutation on the `/api/deployed-graph` code path.
+- Regenerate [plugins/radius/extension.mjs](../../plugins/radius/extension.mjs) via `adapters/canvas/build.mjs`.
+- **Tests:** update `deploy_test.mjs` / `server_test.mjs` to remove tests that covered deleted functions.
+
+### Commit 7 — Docs + Changeset
+
+- Update this doc's **Status** from `Draft` → `Approved`; fill in **Design review notes** with the PR outcome.
+- `pnpm changeset` describing the user-facing change: "Deployed application graph now renders the Modeled topology with per-node live status from the workflow job log; no dependency on the `radius-deploy-status` branch."
+
+Each commit is one PR; no commit relies on a change to `radius-project/radius`.
 
 ## Open questions
 
