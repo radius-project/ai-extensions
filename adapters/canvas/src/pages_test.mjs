@@ -268,11 +268,14 @@ describe("remaining pages smoke-render without removed tokens", () => {
     it("does not render known light-only component surfaces", () => {
         const html = cases.flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""]).join("\n");
         for (const literal of [
-            "background:#ffebe9",
-            "background:#1e1e1e",
-            "background:#edfaed",
-            "background:#fff5b1",
-            "color:#82071e",
+            "#ffebe9",
+            "#ddf4ff",
+            "#82071e",
+            "#0a3069",
+            "#54aeff",
+            "#1e1e1e",
+            "#edfaed",
+            "#fff5b1",
         ]) {
             expect(html).not.toContain(literal);
         }
