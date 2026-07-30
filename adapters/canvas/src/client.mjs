@@ -183,6 +183,7 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
 
     var timeoutId = setTimeout(function() {
         if (statusEl && statusEl.textContent === 'Loading branches…') {
+            statusEl.style.display = '';
             statusEl.textContent = 'Loading branches is taking longer than expected…';
             statusEl.className = 'status error';
             if (baseSel) baseSel.innerHTML = '<option value="">Timeout</option>';
@@ -194,8 +195,7 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearTimeout(timeoutId);
-            if (d.error) { if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
-            var branches = d.branches || [];
+            if (d.error) { if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
             var workspaceBranch = d.workspaceBranch || '';
             // Base must be a real GitHub ref (the diff is computed against a
             // pushed base). Head may additionally be the local worktree branch —
