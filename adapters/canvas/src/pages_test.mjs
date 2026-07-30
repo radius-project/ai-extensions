@@ -123,7 +123,6 @@ describe("pageShell", () => {
         const html = pageShell("My Title", "<p>hello</p>");
         expect(html).toContain(".react-flow__background circle { fill: var(--rad-grid); }");
     });
-    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {

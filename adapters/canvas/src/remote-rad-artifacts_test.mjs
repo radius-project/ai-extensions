@@ -124,8 +124,8 @@ test("radArtifactsDirForSelection stages a temp dir for a remote selection", asy
 
 test("radArtifactsDirForSelection uses the workspace dir for a local selection", async () => {
     const { dir, remote } = await radArtifactsDirForSelection({
-        isLocal: true, state: { workspacePath: path.join(path.sep, "tmp", "ws") }, bicepRepoPath: ".radius/app.bicep",
+        isLocal: true, state: { workspacePath: path.join(path.parse(process.cwd()).root, "tmp", "ws") }, bicepRepoPath: ".radius/app.bicep",
     });
     assert.equal(remote, false);
-    assert.equal(dir, path.join(path.sep, "tmp", "ws", ".radius"));
+    assert.equal(dir, path.join(path.parse(process.cwd()).root, "tmp", "ws", ".radius"));
 });
