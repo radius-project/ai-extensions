@@ -264,12 +264,12 @@ window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 // Managed-cluster resources stay gray throughout (see getNodeColors); their
 // overall status is conveyed by the corner status badge instead of the fill.
 var RADIUS_DEPLOY_STATUS_COLORS = {
-    pending:     { bg: '#f6f8fa', border: '#8b949e' },
-    in_progress: { bg: '#f6f8fa', border: '#8b949e' },
-    postponed:   { bg: '#f6f8fa', border: '#8b949e' },
-    waiting:     { bg: '#f6f8fa', border: '#8b949e' },
-    success:     { bg: '#ddf4ff', border: '#0969da' },
-    failed:      { bg: '#ffebe9', border: '#cf222e' }
+    pending:     { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge)' },
+    in_progress: { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge)' },
+    postponed:   { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge)' },
+    waiting:     { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge)' },
+    success:     { bg: 'color-mix(in srgb, var(--rad-link) 14%, var(--rad-surface))', border: 'var(--rad-link)' },
+    failed:      { bg: 'color-mix(in srgb, var(--rad-danger) 14%, var(--rad-surface))', border: 'var(--rad-danger)' }
 };
 
 // Maps a deploy status to the corner status badge shown on each node while a
@@ -535,7 +535,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // of throwing and breaking the whole panel.
     var RF = window.ReactFlow;
     if (!window.React || !window.ReactDOM || !RF) {
-        container.innerHTML = '<div style="padding:16px;color:#cf222e;font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
+        container.innerHTML = '<div style="padding:16px;color:var(--rad-danger);font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
         return null;
     }
     var React = window.React;
@@ -694,14 +694,14 @@ function radiusRenderGraph(containerId, resources, options) {
     }
 
     function getNodeColors(r) {
-        // Diff mode keeps the same white card surface as the modeled graph.
+        // Diff mode keeps the same themed card surface as the modeled graph.
         // Only the border color encodes diff status.
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
-                case 'added': return { bg: '#ffffff', border: '#16a34a' };
-                case 'removed': return { bg: '#ffffff', border: '#dc2626' };
-                case 'modified': return { bg: '#ffffff', border: '#ca8a04' };
-                default: return { bg: '#ffffff', border: '#d0d7de' };
+                case 'added': return { bg: 'var(--rad-surface)', border: 'var(--rad-success)' };
+                case 'removed': return { bg: 'var(--rad-surface)', border: 'var(--rad-danger)' };
+                case 'modified': return { bg: 'var(--rad-surface)', border: 'var(--rad-warning)' };
+                default: return { bg: 'var(--rad-surface)', border: 'var(--rad-stroke)' };
             }
         }
         // The "Deploying" page passes deployMode. A managed-cluster node always
@@ -714,10 +714,10 @@ function radiusRenderGraph(containerId, resources, options) {
             var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
         }
-        // Non-diff nodes use the clean "modeled graph" card style: a white
+        // Non-diff nodes use the clean modeled-graph card style: a themed
         // surface with a thin neutral border. Category is conveyed by the icon
         // (owned by the type/recipe pack), not by node fill/shape.
-        return { bg: '#ffffff', border: '#d0d7de' };
+        return { bg: 'var(--rad-surface)', border: 'var(--rad-stroke)' };
     }
 
     // The figma .rad-node card is rendered natively by the RadNode React
@@ -740,7 +740,7 @@ function radiusRenderGraph(containerId, resources, options) {
             if (edgeSeen[id]) return;
             edgeSeen[id] = true;
             dashed = dashed || plannedMode;
-            var stroke = dashed ? '#57606a' : '#8c959f';
+            var stroke = dashed ? 'var(--rad-edge-emphasis)' : 'var(--rad-edge)';
             // Diff mode colors the edge by whether the CONNECTION itself changed
             // between base and head (computeGraphDiff tags each rendered
             // connection): added=green, removed=red, unchanged=neutral gray. A
@@ -750,15 +750,15 @@ function radiusRenderGraph(containerId, resources, options) {
             // back to the endpoints' own diff statuses.
             if (diffMode) {
                 var cs = connStatus || '';
-                if (cs === 'removed') stroke = '#dc2626';
-                else if (cs === 'added') stroke = '#16a34a';
-                else if (cs === 'unchanged') stroke = '#8c959f';
+                if (cs === 'removed') stroke = 'var(--rad-danger)';
+                else if (cs === 'added') stroke = 'var(--rad-success)';
+                else if (cs === 'unchanged') stroke = 'var(--rad-edge)';
                 else {
                     var sStatus = diffStatusById[source] || '';
                     var tStatus = diffStatusById[target] || '';
-                    if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
-                    else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
-                    else stroke = '#8c959f';
+                    if (sStatus === 'removed' || tStatus === 'removed') stroke = 'var(--rad-danger)';
+                    else if (sStatus === 'added' || tStatus === 'added') stroke = 'var(--rad-success)';
+                    else stroke = 'var(--rad-edge)';
                 }
             }
             var style = { stroke: stroke, strokeWidth: 1.5 };
@@ -874,7 +874,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     // Output child nodes only appear in the modeled/diff graphs
                     // (the planned and deploying graphs skip this block), so they
                     // always render as neutral grey.
-                    var outColors = { bg: '#f6f8fa', border: '#8c959f' };
+                    var outColors = { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge)' };
                     pushNode(outId, {
                         borderColor: outColors.border,
                         borderWidth: 1,
@@ -992,7 +992,7 @@ function radiusRenderGraph(containerId, resources, options) {
             : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
-            style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
+            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-surface)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || 'var(--rad-stroke)' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
@@ -1050,7 +1050,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 setTimeout(function() { try { inst.fitView({ padding: 0.18 }); } catch (e) {} }, 30);
             }
         },
-            h(Background, { gap: 16, size: 1, color: '#e1e4e8' }),
+            h(Background, { gap: 16, size: 1 }),
             h(Controls, { showInteractive: false })
         );
     }

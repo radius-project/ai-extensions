@@ -193,17 +193,45 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
 });
 
 describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
-    it("keeps diff node backgrounds white and colors only the border by diff status", () => {
-        expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: '#ffffff', border: '#16a34a' };");
-        expect(CLIENT_GRAPH_JS).toContain("case 'removed': return { bg: '#ffffff', border: '#dc2626' };");
-        expect(CLIENT_GRAPH_JS).toContain("case 'modified': return { bg: '#ffffff', border: '#ca8a04' };");
-        // Unchanged / unknown status falls back to the modeled card's neutral gray.
-        expect(CLIENT_GRAPH_JS).toContain("default: return { bg: '#ffffff', border: '#d0d7de' };");
-        // No tinted diff backgrounds remain.
-        expect(CLIENT_GRAPH_JS).not.toContain("#dcfce7");
-        expect(CLIENT_GRAPH_JS).not.toContain("#fee2e2");
-        expect(CLIENT_GRAPH_JS).not.toContain("#fef9c3");
-        expect(CLIENT_GRAPH_JS).not.toContain("#f3f4f6");
+    it("keeps diff node backgrounds theme-aware and colors only the border by diff status", () => {
+        // Extract and run the REAL getNodeColors, supplying the closure variables
+        // it reads from radiusRenderGraph, so this exercises behavior rather than
+        // re-asserting source text.
+        const fnSrc = CLIENT_GRAPH_JS.match(/function getNodeColors\(r\) \{[\s\S]*?\n    \}/)[0];
+        const getNodeColors = new Function("window", "diffMode", "deployMode", `
+            ${CLIENT_GRAPH_JS.match(/var RADIUS_DEPLOY_STATUS_COLORS = \{[\s\S]*?\n\};/)[0]}
+            ${CLIENT_GRAPH_JS.match(/function radiusIsManagedClusterType[\s\S]*?\n\}/)[0]}
+            ${CLIENT_GRAPH_JS.match(/function radiusIsManagedClusterResource[\s\S]*?\n\}/)[0]}
+            ${fnSrc}
+            return getNodeColors;
+        `)({ addEventListener() {} }, true, false);
+
+        // Every status shares the themed card surface; only the border encodes status.
+        const statuses = ["added", "removed", "modified", "unchanged", ""];
+        const surfaces = new Set(statuses.map((s) => getNodeColors({ diffStatus: s }).bg));
+        expect(surfaces).toEqual(new Set(["var(--rad-surface)"]));
+
+        // Added / removed / modified must each be visually distinct.
+        const borders = ["added", "removed", "modified"].map((s) => getNodeColors({ diffStatus: s }).border);
+        expect(new Set(borders).size).toBe(3);
+
+        // No pinned literals — they would not flip with the host theme.
+        expect(fnSrc).not.toMatch(/#[0-9a-f]{3,8}/i);
+    });
+
+    it("expresses every graph edge color decision as a theme token, not a pinned literal", () => {
+        // Guard for the whole rendering path: a reintroduced light-mode hex here
+        // would be invisible in dark mode. SVG icon artwork is brand/product
+        // iconography and intentionally keeps its own palette.
+        const withoutIcons = CLIENT_GRAPH_JS.replace(/svg = '<svg[\s\S]*?<\/svg>';/g, "");
+        const pushEdge = withoutIcons.match(/function pushEdge\([\s\S]*?\n        \}/)[0];
+        expect(pushEdge).not.toMatch(/#[0-9a-f]{3,8}/i);
+    });
+
+    it("expresses node background/border choices as theme tokens, not pinned literals", () => {
+        const withoutIcons = CLIENT_GRAPH_JS.replace(/svg = '<svg[\s\S]*?<\/svg>';/g, "");
+        const pushNode = withoutIcons.match(/function pushNode\([\s\S]*?\n        \}/)[0];
+        expect(pushNode).not.toMatch(/#[0-9a-f]{3,8}/i);
     });
 
     it("colors diff edges by the connection's own diff status (added/removed/unchanged), not just its endpoints", () => {
@@ -213,9 +241,9 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
         // synthetic connection, is drawn at all).
         expect(CLIENT_GRAPH_JS).toContain("function pushEdge(source, target, dashed, connStatus)");
         expect(CLIENT_GRAPH_JS).toContain("var cs = connStatus || '';");
-        expect(CLIENT_GRAPH_JS).toContain("if (cs === 'removed') stroke = '#dc2626';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'added') stroke = '#16a34a';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'unchanged') stroke = '#8c959f';");
+        expect(CLIENT_GRAPH_JS).toContain("if (cs === 'removed') stroke = 'var(--rad-danger)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'added') stroke = 'var(--rad-success)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'unchanged') stroke = 'var(--rad-edge)';");
         // The connection loop threads each connection's diff status into pushEdge.
         expect(CLIENT_GRAPH_JS).toContain("if (targetExists) pushEdge(r.id || r.name, connTarget, false, conn.diffStatus || '');");
     });
@@ -223,9 +251,9 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
     it("falls back to endpoint diff statuses only for edges with no connection-level status (e.g. output edges)", () => {
         expect(CLIENT_GRAPH_JS).toContain("var sStatus = diffStatusById[source] || '';");
         expect(CLIENT_GRAPH_JS).toContain("var tStatus = diffStatusById[target] || '';");
-        expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';");
-        expect(CLIENT_GRAPH_JS).toContain("else stroke = '#8c959f';");
+        expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = 'var(--rad-danger)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (sStatus === 'added' || tStatus === 'added') stroke = 'var(--rad-success)';");
+        expect(CLIENT_GRAPH_JS).toContain("else stroke = 'var(--rad-edge)';");
     });
 
     it("builds a diffStatusById lookup from the resource list for edge coloring", () => {
@@ -348,11 +376,29 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
         })).toBe(false);
     });
 
-    it("uses gray for in-flight, blue for completed, and red for failed resources", () => {
+    it("uses theme-aware neutrals and semantic colors for deployment states", () => {
         const colors = new Function("window", `${CLIENT_GRAPH_JS}; return RADIUS_DEPLOY_STATUS_COLORS;`)({ addEventListener() {} });
-        expect(colors.in_progress).toEqual({ bg: "#f6f8fa", border: "#8b949e" });
-        expect(colors.success).toEqual({ bg: "#ddf4ff", border: "#0969da" });
-        expect(colors.failed).toEqual({ bg: "#ffebe9", border: "#cf222e" });
+        // Invariant: no deploy-status color may pin a literal, or it will not
+        // flip with the host theme. Values are consumed as React inline styles,
+        // where var() resolves.
+        for (const [status, pair] of Object.entries(colors)) {
+            expect(pair.bg, `${status} bg`).toContain("var(--rad-");
+            expect(pair.border, `${status} border`).toContain("var(--rad-");
+            expect(pair.bg, `${status} bg`).not.toMatch(/#[0-9a-f]{3,8}/i);
+            expect(pair.border, `${status} border`).not.toMatch(/#[0-9a-f]{3,8}/i);
+        }
+        // In-flight states share the neutral surface; success/failure are semantic.
+        expect(colors.pending).toEqual(colors.in_progress);
+        expect(colors.success.border).toBe("var(--rad-link)");
+        expect(colors.failed.border).toBe("var(--rad-danger)");
+    });
+
+    it("never passes a var() color into React Flow's Background SVG attribute", () => {
+        // Background forwards `color` to an SVG <circle fill> presentation
+        // attribute, where Chromium does NOT substitute var() — the value is
+        // dropped and the dots render black. The grid is themed from CSS instead.
+        expect(CLIENT_GRAPH_JS).toContain("h(Background, { gap: 16, size: 1 })");
+        expect(CLIENT_GRAPH_JS).not.toMatch(/h\(Background,[^)]*color:[^)]*var\(/);
     });
 
     it("maps each deploy status to a corner badge (hourglass / check / x)", () => {

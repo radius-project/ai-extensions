@@ -11,6 +11,37 @@ import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./c
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
 import { isWorkspaceSelection } from "./workspace.mjs";
 
+// Dark-mode overrides for every themed neutral token. Emitted into both dark
+// scopes (explicit host theme, and the system-preference fallback) from this
+// single source so the two can never drift apart.
+//
+// Each token still reads the host's injected semantic variable first and only
+// falls back to a literal when the canvas runs outside the app (or the host
+// does not inject that token), so an explicit host theme always wins.
+const DARK_TOKENS = `
+    color-scheme: dark;
+    --rad-link: var(--true-color-blue, #58a6ff);
+    --rad-success: #3fb950;
+    --rad-danger: var(--true-color-red, #f85149);
+    --rad-warning: #d29922;
+    --rad-neutral-bg: var(--background-color-segmented, #21262d);
+    --rad-neutral-bg-hover: var(--background-color-segmentedControl-bg-emphasis, #30363d);
+    --rad-neutral-border: var(--border-color-default, #30363d);
+    --rad-neutral-text: var(--text-color-default, #f0f6fc);
+    --rad-bg: var(--background-color-default, #0d1117);
+    --rad-surface: var(--background-color-default, #0d1117);
+    --rad-bg-subtle: var(--background-color-segmented, #161b22);
+    --rad-bg-selected: var(--background-color-segmentedControl-bg-emphasis, #30363d);
+    --rad-bg-hover: var(--background-color-control-transparent-hover, #21262d);
+    --rad-stroke: var(--border-color-default, #30363d);
+    --rad-stroke-strong: var(--border-color-default, #8b949e);
+    --rad-text: var(--text-color-default, #f0f6fc);
+    --rad-text-secondary: var(--text-color-default, #c9d1d9);
+    --rad-text-tertiary: var(--text-color-muted, #8b949e);
+    --rad-edge: var(--text-color-muted, #8b949e);
+    --rad-edge-emphasis: var(--text-color-default, #c9d1d9);
+    --rad-grid: var(--border-color-default, #30363d);`;
+
 // Pick the active top-nav section from a page title.
 function navFromTitle(title) {
     const t = String(title || '').toLowerCase();
@@ -34,11 +65,15 @@ ${getInlineVendorStyles()}
     /* Follow the host app's theme. Radius brand accents stay constant across
        light/dark; every neutral surface/text/border binds to the Copilot app's
        injected semantic tokens (with light-mode fallbacks for standalone use). */
-    color-scheme: light dark;
+    color-scheme: light;
     --rad-brand: #da4c2a;
     --rad-brand-dark: #bb311e;
     --rad-primary: #238741;
     --rad-primary-hover: #1f7539;
+    --rad-link: var(--true-color-blue, #0969da);
+    --rad-success: #1a7f37;
+    --rad-danger: var(--true-color-red, #cf222e);
+    --rad-warning: #9a6700;
     /* Neutral + danger action buttons (Figma ActionButton / DeleteButton). */
     --rad-neutral-bg: var(--background-color-segmented, #f2f3f4);
     --rad-neutral-bg-hover: var(--background-color-segmentedControl-bg-emphasis, #e8eaec);
@@ -57,10 +92,32 @@ ${getInlineVendorStyles()}
     --rad-text: var(--text-color-default, #000000);
     --rad-text-secondary: var(--text-color-default, #1a1a1a);
     --rad-text-tertiary: var(--text-color-muted, #6e6e6e);
+    --rad-edge: var(--text-color-muted, #8c959f);
+    --rad-edge-emphasis: var(--text-color-default, #57606a);
+    --rad-grid: var(--border-color-default, #e1e4e8);
     --rad-radius: 6px;
     --rad-radius-lg: 10px;
     --rad-font: 'Mona Sans', var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
     --rad-mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  /* The host mirrors data-color-mode onto the root element OR body, so every
+     theme selector below matches both placements. color-scheme is additionally
+     lifted to the root when the attribute sits on body, since only the root
+     element's color-scheme reaches the viewport scrollbars. */
+  :root[data-color-mode="light"],
+  body[data-color-mode="light"] { color-scheme: light; }
+  :root:has(body[data-color-mode="light"]) { color-scheme: light; }
+  :root[data-color-mode="dark"],
+  body[data-color-mode="dark"] {${DARK_TOKENS}
+  }
+  :root:has(body[data-color-mode="dark"]) { color-scheme: dark; }
+  /* System theme: only when the host has expressed no explicit preference on
+     either element. Without the body guard this would override an explicit
+     host "light" theme whenever the OS is dark. */
+  @media (prefers-color-scheme: dark) {
+    html:not([data-color-mode]) body:not([data-color-mode]) {${DARK_TOKENS}
+    }
+    html:not([data-color-mode]):not(:has(body[data-color-mode])) { color-scheme: dark; }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; overflow: hidden; }
@@ -141,7 +198,7 @@ ${getInlineVendorStyles()}
   .status, .rad-status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
   .status.info, .rad-status--info { background: color-mix(in srgb, var(--rad-brand) 14%, transparent); border: 1px solid var(--rad-brand); color: var(--rad-text); }
   .status.success, .rad-status--success { background: color-mix(in srgb, var(--rad-primary) 16%, transparent); border: 1px solid var(--rad-primary); color: var(--rad-text); }
-  .status.error, .rad-status--error { background: color-mix(in srgb, #cf222e 16%, transparent); border: 1px solid #cf222e; color: var(--rad-text); }
+  .status.error, .rad-status--error { background: color-mix(in srgb, var(--rad-danger) 16%, transparent); border: 1px solid var(--rad-danger); color: var(--rad-text); }
 
   /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }
@@ -241,8 +298,8 @@ ${getInlineVendorStyles()}
     .rad-conn { grid-template-columns: 1fr; }
     .rad-conn__arrow { transform: rotate(90deg); padding: 2px 0; }
   }
-  .rad-link { color: #1f6feb; text-decoration: underline; cursor: pointer; font-size: 13px; }
-  .rad-link:hover { color: #388bfd; }
+  .rad-link { color: var(--rad-link); text-decoration: underline; cursor: pointer; font-size: 13px; }
+  .rad-link:hover { color: color-mix(in srgb, var(--rad-link) 80%, var(--rad-text)); }
 
   .rad-table-wrap { border: 1px solid var(--rad-stroke); border-radius: var(--rad-radius-lg); overflow-x: auto; background: var(--rad-surface); }
   .rad-table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -285,7 +342,7 @@ ${getInlineVendorStyles()}
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
   .rad-node__source {
     display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
-    font-size: 12px; font-weight: 500; color: #1565c0; text-decoration: none; cursor: pointer;
+    font-size: 12px; font-weight: 500; color: var(--rad-link); text-decoration: none; cursor: pointer;
     pointer-events: auto; background: none; border: none; padding: 0; font-family: inherit;
   }
   .rad-node__source:hover { text-decoration: underline; }
@@ -293,7 +350,7 @@ ${getInlineVendorStyles()}
   .rad-node__dots {
     position: absolute; right: 10px; bottom: 10px; margin: 0; padding: 2px 4px;
     font-size: 12px; font-weight: 700; letter-spacing: 1px; line-height: 1;
-    color: #808791; background: none; border: none; border-radius: 4px;
+    color: var(--rad-text-tertiary); background: none; border: none; border-radius: 4px;
     cursor: pointer; pointer-events: auto;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
@@ -317,7 +374,7 @@ ${getInlineVendorStyles()}
     box-shadow: 0 6px 20px rgba(0,0,0,0.14);
   }
   .rad-feedback__link {
-    padding: 10px 14px; font-size: 13px; color: #1f6feb; text-decoration: none; white-space: nowrap;
+    padding: 10px 14px; font-size: 13px; color: var(--rad-link); text-decoration: none; white-space: nowrap;
   }
   .rad-feedback__link + .rad-feedback__link { border-top: 1px solid var(--rad-stroke); }
   .rad-feedback__link:hover { background: var(--rad-bg-subtle); text-decoration: underline; }
@@ -354,6 +411,12 @@ ${getInlineVendorStyles()}
   .react-flow__controls-button:hover { background: var(--rad-bg-subtle); }
   .react-flow__controls-button svg { fill: currentColor; }
   .react-flow__minimap { background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 6px; }
+  /* The dot grid is painted by React Flow onto an SVG <circle fill> PRESENTATION
+     ATTRIBUTE, and Chromium does not substitute var() there — a var() passed via
+     the Background "color" prop is discarded and the dots fall back to black.
+     Theme it as a CSS property instead, which does resolve var(). */
+  .react-flow__background circle { fill: var(--rad-grid); }
+  .react-flow__background path { stroke: var(--rad-grid); }
 </style>
 </head>
 <body>
@@ -3250,8 +3313,8 @@ function deployLandingView(state) {
   .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary,#586069); }
   .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
   .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); margin:0; }
-  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke,#d1d5da); background:#f6f8fa; color:var(--rad-text,#1a1a1a); }
-  .rad-ddlg__btn:hover { background:#eef1f4; }
+  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke,#d1d5da); background:var(--rad-neutral-bg,#f6f8fa); color:var(--rad-text,#1a1a1a); }
+  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover,#eef1f4); }
   .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:#fff5b1; border:1px solid #ffe082; border-radius:6px; padding:12px; color:#735c0f; font-size:14px; line-height:1.4; }
   .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); }
   .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke,#d1d5da); border-radius:1px; }

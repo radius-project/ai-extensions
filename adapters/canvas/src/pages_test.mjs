@@ -58,6 +58,72 @@ describe("pageShell", () => {
         // The bare selector (which would balloon the radio) must be gone.
         expect(html).not.toMatch(/\n\s*input, select, \.rad-select \{/);
     });
+
+    it("follows explicit host themes and the system color preference", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+
+        // The host mirrors data-color-mode onto the root element OR body, so
+        // both placements must be matched or an explicitly themed host is missed.
+        expect(html).toContain(':root[data-color-mode="dark"],\n  body[data-color-mode="dark"]');
+        expect(html).toContain(':root[data-color-mode="light"],\n  body[data-color-mode="light"]');
+
+        // The system-preference fallback must be gated on BOTH elements lacking
+        // the attribute. Gating on :root alone would force OS-dark styling over
+        // an explicit host "light" theme whenever the host marks up body.
+        expect(html).toContain("@media (prefers-color-scheme: dark)");
+        expect(html).toContain("html:not([data-color-mode]) body:not([data-color-mode])");
+    });
+
+    it("overrides every themed token in both dark scopes, reading host tokens first", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        // The vendor stylesheet is emitted first; pick the shell's own block.
+        const css = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)]
+            .map((m) => m[1])
+            .find((block) => block.includes("--rad-brand"));
+        expect(css).toBeTruthy();
+
+        // Tokens the base :root block binds to a host semantic variable are the
+        // ones that must flip with the theme. Brand/geometry/font tokens are
+        // intentionally constant and excluded.
+        const rootBlock = css.match(/:root \{([\s\S]*?)\n  \}/)[1];
+        const themed = [...rootBlock.matchAll(/(--rad-[\w-]+):\s*var\(--(?:background-color|text-color|border-color|true-color)[^;]*;/g)]
+            .map((m) => m[1]);
+        expect(themed.length).toBeGreaterThan(10);
+
+        const darkBlocks = [
+            css.match(/body\[data-color-mode="dark"\] \{([\s\S]*?)\n  \}/)[1],
+            css.match(/html:not\(\[data-color-mode\]\) body:not\(\[data-color-mode\]\) \{([\s\S]*?)\n    \}/)[1],
+        ];
+        for (const block of darkBlocks) {
+            expect(block).toContain("color-scheme: dark");
+            // No themed token may be left at its light value in a dark scope.
+            for (const token of themed) {
+                expect(block, `${token} missing from a dark scope`).toContain(`${token}:`);
+            }
+            // Dark scopes must still defer to host-injected values; hardcoding
+            // them here would discard the host's actual palette.
+            for (const token of themed) {
+                const decl = block.match(new RegExp(`${token}:\\s*([^;]+);`))[1];
+                expect(decl, `${token} should read a host token`).toContain("var(--");
+            }
+        }
+    });
+
+    it("does not depend on true-color variables outside the host contract", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        // Only red/blue (and their -muted variants) are documented; green and
+        // yellow do not exist, so a var() lookup would silently never resolve.
+        const used = [...html.matchAll(/var\(--true-color-([\w-]+)/g)].map((m) => m[1]);
+        for (const name of used) {
+            expect(["red", "red-muted", "blue", "blue-muted"]).toContain(name);
+        }
+    });
+
+    it("paints the graph dot grid through CSS, which resolves var() unlike SVG attributes", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain(".react-flow__background circle { fill: var(--rad-grid); }");
+    });
+    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
