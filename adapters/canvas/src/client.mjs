@@ -264,12 +264,12 @@ window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 // Managed-cluster resources stay gray throughout (see getNodeColors); their
 // overall status is conveyed by the corner status badge instead of the fill.
 var RADIUS_DEPLOY_STATUS_COLORS = {
-    pending:     { bg: '#f6f8fa', border: '#8b949e' },
-    in_progress: { bg: '#f6f8fa', border: '#8b949e' },
-    postponed:   { bg: '#f6f8fa', border: '#8b949e' },
-    waiting:     { bg: '#f6f8fa', border: '#8b949e' },
-    success:     { bg: '#ddf4ff', border: '#0969da' },
-    failed:      { bg: '#ffebe9', border: '#cf222e' }
+    pending:     { bg: 'var(--rad-node-bg)', border: 'var(--rad-edge)' },
+    in_progress: { bg: 'var(--rad-node-bg)', border: 'var(--rad-edge)' },
+    postponed:   { bg: 'var(--rad-node-bg)', border: 'var(--rad-edge)' },
+    waiting:     { bg: 'var(--rad-node-bg)', border: 'var(--rad-edge)' },
+    success:     { bg: 'var(--rad-info-bg)', border: 'var(--rad-info)' },
+    failed:      { bg: 'var(--rad-danger-bg)', border: 'var(--rad-danger)' }
 };
 
 // Maps a deploy status to the corner status badge shown on each node while a
@@ -392,7 +392,7 @@ function radiusGetTypeStyle(type) {
     // Container registry (ACR / ECR). The 'ecr' token is matched only as a
     // delimited segment so it does not trip on words like "secrets" (s-ecr-ets).
     if (t.includes('image') || t.includes('registry') || /(^|[^a-z])ecr([^a-z]|$)/.test(t)) {
-        return { bg: '#ddf4ff', border: '#0969da', shape: 'roundrectangle', category: 'Registry' };
+        return { bg: 'var(--rad-info-bg)', border: 'var(--rad-info)', shape: 'roundrectangle', category: 'Registry' };
     }
     // Cache (Redis / ElastiCache / MemoryDB)
     if (t.includes('redis') || t.includes('cache') || t.includes('elasticache') || t.includes('memorydb')) {
@@ -535,7 +535,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // of throwing and breaking the whole panel.
     var RF = window.ReactFlow;
     if (!window.React || !window.ReactDOM || !RF) {
-        container.innerHTML = '<div style="padding:16px;color:#cf222e;font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
+        container.innerHTML = '<div style="padding:16px;color:var(--rad-danger);font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
         return null;
     }
     var React = window.React;
@@ -694,14 +694,14 @@ function radiusRenderGraph(containerId, resources, options) {
     }
 
     function getNodeColors(r) {
-        // Diff mode keeps the same white card surface as the modeled graph.
+        // Diff mode keeps the same theme-aware card surface as the modeled graph.
         // Only the border color encodes diff status.
         if (diffMode && r.diffStatus) {
             switch (r.diffStatus) {
-                case 'added': return { bg: '#ffffff', border: '#16a34a' };
-                case 'removed': return { bg: '#ffffff', border: '#dc2626' };
-                case 'modified': return { bg: '#ffffff', border: '#ca8a04' };
-                default: return { bg: '#ffffff', border: '#d0d7de' };
+                case 'added': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-success)' };
+                case 'removed': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-danger)' };
+                case 'modified': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-warning)' };
+                default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
             }
         }
         // The "Deploying" page passes deployMode. A managed-cluster node always
@@ -714,10 +714,10 @@ function radiusRenderGraph(containerId, resources, options) {
             var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
         }
-        // Non-diff nodes use the clean "modeled graph" card style: a white
-        // surface with a thin neutral border. Category is conveyed by the icon
+        // Non-diff nodes use the clean modeled-graph card style: the host surface
+        // with a thin neutral border. Category is conveyed by the icon
         // (owned by the type/recipe pack), not by node fill/shape.
-        return { bg: '#ffffff', border: '#d0d7de' };
+        return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
     }
 
     // The figma .rad-node card is rendered natively by the RadNode React
@@ -740,7 +740,7 @@ function radiusRenderGraph(containerId, resources, options) {
             if (edgeSeen[id]) return;
             edgeSeen[id] = true;
             dashed = dashed || plannedMode;
-            var stroke = dashed ? '#57606a' : '#8c959f';
+            var stroke = dashed ? 'var(--rad-edge)' : 'var(--rad-edge-muted)';
             // Diff mode colors the edge by whether the CONNECTION itself changed
             // between base and head (computeGraphDiff tags each rendered
             // connection): added=green, removed=red, unchanged=neutral gray. A
@@ -750,15 +750,15 @@ function radiusRenderGraph(containerId, resources, options) {
             // back to the endpoints' own diff statuses.
             if (diffMode) {
                 var cs = connStatus || '';
-                if (cs === 'removed') stroke = '#dc2626';
-                else if (cs === 'added') stroke = '#16a34a';
-                else if (cs === 'unchanged') stroke = '#8c959f';
+                if (cs === 'removed') stroke = 'var(--rad-danger)';
+                else if (cs === 'added') stroke = 'var(--rad-success)';
+                else if (cs === 'unchanged') stroke = 'var(--rad-edge-muted)';
                 else {
                     var sStatus = diffStatusById[source] || '';
                     var tStatus = diffStatusById[target] || '';
-                    if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';
-                    else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';
-                    else stroke = '#8c959f';
+                    if (sStatus === 'removed' || tStatus === 'removed') stroke = 'var(--rad-danger)';
+                    else if (sStatus === 'added' || tStatus === 'added') stroke = 'var(--rad-success)';
+                    else stroke = 'var(--rad-edge-muted)';
                 }
             }
             var style = { stroke: stroke, strokeWidth: 1.5 };
@@ -874,7 +874,7 @@ function radiusRenderGraph(containerId, resources, options) {
                     // Output child nodes only appear in the modeled/diff graphs
                     // (the planned and deploying graphs skip this block), so they
                     // always render as neutral grey.
-                    var outColors = { bg: '#f6f8fa', border: '#8c959f' };
+                    var outColors = { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge-muted)' };
                     pushNode(outId, {
                         borderColor: outColors.border,
                         borderWidth: 1,
@@ -992,7 +992,7 @@ function radiusRenderGraph(containerId, resources, options) {
             : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
-            style: { boxSizing: 'border-box', background: d.bgColor || '#ffffff', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || '#d0d7de' },
+            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-node-bg)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || 'var(--rad-node-border)' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
@@ -1050,7 +1050,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 setTimeout(function() { try { inst.fitView({ padding: 0.18 }); } catch (e) {} }, 30);
             }
         },
-            h(Background, { gap: 16, size: 1, color: '#e1e4e8' }),
+            h(Background, { gap: 16, size: 1, color: 'var(--rad-grid)' }),
             h(Controls, { showInteractive: false })
         );
     }
@@ -1070,7 +1070,7 @@ function radiusRenderGraph(containerId, resources, options) {
     if (options.enablePopup !== false) {
         var popup = document.createElement('div');
         popup.id = 'node-popup';
-        popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface,#ffffff); border:1px solid var(--rad-stroke,#d0d7de); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
+        popup.style.cssText = 'display:none; position:absolute; z-index:1000; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:8px; padding:6px 8px; box-shadow:0 4px 12px var(--rad-shadow); font-size:13px; min-width:220px; max-width:380px; font-family:var(--rad-font);';
         container.appendChild(popup);
 
         // The card the popup is currently anchored to (null when hidden), so the
@@ -1091,9 +1091,9 @@ function radiusRenderGraph(containerId, resources, options) {
             // A link row: monochrome glyph + blue label, with the target URL shown
             // as a muted subtitle beneath (matches the node popup mock).
             var linkRow = function(iconSvg, label, href, showUrl) {
-                var sub = showUrl ? '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(href) + '</div>' : '';
+                var sub = showUrl ? '<div style="color:var(--rad-text-tertiary); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + escLocal(href) + '</div>' : '';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(href) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
             // A local link row: same look as linkRow, but opens an on-disk worktree
@@ -1106,9 +1106,9 @@ function radiusRenderGraph(containerId, resources, options) {
             // mirrors linkRow's URL subtitle.
             var localLinkRow = function(iconSvg, label, relPath, line, fallbackUrl) {
                 var subText = escLocal(relPath) + (line ? ':' + line : '');
-                var sub = '<div style="color:var(--rad-text-tertiary,#656d76); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + subText + '</div>';
+                var sub = '<div style="color:var(--rad-text-tertiary); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;">' + subText + '</div>';
                 return '<div style="padding:6px 4px;">' +
-                    '<a href="' + escLocal(fallbackUrl || '#') + '" data-local-src="' + escLocal(relPath) + '" data-local-line="' + (line || 0) + '" data-fallback-url="' + escLocal(fallbackUrl || '') + '" style="color:var(--rad-link,#0969da); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
+                    '<a href="' + escLocal(fallbackUrl || '#') + '" data-local-src="' + escLocal(relPath) + '" data-local-line="' + (line || 0) + '" data-fallback-url="' + escLocal(fallbackUrl || '') + '" style="color:var(--rad-link); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;">' +
                     iconSvg + '<span>' + label + '</span></a>' + sub + '</div>';
             };
             // Source + app-definition links. For a local-workspace graph
@@ -1152,7 +1152,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 } catch (err) { /* ignore */ }
             }
             if (!links.length) {
-                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary,#656d76); font-size:12px;">No links available.</div>');
+                links.push('<div style="padding:6px 4px; color:var(--rad-text-tertiary); font-size:12px;">No links available.</div>');
             }
             popup.innerHTML = links.join('');
             // Position next to the card using its on-screen rect, relative to the
@@ -1275,11 +1275,11 @@ function radiusSetGraphLoading(containerId) {
     container.innerHTML = '<div style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
-        '<span style="font-size:14px; font-weight:600; color:var(--text-color-default, #1f2328);">Generating Application Graph</span>' +
+        '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
         '</div>' +
-        '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
+        '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
 }
 
 function radiusSetGraphError(containerId, message) {

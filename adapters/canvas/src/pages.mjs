@@ -31,32 +31,53 @@ ${getInlineVendorStyles()}
 <style>
   /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
   :root {
-    /* Follow the host app's theme. Radius brand accents stay constant across
-       light/dark; every neutral surface/text/border binds to the Copilot app's
-       injected semantic tokens (with light-mode fallbacks for standalone use). */
-    color-scheme: light dark;
+    /* The Copilot host owns theme selection and injects these semantic tokens.
+       Radius keeps no competing preference; all theme-sensitive colors flow
+       through this layer so host changes update the open canvas immediately. */
+    color-scheme: var(--color-scheme, inherit);
     --rad-brand: #da4c2a;
     --rad-brand-dark: #bb311e;
     --rad-primary: #238741;
     --rad-primary-hover: #1f7539;
-    /* Neutral + danger action buttons (Figma ActionButton / DeleteButton). */
-    --rad-neutral-bg: var(--background-color-segmented, #f2f3f4);
-    --rad-neutral-bg-hover: var(--background-color-segmentedControl-bg-emphasis, #e8eaec);
-    --rad-neutral-border: var(--border-color-default, #d1d5da);
-    --rad-neutral-text: var(--text-color-default, #24292e);
-    --rad-danger-text: #cf3131;
+    --rad-bg: var(--background-color-default, Canvas);
+    --rad-surface: var(--background-color-default, Canvas);
+    --rad-text: var(--text-color-default, CanvasText);
+    --rad-text-secondary: var(--text-color-default, CanvasText);
+    --rad-text-tertiary: var(--text-color-muted, color-mix(in srgb, CanvasText 70%, Canvas));
+    /* Some host segmented-control tokens retain their light palette in a dark
+       canvas. Derive neutral layers from the active host surface and text so
+       navigation, graph wells, and secondary buttons always stay in-theme. */
+    --rad-bg-subtle: color-mix(in srgb, var(--rad-text) 6%, var(--rad-bg));
+    --rad-bg-selected: color-mix(in srgb, var(--rad-text) 12%, var(--rad-bg));
+    --rad-bg-hover: color-mix(in srgb, var(--rad-text) 16%, var(--rad-bg));
+    --rad-stroke: var(--border-color-default, color-mix(in srgb, var(--rad-text) 20%, var(--rad-bg)));
+    --rad-stroke-strong: var(--border-color-muted, color-mix(in srgb, var(--rad-text) 45%, var(--rad-bg)));
+    --rad-neutral-bg: var(--rad-bg-subtle);
+    --rad-neutral-bg-hover: var(--rad-bg-selected);
+    --rad-neutral-border: var(--rad-stroke);
+    --rad-neutral-text: var(--rad-text);
+    --rad-link: var(--text-color-accent, #0969da);
+    --rad-link-hover: var(--text-color-accent-emphasis, #0550ae);
+    --rad-info: var(--text-color-accent, #0969da);
+    --rad-success: var(--text-color-success, color-mix(in srgb, #1a7f37 70%, CanvasText));
+    --rad-warning: var(--text-color-warning, color-mix(in srgb, #9a6700 70%, CanvasText));
+    --rad-danger: var(--text-color-danger, color-mix(in srgb, #cf222e 70%, CanvasText));
+    --rad-success-solid: #1a7f37;
+    --rad-danger-text: var(--rad-danger);
     --rad-danger-solid: #c72222;
     --rad-danger-solid-border: #a61a1a;
-    --rad-bg: var(--background-color-default, #ffffff);
-    --rad-surface: var(--background-color-default, #ffffff);
-    --rad-bg-subtle: var(--background-color-segmented, #f1f1f1);
-    --rad-bg-selected: var(--background-color-segmentedControl-bg-emphasis, #e1e1e1);
-    --rad-bg-hover: var(--background-color-control-transparent-hover, #d5d5d5);
-    --rad-stroke: var(--border-color-default, #d8d8d8);
-    --rad-stroke-strong: var(--border-color-default, #919191);
-    --rad-text: var(--text-color-default, #000000);
-    --rad-text-secondary: var(--text-color-default, #1a1a1a);
-    --rad-text-tertiary: var(--text-color-muted, #6e6e6e);
+    --rad-info-bg: color-mix(in srgb, var(--rad-info) 14%, var(--rad-surface));
+    --rad-success-bg: color-mix(in srgb, var(--rad-success) 14%, var(--rad-surface));
+    --rad-warning-bg: color-mix(in srgb, var(--rad-warning) 16%, var(--rad-surface));
+    --rad-danger-bg: color-mix(in srgb, var(--rad-danger) 14%, var(--rad-surface));
+    --rad-node-bg: var(--rad-surface);
+    --rad-node-border: var(--rad-stroke);
+    --rad-edge: var(--rad-stroke-strong);
+    --rad-edge-muted: var(--rad-stroke);
+    --rad-grid: var(--rad-stroke);
+    --rad-code-bg: var(--rad-bg-subtle);
+    --rad-code-text: var(--rad-text);
+    --rad-shadow: color-mix(in srgb, var(--rad-text) 18%, transparent);
     --rad-radius: 6px;
     --rad-radius-lg: 10px;
     --rad-font: 'Mona Sans', var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
@@ -139,17 +160,17 @@ ${getInlineVendorStyles()}
 
   /* ─── Status banners ──────────────────────────────────────────────────── */
   .status, .rad-status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
-  .status.info, .rad-status--info { background: color-mix(in srgb, var(--rad-brand) 14%, transparent); border: 1px solid var(--rad-brand); color: var(--rad-text); }
-  .status.success, .rad-status--success { background: color-mix(in srgb, var(--rad-primary) 16%, transparent); border: 1px solid var(--rad-primary); color: var(--rad-text); }
-  .status.error, .rad-status--error { background: color-mix(in srgb, #cf222e 16%, transparent); border: 1px solid #cf222e; color: var(--rad-text); }
+  .status.info, .rad-status--info { background: var(--rad-info-bg); border: 1px solid var(--rad-info); color: var(--rad-text); }
+  .status.success, .rad-status--success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
+  .status.error, .rad-status--error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
 
   /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }
   .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 500; user-select: none; }
   .tab.active { border-bottom-color: var(--rad-brand); color: var(--rad-text); }
 
-  code { font-family: var(--rad-mono); font-size: 12px; background: var(--rad-bg-subtle); padding: 2px 6px; border-radius: 4px; }
-  pre { background: var(--rad-bg-subtle); padding: 12px; border-radius: var(--rad-radius); overflow-x: auto; font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+  code { font-family: var(--rad-mono); font-size: 12px; background: var(--rad-code-bg); color: var(--rad-code-text); padding: 2px 6px; border-radius: 4px; }
+  pre { background: var(--rad-code-bg); color: var(--rad-code-text); padding: 12px; border-radius: var(--rad-radius); overflow-x: auto; font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
 
   /* ─── Fields, inputs, selects ─────────────────────────────────────────── */
   label { display: block; font-weight: 600; font-size: 12px; color: var(--rad-text-tertiary); margin: 10px 0 4px; }
@@ -161,9 +182,9 @@ ${getInlineVendorStyles()}
     border-radius: var(--rad-radius); font-size: 13px;
     background: var(--rad-bg); color: var(--rad-text);
     font-family: var(--rad-font);
-    box-shadow: 0 0 0 1px rgba(0,0,0,0.02);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--rad-text) 2%, transparent);
   }
-  input:focus, select:focus, .rad-select:focus { outline: 2px solid var(--rad-brand); outline-offset: -1px; border-color: var(--rad-brand); }
+  input:focus, select:focus, .rad-select:focus { outline: 2px solid var(--rad-brand); outline-offset: 1px; border-color: var(--rad-brand); }
   select.radius-select, .rad-select { appearance: auto; cursor: pointer; min-width: 180px; }
 
   /* ─── Buttons ─────────────────────────────────────────────────────────── */
@@ -178,8 +199,8 @@ ${getInlineVendorStyles()}
   .rad-btn--brand { background: var(--rad-brand); color: #fff; }
   .rad-btn--brand:hover { background: var(--rad-brand-dark); }
   .rad-btn--neutral { background: var(--rad-neutral-bg); color: var(--rad-neutral-text); border: 1px solid var(--rad-neutral-border); }
-  .rad-btn--neutral:hover { background: var(--rad-neutral-bg-hover); border-color: #bfc4c9; }
-  .rad-btn--info { background: #1f6feb; color: #fff; }
+  .rad-btn--neutral:hover { background: var(--rad-neutral-bg-hover); border-color: var(--rad-stroke-strong); }
+  .rad-btn--info { background: var(--rad-info); color: #fff; }
   /* Delete buttons: neutral fill + red text, flip to a solid red on hover (Figma DeleteButton). */
   .rad-btn--danger,
   .rad-btn--danger-outline { background: var(--rad-neutral-bg); color: var(--rad-danger-text); border: 1px solid var(--rad-neutral-border); }
@@ -196,9 +217,9 @@ ${getInlineVendorStyles()}
     border-right: 2px solid var(--rad-text-tertiary); border-bottom: 2px solid var(--rad-text-tertiary);
     transform: translateY(-70%) rotate(45deg); pointer-events: none;
   }
-  .rad-spinner-lg { flex: 0 0 auto; width: 34px; height: 34px; border: 4px solid var(--rad-stroke, #e1e4e8); border-top-color: #1f6feb; border-radius: 50%; animation: rad-spin 0.8s linear infinite; }
+  .rad-spinner-lg { flex: 0 0 auto; width: 34px; height: 34px; border: 4px solid var(--rad-stroke); border-top-color: var(--rad-info); border-radius: 50%; animation: rad-spin 0.8s linear infinite; }
   @keyframes rad-spin { to { transform: rotate(360deg); } }
-  .rad-btn--info:hover { background: #388bfd; }
+  .rad-btn--info:hover { background: var(--rad-link-hover); }
   button:disabled, .rad-btn:disabled { opacity: 0.6; cursor: default; }
   .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
   .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
@@ -241,8 +262,8 @@ ${getInlineVendorStyles()}
     .rad-conn { grid-template-columns: 1fr; }
     .rad-conn__arrow { transform: rotate(90deg); padding: 2px 0; }
   }
-  .rad-link { color: #1f6feb; text-decoration: underline; cursor: pointer; font-size: 13px; }
-  .rad-link:hover { color: #388bfd; }
+  .rad-link { color: var(--rad-link); text-decoration: underline; cursor: pointer; font-size: 13px; }
+  .rad-link:hover { color: var(--rad-link-hover); }
 
   .rad-table-wrap { border: 1px solid var(--rad-stroke); border-radius: var(--rad-radius-lg); overflow-x: auto; background: var(--rad-surface); }
   .rad-table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -259,10 +280,10 @@ ${getInlineVendorStyles()}
   .rad-table__creds { color: var(--rad-text-secondary); }
   .rad-table__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
   .rad-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
-  .rad-dot--success { background: #1a7f37; }
-  .rad-dot--failed { background: #cf222e; }
+  .rad-dot--success { background: var(--rad-success); }
+  .rad-dot--failed { background: var(--rad-danger); }
   .rad-dot--pending { background: var(--rad-text-tertiary); }
-  .rad-dot--deleting { background: #d29922; }
+  .rad-dot--deleting { background: var(--rad-warning); }
   .rad-status-label { vertical-align: middle; }
 
   /* ─── Graph + node cards ──────────────────────────────────────────────── */
@@ -285,7 +306,7 @@ ${getInlineVendorStyles()}
   .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
   .rad-node__source {
     display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
-    font-size: 12px; font-weight: 500; color: #1565c0; text-decoration: none; cursor: pointer;
+    font-size: 12px; font-weight: 500; color: var(--rad-link); text-decoration: none; cursor: pointer;
     pointer-events: auto; background: none; border: none; padding: 0; font-family: inherit;
   }
   .rad-node__source:hover { text-decoration: underline; }
@@ -293,7 +314,7 @@ ${getInlineVendorStyles()}
   .rad-node__dots {
     position: absolute; right: 10px; bottom: 10px; margin: 0; padding: 2px 4px;
     font-size: 12px; font-weight: 700; letter-spacing: 1px; line-height: 1;
-    color: #808791; background: none; border: none; border-radius: 4px;
+    color: var(--rad-text-tertiary); background: none; border: none; border-radius: 4px;
     cursor: pointer; pointer-events: auto;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
@@ -308,16 +329,16 @@ ${getInlineVendorStyles()}
   .rad-feedback__btn {
     margin: 0; width: 36px; height: 36px; border-radius: 10px; padding: 0;
     display: flex; align-items: center; justify-content: center;
-    background: #383d45; border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    background: var(--rad-text); color: var(--rad-bg); border: none; cursor: pointer; box-shadow: 0 2px 8px var(--rad-shadow);
   }
-  .rad-feedback__btn:hover { background: #2b2f36; }
+  .rad-feedback__btn:hover { background: color-mix(in srgb, var(--rad-text) 82%, var(--rad-bg)); }
   .rad-feedback__pop {
     flex-direction: column; min-width: 180px; background: var(--rad-surface);
     border: 1px solid var(--rad-stroke); border-radius: 8px; overflow: hidden;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.14);
+    box-shadow: 0 6px 20px var(--rad-shadow);
   }
   .rad-feedback__link {
-    padding: 10px 14px; font-size: 13px; color: #1f6feb; text-decoration: none; white-space: nowrap;
+    padding: 10px 14px; font-size: 13px; color: var(--rad-link); text-decoration: none; white-space: nowrap;
   }
   .rad-feedback__link + .rad-feedback__link { border-top: 1px solid var(--rad-stroke); }
   .rad-feedback__link:hover { background: var(--rad-bg-subtle); text-decoration: underline; }
@@ -327,7 +348,9 @@ ${getInlineVendorStyles()}
      handles, a light canvas). We render our own figma .rad-node cards, so strip
      React Flow's node box and hide the handles; the card supplies all visuals. */
   .rad-flow-host { width: 100%; height: 100%; }
-  .react-flow, .react-flow__renderer, .react-flow__pane { width: 100%; height: 100%; }
+  .react-flow, .react-flow__renderer, .react-flow__pane {
+    width: 100%; height: 100%; background: transparent;
+  }
   .react-flow__node { font-family: var(--rad-font); font-size: 13px; }
   /* Custom "rad" node type: no default background/border/padding — the card owns it. */
   .react-flow__node-rad {
@@ -346,7 +369,7 @@ ${getInlineVendorStyles()}
   }
   .react-flow__attribution { background: transparent; font-size: 10px; }
   .react-flow__attribution a { color: var(--rad-text-tertiary); }
-  .react-flow__controls { box-shadow: 0 1px 4px rgba(0,0,0,0.12); border-radius: 6px; overflow: hidden; }
+  .react-flow__controls { box-shadow: 0 1px 4px var(--rad-shadow); border-radius: 6px; overflow: hidden; }
   .react-flow__controls-button {
     background: var(--rad-surface); border-bottom: 1px solid var(--rad-stroke);
     color: var(--rad-text); width: 26px; height: 26px;
@@ -401,7 +424,7 @@ export function oidcPage(state) {
 
     return pageShell("Accounts", `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Cloud Accounts</h1>
-<p style="margin-bottom:16px; color: var(--text-color-muted, #656d76);">
+<p style="margin-bottom:16px; color:var(--rad-text-tertiary);">
   Set up OpenID Connect federation so GitHub Actions can authenticate to your cloud provider without long-lived secrets.
 </p>
 <div class="tabs">
@@ -640,11 +663,11 @@ function generateGraph() {
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
-        '<span style="font-size:14px; font-weight:600; color:var(--text-color-default, #1f2328);">Generating Application Graph</span>' +
+        '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
         '</div>' +
-        '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
+        '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
 
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
@@ -713,7 +736,7 @@ ${graphHeader('graph')}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
 </div>
 <div id="graph-container"></div>
-<div style="margin-top:8px; font-size:12px; color:var(--text-color-muted, #656d76);">
+<div style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
 Click a node to view source code links.
 </div>
 
@@ -767,7 +790,7 @@ document.getElementById('graph-branch').addEventListener('change', function() {
     var branch = this.value.trim();
     if (!repo || !branch) return;
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="padding:20px; color:var(--text-color-muted,#656d76);">⏳ Regenerating graph for ' + branch + '…</div>';
+    container.innerHTML = '<div style="padding:20px; color:var(--rad-text-tertiary);">⏳ Regenerating graph for ' + branch + '…</div>';
     fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -836,7 +859,7 @@ ${graphHeader('planned')}
   </div>
   <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
@@ -865,11 +888,11 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
-        '<span style="font-size:14px; font-weight:600; color:var(--text-color-default, #1f2328);">Planning Deployment</span>' +
+        '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Planning Deployment</span>' +
         '</div>' +
-        '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
+        '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#1a7f37;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-success);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
     var pollInterval = setInterval(function() {
@@ -936,7 +959,7 @@ ${graphHeader('planned')}
   </div>
   <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="graph-container"></div>
 
 <script>
@@ -957,7 +980,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     var btn = this;
     // Clear existing graph
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text-color-muted,#656d76);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke,#e1e4e8);border-top-color:var(--rad-primary,#1a7f37);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--rad-text-tertiary);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-primary);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
     fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -1003,21 +1026,21 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
-    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
-    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
-    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
@@ -1070,21 +1093,21 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
-    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
-    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsBase}
     </select>
   </div>
-  <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
-    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsHead}
     </select>
   </div>
@@ -1093,12 +1116,12 @@ ${graphHeader('graph-diff')}
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
-  <span style="color:#1a7f37">+${added} added</span>,
-  <span style="color:#cf222e">-${removed} removed</span>,
-  <span style="color:#bf8700">~${modified} modified</span>,
+  <span style="color:var(--rad-success)">+${added} added</span>,
+  <span style="color:var(--rad-danger)">-${removed} removed</span>,
+  <span style="color:var(--rad-warning)">~${modified} modified</span>,
   ${unchanged} unchanged
 </div>
-${(added === 0 && removed === 0 && modified === 0) ? `<div style="margin-top:12px; padding:10px 14px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; color:var(--text-color-muted, #656d76);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ''}
+${(added === 0 && removed === 0 && modified === 0) ? `<div style="margin-top:12px; padding:10px 14px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; color:var(--rad-text-tertiary);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ''}
 
 <script>
 var resources = ${resourcesJson};
@@ -1176,7 +1199,7 @@ ${graphHeader('deployed')}
 
 <div id="deployed-log-section" class="rad-card" style="margin:16px 0 0; display:none;">
   <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:10px;">Deployment Logs</div>
-  <div id="deployed-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
+  <div id="deployed-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
 <!-- Delete confirmation modal -->
@@ -1268,8 +1291,8 @@ function escapeHtmlClient(s) {
     function showInline(kind, msg) {
         inlineStatus.style.display = 'block';
         inlineStatus.textContent = msg;
-        if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
-        else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
+        if (kind === 'error') { inlineStatus.style.background = 'var(--rad-danger-bg)'; inlineStatus.style.color = 'var(--rad-text)'; inlineStatus.style.border = '1px solid var(--rad-danger)'; }
+        else { inlineStatus.style.background = 'var(--rad-info-bg)'; inlineStatus.style.color = 'var(--rad-text)'; inlineStatus.style.border = '1px solid var(--rad-info)'; }
     }
 
     function refreshControls() {
@@ -1417,7 +1440,7 @@ export function environmentPage(state) {
 <div class="status ${r.error ? "error" : "success"}">${escapeHtml(r.error || r.message)}</div>
 ${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>` : ""}
 ${r.workflow ? `<h2>Generated Workflow</h2><pre style="max-height:400px; overflow:auto;">${escapeHtml(r.workflow)}</pre>` : ""}
-<button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--border-color-default, #d1d9e0); color:var(--text-color-default, #1f2328); border:none; border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
+<button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <script>
 document.getElementById('back-btn').addEventListener('click', function() {
     fetch('/api/deploy-reset', { method: 'POST' }).then(function() { window.location.reload(); });
@@ -1565,7 +1588,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
         <input type="hidden" id="az-selected-app-id" value="" />
         <div class="rad-field__help">
-          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may 
+          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
          <a href="#" id="az-use-existing-link">use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
@@ -1726,24 +1749,24 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </section>
 
 <div id="env-creating-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:340px;">
-    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+  <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:340px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
     <div style="min-width:0;">
       <div id="env-creating-title" style="font-size:14px; line-height:1.4;">Creating environment…</div>
-      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+      <div style="font-size:12px; color:var(--rad-text-tertiary); margin-top:2px;">This may take a few moments</div>
     </div>
   </div>
 </div>
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:420px; width:90%;">
     <div style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Service Management Reference required</div>
-    <div style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
-    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328);" />
-    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:6px;"></div>
+    <div style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
+    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:var(--rad-surface); color:var(--rad-text);" />
+    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger); margin-top:6px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
-      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
+      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
+      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info); border-radius:6px; background:var(--rad-info); color:#fff; cursor:pointer;">Retry</button>
     </div>
   </div>
 </div>
@@ -1752,25 +1775,25 @@ document.getElementById('back-btn').addEventListener('click', function() {
      repo (app-selection-required), or via the opt-in "Use an existing
      application" advanced action. Rows are built dynamically in JS. -->
 <div id="env-appselect-modal" style="display:none; position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
     <div id="env-appselect-title" style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Choose a deploy identity</div>
-    <div id="env-appselect-intro" style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;"></div>
-    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger,#cf222e); line-height:1.5; margin-bottom:10px;"></div>
+    <div id="env-appselect-intro" style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;"></div>
+    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger); line-height:1.5; margin-bottom:10px;"></div>
     <div id="env-appselect-list" style="display:flex; flex-direction:column; gap:6px;"></div>
-    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:8px;"></div>
+    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger); margin-top:8px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
-      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Use selected</button>
+      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
+      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info); border-radius:6px; background:var(--rad-info); color:#fff; cursor:pointer;">Use selected</button>
     </div>
   </div>
 </div>
 
 <div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
-    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+  <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:360px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
     <div style="min-width:0;">
       <div id="env-verify-title" style="font-size:14px; font-weight:600; line-height:1.4;">Verifying authentication to Azure…</div>
-      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+      <div style="font-size:12px; color:var(--rad-text-tertiary); margin-top:2px;">This may take a few moments</div>
     </div>
   </div>
 </div>
@@ -1781,24 +1804,24 @@ document.getElementById('back-btn').addEventListener('click', function() {
 #env-landing .rad-table__actions,
 #cred-landing .rad-table__actions { justify-content: flex-start; }
 /* Success banner shown above the environments list after a successful create. */
-#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--background-color-default,#fff); border:1px solid var(--border-color-muted,#d8dee4); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
-.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#22c580; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
-.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--text-color-muted,#4f5966); }
-.env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
-.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
-.env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
-#env-error-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:#ffebe9; border:1px solid #cf222e; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
-.env-error-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#cf222e; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
-.env-error-banner__text { flex:1 1 auto; font-size:13px; color:#82071e; line-height:1.4; }
+#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-success-bg); border:1px solid var(--rad-success); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-success-solid); color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); }
+.env-success-banner__text strong { font-weight:600; color:var(--rad-text); }
+.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-success-banner__close:hover { color:var(--rad-text); }
+#env-error-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-danger-bg); border:1px solid var(--rad-danger); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-error-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-danger-solid); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-error-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.4; }
 .env-error-banner__text strong { font-weight:600; }
-.env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:#82071e; cursor:pointer; }
-.env-error-banner__close:hover { color:#5a0410; }
-#env-warning-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:#fff8c5; border:1px solid #d4a72c; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
-.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#d4a72c; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
-.env-warning-banner__text { flex:1 1 auto; font-size:13px; color:#54470b; line-height:1.4; white-space:pre-wrap; }
+.env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-error-banner__close:hover { color:var(--rad-text); }
+#env-warning-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-warning); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-warning-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.4; white-space:pre-wrap; }
 .env-warning-banner__text strong { font-weight:600; }
-.env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:#54470b; cursor:pointer; }
-.env-warning-banner__close:hover { color:#3a3007; }
+.env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-warning-banner__close:hover { color:var(--rad-text); }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -1828,7 +1851,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .rad-combo__menu {
   position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 30;
   background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.12); overflow: hidden;
+  box-shadow: 0 8px 24px var(--rad-shadow); overflow: hidden;
 }
 .rad-combo__option {
   display: block; width: 100%; text-align: left; margin: 0; padding: 12px 16px;
@@ -1851,7 +1874,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .rad-combo__value--placeholder { color:var(--rad-text-tertiary); }
 .rad-combo__chevron { flex:0 0 auto; width:8px; height:8px; border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary); transform:translateY(-2px) rotate(45deg); transition:transform 0.15s; }
 .rad-combo--open .rad-combo__chevron { transform:translateY(1px) rotate(-135deg); }
-.rad-combo__menu { margin-top:6px; background:var(--rad-surface); border:1px solid var(--rad-stroke); border-radius:8px; overflow:hidden; box-shadow:0 6px 20px rgba(0,0,0,0.10); }
+.rad-combo__menu { margin-top:6px; background:var(--rad-surface); border:1px solid var(--rad-stroke); border-radius:8px; overflow:hidden; box-shadow:0 6px 20px var(--rad-shadow); }
 .rad-combo__options:empty { display:none; }
 .rad-combo__option { display:block; width:100%; text-align:left; padding:11px 14px; background:none; border:none; margin:0; font-size:14px; color:var(--rad-text); font-family:var(--rad-font); cursor:pointer; }
 .rad-combo__option:hover, .rad-combo__option--active { background:var(--rad-bg-subtle); }
@@ -2259,7 +2282,7 @@ function renderGitHubIdentity() {
             envGhNote.style.display = '';
         } else {
             envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> and <code>write:packages</code> scopes.';
-            envGhNote.style.color = 'var(--rad-muted, #57606a)';
+            envGhNote.style.color = 'var(--rad-text-tertiary)';
             envGhNote.style.display = '';
         }
     }
@@ -2695,7 +2718,7 @@ function showAppPicker(opts) {
         var id = 'appsel-' + (value || 'create');
         var label = document.createElement('label');
         label.setAttribute('for', id);
-        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:8px; cursor:pointer;';
+        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--rad-stroke); border-radius:8px; cursor:pointer;';
         var radio = document.createElement('input');
         radio.type = 'radio'; radio.name = 'appsel'; radio.id = id; radio.value = value;
         radio.style.marginTop = '2px';
@@ -2704,12 +2727,12 @@ function showAppPicker(opts) {
         var body = document.createElement('div');
         body.style.minWidth = '0';
         var line1 = document.createElement('div');
-        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--text-color-default,#1f2328); word-break:break-all;';
+        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--rad-text); word-break:break-all;';
         line1.textContent = primary;
         body.appendChild(line1);
         if (secondary) {
             var line2 = document.createElement('div');
-            line2.style.cssText = 'font-size:11px; color:var(--text-color-muted,#656d76); margin-top:2px; word-break:break-all;';
+            line2.style.cssText = 'font-size:11px; color:var(--rad-text-tertiary); margin-top:2px; word-break:break-all;';
             line2.textContent = secondary;
             body.appendChild(line2);
         }
@@ -3050,7 +3073,7 @@ function markVerified(user, extra) {
 function credVerifyError(msg) {
     var st = document.getElementById('cred-verify-status');
     st.style.display = 'block';
-    st.innerHTML = '<span style="color:#cf222e;">' + escapeHtmlClient(msg) + '</span>';
+    st.innerHTML = '<span style="color:var(--rad-danger);">' + escapeHtmlClient(msg) + '</span>';
 }
 
 document.getElementById('btn-verify-azure').addEventListener('click', function() {
@@ -3223,10 +3246,10 @@ function deployLandingView(state) {
   .rad-btn--danger:hover, .rad-btn--danger-outline:hover { background:var(--rad-danger-solid); border-color:var(--rad-danger-solid-border); color:#fff; }
   .rad-btn--danger-solid { background:var(--rad-danger-solid); color:#fff; border:1px solid var(--rad-danger-solid-border); }
   .rad-btn--danger-solid:hover { background:var(--rad-danger-solid-border); border-color:var(--rad-danger-solid-border); color:#fff; }
-  .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; }
-  .rad-deploy-applink:hover { color:#388bfd; }
-  .rad-monitor-link { color:#1f6feb; text-decoration:underline; font-weight:600; font-size:14px; cursor:pointer; }
-  .rad-monitor-link:hover { color:#388bfd; }
+  .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:var(--rad-link); text-decoration:underline; font-weight:600; font-size:14px; }
+  .rad-deploy-applink:hover { color:var(--rad-link-hover); }
+  .rad-monitor-link { color:var(--rad-link); text-decoration:underline; font-weight:600; font-size:14px; cursor:pointer; }
+  .rad-monitor-link:hover { color:var(--rad-link-hover); }
   .rad-cell-empty { color:var(--rad-text-tertiary); }
   /* Inline status banner (Figma: green success / red error with dismiss). */
   .rad-inline { align-items:center; gap:12px; }
@@ -3234,34 +3257,34 @@ function deployLandingView(state) {
   .rad-inline__msg { flex:1 1 auto; min-width:0; line-height:1.4; }
   .rad-inline__close { flex:0 0 auto; background:none; border:none; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:inherit; opacity:0.65; }
   .rad-inline__close:hover { opacity:1; }
-  .rad-inline--success { background:#edfaed; border:1px solid #66cc66; color:#262626; }
-  .rad-inline--success .rad-inline__icon { color:#33a633; font-weight:700; }
-  .rad-inline--error { background:#ffebe9; border:1px solid #cf222e; color:#82071e; }
-  .rad-inline--error .rad-inline__icon { color:#cf222e; }
+  .rad-inline--success { background:var(--rad-success-bg); border:1px solid var(--rad-success); color:var(--rad-text); }
+  .rad-inline--success .rad-inline__icon { color:var(--rad-success); font-weight:700; }
+  .rad-inline--error { background:var(--rad-danger-bg); border:1px solid var(--rad-danger); color:var(--rad-text); }
+  .rad-inline--error .rad-inline__icon { color:var(--rad-danger); }
   /* Delete confirmation dialog (Figma type-to-confirm flow). */
-  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface,#fff); border:1px solid var(--rad-stroke,#d1d5da); border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,0.11); overflow:hidden; }
-  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke,#d1d5da); }
-  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text,#24292e); }
-  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary,#6e6e6e); padding:6px; border-radius:6px; }
-  .rad-ddlg__close:hover { background:var(--rad-neutral-bg,#f2f3f4); }
+  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }
+  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke); }
+  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text); }
+  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary); padding:6px; border-radius:6px; }
+  .rad-ddlg__close:hover { background:var(--rad-neutral-bg); }
   .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
-  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text,#24292e); }
-  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text,#24292e); }
-  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary,#586069); }
+  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text); }
+  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text); }
+  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary); }
   .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
-  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); margin:0; }
-  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke,#d1d5da); background:#f6f8fa; color:var(--rad-text,#1a1a1a); }
-  .rad-ddlg__btn:hover { background:#eef1f4; }
-  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:#fff5b1; border:1px solid #ffe082; border-radius:6px; padding:12px; color:#735c0f; font-size:14px; line-height:1.4; }
-  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); }
-  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke,#d1d5da); border-radius:1px; }
-  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text,#24292e); margin:0; }
-  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke,#d1d5da); border-radius:6px; font-size:14px; color:var(--rad-text,#24292e); background:var(--rad-surface,#fff); }
-  .rad-ddlg__input:focus { outline:none; border-color:#0366d6; box-shadow:0 0 0 3px rgba(3,102,214,0.2); }
-  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:#d73a49; cursor:pointer; }
-  .rad-ddlg__delete:hover { background:#b31d28; }
-  .rad-ddlg__delete:disabled { background:#e9a1a8; cursor:default; }
-  .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
+  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary); margin:0; }
+  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke); background:var(--rad-neutral-bg); color:var(--rad-text); }
+  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover); }
+  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
+  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
+  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
+  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
+  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
+  .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
+  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
+  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
+  .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
+  .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 
@@ -3627,9 +3650,9 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
         if (sub) {
             sub.style.color = 'var(--rad-text-secondary)';
             sub.innerHTML =
-                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-surface-2,#f0f1f2); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\\'t been pushed to GitHub yet, so there\\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
+                '<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-code-bg); padding:1px 5px; border-radius:4px;">' + escapeHtmlClient(br) + '</code> hasn\\'t been pushed to GitHub yet, so there\\'s nothing to deploy for <strong>' + escapeHtmlClient(app) + '</strong>.</div>' +
                 '<div style="margin-top:10px; color:var(--rad-text-secondary);">Push it, then deploy again:</div>' +
-                '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-surface-2,#f0f1f2); border:1px solid var(--rad-border,#d0d7de); border-radius:6px; padding:8px 10px;">' +
+                '<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-code-bg); border:1px solid var(--rad-stroke); border-radius:6px; padding:8px 10px;">' +
                   '<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">' + escapeHtmlClient(pushCmd) + '</code>' +
                   '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
                 '</div>';
@@ -3638,9 +3661,9 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
         if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
         if (sub) {
             var msg = errText ? escapeHtmlClient(errText) : 'The deploy workflow run did not complete successfully.';
-            if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link,#0969da);">View workflow run in GitHub ↗</a>';
+            if (runUrl) msg += '<br><a href="' + escapeHtmlClient(runUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View workflow run in GitHub ↗</a>';
             sub.innerHTML = msg;
-            sub.style.color = '#cf222e';
+            sub.style.color = 'var(--rad-danger)';
         }
     }
     if (links) links.style.display = 'none';
@@ -3783,18 +3806,18 @@ function deployProgressView(state) {
 
     return pageShell("Deploying", `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Deployment Progress</h1>
-<p style="margin-bottom:12px; color: var(--text-color-muted, #656d76);">
+<p style="margin-bottom:12px; color:var(--rad-text-tertiary);">
   Deploying <strong>${escapeHtml(targetRepo)}</strong> (branch: <code>${escapeHtml(targetBranch)}</code>) to ${provider === 'aws' ? 'AWS' : 'Azure'}
 </p>
-<div id="deploy-error" style="display:${deployStatus === 'failed' && deployError ? 'block' : 'none'}; margin-bottom:12px; padding:12px 14px; background:#ffebe9; border:1px solid #cf222e; border-radius:6px;">
-  <div style="font-size:13px; font-weight:600; color:#cf222e; margin-bottom:6px;">❌ Deployment failed</div>
-  <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--font-mono, monospace); font-size:12px; color:#82071e; max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
+<div id="deploy-error" style="display:${deployStatus === 'failed' && deployError ? 'block' : 'none'}; margin-bottom:12px; padding:12px 14px; background:var(--rad-danger-bg); border:1px solid var(--rad-danger); border-radius:6px;">
+  <div style="font-size:13px; font-weight:600; color:var(--rad-danger); margin-bottom:6px;">❌ Deployment failed</div>
+  <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--rad-mono); font-size:12px; color:var(--rad-text); max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
 </div>
 <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Application Graph</h2>
-<div id="graph-container" style="height:400px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; margin-bottom:16px;"></div>
+<div id="graph-container" style="height:400px; border:1px solid var(--rad-stroke); border-radius:6px; margin-bottom:16px;"></div>
 <div id="deploy-log-section">
   <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Deployment Logs</h2>
-  <div id="deploy-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:250px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
+  <div id="deploy-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:250px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
 <script>
@@ -3806,7 +3829,7 @@ var DEPLOY_PROVIDER = ${JSON.stringify(provider)};
 if (resources.length === 0) {
     var emptyMsg = document.getElementById('graph-container');
     function showPlanningSpinner(msg) {
-        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid #e1e4e8;border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
+        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
     }
     showPlanningSpinner('Loading deployment resources...');
     fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
@@ -3822,14 +3845,14 @@ if (resources.length === 0) {
                 .then(function(p) {
                     if (p && p.reload) { window.location.reload(); }
                     else {
-                        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p><p style="font-size:12px;">' + ((p && p.error) ? p.error : 'Unknown error') + '</p></div>';
+                        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p><p style="font-size:12px;">' + ((p && p.error) ? p.error : 'Unknown error') + '</p></div>';
                     }
                 })
                 .catch(function() {
-                    emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p></div>';
+                    emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p></div>';
                 });
         } else {
-            emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">No resources to display.</p><p style="font-size:12px;">Navigate to the <strong>Planned Graph</strong> page first to plan your application, then deploy from the <strong>Environment</strong> page.</p></div>';
+            emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">No resources to display.</p><p style="font-size:12px;">Navigate to the <strong>Planned Graph</strong> page first to plan your application, then deploy from the <strong>Environment</strong> page.</p></div>';
         }
     });
 }
