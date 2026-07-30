@@ -193,12 +193,11 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
 });
 
 describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
-    it("keeps diff node backgrounds white and colors only the border by diff status", () => {
-        expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: '#ffffff', border: '#16a34a' };");
-        expect(CLIENT_GRAPH_JS).toContain("case 'removed': return { bg: '#ffffff', border: '#dc2626' };");
-        expect(CLIENT_GRAPH_JS).toContain("case 'modified': return { bg: '#ffffff', border: '#ca8a04' };");
-        // Unchanged / unknown status falls back to the modeled card's neutral gray.
-        expect(CLIENT_GRAPH_JS).toContain("default: return { bg: '#ffffff', border: '#d0d7de' };");
+    it("keeps diff node backgrounds on the host surface and colors only the border by diff status", () => {
+        expect(CLIENT_GRAPH_JS).toContain("case 'added': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-success)' };");
+        expect(CLIENT_GRAPH_JS).toContain("case 'removed': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-danger)' };");
+        expect(CLIENT_GRAPH_JS).toContain("case 'modified': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-warning)' };");
+        expect(CLIENT_GRAPH_JS).toContain("default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };");
         // No tinted diff backgrounds remain.
         expect(CLIENT_GRAPH_JS).not.toContain("#dcfce7");
         expect(CLIENT_GRAPH_JS).not.toContain("#fee2e2");
@@ -213,9 +212,9 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
         // synthetic connection, is drawn at all).
         expect(CLIENT_GRAPH_JS).toContain("function pushEdge(source, target, dashed, connStatus)");
         expect(CLIENT_GRAPH_JS).toContain("var cs = connStatus || '';");
-        expect(CLIENT_GRAPH_JS).toContain("if (cs === 'removed') stroke = '#dc2626';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'added') stroke = '#16a34a';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'unchanged') stroke = '#8c959f';");
+        expect(CLIENT_GRAPH_JS).toContain("if (cs === 'removed') stroke = 'var(--rad-danger)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'added') stroke = 'var(--rad-success)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (cs === 'unchanged') stroke = 'var(--rad-edge-muted)';");
         // The connection loop threads each connection's diff status into pushEdge.
         expect(CLIENT_GRAPH_JS).toContain("if (targetExists) pushEdge(r.id || r.name, connTarget, false, conn.diffStatus || '');");
     });
@@ -223,9 +222,9 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
     it("falls back to endpoint diff statuses only for edges with no connection-level status (e.g. output edges)", () => {
         expect(CLIENT_GRAPH_JS).toContain("var sStatus = diffStatusById[source] || '';");
         expect(CLIENT_GRAPH_JS).toContain("var tStatus = diffStatusById[target] || '';");
-        expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = '#dc2626';");
-        expect(CLIENT_GRAPH_JS).toContain("else if (sStatus === 'added' || tStatus === 'added') stroke = '#16a34a';");
-        expect(CLIENT_GRAPH_JS).toContain("else stroke = '#8c959f';");
+        expect(CLIENT_GRAPH_JS).toContain("if (sStatus === 'removed' || tStatus === 'removed') stroke = 'var(--rad-danger)';");
+        expect(CLIENT_GRAPH_JS).toContain("else if (sStatus === 'added' || tStatus === 'added') stroke = 'var(--rad-success)';");
+        expect(CLIENT_GRAPH_JS).toContain("else stroke = 'var(--rad-edge-muted)';");
     });
 
     it("builds a diffStatusById lookup from the resource list for edge coloring", () => {
@@ -348,11 +347,18 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
         })).toBe(false);
     });
 
-    it("uses gray for in-flight, blue for completed, and red for failed resources", () => {
+    it("uses host-backed surfaces for in-flight, completed, and failed resources", () => {
         const colors = new Function("window", `${CLIENT_GRAPH_JS}; return RADIUS_DEPLOY_STATUS_COLORS;`)({ addEventListener() {} });
-        expect(colors.in_progress).toEqual({ bg: "#f6f8fa", border: "#8b949e" });
-        expect(colors.success).toEqual({ bg: "#ddf4ff", border: "#0969da" });
-        expect(colors.failed).toEqual({ bg: "#ffebe9", border: "#cf222e" });
+        expect(colors.in_progress).toEqual({ bg: "var(--rad-node-bg)", border: "var(--rad-edge)" });
+        expect(colors.success).toEqual({ bg: "var(--rad-info-bg)", border: "var(--rad-info)" });
+        expect(colors.failed).toEqual({ bg: "var(--rad-danger-bg)", border: "var(--rad-danger)" });
+    });
+
+    it("uses semantic tokens for graph chrome instead of light-only literals", () => {
+        expect(CLIENT_GRAPH_JS).toContain("color: 'var(--rad-grid)'");
+        expect(CLIENT_GRAPH_JS).toContain("background: d.bgColor || 'var(--rad-node-bg)'");
+        expect(CLIENT_GRAPH_JS).not.toContain("bg: '#ffffff'");
+        expect(CLIENT_GRAPH_JS).not.toContain("color: '#e1e4e8'");
     });
 
     it("maps each deploy status to a corner badge (hourglass / check / x)", () => {

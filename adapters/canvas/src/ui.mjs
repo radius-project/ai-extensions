@@ -85,8 +85,8 @@ export function statusPill(id, kind, html) {
 export function feedbackWidget() {
     const chat = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">`
         + `<path d="M12 3C6.48 3 2 6.94 2 11.5c0 2.3 1.14 4.36 2.98 5.84L4 21l4.2-1.9c1.16.38 2.44.6 3.8.6 5.52 0 10-3.94 10-8.7S17.52 3 12 3z" `
-        + `stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/>`
-        + `<circle cx="8.5" cy="11.5" r="1.1" fill="#fff"/><circle cx="12" cy="11.5" r="1.1" fill="#fff"/><circle cx="15.5" cy="11.5" r="1.1" fill="#fff"/></svg>`;
+        + `stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`
+        + `<circle cx="8.5" cy="11.5" r="1.1" fill="currentColor"/><circle cx="12" cy="11.5" r="1.1" fill="currentColor"/><circle cx="15.5" cy="11.5" r="1.1" fill="currentColor"/></svg>`;
     const feedbackUrl = 'https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml';
     const learnUrl = 'https://radapp.io';
     return `<div id="rad-feedback" class="rad-feedback">

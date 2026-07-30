@@ -45,6 +45,30 @@ describe("pageShell", () => {
         expect(iconStyles).toContain("background: transparent");
         expect(iconStyles).not.toContain("border:");
     });
+
+    it("inherits the Copilot host theme without creating Radius-owned theme state", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain("color-scheme: var(--color-scheme, inherit)");
+        expect(html).toContain("--rad-bg: var(--background-color-default, Canvas)");
+        expect(html).toContain("--rad-text: var(--text-color-default, CanvasText)");
+        expect(html).toContain("--rad-bg-subtle: color-mix(in srgb, var(--rad-text) 6%, var(--rad-bg))");
+        expect(html).toContain("--rad-neutral-bg: var(--rad-bg-subtle)");
+        expect(html).toContain("--rad-node-bg: var(--rad-surface)");
+        expect(html).toContain("--rad-success: var(--text-color-success");
+        expect(html).toContain("--rad-warning: var(--text-color-warning");
+        expect(html).toContain("--rad-danger: var(--text-color-danger");
+        expect(html).not.toContain("localStorage");
+        expect(html).not.toContain("matchMedia");
+        expect(html).not.toContain("prefers-color-scheme");
+        expect(html).not.toContain("--rad-bg-subtle: var(--background-color-segmented");
+        expect(html).not.toContain("--rad-neutral-bg: var(--background-color-segmented");
+    });
+
+    it("keeps React Flow chrome transparent over the themed graph surface", () => {
+        const html = pageShell("My Title", "<div id=\"graph-container\"></div>");
+        const flowStyles = html.match(/\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/)?.[1];
+        expect(flowStyles).toContain("background: transparent");
+    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
@@ -240,4 +264,17 @@ describe("remaining pages smoke-render without removed tokens", () => {
             if (secondary) expect(typeof secondary()).toBe("string");
         });
     }
+
+    it("does not render known light-only component surfaces", () => {
+        const html = cases.flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""]).join("\n");
+        for (const literal of [
+            "background:#ffebe9",
+            "background:#1e1e1e",
+            "background:#edfaed",
+            "background:#fff5b1",
+            "color:#82071e",
+        ]) {
+            expect(html).not.toContain(literal);
+        }
+    });
 });
