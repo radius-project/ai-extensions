@@ -58,6 +58,14 @@ export function pageShell(title, bodyContent, activeNav) {
 <meta charset="utf-8" />
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='64' fill='%23da4c2a'/%3E%3Ccircle cx='64' cy='64' r='56' fill='%23bb311e' opacity='0.3'/%3E%3Cline x1='64' y1='64' x2='34' y2='28' stroke='white' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='64' r='8' fill='white'/%3E%3C/svg%3E" />
 <title>${title} — Radius</title>
+<script>
+  // Detect if we are running in an iframe (e.g., inside the Copilot app).
+  // If so, tag the root so we can suppress rendering until the host injects the theme,
+  // avoiding a dark/light flash during page transitions.
+  if (window !== window.parent) {
+    document.documentElement.setAttribute('data-embedded', '');
+  }
+</script>
 ${getInlineVendorStyles()}
 <style>
   /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
@@ -111,6 +119,10 @@ ${getInlineVendorStyles()}
   body[data-color-mode="dark"] {${DARK_TOKENS}
   }
   :root:has(body[data-color-mode="dark"]) { color-scheme: dark; }
+  /* Prevent flashing in embedded mode: hide until the host injects the theme attribute. */
+  html[data-embedded]:not([data-color-mode]):not(:has(body[data-color-mode])) {
+    visibility: hidden;
+  }
   /* System theme: only when the host has expressed no explicit preference on
      either element. Without the body guard this would override an explicit
      host "light" theme whenever the OS is dark. */
@@ -137,7 +149,9 @@ ${getInlineVendorStyles()}
     align-items: stretch;
     gap: 40px;
     padding: 0 20px;
-    background: var(--rad-bg-subtle);
+    background: var(--rad-surface);
+    border-bottom: 1px solid var(--rad-stroke);
+  }
     border-bottom: 1px solid var(--rad-stroke);
     flex: 0 0 auto;
   }
