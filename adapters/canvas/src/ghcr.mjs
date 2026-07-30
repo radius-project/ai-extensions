@@ -8,9 +8,14 @@ export const BOOTSTRAP_ARTIFACT_TYPE = "application/vnd.radius.statearchive.boot
 export const BOOTSTRAP_CONTENT = "Harmless bootstrap for private Repo Radius state package.";
 
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
+const OCI_IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
 const PACKAGE_AUTH_GUIDANCE =
     "Refresh the stored GitHub CLI credential with: gh auth refresh -s read:packages -s write:packages";
+
+// Artifact type the producer's publish-deploy-status action stamps on the
+// deployed graph/status OCI artifact (radius-project/radius PR #12591).
+export const DEPLOY_STATUS_ARTIFACT_TYPE = "application/vnd.radius.deploy-status.v1+json";
 
 async function defaultRunKeyringCommand(args) {
     const { runGhKeyringCommand } = await import("./gh.mjs");
@@ -56,7 +61,11 @@ async function responseDetail(response) {
 }
 
 function packageAuthError(message) {
-    return new Error(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
+    const error = new Error(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
+    // Tag so callers can distinguish a permission problem from a transient/HTTP
+    // failure and surface auth-specific guidance.
+    error.code = "GHCR_AUTH";
+    return error;
 }
 
 function parseBearerChallenge(header) {
@@ -75,7 +84,7 @@ function parseBearerChallenge(header) {
     return params;
 }
 
-async function getRegistryBearerToken({ fetchImpl, registryOrigin, repositoryPath, username, token }) {
+async function getRegistryBearerToken({ fetchImpl, registryOrigin, repositoryPath, username, token, scope = "pull,push" }) {
     const challengeResponse = await fetchImpl(`${registryOrigin}/v2/`, {
         headers: { Accept: "application/json" },
         redirect: "error",
@@ -90,7 +99,7 @@ async function getRegistryBearerToken({ fetchImpl, registryOrigin, repositoryPat
         throw new Error("GHCR authentication challenge pointed to an unexpected origin.");
     }
     tokenUrl.searchParams.set("service", challenge.service || "ghcr.io");
-    tokenUrl.searchParams.set("scope", `repository:${repositoryPath}:pull,push`);
+    tokenUrl.searchParams.set("scope", `repository:${repositoryPath}:${scope}`);
 
     const response = await fetchImpl(tokenUrl, {
         headers: {
@@ -378,4 +387,85 @@ export async function bootstrapGHCRStatePackage({
         throw new Error(`GHCR state package "${registry}" was not visible through the GitHub Packages API after bootstrap.`);
     }
     validatePackage(metadata, targetRepository);
+}
+
+/**
+ * pullOciArtifactFiles - pull a single-manifest OCI artifact from an untagged
+ * GHCR repository and return its layer blobs keyed by their
+ * `org.opencontainers.image.title` annotation (the file name ORAS records when
+ * it pushes each file). This is the read-side counterpart to the producer's
+ * `oras push` in the publish-deploy-status action.
+ *
+ * Resolves `null` when the tag does not exist (HTTP 404 on the manifest) so the
+ * caller can fall back to an older source. Throws a `GHCR_AUTH`-coded error on
+ * 401/403 so the caller can surface package-permission guidance distinctly from
+ * a missing artifact.
+ */
+export async function pullOciArtifactFiles({
+    registry,
+    tag,
+    credentials,
+    loadCredentials = loadGhKeyringCredentials,
+    fetchImpl = globalThis.fetch,
+    registryOrigin,
+}) {
+    if (typeof fetchImpl !== "function") {
+        throw new Error("This Node.js runtime does not provide fetch.");
+    }
+    if (!tag) {
+        throw new Error("An OCI tag is required to pull a GHCR artifact.");
+    }
+    const parsed = parseRegistry(registry, registryOrigin);
+    const auth = credentials || await loadCredentials();
+    const bearerToken = await getRegistryBearerToken({
+        fetchImpl,
+        registryOrigin: parsed.registryOrigin,
+        repositoryPath: parsed.repositoryPath,
+        username: auth.username,
+        token: auth.token,
+        // Read-only pull; consumers may only hold read:packages.
+        scope: "pull",
+    });
+
+    const encodedPath = registryPath(parsed.repositoryPath);
+    const manifestResponse = await registryFetch(
+        fetchImpl,
+        parsed.registryOrigin,
+        bearerToken,
+        `/v2/${encodedPath}/manifests/${encodeURIComponent(tag)}`,
+        {
+            headers: { Accept: `${OCI_MANIFEST_MEDIA_TYPE}, ${OCI_IMAGE_INDEX_MEDIA_TYPE}` },
+        },
+    );
+    if (manifestResponse.status === 404) return null;
+    if (manifestResponse.status === 401 || manifestResponse.status === 403) {
+        throw packageAuthError(`GHCR rejected package access for ${parsed.repositoryPath}`);
+    }
+    if (!manifestResponse.ok) {
+        throw new Error(`Failed to read GHCR manifest "${tag}" (HTTP ${manifestResponse.status})${await responseDetail(manifestResponse)}`);
+    }
+
+    const manifest = await manifestResponse.json();
+    const layers = Array.isArray(manifest.layers) ? manifest.layers : [];
+    const files = {};
+    for (const layer of layers) {
+        const title = layer?.annotations?.["org.opencontainers.image.title"];
+        if (!title || !layer.digest) continue;
+        // Blob GETs are commonly answered with a 307 to a pre-signed storage URL;
+        // follow it (fetch strips Authorization on the cross-origin hop per spec,
+        // and the redirect target is already signed).
+        const blobResponse = await fetchImpl(
+            `${parsed.registryOrigin}/v2/${encodedPath}/blobs/${layer.digest}`,
+            { headers: { Authorization: `Bearer ${bearerToken}` }, redirect: "follow" },
+        );
+        if (blobResponse.status === 401 || blobResponse.status === 403) {
+            throw packageAuthError(`GHCR rejected blob access for ${parsed.repositoryPath}`);
+        }
+        if (!blobResponse.ok) {
+            throw new Error(`Failed to read GHCR blob ${layer.digest} (HTTP ${blobResponse.status})${await responseDetail(blobResponse)}`);
+        }
+        files[title] = Buffer.from(await blobResponse.arrayBuffer()).toString("utf8");
+    }
+
+    return { files, manifest, artifactType: manifest.artifactType || "" };
 }

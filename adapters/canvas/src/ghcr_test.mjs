@@ -6,8 +6,10 @@ import { test } from "vitest";
 import {
     BOOTSTRAP_ARTIFACT_TYPE,
     BOOTSTRAP_CONTENT,
+    DEPLOY_STATUS_ARTIFACT_TYPE,
     bootstrapGHCRStatePackage,
     loadGhKeyringCredentials,
+    pullOciArtifactFiles,
     withGhcrDockerConfig,
 } from "./ghcr.mjs";
 
@@ -282,3 +284,107 @@ test("withGhcrDockerConfig removes the temp docker config even when publish fail
     assert.ok(seenDir);
     assert.equal(existsSync(seenDir), false, "temp docker config should be removed on failure");
 });
+
+// ── pullOciArtifactFiles ────────────────────────────────────────────────────
+
+function sha256(bytes) {
+    return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+// Build a pull harness that serves an OCI artifact whose layers carry the given
+// { title: content } files (title => org.opencontainers.image.title annotation),
+// mirroring what `oras push <file>:<mediaType>` records.
+function createPullHarness({ files = {}, manifestStatus = 200, tokenStatus = 200 } = {}) {
+    const blobs = new Map(); // digest -> content
+    const layers = [];
+    for (const [title, content] of Object.entries(files)) {
+        const bytes = Buffer.from(content);
+        const digest = sha256(bytes);
+        blobs.set(digest, bytes);
+        layers.push({
+            mediaType: title.endsWith(".json") ? "application/json" : "text/plain",
+            digest,
+            size: bytes.byteLength,
+            annotations: { "org.opencontainers.image.title": title },
+        });
+    }
+    const manifest = {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        artifactType: DEPLOY_STATUS_ARTIFACT_TYPE,
+        config: { mediaType: "application/vnd.oci.empty.v1+json", digest: sha256(Buffer.from("{}")), size: 2 },
+        layers,
+    };
+    const calls = [];
+
+    async function fetchImpl(input, options = {}) {
+        const url = new URL(input);
+        const method = options.method || "GET";
+        calls.push({ url: url.toString(), method });
+
+        if (url.origin === "https://registry.test" && url.pathname === "/v2/") {
+            return new Response("", {
+                status: 401,
+                headers: { "WWW-Authenticate": 'Bearer realm="https://registry.test/token",service="ghcr.io"' },
+            });
+        }
+        if (url.origin === "https://registry.test" && url.pathname === "/token") {
+            if (tokenStatus !== 200) return json({ error: "denied" }, { status: tokenStatus });
+            // The reader must request a pull-only scope.
+            assert.equal(url.searchParams.get("scope"), "repository:acme/app-radius-graph-dev-123456789abc:pull");
+            return json({ token: "registry-bearer" });
+        }
+        const manifestMatch = url.pathname.match(/\/manifests\/(.+)$/);
+        if (url.origin === "https://registry.test" && manifestMatch) {
+            if (manifestStatus === 404) return json({ errors: [] }, { status: 404 });
+            if (manifestStatus === 401 || manifestStatus === 403) return json({ errors: [] }, { status: manifestStatus });
+            return json(manifest);
+        }
+        const blobMatch = url.pathname.match(/\/blobs\/(sha256:[a-f0-9]+)$/);
+        if (url.origin === "https://registry.test" && blobMatch) {
+            const bytes = blobs.get(blobMatch[1]);
+            if (!bytes) return new Response("", { status: 404 });
+            return new Response(bytes, { status: 200 });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+    }
+
+    return { fetchImpl, calls };
+}
+
+const pullOptions = {
+    registry: "ghcr.io/acme/app-radius-graph-dev-123456789abc",
+    tag: "dev-my-app-latest",
+    credentials: { username: "octocat", token: "keyring-token" },
+    registryOrigin: "https://registry.test",
+};
+
+test("pullOciArtifactFiles returns files keyed by their title annotation", async () => {
+    const harness = createPullHarness({
+        files: {
+            "deploy-graph.json": '{"resources":[]}',
+            "deploy-state.txt": "state=succeeded\n",
+        },
+    });
+
+    const result = await pullOciArtifactFiles({ ...pullOptions, fetchImpl: harness.fetchImpl });
+
+    assert.equal(result.artifactType, DEPLOY_STATUS_ARTIFACT_TYPE);
+    assert.equal(result.files["deploy-graph.json"], '{"resources":[]}');
+    assert.equal(result.files["deploy-state.txt"], "state=succeeded\n");
+});
+
+test("pullOciArtifactFiles returns null when the tag is missing", async () => {
+    const harness = createPullHarness({ manifestStatus: 404 });
+    const result = await pullOciArtifactFiles({ ...pullOptions, fetchImpl: harness.fetchImpl });
+    assert.equal(result, null);
+});
+
+test("pullOciArtifactFiles surfaces package-scope guidance on a 403 manifest", async () => {
+    const harness = createPullHarness({ manifestStatus: 403 });
+    await assert.rejects(
+        pullOciArtifactFiles({ ...pullOptions, fetchImpl: harness.fetchImpl }),
+        (err) => err.code === "GHCR_AUTH" && /gh auth refresh -s read:packages/.test(err.message),
+    );
+});
+
