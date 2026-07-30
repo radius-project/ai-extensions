@@ -15,9 +15,9 @@ import { isWorkspaceSelection } from "./workspace.mjs";
 // scopes (explicit host theme, and the system-preference fallback) from this
 // single source so the two can never drift apart.
 //
-// Each token still reads the host's injected semantic variable first and only
-// falls back to a literal when the canvas runs outside the app (or the host
-// does not inject that token), so an explicit host theme always wins.
+// Most tokens read the host's injected semantic variable first and only fall back to
+// a literal when the canvas runs outside the app (or the host does not inject that token).
+// Tokens with no host semantic equivalent (e.g. success/warning) intentionally use literals.
 const DARK_TOKENS = `
     color-scheme: dark;
     --rad-link: var(--true-color-blue, #58a6ff);
