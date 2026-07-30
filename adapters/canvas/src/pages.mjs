@@ -1759,14 +1759,14 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </div>
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:420px; width:90%;">
     <div style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Service Management Reference required</div>
-    <div style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
-    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328);" />
-    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:6px;"></div>
+    <div style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
+    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:var(--rad-surface); color:var(--rad-text);" />
+    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger); margin-top:6px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
-      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
+      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
+      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info); border-radius:6px; background:var(--rad-info); color:#fff; cursor:pointer;">Retry</button>
     </div>
   </div>
 </div>
@@ -1775,15 +1775,15 @@ document.getElementById('back-btn').addEventListener('click', function() {
      repo (app-selection-required), or via the opt-in "Use an existing
      application" advanced action. Rows are built dynamically in JS. -->
 <div id="env-appselect-modal" style="display:none; position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
     <div id="env-appselect-title" style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Choose a deploy identity</div>
-    <div id="env-appselect-intro" style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;"></div>
-    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger,#cf222e); line-height:1.5; margin-bottom:10px;"></div>
+    <div id="env-appselect-intro" style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;"></div>
+    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger); line-height:1.5; margin-bottom:10px;"></div>
     <div id="env-appselect-list" style="display:flex; flex-direction:column; gap:6px;"></div>
-    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:8px;"></div>
+    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger); margin-top:8px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
-      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Use selected</button>
+      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
+      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info); border-radius:6px; background:var(--rad-info); color:#fff; cursor:pointer;">Use selected</button>
     </div>
   </div>
 </div>
@@ -2718,7 +2718,7 @@ function showAppPicker(opts) {
         var id = 'appsel-' + (value || 'create');
         var label = document.createElement('label');
         label.setAttribute('for', id);
-        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:8px; cursor:pointer;';
+        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--rad-stroke); border-radius:8px; cursor:pointer;';
         var radio = document.createElement('input');
         radio.type = 'radio'; radio.name = 'appsel'; radio.id = id; radio.value = value;
         radio.style.marginTop = '2px';
@@ -2727,12 +2727,12 @@ function showAppPicker(opts) {
         var body = document.createElement('div');
         body.style.minWidth = '0';
         var line1 = document.createElement('div');
-        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--text-color-default,#1f2328); word-break:break-all;';
+        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--rad-text); word-break:break-all;';
         line1.textContent = primary;
         body.appendChild(line1);
         if (secondary) {
             var line2 = document.createElement('div');
-            line2.style.cssText = 'font-size:11px; color:var(--text-color-muted,#656d76); margin-top:2px; word-break:break-all;';
+            line2.style.cssText = 'font-size:11px; color:var(--rad-text-tertiary); margin-top:2px; word-break:break-all;';
             line2.textContent = secondary;
             body.appendChild(line2);
         }
@@ -3281,8 +3281,8 @@ function deployLandingView(state) {
   .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
   .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
   .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
-  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:#d73a49; cursor:pointer; }
-  .rad-ddlg__delete:hover { background:#b31d28; }
+  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
+  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
   .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }

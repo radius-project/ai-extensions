@@ -272,6 +272,22 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("loadServesLabels");
     });
 
+    it("uses semantic theme tokens throughout environment modal content", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain('id="env-smr-modal"');
+        expect(html).toContain('id="env-appselect-modal"');
+        expect(html).toContain("box-shadow:0 8px 30px var(--rad-shadow)");
+        for (const legacyToken of [
+            "var(--background-color-default,#fff)",
+            "var(--text-color-default,#1f2328)",
+            "var(--text-color-muted,#656d76)",
+            "var(--border-color-muted,#d8dee4)",
+        ]) {
+            expect(html).not.toContain(legacyToken);
+        }
+        expect(html).not.toContain("box-shadow:0 8px 30px rgba(");
+    });
+
     it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         // Step 3 header + provider-federated app registration copy.
@@ -500,8 +516,18 @@ describe("remaining pages smoke-render without removed tokens", () => {
             "#1e1e1e",
             "#edfaed",
             "#fff5b1",
+            "#d73a49",
+            "#b31d28",
         ]) {
             expect(html).not.toContain(literal);
         }
+    });
+
+    it("uses semantic danger tokens for delete button states", () => {
+        const html = deployingPage({ deployRepo: "octo/app" });
+        expect(html).toContain(".rad-ddlg__delete {");
+        expect(html).toContain("background:var(--rad-danger-solid)");
+        expect(html).toContain(".rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }");
+        expect(html).not.toContain(".rad-ddlg__delete:hover { background:#b31d28; }");
     });
 });
