@@ -98,6 +98,15 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
             expect(CLIENT_GRAPH_JS).not.toContain("dangerouslySetInnerHTML");
             expect(CLIENT_GRAPH_JS).not.toContain("cardHtml");
         });
+
+        it("never passes a var() color into React Flow's Background SVG attribute", () => {
+            // Background forwards `color` to an SVG <circle fill> presentation
+            // attribute, where Chromium does NOT substitute var() — the value is
+            // dropped and the dots render black. The grid is themed from CSS instead
+            // (see the .react-flow__background rules in pages.mjs).
+            expect(CLIENT_GRAPH_JS).toContain("h(Background, { gap: 16, size: 1 })");
+            expect(CLIENT_GRAPH_JS).not.toMatch(/h\(Background,[^)]*color:[^)]*var\(/);
+        });
     });
 
     it("renders the in-card source link two ways: local editor-canvas open in a worktree, native GitHub anchor on a remote branch", () => {
@@ -355,7 +364,6 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
     });
 
     it("uses semantic tokens for graph chrome instead of light-only literals", () => {
-        expect(CLIENT_GRAPH_JS).toContain("color: 'var(--rad-grid)'");
         expect(CLIENT_GRAPH_JS).toContain("background: d.bgColor || 'var(--rad-node-bg)'");
         expect(CLIENT_GRAPH_JS).not.toContain("bg: '#ffffff'");
         expect(CLIENT_GRAPH_JS).not.toContain("color: '#e1e4e8'");

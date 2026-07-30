@@ -377,6 +377,12 @@ ${getInlineVendorStyles()}
   .react-flow__controls-button:hover { background: var(--rad-bg-subtle); }
   .react-flow__controls-button svg { fill: currentColor; }
   .react-flow__minimap { background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 6px; }
+  /* The dot grid is painted by React Flow onto an SVG <circle fill> PRESENTATION
+     ATTRIBUTE, and Chromium does not substitute var() there — a var() passed via
+     the Background "color" prop is discarded and the dots fall back to black.
+     Theme it as a CSS property instead, which does resolve var(). */
+  .react-flow__background circle { fill: var(--rad-grid); }
+  .react-flow__background path { stroke: var(--rad-grid); }
 </style>
 </head>
 <body>
@@ -1037,7 +1043,7 @@ ${graphHeader('graph-diff')}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <span style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
@@ -1054,8 +1060,20 @@ var CONTEXT_REPO = document.getElementById('diff-repo-select').value;
 radiusPopulateApplications(CONTEXT_REPO, 'diff-app');
 radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD);
 
-// Auto-load the diff graph whenever the head (or base, once head is set)
-// branch changes — no Compare button.
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+
+// Auto-load the diff graph when branch selection changes, but debounce
+// to prevent rapid-fire requests if the user is just browsing the list.
+var diffTimeout = null;
+function queueDiff() {
+    if (diffTimeout) clearTimeout(diffTimeout);
+    diffTimeout = setTimeout(runDiff, 500);
+}
+
 function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
@@ -1063,21 +1081,21 @@ function runDiff() {
     if (!repo || !base || !head) return;
     var statusEl = document.getElementById('diff-status');
     statusEl.className = 'status info';
-    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
+    statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
-            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            else if (d.error) { statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtmlClient(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+        .catch(function() { statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
 }
 
-document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('head-branch').addEventListener('change', queueDiff);
 document.getElementById('base-branch').addEventListener('change', function() {
-    if (document.getElementById('head-branch').value) runDiff();
+    if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -1104,7 +1122,7 @@ ${graphHeader('graph-diff')}
       ${branchOptionsBase}
     </select>
   </div>
-  <span style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
@@ -1143,8 +1161,20 @@ radiusPopulateApplications(document.getElementById('diff-repo-select').value, 'd
 // auto-compare — the diff is already rendered.
 radiusPopulateDiffBranches(document.getElementById('diff-repo-select').value, DIFF_BASE || 'main', DIFF_HEAD, false);
 
-// Auto-load the diff graph whenever the head (or base, once head is set)
-// branch changes — no Compare button.
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
+
+// Auto-load the diff graph when branch selection changes, but debounce
+// to prevent rapid-fire requests if the user is just browsing the list.
+var diffTimeout = null;
+function queueDiff() {
+    if (diffTimeout) clearTimeout(diffTimeout);
+    diffTimeout = setTimeout(runDiff, 500);
+}
+
 function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
@@ -1153,21 +1183,21 @@ function runDiff() {
     var statusEl = document.getElementById('diff-status');
     statusEl.style.display = '';
     statusEl.className = 'status info';
-    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
+    statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
-            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; statusEl.className = 'status info'; }
+            else if (d.error) { statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtmlClient(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+        .catch(function() { statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
 }
 
-document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('head-branch').addEventListener('change', queueDiff);
 document.getElementById('base-branch').addEventListener('change', function() {
-    if (document.getElementById('head-branch').value) runDiff();
+    if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
