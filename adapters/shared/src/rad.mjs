@@ -870,6 +870,10 @@ function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
  * repository bicepconfig.json exists or it is unreadable — that base still
  * compiles apps that only use `extension radius`. A missing/unreadable workspace
  * config is logged and skipped.
+ *
+ * Returns the effective config object written to disk, so callers can report the
+ * selected `extensions.radius` reference (e.g. in a compilation failure) even
+ * when `log` is the default no-op.
  */
 export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
   let config = null;
@@ -911,6 +915,7 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
   }
   log(`Compiling with radius extension: ${config.extensions.radius}`);
   fs.writeFileSync(path.join(dir, "bicepconfig.json"), JSON.stringify(config, null, 2));
+  return config;
 }
 
 /**
@@ -946,10 +951,21 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     // Order matters: write bicepconfig.json (and copy any local extension
     // artifacts) before app.bicep so the extensions are in place when rad
     // compiles the Bicep. bicep looks for bicepconfig.json next to the .bicep.
-    writeBicepCompileConfig(dir, radArtifactsDir, log);
+    const config = writeBicepCompileConfig(dir, radArtifactsDir, log);
     fs.writeFileSync(bicepFile, content);
-    const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
-    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
+    try {
+      const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
+      return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
+    } catch (err) {
+      // Surface the exact radius extension the compile used so a failure is
+      // actionable even when `log` is the default no-op (issue #173): the caller
+      // otherwise only sees the raw `rad` output, not which contract was used.
+      const radiusExtension = config?.extensions?.radius;
+      if (radiusExtension) {
+        throw new Error(`${String(err?.message ?? err)}\nCompiled with radius extension: ${radiusExtension}`);
+      }
+      throw err;
+    }
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
     if (cleanupRadArtifactsDir && radArtifactsDir) {
