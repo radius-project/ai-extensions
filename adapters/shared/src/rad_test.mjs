@@ -331,6 +331,56 @@ describe("writeBicepCompileConfig", () => {
     expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe("TGZBYTES");
   });
 
+  it("preserves a pinned extensions.radius reference from the repository config", () => {
+    // The canvas must compile against the repository's exact pinned extension,
+    // not the base radius:latest, otherwise validation runs against a different
+    // contract than the generated app targets.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+    }));
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:0.48");
+  });
+
+  it("preserves unrelated Bicep settings from the repository config verbatim", () => {
+    // The applicable bicepconfig.json may carry settings beyond extensions (e.g.
+    // analyzers, formatting); the compile config must keep them so the canvas
+    // compiles with the same Bicep behavior the repository configures.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+      analyzers: { core: { enabled: true, rules: { "no-unused-params": { level: "warning" } } } },
+      formatting: { indentKind: "space", indentSize: 2 },
+    }));
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.analyzers).toEqual({ core: { enabled: true, rules: { "no-unused-params": { level: "warning" } } } });
+    expect(cfg.formatting).toEqual({ indentKind: "space", indentSize: 2 });
+  });
+
+  it("backfills a resolvable radius alias when the repository config omits it", () => {
+    // A repo config might declare only a custom extension; the base radius alias
+    // must be added so `extension radius` still resolves during compilation.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { customTypes: "./custom-types.tgz" },
+    }));
+    fs.writeFileSync(path.join(ws, "custom-types.tgz"), "TGZBYTES");
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
+    expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe("TGZBYTES");
+  });
+
   it("keeps extensibility enabled and does not copy OCI (br:) extension refs", () => {
     fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
       experimentalFeaturesEnabled: { extensibility: false },
