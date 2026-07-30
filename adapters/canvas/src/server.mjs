@@ -3380,6 +3380,8 @@ function createRequestHandler(instanceId) {
                         // Merge parseRadDeployProgress output into the per-Radius-resource
                         // deployStatus. Only per-resource lines count for terminal state:
                         //   - global "in_progress"  → any pending resource moves to in_progress
+                        //   - byName "in_progress"  → that resource moves to in_progress (from the
+                        //     RADIUS_PROGRESS sidecar poller — real per-resource ticks while deploy runs)
                         //   - byName "success" OR name present in the `Resources:` block
                         //     → resource moves to success (unless already failed)
                         //   - byName "failed"       → resource moves to failed (terminal)
@@ -3405,6 +3407,9 @@ function createRequestHandler(instanceId) {
                                 } else if ((s === 'success' || listed) && cur !== 'success') {
                                     setStatus(r, 'success');
                                     addLog('  ✓ ' + r.name + ' deployed');
+                                } else if (s === 'in_progress' && (!cur || cur === 'pending')) {
+                                    setStatus(r, 'in_progress');
+                                    addLog('  ◐ ' + r.name + ' provisioning…');
                                 }
                             }
                         };

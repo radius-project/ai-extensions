@@ -109,6 +109,10 @@ export function findDeployJobId(detail, stepName = "Run rad commands") {
 //     whose indented `<name> <type>` entries name every resource that was
 //     deployed (this is the only per-resource success signal on success runs,
 //     since current rad deploy does not emit `Completed <name>` lines).
+//   - `RADIUS_PROGRESS <json-array>` lines emitted by the run-rad-commands
+//     sidecar poller (background loop polling `rad resource list` while
+//     `rad deploy` runs), giving real per-resource in_progress/success/failed
+//     ticks instead of a single flip at the end of the log.
 // `resources` is the modeled resource list — only names present there populate
 // `byName` and `deployedNames`. Pure — no I/O.
 export function parseRadDeployProgress(logText, resources) {
@@ -131,6 +135,27 @@ export function parseRadDeployProgress(logText, resources) {
         if (/^Deployment In Progress/i.test(trimmed)) { out.global = 'in_progress'; inResourcesBlock = false; continue; }
         if (/^Deployment Complete\b/i.test(trimmed))   { out.global = 'complete';    inResourcesBlock = false; continue; }
         if (/^Resources:\s*$/i.test(trimmed)) { inResourcesBlock = true; continue; }
+        const pm = trimmed.match(/^RADIUS_PROGRESS\s+(\[.*\])\s*$/);
+        if (pm) {
+            inResourcesBlock = false;
+            // Later lines are more recent snapshots — overwrite as we scan
+            // forward so the last poll before the log ends wins.
+            try {
+                const arr = JSON.parse(pm[1]);
+                if (Array.isArray(arr)) {
+                    for (const item of arr) {
+                        if (!item || typeof item.name !== 'string' || !names.has(item.name)) continue;
+                        const state = String(item.state || '');
+                        let status;
+                        if (/^succeeded$/i.test(state)) status = 'success';
+                        else if (/^(failed|canceled|cancelled)$/i.test(state)) status = 'failed';
+                        else status = 'in_progress';
+                        out.byName[item.name] = status;
+                    }
+                }
+            } catch (e) { /* malformed progress snapshot — ignore */ }
+            continue;
+        }
         const m = trimmed.match(/^(Completed|Failed)\s+(\S+)\s+(\S+)/);
         if (m) {
             const status = m[1] === 'Completed' ? 'success' : 'failed';

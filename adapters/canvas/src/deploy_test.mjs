@@ -369,6 +369,40 @@ describe("parseRadDeployProgress", () => {
         expect([...out.deployedNames].sort()).toEqual(["frontend"]);
     });
 
+    it("maps a RADIUS_PROGRESS snapshot's states to in_progress/success/failed", () => {
+        const log = [
+            "Deployment In Progress...",
+            'RADIUS_PROGRESS [{"name":"frontend","type":"Applications.Core/containers","state":"Provisioning"},{"name":"postgresql","type":"Radius.Data/postgreSqlDatabases","state":"Succeeded"}]',
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName.frontend).toBe("in_progress");
+        expect(out.byName.postgresql).toBe("success");
+    });
+
+    it("treats RADIUS_PROGRESS Failed/Canceled states as failed", () => {
+        const log = 'RADIUS_PROGRESS [{"name":"frontend","type":"Applications.Core/containers","state":"Failed"}]';
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName.frontend).toBe("failed");
+    });
+
+    it("lets a later RADIUS_PROGRESS snapshot overwrite an earlier one for the same resource", () => {
+        const log = [
+            'RADIUS_PROGRESS [{"name":"frontend","type":"Applications.Core/containers","state":"Provisioning"}]',
+            'RADIUS_PROGRESS [{"name":"frontend","type":"Applications.Core/containers","state":"Succeeded"}]',
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName.frontend).toBe("success");
+    });
+
+    it("ignores a malformed or unmodeled RADIUS_PROGRESS line without throwing", () => {
+        const log = [
+            "RADIUS_PROGRESS not-json",
+            'RADIUS_PROGRESS [{"name":"unknown","type":"Applications.Core/containers","state":"Succeeded"}]',
+        ].join("\n");
+        const out = parseRadDeployProgress(log, modeled);
+        expect(out.byName).toEqual({});
+    });
+
     it("returns an empty result for empty / missing input", () => {
         for (const empty of ["", null, undefined]) {
             const out = parseRadDeployProgress(empty, modeled);
