@@ -127,7 +127,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-The plugin is released on demand by running the **Release** workflow with a semver bump level (`patch` by default), which publishes an immutable `v<version>` tag and an attested canvas bundle. Package changelogs use [Changesets](https://github.com/changesets/changesets). See [`RELEASING.md`](./RELEASING.md) for the full release lifecycle.
+The plugin is released on demand by running the **Release** workflow with a semver bump level (`patch` by default). It opens a version bump pull request; merging that pull request publishes an immutable `v<version>` tag and an attested canvas bundle. Package changelogs use [Changesets](https://github.com/changesets/changesets). See [`RELEASING.md`](./RELEASING.md) for the full release lifecycle.
 
 ## Code of conduct
 

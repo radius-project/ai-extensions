@@ -4,12 +4,12 @@ The `radius` plugin is released **manually**, on demand, with a chosen [semver](
 
 ## What a release contains
 
-| Ref / artifact   | Mutable? | Purpose                                                                      |
-| ---------------- | -------- | ---------------------------------------------------------------------------- |
-| `main`           | yes      | Source of truth. Gains one `chore(release): v<version>` version-bump commit. |
-| `release` branch | yes      | Install target: the `main` tree **plus** the built `extension.mjs`.          |
-| `v<version>` tag | **no**   | Immutable annotated tag on the release commit. Never force-moved.            |
-| GitHub release   | no       | Generated notes plus `extension.mjs` as an attested asset.                   |
+| Ref / artifact   | Mutable? | Purpose                                                                       |
+| ---------------- | -------- | ----------------------------------------------------------------------------- |
+| `main`           | yes      | Source of truth. Gains one squash-merged `chore(release): v<version>` commit. |
+| `release` branch | yes      | Install target: the `main` tree **plus** the built `extension.mjs`.           |
+| `v<version>` tag | **no**   | Immutable annotated tag on the release commit. Never force-moved.             |
+| GitHub release   | no       | Generated notes plus `extension.mjs` as an attested asset.                    |
 
 `release` is the only moving pointer, because the plugin `source` in `.github/plugin/marketplace.json` pins `ref: release`. Version tags let anyone pin or audit an exact published artifact.
 
@@ -26,30 +26,38 @@ pnpm run release:version          # print the current version
 pnpm run release:check            # fail if the manifests disagree
 ```
 
-`release:check` runs in CI on every pull request, so the manifests cannot drift. Do not edit these versions by hand — the release workflow bumps them.
+`release:check` runs in CI on every pull request, so the manifests cannot drift. It is also how a push to `main` decides whether there is a new version to publish. Do not edit these versions by hand — the release workflow bumps them.
 
 ## Cutting a release
+
+A release runs in two phases, because the `main` ruleset requires a reviewed pull request, a verified signature, a DCO check and linear history, and grants GitHub Actions no bypass. CI therefore never pushes to `main`; it proposes the version bump and publishes once a human merges it.
+
+### Phase 1 — prepare (manual)
 
 1. Make sure `main` is green and contains everything you want to ship.
 2. Run the **Release** workflow: **Actions → Release → Run workflow**.
 3. Choose the bump level — `patch` (default), `minor`, or `major`.
-4. Optionally tick **dry_run** to build, verify and print the next version without pushing anything.
 
-The workflow ([`.github/workflows/release.yml`](./.github/workflows/release.yml)) then:
+The `prepare` job resolves the next version, **fails if that tag already exists** (released versions are immutable), bumps all three manifests on a `release/v<version>` branch, and opens a pull request. Re-running for the same version updates that branch and pull request instead of creating a second one.
+
+### Phase 2 — publish (on merge)
+
+Review and **squash-merge** the pull request. GitHub creates and signs the squash commit, which satisfies the ruleset's signature requirement.
+
+The push to `main` then runs the `check` job, which compares the manifest version against the existing tags. If the version is already released it stops there, so ordinary merges cost one short job. Otherwise the `publish` job:
 
 1. installs, typechecks and runs unit tests;
-2. resolves the next version and **fails if that tag already exists** — released versions are immutable;
-3. bumps the version in all three manifests;
-4. builds `plugins/radius/extension.mjs`;
-5. attests the bundle's build provenance with [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance);
-6. pushes the version-bump commit to `main`, force-updates `release` to that tree plus one commit adding the bundle, pushes the `v<version>` tag, and creates the GitHub release.
+2. builds `plugins/radius/extension.mjs`;
+3. attests the bundle's build provenance with [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance);
+4. force-updates `release` to the merged `main` tree plus one commit adding the bundle, pushes the immutable `v<version>` tag, and creates the GitHub release.
 
-Everything that can fail (typecheck, test, build, attest) runs **before** the first push, so a failed run leaves `main`, `release` and the tags untouched.
+The bundle is built from the pushed commit itself — the same ref and SHA the attestation records — so provenance always describes the revision that was actually built. Everything that can fail runs **before** the first push, so a failed run leaves `release` and the tags untouched.
 
-### Requirements
+### Notes
 
-- The workflow pushes to `main`, so branch protection must allow `github-actions[bot]` (otherwise a maintainer has to land the bump commit by hand).
-- Protect the `v*` tag pattern in repository settings so tags cannot be deleted or force-moved outside the workflow.
+- The version bump pull request is opened with `GITHUB_TOKEN`, so it does **not** trigger `build.yml`. The `publish` job re-runs typecheck, tests and the build before anything is published.
+- The bump commit is created with `git commit -s` so the DCO check passes.
+- `release` and the `v*` tags carry no ruleset, which is what lets CI write to them. Consider adding a tag ruleset that blocks deletion and updates of `v*`, so tags stay immutable even outside this workflow.
 
 ## Verifying a released bundle
 
