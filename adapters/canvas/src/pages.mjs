@@ -1091,7 +1091,7 @@ ${graphHeader('graph-diff')}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
@@ -1108,30 +1108,47 @@ var CONTEXT_REPO = document.getElementById('diff-repo-select').value;
 radiusPopulateApplications(CONTEXT_REPO, 'diff-app');
 radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD);
 
-// Auto-load the diff graph whenever the head (or base, once head is set)
-// branch changes — no Compare button.
+// Auto-load the diff graph when branch selection changes, but debounce
+// to prevent rapid-fire requests if the user is just browsing the list.
+var diffTimeout = null;
+function queueDiff() {
+    if (diffTimeout) clearTimeout(diffTimeout);
+    diffTimeout = setTimeout(runDiff, 500);
+}
+
 function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
     var repo = document.getElementById('diff-repo-select').value;
     if (!repo || !base || !head) return;
     var statusEl = document.getElementById('diff-status');
+    statusEl.style.display = '';
     statusEl.className = 'status info';
-    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
+    statusEl.innerHTML = 'Comparing <strong>' + escapeHtml(base) + '</strong> &rarr; <strong>' + escapeHtml(head) + '</strong> &hellip; <span style="opacity:0.8;font-size:12px;margin-left:8px;">(Fetching branches &rarr; Parsing .bicep &rarr; Computing diff)</span>';
+    
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
-            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { 
+                statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; 
+                statusEl.className = 'status info'; 
+            }
+            else if (d.error) { 
+                statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtml(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; 
+                statusEl.className = 'status error'; 
+            }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+        .catch(function(err) { 
+            statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; 
+            statusEl.className = 'status error'; 
+        });
 }
 
-document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('head-branch').addEventListener('change', queueDiff);
 document.getElementById('base-branch').addEventListener('change', function() {
-    if (document.getElementById('head-branch').value) runDiff();
+    if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);
@@ -1158,7 +1175,7 @@ ${graphHeader('graph-diff')}
       ${branchOptionsBase}
     </select>
   </div>
-  <span style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
     <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
@@ -1197,8 +1214,14 @@ radiusPopulateApplications(document.getElementById('diff-repo-select').value, 'd
 // auto-compare — the diff is already rendered.
 radiusPopulateDiffBranches(document.getElementById('diff-repo-select').value, DIFF_BASE || 'main', DIFF_HEAD, false);
 
-// Auto-load the diff graph whenever the head (or base, once head is set)
-// branch changes — no Compare button.
+// Auto-load the diff graph when branch selection changes, but debounce
+// to prevent rapid-fire requests if the user is just browsing the list.
+var diffTimeout = null;
+function queueDiff() {
+    if (diffTimeout) clearTimeout(diffTimeout);
+    diffTimeout = setTimeout(runDiff, 500);
+}
+
 function runDiff() {
     var base = document.getElementById('base-branch').value;
     var head = document.getElementById('head-branch').value;
@@ -1207,21 +1230,31 @@ function runDiff() {
     var statusEl = document.getElementById('diff-status');
     statusEl.style.display = '';
     statusEl.className = 'status info';
-    statusEl.textContent = 'Comparing ' + base + ' → ' + head + '…';
+    statusEl.innerHTML = 'Comparing <strong>' + escapeHtml(base) + '</strong> &rarr; <strong>' + escapeHtml(head) + '</strong> &hellip; <span style="opacity:0.8;font-size:12px;margin-left:8px;">(Fetching branches &rarr; Parsing .bicep &rarr; Computing diff)</span>';
+    
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.needsAppBicep) { statusEl.textContent = 'Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.'; statusEl.className = 'status info'; }
-            else if (d.error) { statusEl.textContent = d.error; statusEl.className = 'status error'; }
+            if (d.needsAppBicep) { 
+                statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; 
+                statusEl.className = 'status info'; 
+            }
+            else if (d.error) { 
+                statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtml(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; 
+                statusEl.className = 'status error'; 
+            }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.textContent = 'Failed to compute diff.'; statusEl.className = 'status error'; });
+        .catch(function(err) { 
+            statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; 
+            statusEl.className = 'status error'; 
+        });
 }
 
-document.getElementById('head-branch').addEventListener('change', runDiff);
+document.getElementById('head-branch').addEventListener('change', queueDiff);
 document.getElementById('base-branch').addEventListener('change', function() {
-    if (document.getElementById('head-branch').value) runDiff();
+    if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
 ${graphHeaderClose()}`);

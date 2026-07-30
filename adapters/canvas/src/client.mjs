@@ -180,9 +180,20 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
     var statusEl = document.getElementById('diff-status');
     if (!repo) { if (statusEl) statusEl.textContent = 'No repository context.'; return; }
     if (statusEl) statusEl.textContent = 'Loading branches…';
+    
+    var timeoutId = setTimeout(function() {
+        if (statusEl && statusEl.textContent === 'Loading branches…') {
+            statusEl.textContent = 'Loading branches is taking longer than expected…';
+            statusEl.className = 'status error';
+            if (baseSel) baseSel.innerHTML = '<option value="">Timeout</option>';
+            if (headSel) headSel.innerHTML = '<option value="">Timeout</option>';
+        }
+    }, 8000);
+
     fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            clearTimeout(timeoutId);
             if (d.error) { if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
             var branches = d.branches || [];
             var workspaceBranch = d.workspaceBranch || '';
@@ -224,7 +235,10 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
                 statusEl.textContent = 'Select a head branch to compare against ' + (baseSel.value || 'main') + '.';
             }
         })
-        .catch(function() { if (statusEl) { statusEl.textContent = 'Failed to load branches.'; statusEl.className = 'status error'; } });
+        .catch(function() { 
+            clearTimeout(timeoutId);
+            if (statusEl) { statusEl.textContent = 'Failed to load branches. Network or backend error.'; statusEl.className = 'status error'; } 
+        });
 }
 
 // Populate an Application <select> for the given repository. A repo hosts a
@@ -1244,7 +1258,8 @@ function radiusRenderGraph(containerId, resources, options) {
             legend2.className = 'legend';
             var html = '';
             for (var lc = 0; lc < cats.length; lc++) {
-                html += '<div class="legend-item"><img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(cats[lc].name) + '</div>';
+                var imgHtml = cats[lc].icon ? '<img src="' + escLocal(cats[lc].icon) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' : '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;"></span>';
+                html += '<div class="legend-item">' + imgHtml + escLocal(cats[lc].name) + '</div>';
             }
             legend2.innerHTML = html;
             container.parentNode.insertBefore(legend2, container);
