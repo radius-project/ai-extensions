@@ -540,10 +540,10 @@ document.getElementById('btn-azure').addEventListener('click', function() {
                     (data.clientId ? '<div class="field"><span class="field-label">App Registration</span><div class="field-value">' + data.clientId + '</div></div>' : '') +
                     (res.userName ? '<div class="field"><span class="field-label">Signed in as</span><div class="field-value">' + res.userName + '</div></div>' : '');
             } else {
-                resultDiv.innerHTML = '<div class="status error">' + (res.message || 'Authentication failed') + '</div>';
+                resultDiv.innerHTML = '<div class="status error">' + (res.message || 'Couldn\'t authenticate. Check your credentials and try again.') + '</div>';
             }
         })
-        .catch(function(e) { btn.disabled = false; btn.textContent = 'Confirm authentication'; resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
+        .catch(function(e) { btn.disabled = false; btn.textContent = 'Confirm authentication'; resultDiv.innerHTML = '<div class="status error">Couldn\'t connect to authenticate: ' + e.message + '</div>'; });
 });
 document.getElementById('btn-aws').addEventListener('click', function() {
     var data = {
@@ -560,7 +560,7 @@ document.getElementById('btn-aws').addEventListener('click', function() {
                 '<div class="field"><span class="field-label">Account</span><div class="field-value">' + data.accountId + '</div></div>' +
                 '<div class="field"><span class="field-label">Region</span><div class="field-value">' + data.region + '</div></div>';
         })
-        .catch(function(e) { resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
+        .catch(function(e) { resultDiv.innerHTML = '<div class="status error">Couldn\'t connect to authenticate: ' + e.message + '</div>'; });
 });
 <\/script>`);
 }
@@ -759,10 +759,10 @@ function generateGraph() {
                 setTimeout(function() { window.location.reload(); }, 600);
             } else if (d.needsAppBicep) {
                 container.innerHTML = '';
-                if (statusEl) { statusEl.textContent = 'Generating app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
+                if (statusEl) { statusEl.textContent = 'Generating .radius/app.bicep\u2026 the graph will appear here once saved.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
             } else if (d.error) {
                 container.innerHTML = '';
-                if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
+                if (statusEl) { statusEl.textContent = 'Couldn\'t load the application graph: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
             }
         })
         .catch(function() { clearInterval(pollInterval); container.innerHTML = ''; });
@@ -849,10 +849,10 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             if (d.reload) { window.location.reload(); }
-            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved.</div>'; }
-            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
+            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Generating .radius/app.bicep\u2026 the graph will appear here once saved.</div>'; }
+            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Couldn\'t load the application graph: ' + d.error; }
         })
-        .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
+        .catch(function() { container.innerHTML = '<div class="status error">Couldn\'t connect to load the application graph. Check your network connection.</div>'; });
 });
 
 // Deploy Application → go to the Deployments page with the app preselected.
@@ -980,7 +980,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             } else if (d.error) {
                 clearInterval(pollInterval);
                 container.innerHTML = '';
-                if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; }
+                if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Couldn\'t load the application graph: ' + d.error; statusEl.className = 'status error'; }
             }
         })
         .catch(function() { clearInterval(pollInterval); btn.textContent = 'Plan Deployment'; btn.disabled = false; });
@@ -1042,7 +1042,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             btn.disabled = false;
             if (d.reload) { window.location.reload(); }
             else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
-            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
+            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Couldn\'t load the application graph: ' + d.error; }
         });
 });
 
@@ -3185,7 +3185,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
             markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId, subscriptionName: data.subscriptionName || '' });
         }).catch(function(err) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
-            credVerifyError('Error: ' + err.message);
+            credVerifyError('Couldn\'t connect to verify credentials: ' + err.message);
         });
 });
 
@@ -3210,7 +3210,7 @@ if (verifyAwsBtn) verifyAwsBtn.addEventListener('click', function() {
             markVerified(data.user || data.arn || '', { accountId: data.accountId || accountId, region: region });
         }).catch(function(err) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
-            credVerifyError('Error: ' + err.message);
+            credVerifyError('Couldn\'t connect to verify credentials: ' + err.message);
         });
 });
 
