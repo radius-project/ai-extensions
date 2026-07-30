@@ -612,6 +612,25 @@ export function createPullRequestApi(repo, head, base, title, prBody, timeout = 
     });
 }
 
+// Does this gh failure mean the credential lacks the `workflow` OAuth scope?
+// That scope is required to create or update files under .github/workflows/ and
+// to dispatch workflows. A pull request cannot work around it — the user has to
+// re-authorize — so callers must not offer the PR fallback for this case.
+export function needsWorkflowScope(stderr) {
+    const s = stderr || '';
+    return /workflow.{0,20}scope/i.test(s) || /without .?workflow.? scope/i.test(s);
+}
+
+// Does this gh failure mean the branch is protected (or the account otherwise
+// lacks direct-push rights), i.e. a case a pull request CAN work around?
+// Deliberately broad: creating the PR branch gates the fallback, so a genuine
+// no-access repo still surfaces its original error.
+export function isProtectedBranchFailure(stderr) {
+    const s = stderr || '';
+    if (needsWorkflowScope(s)) return false;
+    return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(s);
+}
+
 // GET a GitHub JSON resource, surfacing the HTTP status so callers can
 // distinguish "not found" (404) from access/other failures. `gh api` exits
 // non-zero on HTTP errors and prints e.g. "gh: Not Found (HTTP 404)" to stderr;

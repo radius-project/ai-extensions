@@ -20,6 +20,8 @@
     "typecheck:shared": "tsc -p adapters/shared/tsconfig.json",
     "typecheck:canvas": "tsc -p adapters/canvas/tsconfig.json",
     "test": "pnpm -r run --if-present test",
+    "pinset:check": "node scripts/update-pinset.mjs --check",
+    "pinset:update": "node scripts/update-pinset.mjs",
     "lint:md": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml \"**/*.md\"",
     "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",

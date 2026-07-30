@@ -1,17 +1,10 @@
 import { fillTemplate } from "./template.js";
-
-// The pinned ref of radius-project/radius that hosts BOTH the shared composite
-// actions (setup-control-plane, restore-state, run-rad-commands, teardown) and
-// the workflow templates the extension commits into user repos. Points at
-// `main` now that the deploy-workflow actions and templates have merged there.
-export const RADIUS_REF = "main";
-
-// The canonical home of the workflow templates in radius-project/radius. The
-// extension fetches them from here at commit time so a user repo always gets
-// the reviewed upstream version. radius-project/radius is the single source of
-// truth: the extension bundles no template copies of its own.
-export const RADIUS_WORKFLOW_REPO = "radius-project/radius";
-export const RADIUS_WORKFLOW_DIR = ".github/extension";
+import { pinActionRefs } from "./pins.js";
+import {
+  REPO_RADIUS_PINSET,
+  RADIUS_WORKFLOW_DIR,
+  RADIUS_WORKFLOW_REPO,
+} from "./pinset.js";
 
 // Committed workflow file names. All three are always committed to the target
 // repo's .github/workflows/: the dispatcher references both provider workflows
@@ -31,12 +24,16 @@ export type DeployWorkflowFiles = Record<string, string>;
  * `.github/workflows/`: the unified `run-rad-commands.yml` dispatcher plus the
  * reusable `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider
  * workflows. The provider-agnostic phases live in composite actions referenced
- * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Only
- * the `{{ENV}}`, `{{APP_FILE}}` and `{{RADIUS_REF}}` placeholders are filled.
+ * from radius-project/radius and are never copied here.
+ *
+ * `{{ENV}}` and `{{APP_FILE}}` are filled, and every `uses:` the pinset governs
+ * is rewritten to its pinned commit SHA — including a template that hardcodes a
+ * ref instead of using the `{{RADIUS_REF}}` placeholder, so the committed
+ * workflow is reproducible whatever shape upstream ships.
  *
  * `templates` maps the committed file name to the raw template body fetched
- * from `radius-project/radius`. The caller must supply all three files; there
- * is no bundled fallback, so a missing file is a hard error.
+ * from radius-project/radius. The caller must supply all three files; there is
+ * no bundled fallback, so a missing file is a hard error.
  */
 export function generateDeployWorkflow(
   env: string,
@@ -47,22 +44,23 @@ export function generateDeployWorkflow(
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing deploy template "${file}". Templates must be fetched from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`,
+        `Missing deploy template "${file}". Templates must be fetched from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${REPO_RADIUS_PINSET.templateSource.sha}".`,
       );
     }
     return body;
   };
+  const radiusRef = REPO_RADIUS_PINSET.templateSource.sha;
+  const provider = (file: string): string =>
+    pinActionRefs(
+      fillTemplate(pick(file), { ENV: env, APP_FILE: appFile, RADIUS_REF: radiusRef }),
+      REPO_RADIUS_PINSET,
+    );
   return {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), { ENV: env }),
-    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), {
-      ENV: env,
-      APP_FILE: appFile,
-      RADIUS_REF,
-    }),
-    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), {
-      ENV: env,
-      APP_FILE: appFile,
-      RADIUS_REF,
-    }),
+    [DEPLOY_DISPATCHER_FILE]: pinActionRefs(
+      fillTemplate(pick(DEPLOY_DISPATCHER_FILE), { ENV: env }),
+      REPO_RADIUS_PINSET,
+    ),
+    [DEPLOY_AZURE_FILE]: provider(DEPLOY_AZURE_FILE),
+    [DEPLOY_AWS_FILE]: provider(DEPLOY_AWS_FILE),
   };
 }

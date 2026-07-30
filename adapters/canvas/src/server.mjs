@@ -17,6 +17,7 @@ import {
   fetchRecipePack,
   resolveRecipeOutputs,
   filterGraphVisualizationResources,
+  describePlan,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -25,7 +26,7 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import { escapeHtml, sharedCredentials, saveCredentials, listCredentialProfiles, saveCredentialProfile, deleteCredentialProfile, getPreferredGitHubLogin, setPreferredGitHubLogin } from "./shared.mjs";
-import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache, primeGhIdentity, setPreferredGhLogin } from "./gh.mjs";
+import { fetchFileFromRepo, github, cliExec, runCommand, commitFileToRepo, getDefaultBranch, getBranchHeadSha, createBranchRef, createPullRequestApi, ghApiJson, getGitHubIdentity, switchGhAccount, getGhPackageCredentials, resetGhIdentityCache, primeGhIdentity, setPreferredGhLogin, isProtectedBranchFailure, needsWorkflowScope } from "./gh.mjs";
 import {
   resolveOidcSubject, buildAppCreateArgs, isServiceManagementReferenceError,
   selectMissingFederatedCredentials,
@@ -54,6 +55,7 @@ import {
   DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE,
   DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE,
 } from "./infra.mjs";
+import { planWorkflowUpgrade, applyWorkflowUpgrade, summarizePlan } from "./workflow-pins.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
   fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState,
@@ -154,19 +156,21 @@ const envListCache = new Map(); // repo -> { at, payload }
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map(); // repo -> { at, payload }
 
-// Throttle for the background workflow drift-sync kicked off from the
-// environments listing: repo -> last-attempt epoch ms. Keeps the sync from
-// re-running on every page load / poll while still self-healing stale workflows.
+// Throttle for the background workflow drift check kicked off from the
+// environments listing: repo -> last-attempt epoch ms. Keeps the check from
+// re-running on every page load / poll.
 const WORKFLOW_SYNC_TTL_MS = 5 * 60 * 1000;
 const workflowSyncState = new Map(); // `${repo}\0${workingBranch}` -> lastAttemptAt
 
-// Fire-and-forget: re-sync the repo's committed Radius workflow files with the
-// upstream templates when they've drifted. Runs in the background so it never
-// delays the environments listing, and is throttled per repo. Managed
-// environments (name + provider) are required to regenerate the expected
-// content, so this is only called on the fresh-compute path. `workingBranch` is
-// the session worktree branch (when it matches the repo) so the sync updates
-// both the default branch and the branch a worktree-consistent deploy runs.
+// Fire-and-forget: report which of the repo's committed Radius workflow files
+// have drifted from the pinned upstream templates. Detection only — nothing is
+// ever written without the user confirming an upgrade (see workflow-pins.mjs).
+// Runs in the background so it never delays the environments listing, and is
+// throttled per repo. Managed environments (name + provider) are required to
+// regenerate the expected content, so this is only called on the fresh-compute
+// path. `workingBranch` is the session worktree branch (when it matches the
+// repo) so both the default branch and the branch a worktree-consistent deploy
+// runs are checked.
 function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
     if (!repo || !managedEnvironments || managedEnvironments.length === 0) return;
     // Throttle per repo+branch so switching the working branch triggers a fresh
@@ -177,45 +181,42 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
     workflowSyncState.set(key, Date.now());
     syncRepoWorkflows(repo, managedEnvironments, {
         workingBranch: workingBranch || "",
-        log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`),
+        log: (m) => console.error(`[radius workflow-drift] ${repo}: ${m}`),
     })
         .then((r) => {
-            if (r && r.updated && r.updated.length) {
+            if (r && r.drifted && r.drifted.length) {
                 console.error(
-                    `[radius workflow-sync] ${repo}: updated ${r.updated.length} workflow file(s) across ${(r.branches || []).join(", ")}: ${r.updated.join(", ")}`,
+                    `[radius workflow-drift] ${repo}: ${r.drifted.length} workflow file(s) differ from the pinned templates across ${(r.branches || []).join(", ")}: ${r.drifted.join(", ")}`,
                 );
             }
         })
-        .catch((e) => console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`));
+        .catch((e) => console.error(`[radius workflow-drift] ${repo}: ${e?.message || e}`));
 }
 
-// Bare filename of the shared verify-credentials workflow (matches
-// infra.mjs's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
-const VERIFY_WORKFLOW_FILE = 'radius-verify-credentials.yml';
-
-// Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
-// committed workflow (deploy / delete / verify), ensure that workflow's files
-// are in sync with the upstream Radius templates so the run never executes a
-// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
-// is scoped to just the workflow about to run (`only`) and is awaited so any
-// in-place update lands before the dispatch — but a sync failure never blocks
-// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
-// and delete workflow content is provider-agnostic, so it only matters for
-// verify. `workingBranch` (when it matches the repo) is synced alongside the
-// default branch so a worktree-consistent run uses current files on both.
-async function ensureWorkflowsCurrent(repo, environment, provider, only, workingBranch) {
-    if (!repo || !environment || !only || only.length === 0) return;
+// Awaited pre-dispatch pin check. Before the extension runs a committed
+// workflow, compare the Repo Radius `uses:` refs already in the repo against the
+// pinset this build requires. Matching pins cost two file reads and the caller
+// dispatches as usual; stale pins mean the workflow would run action code older
+// than this extension expects, so the caller stops and asks the user.
+//
+// Read-only. A failure resolves to "current" rather than blocking: a GitHub
+// outage must not stop a deploy that would otherwise work.
+async function checkWorkflowPins(repo, only, deployRef) {
+    if (!repo || !only || only.length === 0) return { status: "current", files: [] };
     try {
-        const r = await syncRepoWorkflows(repo, [{ name: environment, provider: provider || "" }], {
-            workingBranch: workingBranch || "",
-            only,
-            log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`),
+        const plan = await planWorkflowUpgrade(repo, only, {
+            deployRef: deployRef || "",
+            log: (m) => console.error(`[radius workflow-pin] ${repo}: ${m}`),
         });
-        if (r && r.updated && r.updated.length) {
-            console.error(`[radius workflow-presync] ${repo}: updated ${r.updated.join(", ")} before dispatch`);
-        }
+        console.error(
+            plan.status === "current"
+                ? `[radius workflow-pin] ${repo}: pins are current`
+                : `[radius workflow-pin] ${repo}: update required for ${summarizePlan(plan)}`,
+        );
+        return plan;
     } catch (e) {
-        console.error(`[radius workflow-presync] ${repo}: ${e?.message || e}`);
+        console.error(`[radius workflow-pin] ${repo}: check failed, proceeding: ${e?.message || e}`);
+        return { status: "current", files: [] };
     }
 }
 
@@ -2178,9 +2179,6 @@ function createRequestHandler(instanceId) {
                 // to the keyring credential. (A missing `workflow` scope surfaces as
                 // either a 403 "without workflow scope" on updates or a bare 404 on
                 // creates, so we retry on any failure rather than pattern-matching.)
-                function needsWorkflowScope(stderr) {
-                    return /workflow.{0,20}scope/i.test(stderr || '') || /without .?workflow.? scope/i.test(stderr || '');
-                }
                 async function runGhWorkflow(args, stdin) {
                     const first = await runGh(args, stdin);
                     if (first.code === 0) return first;
@@ -2248,16 +2246,6 @@ function createRequestHandler(instanceId) {
                 const { writeFileSync, unlinkSync } = await import("node:fs");
                 const { tmpdir } = await import("node:os");
                 const { join } = await import("node:path");
-
-                // A protected-branch / missing-write-access failure (as opposed to
-                // a missing `workflow` token scope, which a PR can't fix). Kept
-                // deliberately broad; branch creation gates the fallback, so a
-                // genuine no-access repo still surfaces the original error.
-                function isProtectedBranchFailure(stderr) {
-                    const s = stderr || '';
-                    if (needsWorkflowScope(s)) return false;
-                    return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(s);
-                }
 
                 // PR-fallback state; populated lazily on the first protected-branch
                 // failure. Once set, every subsequent workflow commit targets the
@@ -2785,6 +2773,7 @@ function createRequestHandler(instanceId) {
             const error = entry?.state?.deployError || null;
             const errorKind = entry?.state?.deployErrorKind || null;
             const errorBranch = entry?.state?.deployErrorBranch || null;
+            const errorDetail = entry?.state?.deployErrorDetail || null;
             const startedAt = entry?.state?.deployStartedAt || null;
             const finishedAt = entry?.state?.deployFinishedAt || null;
             const deployedGraph = entry?.state?.deployedGraph || null;
@@ -2805,9 +2794,44 @@ function createRequestHandler(instanceId) {
             if (Number.isFinite(since)) {
                 const startIdx = Math.max(0, since - logBase);
                 const logsNew = logs.slice(startIdx);
-                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
+                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, errorDetail, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
             } else {
-                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
+                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, errorDetail, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
+            }
+            return;
+        }
+
+        // Apply a workflow-pin upgrade the user has just confirmed. Deliberately
+        // a separate route from the status poll: the server must never mutate a
+        // repository as a side effect of rendering. `mode` mirrors which button
+        // was pressed — "commit" writes to the branches the plan targets,
+        // "pull-request" opens one PR into the default branch after a direct
+        // commit was rejected.
+        if (pathname === "/api/workflow-upgrade" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            const entry = servers.get(instanceId);
+            const plan = entry?.state?.pendingWorkflowUpgrade;
+            res.setHeader("Content-Type", "application/json");
+            if (!plan || plan.status !== "outdated") {
+                res.writeHead(409);
+                res.end(JSON.stringify({ status: "stale-plan", detail: "There is no pending workflow update for this session." }));
+                return;
+            }
+            let mode = "commit";
+            try { mode = JSON.parse(body || "{}").mode === "pull-request" ? "pull-request" : "commit"; } catch { /* default */ }
+            try {
+                const result = await applyWorkflowUpgrade(plan.repo, plan, mode, {
+                    log: (m) => console.error(`[radius workflow-pin] ${plan.repo}: ${m}`),
+                });
+                if (result.status === "updated") entry.state.pendingWorkflowUpgrade = null;
+                console.error(`[radius workflow-pin] ${plan.repo}: ${mode} -> ${result.status}${result.reason ? ` (${result.reason})` : ""}`);
+                res.writeHead(result.status === "stale-plan" ? 409 : 200);
+                res.end(JSON.stringify(result));
+            } catch (e) {
+                console.error(`[radius workflow-pin] ${plan.repo}: apply failed: ${e?.message || e}`);
+                res.writeHead(500);
+                res.end(JSON.stringify({ status: "blocked", reason: "no-permission", detail: e?.message || String(e) }));
             }
             return;
         }
@@ -3177,11 +3201,11 @@ function createRequestHandler(instanceId) {
                 // application on the ephemeral control plane while leaving the
                 // GitHub Environment (and its credentials) intact.
                 //
-                // Ensure the delete workflow files are in sync with upstream before
-                // dispatching, so the run never executes a drifted copy. Delete
-                // workflow content is provider-agnostic, and workflow_dispatch runs
-                // from the default branch, so provider/workingBranch aren't needed.
-                await ensureWorkflowsCurrent(repo, environment, "", [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]);
+                // Stale pins are reported but never block a delete: refusing to
+                // tear down an application because its workflow needs an upgrade
+                // would strand the cloud resources it is holding. Deletes run from
+                // the default branch, so there is no deploy ref to check.
+                await checkWorkflowPins(repo, [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]);
                 const dispatchedAt = Date.now();
                 const dispatch = await ghWorkflow([
                     'workflow', 'run', DELETE_APP_DISPATCHER_FILE,
@@ -3565,6 +3589,8 @@ function createRequestHandler(instanceId) {
                     entry.state.deployError = null;
                     entry.state.deployErrorKind = null;
                     entry.state.deployErrorBranch = null;
+                    entry.state.deployErrorDetail = null;
+                    entry.state.pendingWorkflowUpgrade = null;
                     entry.state.deployRunUrl = null;
                     entry.state.deployRunId = null;
                     // An agent redeploy is already inside a repair loop; a user
@@ -3827,12 +3853,27 @@ function createRequestHandler(instanceId) {
                                 '. The dispatch below will fail if the branch has no run-rad-commands workflow.');
                         }
 
-                        // With the deploy workflows present, ensure they're in sync
-                        // with the upstream Radius templates before running them, so
-                        // the deploy never executes a drifted copy. Syncs the deploy
-                        // files on both the default branch and the branch being
-                        // deployed (deployRef), which a --ref dispatch checks out.
-                        await ensureWorkflowsCurrent(repo, envForDeploy, provider, [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE], deployRef);
+                        // With the deploy workflows present, check that the Repo
+                        // Radius actions they reference are the ones this build of
+                        // the extension requires. Checked on the default branch
+                        // (where Actions run from) and on the branch being deployed,
+                        // which a --ref dispatch checks out.
+                        //
+                        // Up to date is the common case and costs two file reads with
+                        // no prompt. Out of date means the run would execute older
+                        // action code against the user's cloud account, so the
+                        // dispatch is withheld until they confirm the update.
+                        const pinPlan = await checkWorkflowPins(repo, [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE], deployRef);
+                        if (pinPlan.status === 'outdated') {
+                            addLog('⏸ The Repo Radius workflows in ' + repo + ' are older than this version of the Radius plugin requires.');
+                            for (const line of describePlan(pinPlan)) addLog('   ' + line);
+                            entry.state.pendingWorkflowUpgrade = pinPlan;
+                            entry.state.deployError = 'This repository\'s Radius workflows are pinned to an older version of the Repo Radius actions than this version of the Radius plugin requires. Review and apply the update to continue.';
+                            entry.state.deployErrorKind = 'workflow-upgrade-required';
+                            entry.state.deployErrorDetail = { plan: describePlan(pinPlan), base: pinPlan.base, summary: summarizePlan(pinPlan) };
+                            entry.state.deployStatus = 'failed';
+                            return;
+                        }
 
                         const deployDispatchedAt = Date.now();
                         addLog('🚀 Dispatching run rad commands workflow (' + deployWorkflowFile + ') on branch "' + deployRef + '" for environment "' + envForDeploy + '"...');

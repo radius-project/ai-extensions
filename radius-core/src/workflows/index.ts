@@ -6,9 +6,6 @@ export {
 } from "./verify.js";
 export {
   generateDeployWorkflow,
-  RADIUS_REF,
-  RADIUS_WORKFLOW_REPO,
-  RADIUS_WORKFLOW_DIR,
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
@@ -21,9 +18,33 @@ export {
 } from "./state.js";
 export {
   generateDeleteWorkflow,
-  DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
 } from "./delete.js";
 export type { DeleteWorkflowFiles } from "./delete.js";
+export {
+  REPO_RADIUS_PINSET,
+  RADIUS_WORKFLOW_REPO,
+  RADIUS_WORKFLOW_DIR,
+  isCommitSha,
+  isPinsetOverridden,
+  ledgerIndex,
+  resolvePin,
+  validatePinset,
+} from "./pinset.js";
+export type { ActionPin, LedgerEntry, Pinset } from "./pinset.js";
+export {
+  classifyPin,
+  comparePins,
+  describePlan,
+  pinActionRefs,
+  readActionPins,
+} from "./pins.js";
+export type {
+  CommittedPin,
+  PinChange,
+  PinStatus,
+  UpgradeFile,
+  UpgradePlan,
+} from "./pins.js";

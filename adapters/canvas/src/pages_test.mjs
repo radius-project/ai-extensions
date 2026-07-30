@@ -6,6 +6,7 @@
 // module's branches stay exercised.
 
 import { describe, it, expect } from "vitest";
+import vm from "node:vm";
 import {
     pageShell,
     oidcPage,
@@ -614,6 +615,33 @@ describe("deployedGraphPage", () => {
         expect(html).toContain("renderGraph(liveRes, true)");
         expect(html).toContain("renderGraph(resources, false)");
     });
+});
+
+describe("every page emits syntactically valid client <script> blocks", () => {
+    // Generalises the environmentPage init-halt guard to every renderer. The
+    // client scripts live inside template literals, so a stray backtick or an
+    // over-escaped apostrophe silently produces JS that won't parse — the page
+    // then renders but never initialises. Compiling each block catches that.
+    const renderers = [
+        ["graphPage", () => graphPage({ resources: sampleResources, contextRepo: "octo/app" })],
+        ["plannedGraphPage", () => plannedGraphPage({ plannedResources: sampleResources, contextRepo: "octo/app" })],
+        ["graphDiffPage", () => graphDiffPage({ diffResources: sampleResources, diffTargetRepo: "octo/app" })],
+        ["deployedGraphPage", () => deployedGraphPage({ deployedResources: sampleResources })],
+        ["environmentPage", () => environmentPage({ contextRepo: "octo/app" })],
+        ["deployingPage", () => deployingPage({ deployRepo: "octo/app" })],
+        ["oidcPage", () => oidcPage({ provider: "azure" })],
+    ];
+
+    for (const [name, render] of renderers) {
+        it(`${name} compiles`, () => {
+            const scripts = [...render().matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)]
+                .map((m) => m[1])
+                .filter((s) => s.trim());
+            for (const src of scripts) {
+                expect(() => new vm.Script(src), `${name} emitted an unparseable script`).not.toThrow();
+            }
+        });
+    }
 });
 
 describe("remaining pages smoke-render without removed tokens", () => {

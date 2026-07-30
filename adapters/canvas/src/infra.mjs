@@ -10,14 +10,14 @@ import {
   generateVerifyWorkflow as coreGenerateVerifyWorkflow,
   generateDeployWorkflow as coreGenerateDeployWorkflow,
   verifyTemplateFile,
-  RADIUS_REF,
+  REPO_RADIUS_PINSET,
   RADIUS_WORKFLOW_REPO,
   RADIUS_WORKFLOW_DIR,
+  pinActionRefs,
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
   generateDeleteWorkflow as coreGenerateDeleteWorkflow,
-  DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
@@ -27,7 +27,6 @@ import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
   getDefaultBranch,
-  commitFileToRepo,
 } from "./gh.mjs";
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
@@ -135,15 +134,19 @@ export function generateAWSOIDC(data) {
 
 /**
  * Fetch a workflow template from radius-project/radius `.github/extension/` at
- * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
- * so a fetch failure (offline, transient API error, or the ref/file missing) is
- * a hard error rather than a fall back to a bundled copy. The underlying cause
- * (gh stderr, 404, decode error) is surfaced in the thrown message.
+ * the pinned template-source commit. radius-project/radius is the single source
+ * of truth, so a fetch failure (offline, transient API error, or the ref/file
+ * missing) is a hard error rather than a fall back to a bundled copy. The
+ * underlying cause (gh stderr, 404, decode error) is surfaced in the thrown
+ * message.
+ *
+ * The ref is a commit SHA, not a branch: a workflow whose actions are pinned but
+ * whose body comes from a moving branch is still not reproducible.
  */
 const TEMPLATE_CACHE_TTL_MS = 60_000;
 const templateCache = new Map(); // `${ref}\0${fileName}` -> { at, body }
 
-async function fetchRadiusTemplate(fileName, ref = RADIUS_REF) {
+async function fetchRadiusTemplate(fileName, ref = REPO_RADIUS_PINSET.templateSource.sha) {
     // Cache decoded template bodies briefly so a single drift-sync pass (which
     // regenerates workflows for every managed environment) fetches each upstream
     // template once instead of once per environment.
@@ -175,7 +178,7 @@ export async function generateVerifyWorkflow(env, provider) {
     const fileName = verifyTemplateFile(platform);
     if (!fileName) throw new Error(`No verify template for provider "${provider}".`);
     const upstream = await fetchRadiusTemplate(fileName);
-    return coreGenerateVerifyWorkflow(env, platform, upstream);
+    return pinActionRefs(coreGenerateVerifyWorkflow(env, platform, upstream), REPO_RADIUS_PINSET);
 }
 
 /**
@@ -186,8 +189,9 @@ export async function generateVerifyWorkflow(env, provider) {
  * environment's cloud.
  *
  * The templates are fetched from radius-project/radius `.github/extension/` at
- * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
- * there is no bundled fallback, so a fetch failure surfaces as an error.
+ * the pinned template-source commit so user repos always get the reviewed
+ * upstream version; there is no bundled fallback, so a fetch failure surfaces as
+ * an error. Every `uses:` the pinset governs is rewritten to its pinned SHA.
  */
 export async function generateDeployWorkflow(env, appFile) {
     // Only the dispatcher + the Azure provider workflow are fetched and committed;
@@ -223,14 +227,10 @@ export async function generateDeployWorkflow(env, appFile) {
  * the caller commits each under `.github/workflows/`. As with deploy, the AWS
  * provider workflow is never fetched or committed and the dispatcher's `aws:`
  * job is stripped.
- *
- * The templates + the `delete-resource` composite action they reference live in
- * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
- * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
  */
 export async function generateDeleteWorkflow(env) {
     const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
-    const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF)));
+    const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
     const templates = {};
     files.forEach((f, i) => {
         templates[f] = bodies[i];
@@ -299,46 +299,41 @@ export function generatePortalUrl(resourceType, provider, state) {
 const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
 
 /**
- * Re-fetch the upstream workflow templates and update any workflow files the
- * extension previously committed to `repo` whose content has drifted from
- * upstream (radius-project/radius `.github/extension/`).
+ * Report which workflow files the extension previously committed to `repo` have
+ * drifted from the pinned upstream templates (radius-project/radius
+ * `.github/extension/`).
  *
- * radius-project/radius is the single source of truth for the verify, deploy and
- * delete workflows. Users get a snapshot of those templates committed into their
- * repo at environment-creation time; when upstream changes, those committed
- * copies go stale. This resynchronises them in place.
+ * **Detection only — this function never writes.** Rewriting a user's workflows
+ * changes which code runs with their cloud credentials, so it only ever happens
+ * through the confirmed path in workflow-pins.mjs. This pass exists so the
+ * Environments listing can surface drift, not to fix it.
  *
- * Files are synced on the repo's default branch (where the verify/deploy Actions
- * run from) AND on the caller's working branch (`opts.workingBranch`, the
- * session worktree branch) when supplied and different — worktree-consistent
- * deploys check out and run the selected branch's workflow files, so a stale
- * copy there would deploy with an out-of-date workflow. A working branch that
- * isn't pushed to the remote (no ref, so its files can't be read) is silently
- * skipped rather than treated as an error.
+ * Files are checked on the repo's default branch (where the verify/deploy
+ * Actions run from) AND on the caller's working branch (`opts.workingBranch`,
+ * the session worktree branch) when supplied and different — worktree-consistent
+ * deploys check out the selected branch's workflow files, so a stale copy there
+ * would deploy an out-of-date workflow. A working branch that isn't pushed to
+ * the remote (no ref, so its files can't be read) is silently skipped rather
+ * than treated as an error.
  *
  * `environments` is the list of Radius-managed environments (`{ name, provider }`)
  * for the repo. Because the committed workflow files are shared across
  * environments (only the `{{ENV}}` dispatch default varies), a file is treated
  * as in-sync when it matches the freshly generated content for ANY managed
- * environment — so a repo with several environments never ping-pongs the baked-in
- * default. Drift is only flagged (and the file rewritten) when the committed copy
- * matches none of them, i.e. the upstream template itself changed.
+ * environment — so a repo with several environments never reports churn on the
+ * baked-in default. Drift is only flagged when the committed copy matches none
+ * of them, i.e. the pinned upstream template itself changed.
  *
  * `opts.only` (optional) restricts the pass to a set of bare workflow filenames
- * (e.g. `["run-rad-commands.yml", "run-rad-commands-azure.yml"]`). This is what
- * lets a caller cheaply ensure just the workflow it is about to dispatch is
- * current, instead of syncing every committed workflow file.
+ * (e.g. `["run-rad-commands.yml", "run-rad-commands-azure.yml"]`).
  *
- * Only files that already exist on a branch are updated; missing files are left
- * to environment creation to author. Best-effort and non-throwing per file: a
- * protected branch (or any commit failure) is reported via `log` and skipped
- * rather than aborting the pass. Returns `{ updated, branches, skipped }` where
- * `updated` is the de-duplicated set of paths changed on any branch.
+ * Only files that already exist on a branch are considered; missing files are
+ * left to environment creation to author. Returns `{ drifted, branches, skipped }`.
  */
 export async function syncRepoWorkflows(repo, environments, opts = {}) {
     const log = typeof opts.log === "function" ? opts.log : () => {};
     const envs = (environments || []).filter((e) => e && e.name);
-    if (!repo || envs.length === 0) return { updated: [], skipped: true };
+    if (!repo || envs.length === 0) return { drifted: [], skipped: true };
 
     // Optional allow-list of bare workflow filenames to sync. When set, only
     // those files are considered (see opts.only above).
@@ -348,22 +343,21 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
             : null;
 
     const defaultBranch = (await getDefaultBranch(repo)) || "main";
-    // Sync the default branch (Actions run from it) plus the working branch a
-    // worktree-consistent deploy would check out. Dedupe so we never commit the
-    // same branch twice when the working branch IS the default branch.
+    // Check the default branch (Actions run from it) plus the working branch a
+    // worktree-consistent deploy would check out. Dedupe so the same branch is
+    // never scanned twice when the working branch IS the default branch.
     const workingBranch = (opts.workingBranch || "").trim();
     const branches = [defaultBranch];
     if (workingBranch && workingBranch !== defaultBranch) branches.push(workingBranch);
 
-    // path -> [{ content, provider }]: every committed workflow file mapped to
-    // the acceptable (upstream-matching) contents, one candidate per environment.
-    // Branch-independent, so it's built once and reused across every branch.
+    // path -> acceptable (upstream-matching) contents, one candidate per managed
+    // environment. Branch-independent, so it's built once and reused per branch.
     const byPath = new Map();
-    const add = (path, content, provider) => {
+    const add = (path, content) => {
         if (typeof content !== "string" || !content) return;
         if (onlySet && !onlySet.has(path.split("/").pop())) return;
         const list = byPath.get(path) || [];
-        list.push({ content, provider });
+        list.push({ content });
         byPath.set(path, list);
     };
     const wf = (name) => `.github/workflows/${name}`;
@@ -371,78 +365,51 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
     for (const env of envs) {
         // Which providers to generate verify candidates for. An environment whose
         // provider couldn't be inferred (server.mjs passes "") gets BOTH, so a
-        // committed AWS verify file is never rewritten with the Azure template
-        // (or vice versa) merely because the provider was unknown — matching the
-        // in-sync check against either provider's template and preferring the
-        // committed file's own provider when a rewrite is needed.
+        // committed AWS verify file is never reported as drifted merely because
+        // the provider was unknown and it was compared to the Azure template.
         const providers =
             env.provider === "azure" || env.provider === "aws"
                 ? [env.provider]
                 : ["azure", "aws"];
         for (const provider of providers) {
             try {
-                add(VERIFY_WORKFLOW_PATH, await generateVerifyWorkflow(env.name, provider), provider);
+                add(VERIFY_WORKFLOW_PATH, await generateVerifyWorkflow(env.name, provider));
             } catch (e) {
                 log(`skipped verify template for "${env.name}" (${provider}): ${e.message}`);
             }
         }
         // Deploy + delete workflows are provider-agnostic (only the Azure provider
         // file is committed and the content doesn't vary by env provider), so
-        // generate them once per environment with a null provider tag.
+        // they're generated once per environment.
         try {
             const deploy = await generateDeployWorkflow(env.name, ".radius/app.bicep");
-            for (const [file, content] of Object.entries(deploy)) add(wf(file), content, null);
+            for (const [file, content] of Object.entries(deploy)) add(wf(file), content);
         } catch (e) {
             log(`skipped deploy templates for "${env.name}": ${e.message}`);
         }
         try {
             const del = await generateDeleteWorkflow(env.name);
-            for (const [file, content] of Object.entries(del)) add(wf(file), content, null);
+            for (const [file, content] of Object.entries(del)) add(wf(file), content);
         } catch (e) {
             log(`skipped delete templates for "${env.name}": ${e.message}`);
         }
     }
 
-    const updated = new Set();
+    const drifted = new Set();
     for (const branch of branches) {
         for (const [path, candidates] of byPath.entries()) {
             const committed = await fetchFileFromRepo(repo, path, branch);
-            // Only update files the extension previously committed on this branch;
-            // don't author missing ones here (environment creation owns that), and
-            // an unpushed working branch simply reads as "missing" and is skipped.
+            // Only consider files the extension previously committed on this
+            // branch; don't author missing ones here (environment creation owns
+            // that), and an unpushed working branch simply reads as "missing".
             if (committed == null || committed === "") continue;
             // In sync if the committed copy matches any environment's generated
             // content — the only per-env difference is the cosmetic dispatch default.
             if (candidates.some((c) => c.content === committed)) continue;
-
-            // Drift detected. Prefer a replacement whose provider matches the
-            // committed file so the shared verify file keeps its current provider;
-            // fall back to the first candidate (deploy/delete content is provider
-            // agnostic, so any candidate is equivalent there).
-            const committedProvider = /AZURE_/.test(committed)
-                ? "azure"
-                : /AWS_/.test(committed)
-                  ? "aws"
-                  : null;
-            const choice =
-                (committedProvider && candidates.find((c) => c.provider === committedProvider)) ||
-                candidates[0];
-            const fileName = path.split("/").pop();
-            try {
-                await commitFileToRepo(
-                    repo,
-                    path,
-                    choice.content,
-                    branch,
-                    `Update ${fileName} to match upstream Radius workflow templates`,
-                );
-                updated.add(path);
-                log(`updated ${path} on "${branch}"`);
-            } catch (e) {
-                log(`could not update ${path} on "${branch}": ${e.message}`);
-            }
+            drifted.add(path);
+            log(`${path} on "${branch}" differs from the pinned upstream template`);
         }
     }
 
-    return { updated: [...updated], branches, skipped: false };
+    return { drifted: [...drifted], branches, skipped: false };
 }

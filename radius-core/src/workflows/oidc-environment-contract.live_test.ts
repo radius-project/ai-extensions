@@ -14,25 +14,23 @@
 // this repo to catch it. A hermetic test cannot guard this: the extension holds
 // no template copy, so it would only assert against a fixture we wrote here.
 //
-// This hits the network and depends on an external repo's moving ref, so it is
-// NOT part of the default hermetic suite: it runs only when
-// RUN_LIVE_WORKFLOW_TESTS is set (e.g. locally or in a scheduled job), never in
-// normal CI. Runtime day-to-day protection is the verify-credentials flow, which
-// fails loudly if the FIC does not match; this test catches the drift earlier.
+// This hits the network, so it is NOT part of the default hermetic suite: it
+// runs only when RUN_LIVE_WORKFLOW_TESTS is set (e.g. locally or in a scheduled
+// job), never in normal CI. It fetches the templates at the pinned commit, so it
+// answers "do the templates this build ships satisfy the contract?" — which is
+// what a pinset bump needs checked. Runtime day-to-day protection is the
+// verify-credentials flow, which fails loudly if the FIC does not match; this
+// test catches the drift earlier.
 import { describe, it, expect } from "vitest";
-import {
-  RADIUS_WORKFLOW_REPO,
-  RADIUS_WORKFLOW_DIR,
-  RADIUS_REF,
-  DEPLOY_AZURE_FILE,
-  DEPLOY_DISPATCHER_FILE,
-} from "./deploy.js";
+import { DEPLOY_AZURE_FILE, DEPLOY_DISPATCHER_FILE } from "./deploy.js";
+import { REPO_RADIUS_PINSET, RADIUS_WORKFLOW_DIR, RADIUS_WORKFLOW_REPO } from "./pinset.js";
 import { VERIFY_AZURE_FILE } from "./verify.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
 async function fetchWorkflow(file: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${RADIUS_REF}/${RADIUS_WORKFLOW_DIR}/${file}`;
+  const ref = REPO_RADIUS_PINSET.templateSource.sha;
+  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${ref}/${RADIUS_WORKFLOW_DIR}/${file}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);

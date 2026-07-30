@@ -34,6 +34,13 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # The pinset decides which upstream action code runs with a user's cloud
+      # credentials, so a hand-edited or stale SHA must never merge.
+      - name: Verify Repo Radius pinset
+        run: pnpm run pinset:check
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Run unit tests
         run: pnpm run test
 

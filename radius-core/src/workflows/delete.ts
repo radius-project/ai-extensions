@@ -1,15 +1,6 @@
 import { fillTemplate } from "./template.js";
-import { RADIUS_REF } from "./deploy.js";
-
-// The ref of radius-project/radius that hosts the delete workflow templates and
-// the `delete-resource` composite action. These landed in PR #12367
-// (radius-project/radius) and are NOT yet on `main`, so both the template fetch
-// and the `{{RADIUS_REF}}` the provider workflows pin their composite actions to
-// must point at the PR branch. Once #12367 merges, switch this back to
-// RADIUS_REF ("main") and delete this constant. It can be overridden via the
-// RADIUS_DELETE_REF env var (e.g. pin to a commit SHA) so it can be updated
-// without releasing a new core package if the PR branch moves.
-export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
+import { pinActionRefs } from "./pins.js";
+import { REPO_RADIUS_PINSET } from "./pinset.js";
 
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
@@ -23,16 +14,16 @@ export type DeleteWorkflowFiles = Record<string, string>;
 
 /**
  * Build the application-delete GitHub Actions workflows, mirroring the
- * composite-action structure of radius-project/radius (PR #12367).
+ * composite-action structure of radius-project/radius.
  *
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` dispatcher plus the reusable
- * `delete-azure.yml` / `delete-aws.yml` provider workflows. The dispatcher only
- * fills `{{ENV}}` (the dispatch default); the provider workflows also pin their
- * composite actions to `{{RADIUS_REF}}`.
+ * `delete-azure.yml` / `delete-aws.yml` provider workflows. As with deploy,
+ * `{{ENV}}` is filled and every `uses:` the pinset governs is rewritten to its
+ * pinned commit SHA.
  *
  * `templates` maps the committed file name to the raw template body fetched
- * from `radius-project/radius`. The caller must supply all three files; there is
+ * from radius-project/radius. The caller must supply all three files; there is
  * no bundled fallback, so a missing file is a hard error.
  */
 export function generateDeleteWorkflow(
@@ -43,23 +34,23 @@ export function generateDeleteWorkflow(
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`,
+        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${REPO_RADIUS_PINSET.templateSource.sha}".`,
       );
     }
     return body;
   };
+  const radiusRef = REPO_RADIUS_PINSET.templateSource.sha;
+  const provider = (file: string): string =>
+    pinActionRefs(
+      fillTemplate(pick(file), { ENV: env, RADIUS_REF: radiusRef }),
+      REPO_RADIUS_PINSET,
+    );
   return {
-    [DELETE_APP_DISPATCHER_FILE]: fillTemplate(pick(DELETE_APP_DISPATCHER_FILE), { ENV: env }),
-    [DELETE_AZURE_FILE]: fillTemplate(pick(DELETE_AZURE_FILE), {
-      ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF,
-    }),
-    [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
-      ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF,
-    }),
+    [DELETE_APP_DISPATCHER_FILE]: pinActionRefs(
+      fillTemplate(pick(DELETE_APP_DISPATCHER_FILE), { ENV: env }),
+      REPO_RADIUS_PINSET,
+    ),
+    [DELETE_AZURE_FILE]: provider(DELETE_AZURE_FILE),
+    [DELETE_AWS_FILE]: provider(DELETE_AWS_FILE),
   };
 }
-
-// Re-export so callers can pin template fetches to the same ref.
-export { RADIUS_REF };

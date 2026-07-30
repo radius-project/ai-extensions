@@ -3533,6 +3533,10 @@ function deployLandingView(state) {
         <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
         <div id="deploy-fail-repair-note" style="display:none; margin-top:10px; font-size:12px; color:var(--rad-text-secondary);"></div>
       </div>
+      <div id="deploy-upgrade-actions" style="display:none; margin-top:16px; gap:8px;">
+        <button id="deploy-upgrade-apply" class="rad-btn" style="margin:0;">Update workflows</button>
+        <button id="deploy-upgrade-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
+      </div>
     </div>
   </div>
 </div>
@@ -3987,18 +3991,20 @@ function resetDeployModal() {
     var sub = document.getElementById('deploy-progress-subtitle');
     var links = document.getElementById('deploy-progress-links');
     var failActions = document.getElementById('deploy-progress-fail-actions');
+    var upgradeActions = document.getElementById('deploy-upgrade-actions');
     if (spin) spin.style.display = '';
     if (fail) fail.style.display = 'none';
     if (sub) { sub.textContent = 'This may take a few minutes…'; sub.style.color = 'var(--rad-text-secondary)'; }
     if (links) links.style.display = 'flex';
     if (failActions) failActions.style.display = 'none';
+    if (upgradeActions) upgradeActions.style.display = 'none';
 }
 
 // Switch the deploy modal into a "failed" state: swap the spinner for an error
 // icon, show the error message, and offer a button back to the deployments list.
 // The kind argument lets us render a cleaner, tailored panel for well-known
 // failures (e.g. a branch that hasn't been pushed) instead of raw CLI stderr.
-function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, handoff) {
+function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, handoff, detail) {
     var modal = document.getElementById('deploy-progress-modal');
     var spin = document.getElementById('deploy-progress-spinner');
     var fail = document.getElementById('deploy-progress-failicon');
@@ -4022,6 +4028,9 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, ha
                   '<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>' +
                 '</div>';
         }
+    } else if (kind === 'workflow-upgrade-required') {
+        showWorkflowUpgrade(app, detail);
+        return;
     } else {
         if (title) title.innerHTML = 'Deployment of <strong>' + escapeHtmlClient(app) + '</strong> to <strong>' + escapeHtmlClient(env) + '</strong> failed';
         if (sub) {
@@ -4071,6 +4080,145 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, ha
         if (modal) modal.style.display = 'none';
         resetDeployModal();
         loadDeployments();
+    });
+})();
+
+// The deploy was withheld because this repository's Radius workflows pin older
+// Repo Radius actions than this plugin requires. Show exactly what would change
+// and wait: nothing is written to the repository until the user says so.
+// The mode argument is the apply path the buttons will request -- "commit"
+// first, then "pull-request" if the default branch turns out to be protected.
+var PENDING_UPGRADE = null;
+function showWorkflowUpgrade(app, detail, mode) {
+    if (detail) PENDING_UPGRADE = detail;
+    detail = PENDING_UPGRADE || {};
+    var applyMode = mode || 'commit';
+    var title = document.getElementById('deploy-progress-title');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var links = document.getElementById('deploy-progress-links');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    var upgradeActions = document.getElementById('deploy-upgrade-actions');
+    var applyBtn = document.getElementById('deploy-upgrade-apply');
+    var spin = document.getElementById('deploy-progress-spinner');
+    var fail = document.getElementById('deploy-progress-failicon');
+    var modal = document.getElementById('deploy-progress-modal');
+    if (spin) spin.style.display = 'none';
+    if (fail) fail.style.display = '';
+    if (links) links.style.display = 'none';
+    if (failActions) failActions.style.display = 'none';
+
+    var planLines = (detail.plan || []).join('\\n');
+    var target = applyMode === 'pull-request'
+        ? 'Radius will open a pull request with the updated workflows. Repo Radius runs from <code>' + escapeHtmlClient(detail.base || 'the default branch') + '</code>, so this deployment can\\'t start until that pull request is merged.'
+        : 'The update will be committed to <code>' + escapeHtmlClient(detail.base || 'the default branch') + '</code>.';
+    if (title) title.innerHTML = applyMode === 'pull-request' ? 'Can\\'t commit to the default branch' : 'Repo Radius workflows need updating';
+    if (sub) {
+        sub.style.color = 'var(--rad-text-secondary)';
+        sub.innerHTML =
+            '<div style="color:var(--rad-text);">This repository\\'s Radius workflows are pinned to an older version of the Repo Radius actions than this version of the Radius plugin requires. Updating keeps deployments of <strong>' + escapeHtmlClient(app) + '</strong> reproducible.</div>' +
+            (planLines
+                ? '<pre style="margin:10px 0 0; padding:8px 10px; background:var(--rad-code-bg); border:1px solid var(--rad-stroke); border-radius:6px; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); max-height:160px; overflow:auto; white-space:pre-wrap;">' + escapeHtmlClient(planLines) + '</pre>'
+                : '') +
+            '<div style="margin-top:10px;">' + target + '</div>';
+    }
+    if (applyBtn) applyBtn.textContent = applyMode === 'pull-request' ? 'Open a pull request' : 'Update workflows';
+    if (upgradeActions) {
+        upgradeActions.style.display = 'flex';
+        upgradeActions.dataset.mode = applyMode;
+        upgradeActions.dataset.app = app;
+        upgradeActions.dataset.base = detail.base || '';
+    }
+    if (modal) modal.style.display = 'flex';
+    deployBtn.disabled = false;
+    refreshDeployBtn();
+}
+
+// Render a terminal "we can't update this for you" state. The deployment does
+// not proceed, and the message names what is missing so someone with the right
+// access can act on it.
+function showWorkflowUpgradeBlocked(reason, detail, url) {
+    var title = document.getElementById('deploy-progress-title');
+    var sub = document.getElementById('deploy-progress-subtitle');
+    var upgradeActions = document.getElementById('deploy-upgrade-actions');
+    var failActions = document.getElementById('deploy-progress-fail-actions');
+    if (upgradeActions) upgradeActions.style.display = 'none';
+    if (failActions) failActions.style.display = 'block';
+    if (reason === 'pull-request-open') {
+        if (title) title.innerHTML = 'Pull request opened';
+        if (sub) {
+            sub.style.color = 'var(--rad-text-secondary)';
+            sub.innerHTML =
+                '<div style="color:var(--rad-text);">The updated workflows are waiting for review.</div>' +
+                (url ? '<div style="margin-top:8px;"><a href="' + escapeHtmlClient(url) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View pull request in GitHub ↗</a></div>' : '') +
+                '<div style="margin-top:10px;">Repo Radius runs from the default branch, so this deployment will start working once the pull request is merged.</div>';
+        }
+        return;
+    }
+    if (title) title.innerHTML = 'Workflow update blocked';
+    if (sub) {
+        sub.style.color = 'var(--rad-danger)';
+        var hint = reason === 'missing-workflow-scope'
+            ? 'Your GitHub token is missing the "workflow" scope. Run <code>gh auth refresh -h github.com -s workflow</code> in a terminal, then try again.'
+            : 'Ask someone with write access to this repository to apply the update.';
+        sub.innerHTML =
+            '<div>Radius couldn\\'t update the Repo Radius workflows.</div>' +
+            (detail ? '<pre style="margin:8px 0 0; white-space:pre-wrap; font-family:var(--font-mono, monospace); font-size:12px;">' + escapeHtmlClient(detail) + '</pre>' : '') +
+            '<div style="margin-top:10px; color:var(--rad-text-secondary);">' + hint + '</div>' +
+            '<div style="margin-top:6px; color:var(--rad-text-secondary);">The deployment was not started.</div>';
+    }
+}
+
+// Apply / Cancel for the workflow-upgrade panel. Apply is the ONLY thing in the
+// canvas that writes workflow files to the user's repository, and it only ever
+// runs from this click.
+(function() {
+    var applyBtn = document.getElementById('deploy-upgrade-apply');
+    var cancelBtn = document.getElementById('deploy-upgrade-cancel');
+    var actions = document.getElementById('deploy-upgrade-actions');
+    if (cancelBtn) cancelBtn.addEventListener('click', function() {
+        var modal = document.getElementById('deploy-progress-modal');
+        if (modal) modal.style.display = 'none';
+        resetDeployModal();
+        loadDeployments();
+    });
+    if (!applyBtn) return;
+    applyBtn.addEventListener('click', function() {
+        var mode = (actions && actions.dataset.mode) || 'commit';
+        var app = (actions && actions.dataset.app) || '';
+        applyBtn.disabled = true;
+        applyBtn.textContent = mode === 'pull-request' ? 'Opening…' : 'Updating…';
+        fetch('/api/workflow-upgrade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: mode })
+        }).then(function(r) { return r.json().catch(function() { return {}; }); })
+          .then(function(d) {
+            applyBtn.disabled = false;
+            if (!d || !d.status) { showWorkflowUpgradeBlocked('no-permission', 'The update request failed.'); return; }
+            if (d.status === 'updated') {
+                // Workflows are current now, so re-run the deploy the user asked
+                // for rather than making them click Deploy a second time.
+                var modal = document.getElementById('deploy-progress-modal');
+                if (modal) modal.style.display = 'none';
+                resetDeployModal();
+                showInline('success', 'Radius workflows updated. Starting the deployment…', true);
+                deployBtn.click();
+                return;
+            }
+            if (d.status === 'needs-pull-request') {
+                showWorkflowUpgrade(app, null, 'pull-request');
+                return;
+            }
+            if (d.status === 'stale-plan') {
+                showWorkflowUpgradeBlocked('no-permission', (d.detail || '') + ' Click Deploy again to review the current state.');
+                return;
+            }
+            showWorkflowUpgradeBlocked(d.reason || 'no-permission', d.detail || '', d.url || '');
+          })
+          .catch(function() {
+            applyBtn.disabled = false;
+            showWorkflowUpgradeBlocked('no-permission', 'The update request could not be sent.');
+          });
     });
 })();
 
@@ -4124,13 +4272,13 @@ deployBtn.addEventListener('click', function() {
                     // polling until it lands or the server stops retrying.
                     if (handoff.pending && failedPolls < 20) {
                         failedPolls++;
-                        showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', false, handoff);
+                        showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', false, handoff, (d && d.errorDetail) || null);
                         return;
                     }
                     clearInterval(wfPoll);
                     clearTimeout(autoHide);
                     delete OP_STATUS[opKey(app, env)];
-                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', (d && d.repairing) || false, handoff);
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', (d && d.repairing) || false, handoff, (d && d.errorDetail) || null);
                     loadDeployments(true);
                     return;
                 }

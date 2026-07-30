@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { REPO_RADIUS_PINSET, comparePins } from "@radius-project/core";
 
 // Shared mock state for the ./gh.mjs stub. `vi.hoisted` runs before the module
 // factory below so the mock can close over it. `committed` is keyed by branch:
@@ -71,28 +72,28 @@ describe("syncRepoWorkflows", () => {
         expect(h.commits).toEqual([]);
     });
 
-    it("makes no commits when every committed file already matches upstream", async () => {
+    it("reports nothing when every committed file already matches upstream", async () => {
         h.committed.main = await expectedFilesFor("dev", "azure");
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }]);
-        expect(res.updated).toEqual([]);
+        expect(res.drifted).toEqual([]);
         expect(h.commits).toEqual([]);
     });
 
-    it("rewrites a drifted file with the freshly generated content", async () => {
+    // The guarantee this whole pass rests on: rewriting a user's workflows
+    // changes what runs with their cloud credentials, so detection must never
+    // turn into a write. Upgrades go through the confirmed workflow-pins path.
+    it("reports a drifted file without committing anything", async () => {
         h.committed.main = await expectedFilesFor("dev", "azure");
         h.committed.main[VERIFY_PATH] = STALE_AZURE_VERIFY;
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }]);
-        expect(res.updated).toEqual([VERIFY_PATH]);
-        expect(h.commits).toHaveLength(1);
-        expect(h.commits[0].path).toBe(VERIFY_PATH);
-        expect(h.commits[0].content).toBe(await generateVerifyWorkflow("dev", "azure"));
-        expect(h.commits[0].branch).toBe("main");
+        expect(res.drifted).toEqual([VERIFY_PATH]);
+        expect(h.commits).toEqual([]);
     });
 
     it("skips files the extension never committed (missing on the repo)", async () => {
         // Repo has none of the workflow files yet.
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }]);
-        expect(res.updated).toEqual([]);
+        expect(res.drifted).toEqual([]);
         expect(h.commits).toEqual([]);
     });
 
@@ -103,42 +104,41 @@ describe("syncRepoWorkflows", () => {
             { name: "dev", provider: "azure" },
             { name: "prod", provider: "azure" },
         ]);
-        expect(res.updated).toEqual([]);
+        expect(res.drifted).toEqual([]);
         expect(h.commits).toEqual([]);
-    });
-
-    it("preserves the committed provider when rewriting the shared verify file", async () => {
-        // Drifted AWS verify file in a repo that has both an azure and aws env:
-        // it must be rewritten from the AWS template, not the azure one.
-        h.committed.main = { [VERIFY_PATH]: STALE_AWS_VERIFY };
-        const res = await syncRepoWorkflows("acme/app", [
-            { name: "dev", provider: "azure" },
-            { name: "prod", provider: "aws" },
-        ]);
-        expect(res.updated).toEqual([VERIFY_PATH]);
-        expect(h.commits[0].content).toBe(await generateVerifyWorkflow("prod", "aws"));
     });
 
     it("keeps an AWS verify file in sync when the env provider is unknown", async () => {
         // server.mjs passes provider "" when it can't infer one. A committed AWS
-        // verify file that already matches upstream must NOT be rewritten with the
-        // Azure template — the unknown provider generates BOTH candidates.
+        // verify file that already matches upstream must NOT be reported as
+        // drifted — the unknown provider generates BOTH candidates.
         h.committed.main = { [VERIFY_PATH]: await generateVerifyWorkflow("dev", "aws") };
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "" }]);
-        expect(res.updated).toEqual([]);
+        expect(res.drifted).toEqual([]);
         expect(h.commits).toEqual([]);
     });
 
-    it("rewrites a drifted AWS verify file with the AWS template when provider is unknown", async () => {
+    it("reports a drifted AWS verify file when the provider is unknown", async () => {
         h.committed.main = { [VERIFY_PATH]: STALE_AWS_VERIFY };
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "" }]);
-        expect(res.updated).toEqual([VERIFY_PATH]);
-        // Must use the AWS template (matching the committed file's provider), not
-        // the Azure one, even though the env provider couldn't be inferred.
-        expect(h.commits[0].content).toBe(await generateVerifyWorkflow("dev", "aws"));
+        expect(res.drifted).toEqual([VERIFY_PATH]);
+        expect(h.commits).toEqual([]);
     });
 
-    it("also updates the working branch when it has drifted", async () => {
+    it("also checks the working branch", async () => {
+        h.committed.main = await expectedFilesFor("dev", "azure");
+        h.committed.feature = await expectedFilesFor("dev", "azure");
+        h.committed.feature[VERIFY_PATH] = STALE_AZURE_VERIFY;
+
+        const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
+            workingBranch: "feature",
+        });
+
+        expect(res.branches).toEqual(["main", "feature"]);
+        expect(res.drifted).toEqual([VERIFY_PATH]);
+    });
+
+    it("de-duplicates a path that drifted on both branches", async () => {
         h.committed.main = await expectedFilesFor("dev", "azure");
         h.committed.feature = await expectedFilesFor("dev", "azure");
         h.committed.main[VERIFY_PATH] = STALE_AZURE_VERIFY;
@@ -148,38 +148,17 @@ describe("syncRepoWorkflows", () => {
             workingBranch: "feature",
         });
 
-        expect(res.branches).toEqual(["main", "feature"]);
-        expect(res.updated).toEqual([VERIFY_PATH]); // de-duped across branches
-        const branches = h.commits.map((c) => c.branch).sort();
-        expect(branches).toEqual(["feature", "main"]);
-        for (const c of h.commits) {
-            expect(c.content).toBe(await generateVerifyWorkflow("dev", "azure"));
-        }
+        expect(res.drifted).toEqual([VERIFY_PATH]);
     });
 
-    it("updates the working branch even when the default branch is already in sync", async () => {
-        h.committed.main = await expectedFilesFor("dev", "azure"); // in sync
-        h.committed.feature = await expectedFilesFor("dev", "azure");
-        h.committed.feature[VERIFY_PATH] = STALE_AZURE_VERIFY; // only the branch drifted
-
-        const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
-            workingBranch: "feature",
-        });
-
-        expect(res.updated).toEqual([VERIFY_PATH]);
-        expect(h.commits).toHaveLength(1);
-        expect(h.commits[0].branch).toBe("feature");
-    });
-
-    it("does not double-commit when the working branch IS the default branch", async () => {
+    it("does not scan the same branch twice when the working branch IS the default", async () => {
         h.committed.main = await expectedFilesFor("dev", "azure");
         h.committed.main[VERIFY_PATH] = STALE_AZURE_VERIFY;
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
             workingBranch: "main",
         });
         expect(res.branches).toEqual(["main"]);
-        expect(h.commits).toHaveLength(1);
-        expect(h.commits[0].branch).toBe("main");
+        expect(res.drifted).toEqual([VERIFY_PATH]);
     });
 
     it("silently skips an unpushed working branch (no committed files to read)", async () => {
@@ -188,13 +167,13 @@ describe("syncRepoWorkflows", () => {
         const res = await syncRepoWorkflows("acme/app", [{ name: "dev", provider: "azure" }], {
             workingBranch: "feature",
         });
-        expect(res.updated).toEqual([]);
+        expect(res.drifted).toEqual([]);
         expect(h.commits).toEqual([]);
     });
 
-    it("with `only`, syncs just the targeted workflow files and ignores drift in others", async () => {
+    it("with `only`, checks just the targeted workflow files and ignores drift in others", async () => {
         // Both the delete workflow and the verify workflow have drifted, but a
-        // pre-delete sync should only touch the delete files.
+        // delete-scoped pass should only look at the delete files.
         h.committed.main = await expectedFilesFor("dev", "azure");
         h.committed.main[VERIFY_PATH] = STALE_AZURE_VERIFY;
         h.committed.main[".github/workflows/delete-application.yml"] = "name: stale-delete\n";
@@ -203,11 +182,7 @@ describe("syncRepoWorkflows", () => {
             only: ["delete-application.yml", "delete-azure.yml"],
         });
 
-        expect(res.updated).toEqual([".github/workflows/delete-application.yml"]);
-        expect(h.commits).toHaveLength(1);
-        expect(h.commits[0].path).toBe(".github/workflows/delete-application.yml");
-        // The drifted verify file was outside `only`, so it must be left untouched.
-        expect(h.commits.some((c) => c.path === VERIFY_PATH)).toBe(false);
+        expect(res.drifted).toEqual([".github/workflows/delete-application.yml"]);
     });
 
     it("accepts full paths in `only` and matches on the bare filename", async () => {
@@ -218,8 +193,30 @@ describe("syncRepoWorkflows", () => {
             only: [".github/workflows/run-rad-commands.yml", ".github/workflows/run-rad-commands-azure.yml"],
         });
 
-        expect(res.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
-        expect(h.commits).toHaveLength(1);
-        expect(h.commits[0].path).toBe(".github/workflows/run-rad-commands.yml");
+        expect(res.drifted).toEqual([".github/workflows/run-rad-commands.yml"]);
+    });
+});
+
+describe("workflow generation pins action refs", () => {
+    it("rewrites every governed `uses:` to the pinned commit SHA", async () => {
+        const files = await generateDeployWorkflow("dev", ".radius/app.bicep");
+        const azure = files["run-rad-commands-azure.yml"];
+
+        expect(azure).toContain(
+            `uses: radius-project/radius/.github/extension/actions/run-rad-commands@${REPO_RADIUS_PINSET.templateSource.sha}`,
+        );
+        expect(azure).not.toContain("@{{RADIUS_REF}}");
+        expect(azure).not.toMatch(/uses: radius-project\/radius\S*@main\b/);
+    });
+
+    it("leaves nothing for the pin check to do", async () => {
+        const files = {
+            ".github/workflows/run-rad-commands-azure.yml": (
+                await generateDeployWorkflow("dev", ".radius/app.bicep")
+            )["run-rad-commands-azure.yml"],
+            ".github/workflows/delete-azure.yml": (await generateDeleteWorkflow("dev"))["delete-azure.yml"],
+        };
+
+        expect(comparePins(files, REPO_RADIUS_PINSET).status).toBe("current");
     });
 });
