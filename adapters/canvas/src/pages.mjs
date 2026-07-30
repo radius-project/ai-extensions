@@ -1291,8 +1291,8 @@ function escapeHtmlClient(s) {
     function showInline(kind, msg) {
         inlineStatus.style.display = 'block';
         inlineStatus.textContent = msg;
-        if (kind === 'error') { inlineStatus.style.background = '#ffebe9'; inlineStatus.style.color = '#82071e'; inlineStatus.style.border = '1px solid #cf222e'; }
-        else { inlineStatus.style.background = '#ddf4ff'; inlineStatus.style.color = '#0a3069'; inlineStatus.style.border = '1px solid #54aeff'; }
+        if (kind === 'error') { inlineStatus.style.background = 'var(--rad-danger-bg)'; inlineStatus.style.color = 'var(--rad-text)'; inlineStatus.style.border = '1px solid var(--rad-danger)'; }
+        else { inlineStatus.style.background = 'var(--rad-info-bg)'; inlineStatus.style.color = 'var(--rad-text)'; inlineStatus.style.border = '1px solid var(--rad-info)'; }
     }
 
     function refreshControls() {

@@ -392,7 +392,7 @@ function radiusGetTypeStyle(type) {
     // Container registry (ACR / ECR). The 'ecr' token is matched only as a
     // delimited segment so it does not trip on words like "secrets" (s-ecr-ets).
     if (t.includes('image') || t.includes('registry') || /(^|[^a-z])ecr([^a-z]|$)/.test(t)) {
-        return { bg: '#ddf4ff', border: '#0969da', shape: 'roundrectangle', category: 'Registry' };
+        return { bg: 'var(--rad-info-bg)', border: 'var(--rad-info)', shape: 'roundrectangle', category: 'Registry' };
     }
     // Cache (Redis / ElastiCache / MemoryDB)
     if (t.includes('redis') || t.includes('cache') || t.includes('elasticache') || t.includes('memorydb')) {
