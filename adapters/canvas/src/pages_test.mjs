@@ -6,6 +6,7 @@
 // module's branches stay exercised.
 
 import { describe, it, expect } from "vitest";
+import vm from "node:vm";
 import {
     pageShell,
     oidcPage,
@@ -68,6 +69,18 @@ describe("pageShell", () => {
         const html = pageShell("My Title", "<div id=\"graph-container\"></div>");
         const flowStyles = html.match(/\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/)?.[1];
         expect(flowStyles).toContain("background: transparent");
+    });
+
+    it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
+        // The app-registration picker builds each option as a flex row of
+        // [radio][text]. A bare `input` selector in the width:100% rule stretches
+        // the radio to fill the row and shoves the label text far to the right
+        // (see the empty GITHUB-card style regression). The width rule must skip
+        // radios/checkboxes so they keep their intrinsic size.
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain('input:not([type="radio"]):not([type="checkbox"]), select, .rad-select {');
+        // The bare selector (which would balloon the radio) must be gone.
+        expect(html).not.toMatch(/\n\s*input, select, \.rad-select \{/);
     });
 });
 
@@ -224,6 +237,217 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("/api/save-credential-profile");
         // The old inline provider picker was removed from the env-create form.
         expect(html).not.toContain('id="env-provider-select"');
+    });
+
+    it("progressively discloses a Service Management Reference input and retries with it", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // The SMR modal + input are present but hidden by default (no field on
+        // first submit).
+        expect(html).toContain('id="env-smr-modal"');
+        expect(html).toContain('id="env-smr-input"');
+        expect(html).toContain("Service Management Reference");
+        expect(html).toContain("Service Tree ID GUID");
+        // The client reacts to the machine-readable code and forwards the value.
+        expect(html).toContain("service-management-reference-required");
+        expect(html).toContain("serviceManagementReference");
+        expect(html).toContain("runAzureAutoSetupInteractive");
+    });
+
+    it("renders the app-registration picker + editable name + use-existing action", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Editable deploy-identity name prefilled from the repo.
+        expect(html).toContain('id="az-app-name-input"');
+        expect(html).toContain("radius-deploy-octo-app");
+        // Opt-in cross-repo "use existing" advanced action + its endpoint.
+        expect(html).toContain('id="az-use-existing-link"');
+        expect(html).toContain("/api/list-azure-app-registrations");
+        // Duplicate/selection picker modal + its machine-readable trigger code.
+        expect(html).toContain('id="env-appselect-modal"');
+        expect(html).toContain("app-selection-required");
+        expect(html).toContain("showAppPicker");
+        // The "Serves:" label is lazy-loaded per app so the picker renders
+        // immediately instead of blocking on one az FIC-list per owned app.
+        expect(html).toContain("/api/azure-app-serves-repos?appId=");
+        expect(html).toContain("servesSlots");
+        expect(html).toContain("loadServesLabels");
+    });
+
+    it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Step 3 header + provider-federated app registration copy.
+        expect(html).toContain("3 · Deploy identity");
+        expect(html).toContain("Azure app registration");
+        expect(html).toContain("The Microsoft Entra app GitHub Actions signs in as");
+        expect(html).toContain("no stored secrets");
+    });
+
+    it("discloses both role grants (Contributor + AKS Cluster Admin) at consent", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Setup grants two roles; both the deploy-identity field help and the
+        // profile-detail line must name the AKS Cluster Admin grant, not just
+        // Contributor, so the privilege is disclosed before the user proceeds.
+        expect(html).toContain("Azure Kubernetes Service RBAC Cluster Admin");
+        expect(html).toContain("the default for AKS Automatic");
+        expect(html).toContain("AKS RBAC Cluster Admin on the cluster");
+    });
+
+    it("wires the New Environment button to open the env form (regression guard)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // d97b6d1 accidentally dropped this handler when the use-existing IIFE was
+        // inserted, leaving #new-env-btn dead. Assert the exact wiring so a future
+        // deletion of the primary entry point fails the suite.
+        expect(html).toContain("getElementById('new-env-btn')");
+        expect(html).toMatch(/getElementById\('new-env-btn'\)\.addEventListener\('click',\s*function\(\)\s*\{\s*showEnvForm/);
+    });
+
+    it("makes the shared-identity pin reversible and reset on context change", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Hidden pin + note + explicit reversal affordance.
+        expect(html).toContain('id="az-selected-app-id"');
+        expect(html).toContain('id="az-selected-app-note"');
+        expect(html).toContain('id="az-clear-pin-link"');
+        // Central reset helper is defined and called from both the fresh-form and
+        // profile-change paths so a stale pin can't leak into the wrong context.
+        expect(html).toContain("function clearSharedAppPin");
+        expect(html).toMatch(/clearSharedAppPin\(\)/);
+    });
+
+    it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Repro: open the env form, use the combo's "+ Create new profile" action
+        // to add a profile on the Credentials subtab, then switch back to
+        // Environments. switchSubtab() must refresh the combo (preserving the
+        // current selection) so the new profile appears without a full canvas
+        // reload — but only while the form is visible, so discovery doesn't fire
+        // on the hidden landing view.
+        expect(html).toMatch(/if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/);
+    });
+
+    it("surfaces the write:packages scope in the account picker and identity warning", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // Per-account label flags a missing packages scope (sibling of the
+        // existing workflow-scope flag).
+        expect(html).toContain("missing ");
+        expect(html).toContain("hasPackages");
+        expect(html).toContain("actingHasPackages");
+        // The identity warning builds the concrete refresh command including
+        // read:packages + write:packages when the acting account lacks it.
+        expect(html).toContain("read:packages");
+        expect(html).toContain("write:packages");
+        // Default (non-warning) note names both scopes setup needs.
+        expect(html).toContain("<code>write:packages</code>");
+        // `gh auth refresh` has NO --user flag, so the remediation must first
+        // `gh auth switch -u <login>` and then run a bare `gh auth refresh`.
+        // Guard against regressing to `gh auth refresh ... -u <login>`, which
+        // errors with "unknown shorthand flag: 'u'".
+        expect(html).toContain("gh auth switch -h github.com -u ");
+        expect(html).toContain("gh auth refresh -h github.com");
+        expect(html).not.toMatch(/gh auth refresh[^'"`]*-u /);
+        // After running the command out-of-band the UX must be able to detect the
+        // change: a manual Re-check button plus an auto re-check on window refocus,
+        // both hitting the cache-busting fresh=1 identity endpoint (now carrying
+        // ?repo so the server folds in the repo admin preflight).
+        expect(html).toContain('id="env-gh-recheck"');
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO");
+        expect(html).toContain("idUrl += '&fresh=1'");
+        expect(html).toContain("visibilitychange");
+        expect(html).toContain("window.addEventListener('focus', envGhAutoRecheck)");
+    });
+
+    it("scopes the AKS grant to the cluster's own resource group and surfaces setup warnings on success", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        // The cluster's own RG (from discovery) is sent independently of the
+        // editable deployment RG combo, so the server scopes AKS Cluster Admin to
+        // the cluster's real path even when the deployment RG differs.
+        expect(html).toContain("function findAzureClusterResourceGroup(");
+        expect(html).toContain("clusterResourceGroup = findAzureClusterResourceGroup(cluster)");
+        expect(html).toContain("clusterResourceGroup: clusterResourceGroup");
+        expect(html).toContain("payload.clusterResourceGroup = params.clusterResourceGroup");
+        // The auto-setup step log (incl. the best-effort AKS warning) is surfaced
+        // on the SUCCESS path, not just swallowed into the error message.
+        expect(html).toContain("function showEnvSetupWarnings(");
+        expect(html).toContain("preflight.then(function(setupResult)");
+        expect(html).toContain("showEnvSetupWarnings(setupSteps)");
+        expect(html).toContain('id="env-warning-banner"');
+    });
+
+    it("links the Azure RG and cluster dropdowns and sorts discovered resources (Nicole regression)", () => {
+        // Regression: the cluster dropdown listed every AKS cluster regardless of
+        // the selected resource group, the two dropdowns were not linked RG->cluster,
+        // and neither list was sorted. Discovery now sorts clusters/RGs/namespaces,
+        // filters the cluster list to the selected RG, and keeps the cluster->RG
+        // back-fill so the two stay linked both ways.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("function sortByName(");
+        expect(html).toContain("function renderAzureClusters(");
+        expect(html).toContain("window.__azureClusters = sortByName(data.clusters || [])");
+        expect(html).toContain("populateSelect('azure-rg-select', sortByName(data.resourceGroups || [])");
+        expect(html).toContain("populateSelect('azure-namespace-select', sortByName(");
+        // Selecting a resource group filters the cluster list to that RG.
+        expect(html).toContain("if ((all[i].resourceGroup || '') === rg) filtered.push(all[i])");
+        // Selecting a cluster still back-fills its resource group (bidirectional link).
+        expect(html).toContain("rgSel.value = cluster.resourceGroup;");
+    });
+
+
+    it("always sends appName on create so explicit-empty is server-detectable", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("params.appName !== undefined");
+    });
+
+    it("surfaces repo admin access at open: fetches identity with ?repo and renders repoAccess", () => {
+        // Comment #9: the repo admin preflight was submit-only, so a write/maintain
+        // developer only hit the 403 after filling the whole form. The client now
+        // passes its repo to /api/github-identity so the server folds the preflight
+        // in, and renders the returned repoAccess message in the account note — an
+        // early, additive heads-up beside the account it concerns.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO");
+        expect(html).toContain("if (id.repoAccess)");
+        // A successful account switch must re-run the preflight for the new
+        // account (the switch response carries no repoAccess), so the switch
+        // handler re-loads identity rather than trusting res.d.identity.
+        expect(html).toContain("loadGitHubIdentity(true);");
+    });
+
+    it("single-sources the tested azure-oidc helpers into the client via .toString() (no hand-copied twins)", () => {
+        // Comment #10: formatServesReposLabel / discoverStatusText were duplicated
+        // as untested browser copies. They are now serialized from azure-oidc.mjs
+        // into the client bundle, so the shipping client runs the exact tested
+        // code and the call sites reference the real functions.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("function formatServesReposLabel(");
+        expect(html).toContain("function discoverStatusText(");
+        expect(html).toContain("discoverStatusText(data, 'azure')");
+        expect(html).toContain("discoverStatusText(data, 'aws')");
+        expect(html).toContain("formatServesReposLabel(serves)");
+        // The hand-copied twins must be gone.
+        expect(html).not.toContain("formatServesReposLabelClient");
+    });
+
+    it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
+        // The client scripts live inside a template literal, so an escaped
+        // apostrophe (\\') un-escapes to a raw ' in the emitted JS and breaks a
+        // single-quoted string, halting page init so the tables never load.
+        // Compile every emitted script to catch that class of bug at build time.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+        expect(scripts.length).toBeGreaterThan(0);
+        for (const src of scripts) {
+            expect(() => new vm.Script(src)).not.toThrow();
+        }
+    });
+
+    it("never references the undeclared CONTEXT_REPO — this page's repo var is CTX_REPO", () => {
+        // Regression: loadGitHubIdentity was pasted with `CONTEXT_REPO`, an
+        // identifier declared in OTHER page scripts (graph/diff pages) but never
+        // in environmentPage — this page declares `var CTX_REPO`. At runtime that
+        // read throws `ReferenceError: CONTEXT_REPO is not defined`, halting
+        // showEnvForm before the GitHub account field loads, so the GITHUB card
+        // renders empty. The compile-only init-halt guard can't catch an
+        // undeclared free variable, so assert the identifier never appears here.
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).not.toContain("CONTEXT_REPO");
     });
 });
 

@@ -1,4 +1,5 @@
 import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
+import { buildEnvironmentSuffix } from "./oidc-subject.js";
 
 const AZURE_PORTAL_BASE = "https://portal.azure.com/#";
 function buildResourceGroupResourceListUrl(subscriptionId: string, resourceGroup: string): string {
@@ -60,6 +61,15 @@ export const azure: ComputePlatform = {
 
   generateOidc(data: any): OidcResult {
     const d = data || {};
+    const repoSlug = d.repoFullName || d.repo || "OWNER/REPO";
+    const envName = d.environment || "production";
+    // Default (mutable) GitHub subject. NOTE: orgs/repos can customize the OIDC
+    // subject, and GitHub's immutable-subject rollout can change even the
+    // default to `repo:{owner}@<ownerId>/{repo}@<repoId>:...`. The auto-setup
+    // path (/api/azure-auto-setup) queries the customization API and derives the
+    // exact subject (creating both default forms when undetermined); this manual
+    // script uses the common default and warns below.
+    const subject = `repo:${repoSlug}:${buildEnvironmentSuffix(envName)}`;
     return {
       message: "Azure OIDC configuration generated",
       output: `# Azure Federated Identity Configuration
@@ -70,13 +80,25 @@ gh variable set AZURE_TENANT_ID --body "${d.tenantId || ""}"
 gh variable set AZURE_SUBSCRIPTION_ID --body "${d.subscriptionId || ""}"
 gh variable set AZURE_CLIENT_ID --body "${d.clientId || ""}"
 
+# NOTE (enterprise/Corpnet tenants): if you create the App Registration
+# yourself, tenant policy may require a Service Management Reference — add
+#   --service-management-reference <SERVICE_MANAGEMENT_REFERENCE>
+# to \`az ad app create\` (for Microsoft-internal tenants this is your Service
+# Tree ID GUID), otherwise it fails with "ServiceManagementReference field is
+# required".
+
+# NOTE (OIDC subject): if your org/repo customizes the Actions OIDC subject, or
+# your repo uses GitHub's immutable subject, the "subject" below must match what
+# GitHub actually mints (GET /repos/${repoSlug}/actions/oidc/customization/sub).
+# A mismatch fails deploy-time login with AADSTS700213.
+
 # 2. Create federated credential (via Azure CLI):
 az ad app federated-credential create \\
   --id ${d.clientId || "<CLIENT_ID>"} \\
   --parameters '{
     "name": "github-actions-oidc",
     "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:OWNER/REPO:environment:production",
+    "subject": "${subject}",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 

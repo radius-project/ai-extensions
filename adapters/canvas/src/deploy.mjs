@@ -268,6 +268,96 @@ export function extractErrorLines(logText, max = 12) {
     return out.slice(-max);
 }
 
+// Detects the Entra "enterprise claim" rejection (AADSTS7002381) that GitHub
+// Actions OIDC hits when a repo is NOT owned by an org in a GitHub Enterprise.
+// Tenant-agnostic: the accepted enterprise values and the actual value are parsed
+// out of the error text itself, so this works for any tenant policy, not just
+// Microsoft's. Returns a friendly multi-line explanation, or '' if not applicable.
+export function explainOidcEnterpriseClaim(logText) {
+    if (!logText) return '';
+    if (!/AADSTS7002381/.test(logText) && !/must contain the enterprise claim/i.test(logText)) return '';
+    // Parse: "...enterprise claim with value 'a', 'b' or 'c' but actual value is 'x'..."
+    let accepted = [];
+    let actual = null;
+    const m = /enterprise claim with value\s+(.+?)\s+but actual value is\s+'([^']*)'/i.exec(logText);
+    if (m) {
+        accepted = (m[1].match(/'([^']*)'/g) || []).map(s => s.replace(/'/g, ''));
+        actual = m[2];
+    }
+    const acceptedLabel = accepted.length ? accepted.join(', ') : 'a value required by the target Azure tenant';
+    let leadLine, actualLabel;
+    if (actual === '') {
+        // Claim present in the issuer config but empty — the classic personal-repo case.
+        leadLine = 'Azure Login (OIDC) was rejected because this repository\u2019s GitHub OIDC token is missing the required "enterprise" claim.';
+        actualLabel = 'empty (this repository is not part of a GitHub Enterprise)';
+    } else if (actual) {
+        // Claim present but not one the tenant trusts.
+        leadLine = 'Azure Login (OIDC) was rejected because this repository\u2019s GitHub "enterprise" OIDC claim ("' + actual + '") is not trusted by the target Azure tenant.';
+        actualLabel = '"' + actual + '"';
+    } else {
+        // Could not parse the actual value from the error text.
+        leadLine = 'Azure Login (OIDC) was rejected by the target Azure tenant over the GitHub OIDC "enterprise" claim.';
+        actualLabel = 'not reported';
+    }
+    return [
+        leadLine,
+        'The target Azure tenant only trusts GitHub Actions tokens whose enterprise claim is one of: ' + acceptedLabel + ' (actual: ' + actualLabel + ').',
+        'GitHub only includes the enterprise claim for repositories owned by an organization that belongs to a GitHub Enterprise \u2014 personal-account repositories cannot satisfy this policy.',
+        'Fix: host this repository under an organization that is part of one of the accepted GitHub Enterprises (' + acceptedLabel + '), then re-run Create Environment so the federated credential is recreated for the new owner/repo.',
+    ].join('\n');
+}
+
+// Given the outcome of reading `gh api repos/{repo}` plus the acting gh login,
+// return a clear, actionable error string, or '' when the account can read the
+// repo AND has admin. Pure — no I/O, never throws. Catches the two bare-404
+// failure modes GitHub returns for auth/permission problems during environment
+// setup: (1) the wrong gh account is active (repo invisible → read 404), and
+// (2) the account can read the repo but lacks the admin needed to create a
+// deployment environment (PUT /repos/{repo}/environments → 404).
+export function explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions } = {}) {
+    const who = login || 'the active gh account';
+    if (readFailed) {
+        return 'Can\u2019t read repository "' + repo + '" as GitHub account "' + who + '". ' +
+            'Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). ' +
+            'Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry. ' +
+            'Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back.';
+    }
+    if (permissions && permissions.admin === true) return '';
+    // Read OK but not admin — report the current best role so the user knows
+    // exactly what they have and what to ask for. When none of the role flags is
+    // truthy (e.g. jq emitted `{admin:null,...}`) we don't actually know the
+    // role, so we avoid claiming a specific "no direct access".
+    let role = '';
+    if (permissions) {
+        if (permissions.maintain) role = 'Maintain';
+        else if (permissions.push) role = 'Write';
+        else if (permissions.triage) role = 'Triage';
+        else if (permissions.pull) role = 'Read';
+    }
+    const account = login || 'you';
+    const haveClause = role
+        ? 'account "' + account + '" currently has ' + role + ' access'
+        : 'account "' + account + '" does not have Admin access (its exact role could not be determined)';
+    return 'Environment setup needs Admin permission on "' + repo + '", but ' + haveClause + '. ' +
+        'Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry.';
+}
+
+// True when a gh error text indicates the repo/API path was Not Found (HTTP 404) —
+// the signal that the active account can't see the repo. Pure, never throws.
+//
+// The bare `not found` alternate is INTENTIONAL, not an oversight: gh surfaces
+// this condition with variable wording (e.g. "gh: Not Found (HTTP 404)" but also
+// plain "the repository was not found"), and both must match. The match is
+// deliberately allowed to be broad because the sole caller (server.mjs, the repo
+// preflight) is fail-open — a match only flips an advisory `readFailed` flag and
+// GitHub still enforces real permissions server-side — so a false positive here
+// costs nothing while a false negative would misdirect the preflight. Narrowing
+// to `HTTP 404` only would drop the tested bare-phrase case (deploy_test.mjs).
+export function isRepoNotFoundError(errText) {
+    if (!errText) return false;
+    return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
+}
+
 export function extractRadDeployError(logText, maxChars = 4000) {
     if (!logText) return '';
     // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,

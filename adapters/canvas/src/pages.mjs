@@ -5,6 +5,7 @@
 // ./shared.mjs. No I/O, routing, or business logic here.
 
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
+import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.mjs";
 import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
 import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
@@ -175,7 +176,7 @@ ${getInlineVendorStyles()}
   label { display: block; font-weight: 600; font-size: 12px; color: var(--rad-text-tertiary); margin: 10px 0 4px; }
   .rad-field { display: flex; flex-direction: column; gap: 4px; }
   .rad-field label { margin: 0; }
-  input, select, .rad-select {
+  input:not([type="radio"]):not([type="checkbox"]), select, .rad-select {
     width: 100%; padding: 8px 10px;
     border: 1px solid var(--rad-stroke-strong);
     border-radius: var(--rad-radius); font-size: 13px;
@@ -233,6 +234,34 @@ ${getInlineVendorStyles()}
   .rad-section:first-of-type { border-top: none; padding-top: 0; margin-top: 16px; }
   .rad-section__title { font-size: 15px; font-weight: 600; color: var(--rad-text); margin-bottom: 4px; }
   .rad-section__desc { font-size: 13px; color: var(--rad-text-tertiary); margin-bottom: 8px; }
+  /* Lead-in sentence under a card title. */
+  .rad-card__lede { font-size: 13px; line-height: 19px; color: var(--rad-text-tertiary); margin: 6px 0 0; max-width: 640px; }
+  /* Helper text tucked under a form control. */
+  .rad-field__help { font-size: 12px; color: var(--rad-text-tertiary); }
+  /* ─── Connection layout (GitHub ⇒ cloud federation) ─────────────────────── */
+  /* Presents the two identities as the two ends of a trust: a GitHub side and a
+     cloud side, joined by a direction arrow. Collapses to a stack on narrow
+     panels, where the arrow rotates to point downward. */
+  .rad-conn { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 12px; margin-top: 12px; }
+  .rad-conn__side {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--rad-stroke); border-radius: var(--rad-radius);
+    background: var(--rad-bg-subtle); padding: 12px 14px;
+  }
+  .rad-conn__badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--rad-text-tertiary);
+  }
+  .rad-conn__badge svg { width: 15px; height: 15px; display: block; }
+  .rad-conn__arrow {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--rad-text-tertiary); font-size: 20px; line-height: 1; padding: 0 2px;
+  }
+  @media (max-width: 620px) {
+    .rad-conn { grid-template-columns: 1fr; }
+    .rad-conn__arrow { transform: rotate(90deg); padding: 2px 0; }
+  }
   .rad-link { color: var(--rad-link); text-decoration: underline; cursor: pointer; font-size: 13px; }
   .rad-link:hover { color: var(--rad-link-hover); }
 
@@ -1448,6 +1477,11 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <span id="env-error-banner-text" class="env-error-banner__text"></span>
     <button type="button" id="env-error-banner-close" class="env-error-banner__close" aria-label="Dismiss">×</button>
   </div>
+  <div id="env-warning-banner" role="status" style="display:none;">
+    <span class="env-warning-banner__icon" aria-hidden="true">⚠</span>
+    <span id="env-warning-banner-text" class="env-warning-banner__text"></span>
+    <button type="button" id="env-warning-banner-close" class="env-warning-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -1466,31 +1500,14 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-card__title" style="margin:0;">Create Environment</div>
       <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
     </div>
-
+    <!-- 1 · Name this environment -->
     <div class="rad-section">
-      <div class="rad-field">
-        <label>Credential Profile</label>
-        <div class="rad-combo" id="env-profile-combo">
-          <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
-            <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
-            <span class="rad-combo__chevron" aria-hidden="true"></span>
-          </button>
-          <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
-            <div class="rad-combo__options" id="env-profile-options"></div>
-            <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
-            <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
-          </div>
-        </div>
-        <!-- Holds the selected profile name; read by the create flow. -->
-        <input type="hidden" id="env-profile-select" value="" />
-        <div id="env-profile-status" style="margin-top:8px; font-size:13px; display:none;"></div>
+      <div class="rad-section__title">1 · Name this environment</div>
+      <div class="rad-field" style="max-width:420px;">
+        <label>Environment name</label>
+        <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(envName)}" />
+        <div class="rad-field__help">The deployment target you'll deploy apps into by name.</div>
       </div>
-
-      <div class="rad-field" style="margin-top:16px;">
-        <label>Environment Name</label>
-        <input id="env-name-input" type="text" placeholder="e.g. aks-prod" value="${escapeHtml(envName)}" />
-      </div>
-
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
       <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
@@ -1498,13 +1515,99 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <input type="hidden" id="env-selected-provider" value="" />
     </div>
 
+    <!-- 2 · Connect GitHub to a cloud -->
+    <div class="rad-section">
+      <div class="rad-section__title">2 · Connect GitHub to a cloud</div>
+      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo.</div>
+
+      <div class="rad-conn">
+        <!-- GitHub side of the trust. The account combo is populated by
+             loadGitHubIdentity() when the env form opens; it warns when the
+             acting account differs from the one the app shows, or lacks the
+             workflow scope needed to write the deploy workflow file. -->
+        <div class="rad-conn__side">
+          <div class="rad-conn__badge">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </div>
+          <div class="rad-field" id="env-gh-identity-field" style="display:none;">
+            <label>Account</label>
+            <div class="rad-combo" id="env-gh-account-combo">
+              <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
+                <span class="rad-combo__chevron" aria-hidden="true"></span>
+              </button>
+              <div class="rad-combo__menu" id="env-gh-account-menu" role="listbox" style="display:none;">
+                <div class="rad-combo__options" id="env-gh-account-options"></div>
+                <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
+              </div>
+            </div>
+            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code> which changes the active GitHub account for every terminal and tool on this machine, remaining changed even after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
+            <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
+            <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
+          </div>
+        </div>
+
+        <div class="rad-conn__arrow" aria-hidden="true">→</div>
+
+        <!-- Cloud side of the trust. The provider (Azure/AWS) comes from the
+             selected credential profile; the profile detail below the combo
+             reflects what the connection does and where deploys land. -->
+        <div class="rad-conn__side">
+          <div class="rad-conn__badge">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 13a3.5 3.5 0 01-.36-6.98A4 4 0 0111.9 6.1 3 3 0 0111.5 13h-7z"/></svg>
+            Cloud credentials
+          </div>
+          <div class="rad-field">
+            <label>Credential profile</label>
+            <div class="rad-combo" id="env-profile-combo">
+              <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
+                <span class="rad-combo__chevron" aria-hidden="true"></span>
+              </button>
+              <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
+                <div class="rad-combo__options" id="env-profile-options"></div>
+                <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
+                <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
+              </div>
+            </div>
+            <!-- Holds the selected profile name; read by the create flow. -->
+            <input type="hidden" id="env-profile-select" value="" />
+            <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 · Deploy identity -->
+    <div class="rad-section" id="env-identity-section">
+      <div class="rad-section__title">3 · Deploy identity</div>
+      <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
+      <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
+        <label>Azure app registration</label>
+        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
+        <input type="hidden" id="az-selected-app-id" value="" />
+        <div class="rad-field__help">
+          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
+         <a href="#" id="az-use-existing-link">use an existing application…</a>
+        </div>
+        <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
+        <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
+      </div>
+      <div class="rad-field__help" id="env-identity-aws" style="display:none;">GitHub Actions assumes the IAM role from your credential profile — no extra identity to configure here.</div>
+    </div>
+
+    <!-- 4 · Infrastructure -->
     <div class="rad-section" id="env-infra-section">
-      <div class="rad-section__title">Infrastructure</div>
+      <div class="rad-section__title">4 · Infrastructure</div>
       <div class="rad-section__desc">Configure the compute infrastructure for your environment.</div>
 
       <!-- Azure infra -->
       <div id="panel-azure">
-        <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
+          <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
+          <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+        </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label>Resource Group</label>
@@ -1526,7 +1629,10 @@ document.getElementById('back-btn').addEventListener('click', function() {
 
       <!-- AWS infra -->
       <div id="panel-aws" style="display:none;">
-        <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary); margin:8px 0;">Select a credential profile to discover resources.</div>
+        <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
+          <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
+          <button type="button" id="aws-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+        </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label>EKS Cluster</label>
@@ -1652,6 +1758,36 @@ document.getElementById('back-btn').addEventListener('click', function() {
   </div>
 </div>
 
+<div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
+    <div style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Service Management Reference required</div>
+    <div style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
+    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328);" />
+    <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:6px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
+    </div>
+  </div>
+</div>
+
+<!-- App Registration picker: shown when multiple owned identities match this
+     repo (app-selection-required), or via the opt-in "Use an existing
+     application" advanced action. Rows are built dynamically in JS. -->
+<div id="env-appselect-modal" style="display:none; position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
+    <div id="env-appselect-title" style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Choose a deploy identity</div>
+    <div id="env-appselect-intro" style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;"></div>
+    <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger,#cf222e); line-height:1.5; margin-bottom:10px;"></div>
+    <div id="env-appselect-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+    <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:8px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Use selected</button>
+    </div>
+  </div>
+</div>
+
 <div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:360px;">
     <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
@@ -1680,6 +1816,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-error-banner__text strong { font-weight:600; }
 .env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-error-banner__close:hover { color:var(--rad-text); }
+#env-warning-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-warning); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-warning-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.4; white-space:pre-wrap; }
+.env-warning-banner__text strong { font-weight:600; }
+.env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-warning-banner__close:hover { color:var(--rad-text); }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -1762,7 +1904,20 @@ function switchSubtab(name) {
         links[i].classList.toggle('rad-subtab--active', links[i].getAttribute('data-subtab') === name);
     }
     try { history.replaceState(null, '', '/?page=' + (isCred ? 'credentials' : 'environment')); } catch (e) {}
-    if (isCred) loadCredTable(); else loadEnvTable();
+    if (isCred) {
+        loadCredTable();
+    } else {
+        loadEnvTable();
+        // If the user is returning to an already-open Create Environment form
+        // (e.g. they opened it, hit the combo's "+ Create new profile" action to
+        // add a profile on the Credentials subtab, then came back), the combo
+        // still holds the PROFILES snapshot from when the form opened — so a
+        // just-created profile is missing until a full canvas reload. Re-sync it
+        // here, preserving the current selection. Skipped on the landing view:
+        // the combo is hidden there, New Environment re-fetches via showEnvForm(),
+        // and refreshing would fire resource discovery on a hidden form.
+        if (envForm && envForm.style.display !== 'none') loadProfilesIntoEnvSelect(envProfileSelect.value);
+    }
 }
 (function() {
     var links = document.querySelectorAll('#env-subtabs .rad-subtab');
@@ -1874,10 +2029,12 @@ function showEnvForm(preset) {
     if (sb) sb.style.display = 'none';
     envNameInput.value = preset.name !== undefined ? preset.name : '';
     document.getElementById('az-client-id').value = '';
+    clearSharedAppPin();
     document.getElementById('deploy-status').style.display = 'none';
     envLanding.style.display = 'none';
     envForm.style.display = '';
     loadProfilesIntoEnvSelect(preset.profile);
+    loadGitHubIdentity();
     envNameInput.focus();
 }
 function showEnvLanding() {
@@ -1912,6 +2069,27 @@ function showEnvError(msg) {
 var envErrorClose = document.getElementById('env-error-banner-close');
 if (envErrorClose) envErrorClose.addEventListener('click', function() {
     document.getElementById('env-error-banner').style.display = 'none';
+});
+
+// Surface non-fatal auto-setup warnings (steps prefixed with "⚠️") on the
+// SUCCESS path. Auto-setup returns a 'steps' log; the AKS Cluster Admin grant is
+// best-effort and only pushes a warning into that log, so without this the user
+// would never see (on success) that they must grant the role manually before the
+// deploy will pass "Verify AKS Access". Renders nothing when there are no
+// warnings. Steps are server-built plain text; render as text, not markup.
+function showEnvSetupWarnings(steps) {
+    var banner = document.getElementById('env-warning-banner');
+    var text = document.getElementById('env-warning-banner-text');
+    if (!banner || !text) return;
+    var warnings = (steps || []).filter(function(s) { return typeof s === 'string' && s.indexOf('⚠️') === 0; });
+    if (!warnings.length) { banner.style.display = 'none'; return; }
+    text.textContent = warnings.join('\\n\\n');
+    banner.style.display = 'flex';
+    banner.scrollIntoView({ block: 'nearest' });
+}
+var envWarningClose = document.getElementById('env-warning-banner-close');
+if (envWarningClose) envWarningClose.addEventListener('click', function() {
+    document.getElementById('env-warning-banner').style.display = 'none';
 });
 
 function findProfile(name) {
@@ -1976,24 +2154,311 @@ function loadProfilesIntoEnvSelect(preselectName) {
             setProfileValue('');
         });
 }
+
+// --- GitHub identity for setup (acting account + switcher) ---
+// Setup mutations (App Registration create, environment PUT, workflow-file
+// commit) run as an effective GitHub account that is NOT always the one the
+// host app shows. Surface it, and let the user switch, so a wrong account
+// (e.g. an enterprise/EMU login without repo or tenant access) is caught here
+// rather than as a confusing mid-setup permission error.
+var GH_IDENTITY = null;
+var envGhField = document.getElementById('env-gh-identity-field');
+var envGhBtn = document.getElementById('env-gh-account-button');
+var envGhMenu = document.getElementById('env-gh-account-menu');
+var envGhValue = document.getElementById('env-gh-account-value');
+var envGhOptions = document.getElementById('env-gh-account-options');
+var envGhNote = document.getElementById('env-gh-identity-note');
+var envGhRecheck = document.getElementById('env-gh-recheck');
+// True while the identity note is showing a missing-scope warning the user must
+// fix out-of-band (run a gh command). Gates the auto re-check on window refocus
+// so we only re-poll gh when there is actually something to clear.
+var envGhScopeWarn = false;
+// Guards against overlapping re-checks (rapid focus events / button spam).
+var envGhChecking = false;
+
+function openGhAccountMenu(open) {
+    if (!envGhMenu) return;
+    var show = open === undefined ? envGhMenu.style.display === 'none' : open;
+    envGhMenu.style.display = show ? '' : 'none';
+    if (envGhBtn) envGhBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+if (envGhBtn) envGhBtn.addEventListener('click', function(e) { e.stopPropagation(); openGhAccountMenu(); });
+document.addEventListener('click', function(e) {
+    var combo = document.getElementById('env-gh-account-combo');
+    if (combo && !combo.contains(e.target)) openGhAccountMenu(false);
+});
+
+function renderGitHubIdentity() {
+    if (!envGhField || !GH_IDENTITY) return;
+    var id = GH_IDENTITY;
+    if (id.error || !id.actingLogin) {
+        // Detection failed or no account — keep the field hidden rather than
+        // showing a misleading control. Setup still runs with whatever gh uses.
+        envGhField.style.display = 'none';
+        envGhScopeWarn = false;
+        if (envGhRecheck) envGhRecheck.style.display = 'none';
+        return;
+    }
+    envGhField.style.display = '';
+    if (envGhValue) envGhValue.textContent = '@' + id.actingLogin;
+    var accounts = id.accounts || [];
+    if (envGhOptions) {
+        envGhOptions.innerHTML = '';
+        accounts.forEach(function(a) {
+            var o = document.createElement('button');
+            o.type = 'button';
+            o.className = 'rad-combo__option';
+            o.setAttribute('role', 'option');
+            var label = '@' + a.login;
+            var missingScopes = [];
+            if (!a.hasWorkflow) missingScopes.push('workflow');
+            if (!a.hasPackages) missingScopes.push('packages');
+            if (missingScopes.length) label += ' — missing ' + missingScopes.join(' + ') + ' scope' + (missingScopes.length > 1 ? 's' : '');
+            if (!a.switchable) label += ' (not switchable)';
+            else if (a.login === id.actingLogin) label += ' ✓';
+            o.textContent = label;
+            if (a.switchable && a.login !== id.actingLogin) {
+                o.setAttribute('data-login', a.login);
+                o.addEventListener('click', function() {
+                    switchGitHubAccount(this.getAttribute('data-login'));
+                    openGhAccountMenu(false);
+                });
+            } else {
+                o.disabled = true;
+                o.style.opacity = '0.6';
+                o.style.cursor = 'default';
+            }
+            envGhOptions.appendChild(o);
+        });
+    }
+    var emptyEl = document.getElementById('env-gh-account-empty');
+    if (emptyEl) emptyEl.style.display = accounts.length ? 'none' : '';
+
+    if (envGhNote) {
+        var warn = '';
+        var scopeWarn = false;
+        var repoWarn = false;
+        if (id.repoAccess) {
+            // The acting account can't admin (or can't read) the target repo, so
+            // Create Environment would 403 at submit. Surface it HERE at open,
+            // next to the account it concerns, rather than after the user fills
+            // in all four steps. The submit-time preflight stays authoritative;
+            // this is an early, additive heads-up. Offer Re-check so switching
+            // accounts (or being granted access) clears it without reopening.
+            warn = id.repoAccess;
+            repoWarn = true;
+        } else if (id.mismatch && id.displayLogin) {
+            warn = 'The app shows @' + id.displayLogin + ' but setup will act as @' + id.actingLogin +
+                '. If deployment fails with a permission error, switch to the account that has access to this repo and your Azure tenant.';
+        } else if (!id.actingHasWorkflow || !id.actingHasPackages) {
+            // Both scopes are needed to complete setup: 'workflow' to commit the
+            // deploy workflow, 'write:packages' to publish the private state
+            // package to GHCR. Name whichever is missing and build the exact
+            // refresh command (read:packages accompanies write:packages).
+            var missNames = [], refreshScopes = [];
+            if (!id.actingHasWorkflow) { missNames.push('workflow'); refreshScopes.push('workflow'); }
+            if (!id.actingHasPackages) { missNames.push('write:packages'); refreshScopes.push('read:packages'); refreshScopes.push('write:packages'); }
+            // gh auth refresh has no --user flag: it refreshes whichever
+            // account is ACTIVE for the host. In a multi-account (EMU/enterprise)
+            // setup the active account may not be the one we act as, so first
+            // switch to it with "gh auth switch -u" (which does take --user), then
+            // run a bare refresh. Adding a -u flag to the refresh call errors
+            // with "unknown shorthand flag: 'u'".
+            var refreshScopeFlags = refreshScopes.map(function(s){ return ' -s ' + s; }).join('');
+            var refreshCmd = 'gh auth switch -h github.com -u ' + id.actingLogin +
+                ' && gh auth refresh -h github.com' + refreshScopeFlags;
+            warn = 'The active account @' + id.actingLogin + ' is missing the ' + missNames.join(' and ') + ' scope' + (missNames.length > 1 ? 's' : '') +
+                ' environment setup needs. Run "' + refreshCmd + '" or switch accounts. Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back.';
+            scopeWarn = true;
+        }
+        // Remember whether a fixable scope warning is on screen, and offer the
+        // manual Re-check control only in that case. Returning from the terminal
+        // (window refocus) auto re-checks while this is true; see below.
+        envGhScopeWarn = scopeWarn || repoWarn;
+        if (envGhRecheck) envGhRecheck.style.display = (scopeWarn || repoWarn) ? '' : 'none';
+        if (warn) {
+            envGhNote.textContent = warn;
+            envGhNote.style.color = 'var(--rad-warning, #9a6700)';
+            envGhNote.style.display = '';
+        } else {
+            envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> and <code>write:packages</code> scopes.';
+            envGhNote.style.color = 'var(--rad-muted, #57606a)';
+            envGhNote.style.display = '';
+        }
+    }
+}
+
+function loadGitHubIdentity(fresh) {
+    if (envGhChecking) return;
+    envGhChecking = true;
+    // On the very first load show the neutral "Detecting…" placeholder; on a
+    // re-check the account value is already shown, so give feedback on the
+    // button instead of blanking the field.
+    if (fresh && envGhRecheck) { envGhRecheck.disabled = true; envGhRecheck.textContent = 'Checking…'; }
+    else if (envGhValue) envGhValue.textContent = 'Detecting…';
+    // fresh=1 asks the server to drop its memoized gh snapshot so newly added
+    // scopes (e.g. write:packages) are actually observed. repo lets the server
+    // fold in the repo admin/read preflight so a non-admin account is flagged
+    // here at open, not only at submit.
+    var idUrl = '/api/github-identity?repo=' + encodeURIComponent(CTX_REPO || '');
+    if (fresh) idUrl += '&fresh=1';
+    fetch(idUrl)
+        .then(function(r) { return r.json(); })
+        .then(function(d) { GH_IDENTITY = d || {}; renderGitHubIdentity(); })
+        .catch(function() { if (envGhField) envGhField.style.display = 'none'; })
+        .then(function() {
+            envGhChecking = false;
+            if (envGhRecheck) { envGhRecheck.disabled = false; envGhRecheck.textContent = 'Re-check'; }
+        });
+}
+
+// Manual re-check: the user ran the gh command and wants the warning re-evaluated.
+if (envGhRecheck) envGhRecheck.addEventListener('click', function() { loadGitHubIdentity(true); });
+
+// Auto re-check when the canvas regains focus. The user leaves to a terminal to
+// run the remediation command and comes back; refocus is the natural signal to
+// re-poll. Only fire while a fixable scope warning is showing so we do not run
+// gh on every unrelated focus.
+function envGhAutoRecheck() {
+    if (envGhScopeWarn && !envGhChecking && envGhField && envGhField.style.display !== 'none') {
+        loadGitHubIdentity(true);
+    }
+}
+document.addEventListener('visibilitychange', function() { if (!document.hidden) envGhAutoRecheck(); });
+window.addEventListener('focus', envGhAutoRecheck);
+
+function switchGitHubAccount(login) {
+    if (!login) return;
+    if (envGhValue) envGhValue.textContent = 'Switching…';
+    fetch('/api/github-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login: login }),
+    })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        .then(function(res) {
+            if (res.ok) {
+                // Re-fetch identity WITH the repo so the admin/read preflight
+                // re-runs for the freshly switched account — the switch response
+                // resolves identity without the repo, so it carries no repoAccess.
+                loadGitHubIdentity(true);
+                return;
+            }
+            renderGitHubIdentity();
+            if (envGhNote) {
+                envGhNote.textContent = (res.d && res.d.error) || 'Could not switch account.';
+                envGhNote.style.color = 'var(--rad-danger, #cf222e)';
+                envGhNote.style.display = '';
+            }
+        })
+        .catch(function() { renderGitHubIdentity(); });
+}
+
 function onEnvProfileSelected() {
+    // A credential-profile / tenant change is a context change: never let a
+    // shared-identity pin from a previous context silently carry over.
     selectedProfile = findProfile(envProfileSelect.value);
     var statusEl = document.getElementById('env-profile-status');
+    var idAz = document.getElementById('env-identity-azure');
+    var idAws = document.getElementById('env-identity-aws');
     if (!selectedProfile) {
         statusEl.style.display = 'none';
         deployBtn.disabled = true;
+        var azRb0 = document.getElementById('azure-refresh-btn'); if (azRb0) azRb0.disabled = true;
+        var awsRb0 = document.getElementById('aws-refresh-btn'); if (awsRb0) awsRb0.disabled = true;
         return;
     }
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span>' +
-        (selectedProfile.user ? ' <span style="color:var(--rad-text-tertiary);">· Logged in as <strong style="color:var(--rad-text);">' + escapeHtmlClient(selectedProfile.user) + '</strong></span>' : '');
     var prov = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
     document.getElementById('env-selected-provider').value = prov;
+    // Provider-aware profile detail: what the connection does, where deploys
+    // land (subscription / account), and the verified identity behind it.
+    var detail = '';
+    if (prov === 'aws') {
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">GitHub Actions assumes the IAM role in this profile over OIDC to deploy — no stored secrets.</div>';
+        var awsDest = escapeHtmlClient(selectedProfile.accountId || '') + (selectedProfile.region ? ' · ' + escapeHtmlClient(selectedProfile.region) : '');
+        if (awsDest.trim()) detail += '<div><span style="color:var(--rad-text-tertiary);">Account:</span> <strong style="color:var(--rad-text);">' + awsDest + '</strong></div>';
+    } else {
+        detail += '<div style="color:var(--rad-text-tertiary);margin-bottom:4px;">Creates the Entra app, the OIDC trust to your repo, and grants it Contributor on the resource group and AKS RBAC Cluster Admin on the cluster.</div>';
+        var sub = selectedProfile.subscriptionName || selectedProfile.subscriptionId || '';
+        if (sub) detail += '<div><span style="color:var(--rad-text-tertiary);">Subscription:</span> <strong style="color:var(--rad-text);">' + escapeHtmlClient(sub) + '</strong></div>';
+    }
+    if (selectedProfile.user) detail += '<div><span style="color:var(--rad-text-tertiary);">Signed in as</span> <strong style="color:var(--rad-text);">' + escapeHtmlClient(selectedProfile.user) + '</strong> <span style="color:var(--rad-primary);font-weight:600;">· ✓ Verified</span></div>';
+    else detail += '<div><span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span></div>';
+    statusEl.style.display = '';
+    statusEl.innerHTML = detail;
+    if (idAz) idAz.style.display = prov === 'azure' ? '' : 'none';
+    if (idAws) idAws.style.display = prov === 'aws' ? '' : 'none';
     document.getElementById('panel-azure').style.display = prov === 'azure' ? '' : 'none';
     document.getElementById('panel-aws').style.display = prov === 'aws' ? '' : 'none';
     deployBtn.disabled = false;
+    var rb = document.getElementById(prov === 'aws' ? 'aws-refresh-btn' : 'azure-refresh-btn');
+    if (rb) rb.disabled = false;
     discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
 }
+['azure-refresh-btn','aws-refresh-btn'].forEach(function(id){
+    var b = document.getElementById(id);
+    if (b) b.addEventListener('click', function(){
+        if (!selectedProfile) return;
+        var prov = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
+        discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
+    });
+});
+// Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
+// reuse another app's identity — deliberately wider blast radius, so it must
+// be cleared on any fresh form or context change and be explicitly reversible.
+function clearSharedAppPin() {
+    var hid = document.getElementById('az-selected-app-id');
+    if (hid) hid.value = '';
+    var note = document.getElementById('az-selected-app-note');
+    if (note) { note.style.display = 'none'; note.textContent = ''; }
+    var clearLink = document.getElementById('az-clear-pin-link');
+    if (clearLink) clearLink.style.display = 'none';
+    var nameEl = document.getElementById('az-app-name-input');
+    if (nameEl) { nameEl.disabled = false; nameEl.style.opacity = ''; }
+}
+(function(){
+    var clearLink = document.getElementById('az-clear-pin-link');
+    if (clearLink) clearLink.addEventListener('click', function(e){ e.preventDefault(); clearSharedAppPin(); });
+})();
+// Opt-in "use an existing application" (advanced, non-default): lists ALL
+// App Registrations the user owns and lets them deliberately share one across
+// repos. A shared deploy identity has a wider blast radius, so this is never
+// reached automatically — only via this explicit action.
+(function(){
+    var link = document.getElementById('az-use-existing-link');
+    if (!link) return;
+    link.addEventListener('click', function(e){
+        e.preventDefault();
+        var note = document.getElementById('az-selected-app-note');
+        link.textContent = 'Loading applications…';
+        fetch('/api/list-azure-app-registrations').then(function(r){ return r.json(); }).then(function(data){
+            link.textContent = 'Use an existing application…';
+            if (data.error) { if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'Could not list applications: ' + data.error; } return; }
+            var apps = data.apps || [];
+            if (!apps.length) { if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'You do not own any App Registrations yet — create one instead.'; } return; }
+            showAppPicker({
+                title: 'Use an existing application',
+                intro: 'Select an App Registration you already own to reuse as this repository\u2019s deploy identity.',
+                caution: 'Sharing one identity across repositories means every wired repository can use its Azure permissions. Only do this for repos that belong to the same product.',
+                candidates: apps,
+                defaultAppId: '',
+                allowCreateNew: false
+            }).then(function(choice){
+                var hid = document.getElementById('az-selected-app-id');
+                if (hid && choice.appId) hid.value = choice.appId;
+                var picked = apps.filter(function(a){ return a.appId === choice.appId; })[0];
+                if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-info,#0969da)'; note.textContent = 'Will reuse: ' + ((picked && picked.displayName) || choice.appId) + ' (' + choice.appId + ').'; }
+                var clearLink = document.getElementById('az-clear-pin-link');
+                if (clearLink) clearLink.style.display = 'inline';
+                var nameEl = document.getElementById('az-app-name-input');
+                if (nameEl) { nameEl.disabled = true; nameEl.style.opacity = '0.6'; }
+            }).catch(function(){ /* cancelled */ });
+        }).catch(function(err){
+            link.textContent = 'Use an existing application…';
+            if (note) { note.style.display = 'block'; note.style.color = 'var(--rad-danger,#cf222e)'; note.textContent = 'Could not list applications: ' + (err && err.message || err); }
+        });
+    });
+})();
 document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
@@ -2037,6 +2502,25 @@ function populateSelect(selectId, items, placeholder) {
     custom.value = '__custom__'; custom.textContent = '+ Enter custom...';
     sel.appendChild(custom);
 }
+// Case-insensitive sort by display name so discovered resource lists render in
+// a predictable order in the dropdowns.
+function sortByName(items) {
+    return (items || []).slice().sort(function(a, b) {
+        var an = String((a && (a.name || a.id)) || a).toLowerCase();
+        var bn = String((b && (b.name || b.id)) || b).toLowerCase();
+        return an < bn ? -1 : an > bn ? 1 : 0;
+    });
+}
+// Populate the AKS cluster dropdown from a (possibly RG-filtered) list, keeping
+// the current selection when it is still present in the new list.
+function renderAzureClusters(list, keepValue) {
+    populateSelect('azure-cluster-select', list, 'Select AKS cluster…');
+    if (!keepValue) return;
+    var sel = document.getElementById('azure-cluster-select');
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === keepValue) { sel.value = keepValue; break; }
+    }
+}
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
     var rgSel = document.getElementById('azure-rg-select');
@@ -2047,6 +2531,19 @@ function setupAzureInfraFilter() {
         for (var i = 0; i < list.length; i++) { if ((list[i].id || list[i].name) === cid) return list[i]; }
         return null;
     }
+    // Selecting a resource group limits the cluster dropdown to the AKS clusters
+    // that live in that resource group. A custom-typed or empty RG shows them all.
+    rgSel.addEventListener('change', function() {
+        var rg = rgSel.value;
+        var all = window.__azureClusters || [];
+        if (rg === '' || rg === '__custom__') { renderAzureClusters(all, clusterSel.value); return; }
+        var filtered = [];
+        for (var i = 0; i < all.length; i++) { if ((all[i].resourceGroup || '') === rg) filtered.push(all[i]); }
+        var keep = '';
+        for (var j = 0; j < filtered.length; j++) { if ((filtered[j].id || filtered[j].name) === clusterSel.value) { keep = clusterSel.value; break; } }
+        renderAzureClusters(filtered, keep);
+    });
+    // Selecting a cluster back-fills its resource group so the two stay linked.
     clusterSel.addEventListener('change', function() {
         var cid = clusterSel.value;
         if (cid === '__custom__' || cid === '') return;
@@ -2076,16 +2573,16 @@ function discoverResources(provider, subId, tenantId) {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (provider === 'azure') {
-                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.resourceGroups||[]).length + ' resource group(s)';
-                window.__azureClusters = data.clusters || [];
-                populateSelect('azure-cluster-select', window.__azureClusters, 'Select AKS cluster…');
-                populateSelect('azure-rg-select', data.resourceGroups || [], 'Select resource group…');
-                populateSelect('azure-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
+                if (statusEl) statusEl.textContent = discoverStatusText(data, 'azure');
+                window.__azureClusters = sortByName(data.clusters || []);
+                renderAzureClusters(window.__azureClusters, '');
+                populateSelect('azure-rg-select', sortByName(data.resourceGroups || []), 'Select resource group…');
+                populateSelect('azure-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
                 setupAzureInfraFilter();
             } else {
-                if (statusEl) statusEl.textContent = data.error ? 'Discovery failed: ' + data.error : 'Found ' + (data.clusters||[]).length + ' cluster(s), ' + (data.vpcs||[]).length + ' VPC(s)';
-                populateSelect('aws-cluster-select', data.clusters || [], 'Select EKS cluster…');
-                populateSelect('aws-namespace-select', data.namespaces || ['default','kube-system','radius-system'], 'Select namespace…');
+                if (statusEl) statusEl.textContent = discoverStatusText(data, 'aws');
+                populateSelect('aws-cluster-select', sortByName(data.clusters || []), 'Select EKS cluster…');
+                populateSelect('aws-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
                 populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets…');
             }
@@ -2097,22 +2594,244 @@ function getComboValue(selectId, customId) {
     if (sel.value === '__custom__') return document.getElementById(customId).value;
     return sel.value;
 }
+// Look up a discovered AKS cluster's own resource group by its selected id/name.
+// Returns '' when the cluster was typed by hand (not in the discovery list), so
+// the server falls back to the deployment resource group.
+function findAzureClusterResourceGroup(clusterId) {
+    var list = window.__azureClusters || [];
+    for (var i = 0; i < list.length; i++) {
+        if ((list[i].id || list[i].name) === clusterId) return list[i].resourceGroup || '';
+    }
+    return '';
+}
 function runAzureAutoSetup(params) {
+    var payload = {
+        repo: params.repo, environment: params.environment,
+        resourceGroup: params.resourceGroup, cluster: params.cluster,
+        subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
+    };
+    // The cluster's own resource group (from discovery), used server-side to
+    // scope the AKS Cluster Admin grant. Sent only when known.
+    if (params.clusterResourceGroup) payload.clusterResourceGroup = params.clusterResourceGroup;
+    // Only sent on a retry after the tenant demands it (progressive disclosure).
+    if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
+    // ROUND 9: editable create name + explicit identity selection. Send appName
+    // whenever the field was populated in params (even ''), so the server can
+    // distinguish an explicit blank (invalid) from an omitted field (derive).
+    if (params.appName !== undefined) payload.appName = params.appName;
+    if (params.appId) payload.appId = params.appId;
+    if (params.createNew) payload.createNew = true;
     return fetch('/api/azure-auto-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            repo: params.repo, environment: params.environment,
-            resourceGroup: params.resourceGroup, cluster: params.cluster,
-            subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
-        })
+        body: JSON.stringify(payload)
     }).then(function(r) { return r.json(); }).then(function(data) {
         if (data.error) {
             var detail = data.steps && data.steps.length ? ' — ' + data.steps.join('; ') : '';
-            throw new Error(data.error + detail);
+            var err = new Error(data.error + detail);
+            err.code = data.code;
+            // Carry selection metadata so the interactive wrapper can prompt.
+            err.candidates = data.candidates;
+            err.defaultAppId = data.defaultAppId;
+            throw err;
         }
         if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
         return data;
+    });
+}
+
+// Prompt for a Service Management Reference (GUID) via the modal; resolves the
+// entered GUID or rejects if the user cancels.
+function promptSmr() {
+    var UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    var modal = document.getElementById('env-smr-modal');
+    var input = document.getElementById('env-smr-input');
+    var errEl = document.getElementById('env-smr-error');
+    var retryBtn = document.getElementById('env-smr-retry');
+    var cancelBtn = document.getElementById('env-smr-cancel');
+    input.value = ''; errEl.style.display = 'none';
+    modal.style.display = 'flex';
+    input.focus();
+    return new Promise(function(resolve, reject) {
+        function cleanup() {
+            modal.style.display = 'none';
+            retryBtn.removeEventListener('click', onRetry);
+            cancelBtn.removeEventListener('click', onCancel);
+        }
+        function onRetry() {
+            var smr = input.value.trim();
+            if (!UUID_RE.test(smr)) {
+                errEl.textContent = 'Enter a valid GUID.';
+                errEl.style.display = 'block';
+                return;
+            }
+            cleanup();
+            resolve(smr);
+        }
+        function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
+        retryBtn.addEventListener('click', onRetry);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+}
+
+// Single source of truth: these two pure helpers are authored and unit-tested
+// in azure-oidc.mjs, then serialized into this browser bundle via .toString()
+// so the SHIPPING client runs the exact tested code instead of a hand-copied
+// twin that drifts and has no coverage. Emitted as function declarations (they
+// hoist, so earlier call sites in this script — e.g. discoverResources — resolve
+// them). Both are self-contained (no external refs) and the build runs with
+// minify off, so their source round-trips cleanly. The pages_test init-halt
+// guard compiles the emitted scripts, catching any serialization breakage.
+${formatServesReposLabel.toString()}
+${discoverStatusText.toString()}
+
+// Render the identity picker. opts.candidates is a list of
+// {appId, displayName, createdDateTime, servesRepos?}. Resolves with
+// {appId} or {createNew:true}; rejects on cancel.
+function showAppPicker(opts) {
+    var modal = document.getElementById('env-appselect-modal');
+    var titleEl = document.getElementById('env-appselect-title');
+    var introEl = document.getElementById('env-appselect-intro');
+    var cautionEl = document.getElementById('env-appselect-caution');
+    var listEl = document.getElementById('env-appselect-list');
+    var errEl = document.getElementById('env-appselect-error');
+    var confirmBtn = document.getElementById('env-appselect-confirm');
+    var cancelBtn = document.getElementById('env-appselect-cancel');
+    titleEl.textContent = opts.title || 'Choose a deploy identity';
+    introEl.textContent = opts.intro || '';
+    if (opts.caution) { cautionEl.textContent = opts.caution; cautionEl.style.display = 'block'; }
+    else { cautionEl.style.display = 'none'; }
+    errEl.style.display = 'none';
+    listEl.innerHTML = '';
+    var candidates = opts.candidates || [];
+    var chosen = { value: opts.defaultAppId || (candidates[0] && candidates[0].appId) || '' };
+    // appId -> row body element still awaiting its lazy "Serves:" label.
+    var servesSlots = {};
+    function appendServes(bodyEl, text) {
+        var line3 = document.createElement('div');
+        line3.style.cssText = 'font-size:11px; color:var(--rad-info,#0969da); margin-top:2px; word-break:break-all;';
+        line3.textContent = text;
+        bodyEl.appendChild(line3);
+    }
+
+    function row(value, primary, secondary, serves) {
+        var id = 'appsel-' + (value || 'create');
+        var label = document.createElement('label');
+        label.setAttribute('for', id);
+        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:8px; cursor:pointer;';
+        var radio = document.createElement('input');
+        radio.type = 'radio'; radio.name = 'appsel'; radio.id = id; radio.value = value;
+        radio.style.marginTop = '2px';
+        if (value === chosen.value) radio.checked = true;
+        radio.addEventListener('change', function() { chosen.value = value; });
+        var body = document.createElement('div');
+        body.style.minWidth = '0';
+        var line1 = document.createElement('div');
+        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--text-color-default,#1f2328); word-break:break-all;';
+        line1.textContent = primary;
+        body.appendChild(line1);
+        if (secondary) {
+            var line2 = document.createElement('div');
+            line2.style.cssText = 'font-size:11px; color:var(--text-color-muted,#656d76); margin-top:2px; word-break:break-all;';
+            line2.textContent = secondary;
+            body.appendChild(line2);
+        }
+        var servesText = formatServesReposLabel(serves);
+        if (servesText) {
+            appendServes(body, servesText);
+        } else if (value && value !== '__create__') {
+            // No server-provided label: remember the row so it can be filled
+            // lazily once /api/azure-app-serves-repos resolves for this app.
+            servesSlots[value] = body;
+        }
+        label.appendChild(radio);
+        label.appendChild(body);
+        listEl.appendChild(label);
+    }
+
+    candidates.forEach(function(c) {
+        var created = c.createdDateTime ? ('created ' + String(c.createdDateTime).slice(0, 10) + ' · ') : '';
+        row(c.appId, c.displayName || c.appId, created + c.appId, c.servesRepos);
+    });
+    if (opts.allowCreateNew) {
+        row('__create__', 'Create a new application instead', 'A fresh per-repo deploy identity that only this repository can use.');
+        if (!chosen.value) chosen.value = '__create__';
+    }
+
+    // Lazy-load the per-app "Serves:" labels so the picker renders immediately
+    // instead of blocking on one az federated-credential list per owned app.
+    // Bounded concurrency; each label is best-effort and skipped on failure or
+    // if its row was replaced by a later picker.
+    (function loadServesLabels() {
+        var pending = Object.keys(servesSlots);
+        if (!pending.length) return;
+        var pos = 0;
+        var CONC = 6;
+        function pump() {
+            if (pos >= pending.length) return;
+            var appId = pending[pos++];
+            var bodyEl = servesSlots[appId];
+            fetch('/api/azure-app-serves-repos?appId=' + encodeURIComponent(appId))
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var text = formatServesReposLabel(d && d.servesRepos);
+                    if (text && bodyEl && bodyEl.isConnected) appendServes(bodyEl, text);
+                })
+                .catch(function() { /* label is best-effort */ })
+                .then(function() { pump(); });
+        }
+        for (var i = 0; i < Math.min(CONC, pending.length); i++) pump();
+    })();
+
+    modal.style.display = 'flex';
+    return new Promise(function(resolve, reject) {
+        function cleanup() {
+            modal.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+        }
+        function onConfirm() {
+            if (!chosen.value) {
+                errEl.textContent = 'Select an application or choose to create a new one.';
+                errEl.style.display = 'block';
+                return;
+            }
+            cleanup();
+            if (chosen.value === '__create__') resolve({ createNew: true });
+            else resolve({ appId: chosen.value });
+        }
+        function onCancel() { cleanup(); reject(new Error('Identity selection cancelled.')); }
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+}
+
+// Run auto-setup, resolving both progressive-disclosure prompts:
+//   - service-management-reference-required → SMR modal, retry with the GUID
+//   - app-selection-required → identity picker, retry with appId/createNew
+// Retries recursively so a create-after-picking can still surface the SMR prompt.
+function runAzureAutoSetupInteractive(params) {
+    return runAzureAutoSetup(params).catch(function(err) {
+        if (err.code === 'service-management-reference-required') {
+            return promptSmr().then(function(smr) {
+                return runAzureAutoSetupInteractive(Object.assign({}, params, { serviceManagementReference: smr }));
+            });
+        }
+        if (err.code === 'app-selection-required') {
+            return showAppPicker({
+                title: 'Choose a deploy identity',
+                intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
+                candidates: err.candidates || [],
+                defaultAppId: err.defaultAppId,
+                allowCreateNew: true
+            }).then(function(choice) {
+                var next = Object.assign({}, params);
+                if (choice.createNew) { next.createNew = true; delete next.appId; }
+                else { next.appId = choice.appId; delete next.createNew; }
+                return runAzureAutoSetupInteractive(next);
+            });
+        }
+        throw err;
     });
 }
 
@@ -2126,13 +2845,18 @@ deployBtn.addEventListener('click', function() {
     var provider = selectedProfile.provider === 'aws' ? 'aws' : 'azure';
     var targetRepo = document.getElementById('target-repo').value.trim();
     if (!targetRepo) { fail('Please specify a target repository (owner/repo).'); return; }
-    var cluster, namespace, vpc, subnets, resourceGroup;
+    var cluster, namespace, vpc, subnets, resourceGroup, clusterResourceGroup;
     if (provider === 'azure') {
         cluster = getComboValue('azure-cluster-select', 'azure-cluster-custom');
         namespace = getComboValue('azure-namespace-select', 'azure-namespace-custom') || 'default';
         resourceGroup = getComboValue('azure-rg-select', 'azure-rg-custom');
         if (!resourceGroup) { fail('Please specify a resource group.'); return; }
         if (!cluster) { fail('Please specify an AKS cluster.'); return; }
+        // Capture the cluster's OWN resource group from discovery, independent of
+        // the editable RG combo above, so the AKS Cluster Admin grant is scoped to
+        // the cluster's real path even if the deployment RG differs. Empty for a
+        // custom-typed cluster that never came from discovery.
+        clusterResourceGroup = findAzureClusterResourceGroup(cluster);
     } else {
         cluster = getComboValue('aws-cluster-select', 'aws-cluster-custom');
         namespace = getComboValue('aws-namespace-select', 'aws-namespace-custom') || 'default';
@@ -2144,6 +2868,8 @@ deployBtn.addEventListener('click', function() {
     btn.textContent = 'Creating environment…';
     btn.disabled = true;
     statusEl.style.display = 'none';
+    var staleWarn = document.getElementById('env-warning-banner');
+    if (staleWarn) staleWarn.style.display = 'none';
     var creatingModal = document.getElementById('env-creating-modal');
     var creatingTitle = document.getElementById('env-creating-title');
     var label = providerLabel(provider);
@@ -2162,14 +2888,26 @@ deployBtn.addEventListener('click', function() {
     if (needsAzureCreds) {
         creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
-        preflight = runAzureAutoSetup({ repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster, subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId });
+        var appNameEl = document.getElementById('az-app-name-input');
+        var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
+        preflight = runAzureAutoSetupInteractive({
+            repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster,
+            clusterResourceGroup: clusterResourceGroup,
+            subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId,
+            appName: appNameEl ? appNameEl.value.trim() : '',
+            appId: selectedAppId
+        });
     } else {
         creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         creatingModal.style.display = 'flex';
         preflight = Promise.resolve(null);
     }
 
-    preflight.then(function() {
+    preflight.then(function(setupResult) {
+        // Auto-setup's step log (incl. any ⚠️ AKS Cluster Admin warning) rides on
+        // the resolved payload; keep it so we can surface warnings once the
+        // environment is created (below), instead of discarding it as before.
+        var setupSteps = (setupResult && setupResult.steps) || [];
         creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
         var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster, namespace: namespace, profileName: selectedProfile.name };
         envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
@@ -2200,7 +2938,7 @@ deployBtn.addEventListener('click', function() {
                                 creatingModal.style.display = 'none';
                                 btn.textContent = 'Create Environment'; btn.disabled = false;
                                 statusEl.style.display = 'none';
-                                showEnvLanding(); showEnvSuccessBanner(provider, env); loadEnvTable();
+                                showEnvLanding(); showEnvSuccessBanner(provider, env); showEnvSetupWarnings(setupSteps); loadEnvTable();
                                 return;
                             }
                             if (v.state === 'failed') { failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : '')); return; }
@@ -2357,7 +3095,7 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
             if (data.error) { credVerifyError(data.error); return; }
             if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
-            markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId });
+            markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId, subscriptionName: data.subscriptionName || '' });
         }).catch(function(err) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
             credVerifyError('Error: ' + err.message);
@@ -2396,7 +3134,7 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
     if (!credVerified) { alert('Please verify your credentials first.'); return; }
     var provider = credProviderSelect.value;
     var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
-    if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; }
+    if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; profile.subscriptionName = credVerified.subscriptionName || ''; }
     else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
     btn.disabled = true; btn.textContent = 'Saving…';
     fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
