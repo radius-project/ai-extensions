@@ -717,11 +717,11 @@ function generateGraph() {
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
-        '<span style="font-size:14px; font-weight:600; color:var(--text-color-default, #1f2328);">Generating Application Graph</span>' +
+        '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
         '</div>' +
-        '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
+        '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
 
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
@@ -790,7 +790,7 @@ ${graphHeader('graph')}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
 </div>
 <div id="graph-container"></div>
-<div style="margin-top:8px; font-size:12px; color:var(--text-color-muted, #656d76);">
+<div style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
 Click a node to view source code links.
 </div>
 
@@ -844,7 +844,7 @@ document.getElementById('graph-branch').addEventListener('change', function() {
     var branch = this.value.trim();
     if (!repo || !branch) return;
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="padding:20px; color:var(--text-color-muted,#656d76);">⏳ Regenerating graph for ' + branch + '…</div>';
+    container.innerHTML = '<div style="padding:20px; color:var(--rad-text-tertiary);">⏳ Regenerating graph for ' + branch + '…</div>';
     fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -913,7 +913,7 @@ ${graphHeader('planned')}
   </div>
   <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
 <div id="graph-container-wrapper"></div>
 <script>
@@ -942,11 +942,11 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
-        '<span style="font-size:14px; font-weight:600; color:var(--text-color-default, #1f2328);">Planning Deployment</span>' +
+        '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Planning Deployment</span>' +
         '</div>' +
-        '<div id="progress-steps" style="font-size:13px; color:var(--text-color-muted, #656d76); line-height:2;"></div>' +
+        '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--border-color-default,#d0d7de);border-top-color:#1a7f37;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1a7f37;margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--text-color-default,#1f2328);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-success);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand, #da4c2a);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
     var stepsEl = document.getElementById('progress-steps');
     var shownSteps = 0;
     var pollInterval = setInterval(function() {
@@ -1013,7 +1013,7 @@ ${graphHeader('planned')}
   </div>
   <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--text-color-muted, #656d76);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
+<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="graph-container"></div>
 
 <script>
@@ -1034,7 +1034,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     var btn = this;
     // Clear existing graph
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text-color-muted,#656d76);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke,#e1e4e8);border-top-color:var(--rad-primary,#1a7f37);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--rad-text-tertiary);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke,#e1e4e8);border-top-color:var(--rad-primary,#1a7f37);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
     fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -1080,21 +1080,21 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
-    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
-    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
-    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
@@ -1164,21 +1164,21 @@ ${graphHeader('graph-diff')}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Application</label>
-    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:200px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Base</label>
-    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsBase}
     </select>
   </div>
-  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--text-color-muted, #656d76);">→</span>
+  <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--text-color-muted, #656d76);">Head</label>
-    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; background:var(--background-color-default, #fff); min-width:180px; width:auto; max-width:400px;">
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsHead}
     </select>
   </div>
@@ -1192,7 +1192,7 @@ ${graphHeader('graph-diff')}
   <span style="color:#bf8700">~${modified} modified</span>,
   ${unchanged} unchanged
 </div>
-${(added === 0 && removed === 0 && modified === 0) ? `<div style="margin-top:12px; padding:10px 14px; background:var(--background-color-default, #f6f8fa); border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; font-size:13px; color:var(--text-color-muted, #656d76);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ''}
+${(added === 0 && removed === 0 && modified === 0) ? `<div class="status success" style="margin-top:12px; font-size:13px;">✅ No application graph changes detected. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ''}
 
 <script>
 var resources = ${resourcesJson};
@@ -1527,7 +1527,7 @@ export function environmentPage(state) {
 <div class="status ${r.error ? "error" : "success"}">${escapeHtml(r.error || r.message)}</div>
 ${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>` : ""}
 ${r.workflow ? `<h2>Generated Workflow</h2><pre style="max-height:400px; overflow:auto;">${escapeHtml(r.workflow)}</pre>` : ""}
-<button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--border-color-default, #d1d9e0); color:var(--text-color-default, #1f2328); border:none; border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
+<button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--border-color-default, #d1d9e0); color:var(--rad-text); border:none; border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <script>
 document.getElementById('back-btn').addEventListener('click', function() {
     fetch('/api/deploy-reset', { method: 'POST' }).then(function() { window.location.reload(); });
@@ -1836,23 +1836,23 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </section>
 
 <div id="env-creating-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:340px;">
-    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+  <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:340px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
     <div style="min-width:0;">
       <div id="env-creating-title" style="font-size:14px; line-height:1.4;">Creating environment…</div>
-      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+      <div style="font-size:12px; color:var(--rad-text-tertiary); margin-top:2px;">This may take a few moments</div>
     </div>
   </div>
 </div>
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:420px; width:90%;">
     <div style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Service Management Reference required</div>
-    <div style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
-    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328);" />
+    <div style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;">This Entra tenant requires a Service Management Reference on new App Registrations. Enter your Service Management Reference (Microsoft-internal: your Service Tree ID GUID) and retry.</div>
+    <input id="env-smr-input" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; padding:8px 10px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:var(--rad-surface); color:var(--rad-text);" />
     <div id="env-smr-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:6px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-smr-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
       <button id="env-smr-retry" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Retry</button>
     </div>
   </div>
@@ -1862,25 +1862,25 @@ document.getElementById('back-btn').addEventListener('click', function() {
      repo (app-selection-required), or via the opt-in "Use an existing
      application" advanced action. Rows are built dynamically in JS. -->
 <div id="env-appselect-modal" style="display:none; position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:560px; width:92%; max-height:80vh; overflow:auto;">
     <div id="env-appselect-title" style="font-size:14px; font-weight:600; line-height:1.4; margin-bottom:6px;">Choose a deploy identity</div>
-    <div id="env-appselect-intro" style="font-size:12px; color:var(--text-color-muted,#656d76); line-height:1.5; margin-bottom:12px;"></div>
+    <div id="env-appselect-intro" style="font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; margin-bottom:12px;"></div>
     <div id="env-appselect-caution" style="display:none; font-size:11px; color:var(--rad-danger,#cf222e); line-height:1.5; margin-bottom:10px;"></div>
     <div id="env-appselect-list" style="display:flex; flex-direction:column; gap:6px;"></div>
     <div id="env-appselect-error" style="display:none; font-size:12px; color:var(--rad-danger,#cf222e); margin-top:8px;"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:6px; background:transparent; color:var(--text-color-default,#1f2328); cursor:pointer;">Cancel</button>
+      <button id="env-appselect-cancel" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-stroke); border-radius:6px; background:transparent; color:var(--rad-text); cursor:pointer;">Cancel</button>
       <button id="env-appselect-confirm" type="button" style="padding:6px 14px; font-size:13px; border:1px solid var(--rad-info,#0969da); border-radius:6px; background:var(--rad-info,#0969da); color:#fff; cursor:pointer;">Use selected</button>
     </div>
   </div>
 </div>
 
 <div id="env-verify-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="display:flex; align-items:center; gap:16px; background:var(--background-color-default,#fff); color:var(--text-color-default,#1f2328); border:1px solid var(--border-color-muted,#d8dee4); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
-    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--border-color-muted,#d8dee4) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
+  <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.18); padding:22px 26px; max-width:360px;">
+    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info,#0969da) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
     <div style="min-width:0;">
       <div id="env-verify-title" style="font-size:14px; font-weight:600; line-height:1.4;">Verifying authentication to Azure…</div>
-      <div style="font-size:12px; color:var(--text-color-muted,#656d76); margin-top:2px;">This may take a few moments</div>
+      <div style="font-size:12px; color:var(--rad-text-tertiary); margin-top:2px;">This may take a few moments</div>
     </div>
   </div>
 </div>
@@ -1891,12 +1891,12 @@ document.getElementById('back-btn').addEventListener('click', function() {
 #env-landing .rad-table__actions,
 #cred-landing .rad-table__actions { justify-content: flex-start; }
 /* Success banner shown above the environments list after a successful create. */
-#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--background-color-default,#fff); border:1px solid var(--border-color-muted,#d8dee4); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
-.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#22c580; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
-.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--text-color-muted,#4f5966); }
-.env-success-banner__text strong { font-weight:600; color:var(--text-color-default,#1f2328); }
-.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--text-color-muted,#656d76); cursor:pointer; }
-.env-success-banner__close:hover { color:var(--text-color-default,#1f2328); }
+#env-success-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-surface); border:1px solid var(--rad-stroke); box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+.env-success-banner__check { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-success); color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-success-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text-tertiary); }
+.env-success-banner__text strong { font-weight:600; color:var(--rad-text); }
+.env-success-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-success-banner__close:hover { color:var(--rad-text); }
 #env-error-banner { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:#ffebe9; border:1px solid #cf222e; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
 .env-error-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:#cf222e; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
 .env-error-banner__text { flex:1 1 auto; font-size:13px; color:#82071e; line-height:1.4; }
@@ -2805,7 +2805,7 @@ function showAppPicker(opts) {
         var id = 'appsel-' + (value || 'create');
         var label = document.createElement('label');
         label.setAttribute('for', id);
-        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--border-color-muted,#d8dee4); border-radius:8px; cursor:pointer;';
+        label.style.cssText = 'display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border:1px solid var(--rad-stroke); border-radius:8px; cursor:pointer;';
         var radio = document.createElement('input');
         radio.type = 'radio'; radio.name = 'appsel'; radio.id = id; radio.value = value;
         radio.style.marginTop = '2px';
@@ -2814,12 +2814,12 @@ function showAppPicker(opts) {
         var body = document.createElement('div');
         body.style.minWidth = '0';
         var line1 = document.createElement('div');
-        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--text-color-default,#1f2328); word-break:break-all;';
+        line1.style.cssText = 'font-size:13px; font-weight:600; color:var(--rad-text); word-break:break-all;';
         line1.textContent = primary;
         body.appendChild(line1);
         if (secondary) {
             var line2 = document.createElement('div');
-            line2.style.cssText = 'font-size:11px; color:var(--text-color-muted,#656d76); margin-top:2px; word-break:break-all;';
+            line2.style.cssText = 'font-size:11px; color:var(--rad-text-tertiary); margin-top:2px; word-break:break-all;';
             line2.textContent = secondary;
             body.appendChild(line2);
         }
@@ -3371,7 +3371,7 @@ function deployLandingView(state) {
   .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:#d73a49; cursor:pointer; }
   .rad-ddlg__delete:hover { background:#b31d28; }
   .rad-ddlg__delete:disabled { background:#e9a1a8; cursor:default; }
-  .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:#1f6feb; border-radius:50%; animation:spin 0.8s linear infinite; }
+  .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke,#e1e4e8); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 
@@ -3901,7 +3901,7 @@ function deployProgressView(state) {
   <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--font-mono, monospace); font-size:12px; color:#82071e; max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
 </div>
 <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Application Graph</h2>
-<div id="graph-container" style="height:400px; border:1px solid var(--border-color-default, #d1d9e0); border-radius:6px; margin-bottom:16px;"></div>
+<div id="graph-container" style="height:400px; border:1px solid var(--rad-stroke); border-radius:6px; margin-bottom:16px;"></div>
 <div id="deploy-log-section">
   <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Deployment Logs</h2>
   <div id="deploy-log-output" style="background:#1e1e1e; color:#d4d4d4; font-family:var(--font-mono, monospace); font-size:12px; padding:12px; border-radius:6px; max-height:250px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
@@ -3916,7 +3916,7 @@ var DEPLOY_PROVIDER = ${JSON.stringify(provider)};
 if (resources.length === 0) {
     var emptyMsg = document.getElementById('graph-container');
     function showPlanningSpinner(msg) {
-        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid #e1e4e8;border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
+        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand, #da4c2a);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
     }
     showPlanningSpinner('Loading deployment resources...');
     fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
@@ -3932,14 +3932,14 @@ if (resources.length === 0) {
                 .then(function(p) {
                     if (p && p.reload) { window.location.reload(); }
                     else {
-                        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p><p style="font-size:12px;">' + ((p && p.error) ? p.error : 'Unknown error') + '</p></div>';
+                        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p><p style="font-size:12px;">' + ((p && p.error) ? p.error : 'Unknown error') + '</p></div>';
                     }
                 })
                 .catch(function() {
-                    emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p></div>';
+                    emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p></div>';
                 });
         } else {
-            emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-color-muted,#656d76);flex-direction:column;gap:8px;"><p style="font-size:14px;">No resources to display.</p><p style="font-size:12px;">Navigate to the <strong>Planned Graph</strong> page first to plan your application, then deploy from the <strong>Environment</strong> page.</p></div>';
+            emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">No resources to display.</p><p style="font-size:12px;">Navigate to the <strong>Planned Graph</strong> page first to plan your application, then deploy from the <strong>Environment</strong> page.</p></div>';
         }
     });
 }
