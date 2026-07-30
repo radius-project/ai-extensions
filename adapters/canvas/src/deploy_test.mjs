@@ -354,6 +354,25 @@ describe("parseRadDeployProgress", () => {
         expect([...out.deployedNames].sort()).toEqual(["mysql28", "todo-list-app"]);
     });
 
+    it("recognizes indented Resources: block entries under the `gh run view --log` tab/timestamp prefix (regression)", () => {
+        // The prefix-stripping regex used to eat the block's indentation along
+        // with GH's timestamp separator, since only one space separates them —
+        // making every entry look unindented and never match. Reproduces the
+        // exact real-world line shape (tab-prefix + timestamp + indented name).
+        const log = [
+            "Azure / Deploy with Radius\tUNKNOWN STEP\t2026-07-30T04:28:14.7500756Z Deployment Complete",
+            "Azure / Deploy with Radius\tUNKNOWN STEP\t2026-07-30T04:28:14.7503193Z Resources:",
+            "Azure / Deploy with Radius\tUNKNOWN STEP\t2026-07-30T04:28:14.7504860Z     todo-list-app   Radius.Compute/containers",
+            "Azure / Deploy with Radius\tUNKNOWN STEP\t2026-07-30T04:28:14.7506171Z     mysql500        Radius.Data/mySqlDatabases",
+        ].join("\n");
+        const modeledApp = [
+            { name: "todo-list-app", type: "Radius.Compute/containers" },
+            { name: "mysql500", type: "Radius.Data/mySqlDatabases" },
+        ];
+        const out = parseRadDeployProgress(log, modeledApp);
+        expect([...out.deployedNames].sort()).toEqual(["mysql500", "todo-list-app"]);
+    });
+
     it("ends the Resources: block on the next non-indented line", () => {
         // Guard: a later section header must not leak into deployedNames even if
         // its first token happens to be a modeled resource name.

@@ -4,7 +4,9 @@ import { fillTemplate } from "./template.js";
 // actions (setup-control-plane, restore-state, run-rad-commands, teardown) and
 // the workflow templates the extension commits into user repos. Points at
 // `main` now that the deploy-workflow actions and templates have merged there.
-export const RADIUS_REF = "main";
+// Overridable via RADIUS_DEPLOY_REF (e.g. to test an unmerged branch) so it can
+// be pointed elsewhere without releasing a new core package.
+export const RADIUS_REF = process.env.RADIUS_DEPLOY_REF || "main";
 
 // The canonical home of the workflow templates in radius-project/radius. The
 // extension fetches them from here at commit time so a user repo always gets

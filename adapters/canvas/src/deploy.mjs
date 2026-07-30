@@ -127,9 +127,12 @@ export function parseRadDeployProgress(logText, resources) {
         // `gh api /jobs/{id}/logs` ISO timestamp prefix. Preserve indentation
         // after both so the `Resources:` block's indented entries are still
         // recognizable.
+        // The `\s+` this used to end with also ate the Resources: block's own
+        // indentation (only one space separates GH's timestamp from content),
+        // so every indented entry looked unindented and never matched below.
         const stripped = raw
             .replace(/^[^\t]+\t[^\t]+\t/, '')
-            .replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, '');
+            .replace(/^\d{4}-\d\d-\d\dT[^\s]+ /, '');
         const trimmed = stripped.trim();
         if (!trimmed) continue;
         if (/^Deployment In Progress/i.test(trimmed)) { out.global = 'in_progress'; inResourcesBlock = false; continue; }
