@@ -530,4 +530,16 @@ describe("remaining pages smoke-render without removed tokens", () => {
         expect(html).toContain(".rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }");
         expect(html).not.toContain(".rad-ddlg__delete:hover { background:#b31d28; }");
     });
+
+    it("references no --rad-* token that pageShell does not define", () => {
+        // A var(--rad-foo, <fallback>) whose token is never defined silently
+        // paints its light-only fallback in every theme (e.g. the --rad-muted
+        // regression). Guard every page against undefined --rad-* references.
+        const shell = pageShell("t", "");
+        const defined = new Set([...shell.matchAll(/(--rad-[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+        const html = cases.flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""]).join("\n");
+        const referenced = new Set([...html.matchAll(/var\((--rad-[a-z0-9-]+)/g)].map((m) => m[1]));
+        const undefinedTokens = [...referenced].filter((t) => !defined.has(t));
+        expect(undefinedTokens).toEqual([]);
+    });
 });

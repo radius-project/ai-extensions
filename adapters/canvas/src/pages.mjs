@@ -2282,7 +2282,7 @@ function renderGitHubIdentity() {
             envGhNote.style.display = '';
         } else {
             envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> and <code>write:packages</code> scopes.';
-            envGhNote.style.color = 'var(--rad-muted, #57606a)';
+            envGhNote.style.color = 'var(--rad-text-tertiary)';
             envGhNote.style.display = '';
         }
     }
