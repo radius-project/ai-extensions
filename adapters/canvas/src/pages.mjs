@@ -3315,7 +3315,7 @@ function deployLandingView(state) {
   .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); margin:0; }
   .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke,#d1d5da); background:var(--rad-neutral-bg,#f6f8fa); color:var(--rad-text,#1a1a1a); }
   .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover,#eef1f4); }
-  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:#fff5b1; border:1px solid #ffe082; border-radius:6px; padding:12px; color:#735c0f; font-size:14px; line-height:1.4; }
+.rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:color-mix(in srgb, var(--rad-warning) 18%, var(--rad-surface)); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
   .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary,#586069); }
   .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke,#d1d5da); border-radius:1px; }
   .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text,#24292e); margin:0; }
