@@ -882,11 +882,11 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
           // Use the repository config verbatim, then ensure only what a Radius
           // compile requires (extensibility on, a resolvable `radius` alias).
           config = ws;
-          if (typeof config.experimentalFeaturesEnabled !== "object" || config.experimentalFeaturesEnabled === null) {
+          if (typeof config.experimentalFeaturesEnabled !== "object" || config.experimentalFeaturesEnabled === null || Array.isArray(config.experimentalFeaturesEnabled)) {
             config.experimentalFeaturesEnabled = {};
           }
           config.experimentalFeaturesEnabled.extensibility = true;
-          if (typeof config.extensions !== "object" || config.extensions === null) {
+          if (typeof config.extensions !== "object" || config.extensions === null || Array.isArray(config.extensions)) {
             config.extensions = {};
           }
           if (typeof config.extensions.radius !== "string") {

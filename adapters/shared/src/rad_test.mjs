@@ -421,6 +421,21 @@ describe("writeBicepCompileConfig", () => {
     expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
   });
+
+  it("recovers a resolvable config when array-valued sections make the repo config malformed", () => {
+    // A JSON-valid but malformed config could set these to arrays; typeof still
+    // reports "object", so the code must reject arrays explicitly, otherwise the
+    // forced extensibility flag and radius alias would be written as dropped
+    // non-index array properties, breaking `extension radius` resolution.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: [],
+      extensions: [],
+    }));
+    writeBicepCompileConfig(dir, ws);
+    const cfg = readConfig();
+    expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+  });
 });
 
 // Opt-in end-to-end check that a generated custom-type app actually compiles
