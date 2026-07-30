@@ -151,8 +151,6 @@ ${getInlineVendorStyles()}
     padding: 0 20px;
     background: var(--rad-surface);
     border-bottom: 1px solid var(--rad-stroke);
-  }
-    border-bottom: 1px solid var(--rad-stroke);
     flex: 0 0 auto;
   }
   .rad-topnav__tab {
