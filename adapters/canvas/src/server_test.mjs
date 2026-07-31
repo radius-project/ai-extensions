@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation, triggerDeployRepairHandoff, setDeployRepairHandoff } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
@@ -220,6 +220,8 @@ describe("pickAksResourceGroup", () => {
 });
 
 describe("triggerDeployRepairHandoff", () => {
+    afterEach(() => { setDeployRepairHandoff(null); });
+
     function failedEntry(overrides = {}) {
         return {
             state: {
@@ -286,5 +288,25 @@ describe("triggerDeployRepairHandoff", () => {
     it("never throws when the handoff itself fails", () => {
         setDeployRepairHandoff(() => { throw new Error("session gone"); });
         expect(() => triggerDeployRepairHandoff(failedEntry())).not.toThrow();
+    });
+
+    it("releases the loop when the handoff throws, so a later poll can retry", () => {
+        const entry = failedEntry();
+        setDeployRepairHandoff(() => { throw new Error("session gone"); });
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+        expect(entry.state.deployRepairing).toBe(false);
+
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        expect(calls).toHaveLength(1);
+    });
+
+    it("releases the loop when the handoff rejects, so a later poll can retry", async () => {
+        const entry = failedEntry();
+        setDeployRepairHandoff(() => Promise.reject(new Error("send failed")));
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        await Promise.resolve();
+        expect(entry.state.deployRepairing).toBe(false);
     });
 });

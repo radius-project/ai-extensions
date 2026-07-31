@@ -219,7 +219,15 @@ export function triggerDeployRepairHandoff(entry) {
         const error = state.deployError || "";
         const deployRunUrl = state.deployRunUrl || "";
         state.deployRepairing = true;
-        Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl })).catch(() => {});
+        // A handoff that never reached the agent must not leave the loop marked as
+        // owned, or no later poll or deploy could ever hand off again.
+        const release = () => { state.deployRepairing = false; };
+        try {
+            Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl })).catch(release);
+        } catch {
+            release();
+            return false;
+        }
         return true;
     } catch { /* never let a handoff failure break the response */ }
     return false;
@@ -2589,7 +2597,7 @@ function createRequestHandler(instanceId) {
             const deployedGraph = entry?.state?.deployedGraph || null;
             const deployRunUrl = entry?.state?.deployRunUrl || null;
             // Every failure path converges on this poll, so it is where a failed
-            // deploy is handed to the agent to repair (fires once per failure).
+            // deploy is handed to the agent to repair (once per repair loop).
             const repairing = triggerDeployRepairHandoff(entry) || entry?.state?.deployRepairing || false;
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
