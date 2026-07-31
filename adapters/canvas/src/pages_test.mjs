@@ -46,6 +46,30 @@ describe("pageShell", () => {
         expect(iconStyles).not.toContain("border:");
     });
 
+    it("inherits the Copilot host theme without creating Radius-owned theme state", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        expect(html).toContain("color-scheme: var(--color-scheme, inherit)");
+        expect(html).toContain("--rad-bg: var(--background-color-default, Canvas)");
+        expect(html).toContain("--rad-text: var(--text-color-default, CanvasText)");
+        expect(html).toContain("--rad-bg-subtle: color-mix(in srgb, var(--rad-text) 6%, var(--rad-bg))");
+        expect(html).toContain("--rad-neutral-bg: var(--rad-bg-subtle)");
+        expect(html).toContain("--rad-node-bg: var(--rad-surface)");
+        expect(html).toContain("--rad-success: var(--text-color-success");
+        expect(html).toContain("--rad-warning: var(--text-color-warning");
+        expect(html).toContain("--rad-danger: var(--text-color-danger");
+        expect(html).not.toContain("localStorage");
+        expect(html).not.toContain("matchMedia");
+        expect(html).not.toContain("prefers-color-scheme");
+        expect(html).not.toContain("--rad-bg-subtle: var(--background-color-segmented");
+        expect(html).not.toContain("--rad-neutral-bg: var(--background-color-segmented");
+    });
+
+    it("keeps React Flow chrome transparent over the themed graph surface", () => {
+        const html = pageShell("My Title", "<div id=\"graph-container\"></div>");
+        const flowStyles = html.match(/\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/)?.[1];
+        expect(flowStyles).toContain("background: transparent");
+    });
+
     it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
         // The app-registration picker builds each option as a flex row of
         // [radio][text]. A bare `input` selector in the width:100% rule stretches
@@ -245,6 +269,22 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("/api/azure-app-serves-repos?appId=");
         expect(html).toContain("servesSlots");
         expect(html).toContain("loadServesLabels");
+    });
+
+    it("uses semantic theme tokens throughout environment modal content", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain('id="env-smr-modal"');
+        expect(html).toContain('id="env-appselect-modal"');
+        expect(html).toContain("box-shadow:0 8px 30px var(--rad-shadow)");
+        for (const legacyToken of [
+            "var(--background-color-default,#fff)",
+            "var(--text-color-default,#1f2328)",
+            "var(--text-color-muted,#656d76)",
+            "var(--border-color-muted,#d8dee4)",
+        ]) {
+            expect(html).not.toContain(legacyToken);
+        }
+        expect(html).not.toContain("box-shadow:0 8px 30px rgba(");
     });
 
     it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
@@ -464,4 +504,42 @@ describe("remaining pages smoke-render without removed tokens", () => {
             if (secondary) expect(typeof secondary()).toBe("string");
         });
     }
+
+    it("does not render known light-only component surfaces", () => {
+        const html = cases.flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""]).join("\n");
+        for (const literal of [
+            "#ffebe9",
+            "#ddf4ff",
+            "#82071e",
+            "#0a3069",
+            "#54aeff",
+            "#1e1e1e",
+            "#edfaed",
+            "#fff5b1",
+            "#d73a49",
+            "#b31d28",
+        ]) {
+            expect(html).not.toContain(literal);
+        }
+    });
+
+    it("uses semantic danger tokens for delete button states", () => {
+        const html = deployingPage({ deployRepo: "octo/app" });
+        expect(html).toContain(".rad-ddlg__delete {");
+        expect(html).toContain("background:var(--rad-danger-solid)");
+        expect(html).toContain(".rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }");
+        expect(html).not.toContain(".rad-ddlg__delete:hover { background:#b31d28; }");
+    });
+
+    it("references no --rad-* token that pageShell does not define", () => {
+        // A var(--rad-foo, <fallback>) whose token is never defined silently
+        // paints its light-only fallback in every theme (e.g. the --rad-muted
+        // regression). Guard every page against undefined --rad-* references.
+        const shell = pageShell("t", "");
+        const defined = new Set([...shell.matchAll(/(--rad-[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+        const html = cases.flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""]).join("\n");
+        const referenced = new Set([...html.matchAll(/var\((--rad-[a-z0-9-]+)/g)].map((m) => m[1]));
+        const undefinedTokens = [...referenced].filter((t) => !defined.has(t));
+        expect(undefinedTokens).toEqual([]);
+    });
 });

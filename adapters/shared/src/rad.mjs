@@ -854,42 +854,68 @@ function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
  * writeBicepCompileConfig - populate a temp compile dir with the effective
  * bicepconfig.json (and any local extension artifacts) a modeled app needs.
  *
- * The base is always RADIUS_BICEP_CONFIG, so `extension radius` always resolves.
- * When `radArtifactsDir` (a workspace `.radius/`) has its own bicepconfig.json,
- * its extension aliases are merged over the base so a locally published
- * custom-type extension (e.g. `customTypes` -> ./custom-types.tgz) resolves, and
- * every alias pointing at a local file (not a `br:`/`oci:` ref) is copied into
- * `dir` preserving its relative path. `extensibility` is never disabled. A
- * missing/unreadable workspace config is logged and skipped; the base config
- * still compiles apps that only use `extension radius`.
+ * When `radArtifactsDir` (a workspace or staged `.radius/`) has its own
+ * bicepconfig.json, that file is used verbatim as the compile config so the
+ * canvas compiles against the repository's exact configured contract: its
+ * pinned `extensions.radius` reference, every additional extension alias (e.g.
+ * a locally published `customTypes` -> ./custom-types.tgz), and every other
+ * Bicep setting (analyzers, formatting, moduleAliases, cloud, ...) are all
+ * preserved. Every extension alias pointing at a local file (not a `br:`/`oci:`
+ * ref) is copied into `dir` preserving its relative path so bicep resolves it.
+ * `extensibility` is force-enabled and a `radius` alias is backfilled from the
+ * base only when the repo config omits it, so `extension radius` always
+ * resolves; nothing else in the repo config is rewritten.
+ *
+ * The base RADIUS_BICEP_CONFIG is used only as a fallback when no applicable
+ * repository bicepconfig.json exists or it is unreadable — that base still
+ * compiles apps that only use `extension radius`. A missing/unreadable workspace
+ * config is logged and skipped.
+ *
+ * Returns the effective config object written to disk, so callers can report the
+ * selected `extensions.radius` reference (e.g. in a compilation failure) even
+ * when `log` is the default no-op.
  */
 export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
-  const config = {
-    experimentalFeaturesEnabled: { ...RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled },
-    extensions: { ...RADIUS_BICEP_CONFIG.extensions },
-  };
+  let config = null;
   if (radArtifactsDir) {
     try {
       const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
       if (fs.existsSync(wsConfigPath)) {
         const ws = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
-        if (ws && typeof ws.experimentalFeaturesEnabled === "object") {
-          Object.assign(config.experimentalFeaturesEnabled, ws.experimentalFeaturesEnabled);
-        }
-        config.experimentalFeaturesEnabled.extensibility = true;
-        if (ws && typeof ws.extensions === "object") {
-          for (const [alias, ref] of Object.entries(ws.extensions)) {
+        if (ws && typeof ws === "object" && !Array.isArray(ws)) {
+          // Use the repository config verbatim, then ensure only what a Radius
+          // compile requires (extensibility on, a resolvable `radius` alias).
+          config = ws;
+          if (typeof config.experimentalFeaturesEnabled !== "object" || config.experimentalFeaturesEnabled === null || Array.isArray(config.experimentalFeaturesEnabled)) {
+            config.experimentalFeaturesEnabled = {};
+          }
+          config.experimentalFeaturesEnabled.extensibility = true;
+          if (typeof config.extensions !== "object" || config.extensions === null || Array.isArray(config.extensions)) {
+            config.extensions = {};
+          }
+          if (typeof config.extensions.radius !== "string") {
+            config.extensions.radius = RADIUS_BICEP_CONFIG.extensions.radius;
+          }
+          for (const ref of Object.values(config.extensions)) {
             if (typeof ref !== "string") continue;
-            config.extensions[alias] = ref;
             if (!isOciExtensionRef(ref)) copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
           }
         }
       }
     } catch (err) {
-      log(`Warning: could not read workspace bicepconfig.json; using the base Radius config: ${String(err?.message ?? err)}`);
+      log(`Warning: could not read repository bicepconfig.json; using the base Radius config: ${String(err?.message ?? err)}`);
+      config = null;
     }
   }
+  if (!config) {
+    config = {
+      experimentalFeaturesEnabled: { ...RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled },
+      extensions: { ...RADIUS_BICEP_CONFIG.extensions },
+    };
+  }
+  log(`Compiling with radius extension: ${config.extensions.radius}`);
   fs.writeFileSync(path.join(dir, "bicepconfig.json"), JSON.stringify(config, null, 2));
+  return config;
 }
 
 /**
@@ -903,11 +929,13 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
  * `.radius/app-graph.json`, next to the app.bicep it was built from).
  *
  * `radArtifactsDir`, when set to a workspace `.radius/` directory, makes the
- * compile use that repo's effective bicepconfig.json and local extension
- * artifacts (see writeBicepCompileConfig) so apps that declare a locally
- * published `extension customTypes` compile; otherwise the base Radius config is
- * used. When `cleanupRadArtifactsDir` is true (e.g. a temp dir staged from a
- * committed branch), `radArtifactsDir` is removed after the compile.
+ * compile use that repository's applicable bicepconfig.json verbatim — its
+ * pinned `extensions.radius` reference, additional extension aliases, local
+ * extension artifacts (see writeBicepCompileConfig), and other Bicep settings —
+ * so the canvas compiles against the repository's exact configured contract;
+ * otherwise the base Radius config is used. When `cleanupRadArtifactsDir` is
+ * true (e.g. a temp dir staged from a committed branch), `radArtifactsDir` is
+ * removed after the compile.
  *
  * The returned array is passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
@@ -923,10 +951,21 @@ export async function buildGraphViaRad(content, definitionFile = ".radius/app.bi
     // Order matters: write bicepconfig.json (and copy any local extension
     // artifacts) before app.bicep so the extensions are in place when rad
     // compiles the Bicep. bicep looks for bicepconfig.json next to the .bicep.
-    writeBicepCompileConfig(dir, radArtifactsDir, log);
+    const config = writeBicepCompileConfig(dir, radArtifactsDir, log);
     fs.writeFileSync(bicepFile, content);
-    const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
-    return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
+    try {
+      const appGraph = await runRadAppGraph(bicepFile, { log, saveGraphJsonTo });
+      return filterGraphVisualizationResources(applicationGraphToResources(appGraph, definitionFile, content));
+    } catch (err) {
+      // Surface the exact radius extension the compile used so a failure is
+      // actionable even when `log` is the default no-op (issue #173): the caller
+      // otherwise only sees the raw `rad` output, not which contract was used.
+      const radiusExtension = config?.extensions?.radius;
+      if (radiusExtension) {
+        throw new Error(`${String(err?.message ?? err)}\nCompiled with radius extension: ${radiusExtension}`);
+      }
+      throw err;
+    }
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
     if (cleanupRadArtifactsDir && radArtifactsDir) {
