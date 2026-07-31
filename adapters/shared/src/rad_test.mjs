@@ -9,6 +9,7 @@ import {
   RADIUS_BICEP_CONFIG_JSON,
   MODELED_APP_GRAPH_FLAGS,
   MANAGED_RAD_PATH,
+  MANAGED_BICEP_PATH,
   resolveExistingRadBinary,
   buildGraphViaRad,
   writeBicepCompileConfig,
@@ -26,14 +27,20 @@ import {
   radBinaryVersion,
   releaseAsset,
   ensureRadBinary,
+  ensureManagedBicep,
+  managedBicepEnv,
 } from "./rad.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
+const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
 
 describe("managed rad platform paths", () => {
   it("uses the platform executable suffix at the stable managed location", () => {
     expect(MANAGED_RAD_PATH).toBe(
       path.join(os.homedir(), ".radius", "ai-extensions", "bin", RAD),
+    );
+    expect(MANAGED_BICEP_PATH).toBe(
+      path.join(os.homedir(), ".radius", "ai-extensions", "bin", BICEP),
     );
   });
 
@@ -53,6 +60,92 @@ describe("managed rad platform paths", () => {
     expect(() => releaseAsset("freebsd", "x64")).toThrow("Unsupported platform");
     expect(() => releaseAsset("linux", "ia32")).toThrow("Unsupported platform");
     expect(() => releaseAsset("win32", "arm")).toThrow("Unsupported platform");
+  });
+});
+
+describe("managed Bicep", () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "managed-bicep-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("forces every managed rad environment to the extension-owned Bicep path", () => {
+    expect(managedBicepEnv({ TOKEN: "secret", BICEP: "user-bicep" })).toEqual({
+      TOKEN: "secret",
+      BICEP: MANAGED_BICEP_PATH,
+    });
+  });
+
+  it("downloads Bicep once for concurrent callers and verifies the expected path", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    const calls = [];
+    let releaseDownload;
+    const downloadBlocked = new Promise((resolve) => { releaseDownload = resolve; });
+    const run = vi.fn(async (radPath, args, options) => {
+      calls.push({ radPath, args, options });
+      expect(fs.existsSync(bicepPath)).toBe(true);
+      expect(fs.statSync(bicepPath).size).toBe(0);
+      await downloadBlocked;
+      fs.writeFileSync(bicepPath, "bicep");
+    });
+
+    const first = ensureManagedBicep("managed-rad", { bicepPath, run });
+    const second = ensureManagedBicep("managed-rad", { bicepPath, run });
+    expect(run).toHaveBeenCalledTimes(1);
+    releaseDownload();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([bicepPath, bicepPath]);
+    expect(calls[0]).toMatchObject({
+      radPath: "managed-rad",
+      args: ["bicep", "download"],
+      options: {
+        cwd: path.dirname(bicepPath),
+        env: { BICEP: bicepPath },
+        label: "rad bicep download",
+      },
+    });
+  });
+
+  it("rejects when rad reports success without creating the managed Bicep binary", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    await expect(
+      ensureManagedBicep("managed-rad", { bicepPath, run: vi.fn().mockResolvedValue({}) }),
+    ).rejects.toThrow(`without creating ${bicepPath}`);
+    expect(fs.existsSync(bicepPath)).toBe(false);
+  });
+
+  it("skips the download when the managed Bicep binary already exists", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    fs.writeFileSync(bicepPath, "bicep");
+    const run = vi.fn();
+
+    await expect(ensureManagedBicep("managed-rad", { bicepPath, run })).resolves.toBe(bicepPath);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("replaces a partial binary left behind with a stale download lock", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    const lockPath = `${bicepPath}.download.lock`;
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    fs.writeFileSync(bicepPath, "partial");
+    fs.writeFileSync(lockPath, "abandoned");
+    const stale = new Date(Date.now() - 10 * 60 * 1000);
+    fs.utimesSync(lockPath, stale, stale);
+    const run = vi.fn(async () => {
+      expect(fs.readFileSync(bicepPath, "utf8")).toBe("");
+      fs.writeFileSync(bicepPath, "complete-bicep");
+    });
+
+    await expect(ensureManagedBicep("managed-rad", { bicepPath, run })).resolves.toBe(bicepPath);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(bicepPath, "utf8")).toBe("complete-bicep");
+    expect(fs.existsSync(lockPath)).toBe(false);
   });
 });
 
@@ -167,6 +260,8 @@ describe("resolveRadForGraph", () => {
   const savedEnv = {};
   let managedBackup = null;
   let managedMode = null;
+  let bicepBackup = null;
+  let bicepMode = null;
 
   function mockHttpsGet(responses, calls) {
     return vi.spyOn(https, "get").mockImplementation((url, options, callback) => {
@@ -222,7 +317,17 @@ describe("resolveRadForGraph", () => {
       managedBackup = null;
       managedMode = null;
     }
+    if (fs.existsSync(MANAGED_BICEP_PATH)) {
+      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
+      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
+    } else {
+      bicepBackup = null;
+      bicepMode = null;
+    }
     fs.rmSync(MANAGED_RAD_PATH, { force: true });
+    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+    if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
   });
 
   afterEach(() => {
@@ -235,6 +340,12 @@ describe("resolveRadForGraph", () => {
       fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
       fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
       if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
+    }
+    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
+    if (bicepBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
+      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
     }
     vi.restoreAllMocks();
   });
@@ -714,6 +825,8 @@ describeReconcile("ensureRadBinary version reconciliation", () => {
   const savedEnv = {};
   let managedBackup = null;
   let managedMode = null;
+  let bicepBackup = null;
+  let bicepMode = null;
 
   function writeFakeRad(dest, version) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -765,7 +878,17 @@ if (process.argv.includes("version")) {
       managedBackup = null;
       managedMode = null;
     }
+    if (fs.existsSync(MANAGED_BICEP_PATH)) {
+      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
+      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
+    } else {
+      bicepBackup = null;
+      bicepMode = null;
+    }
     fs.rmSync(MANAGED_RAD_PATH, { force: true });
+    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+    if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
   });
 
   afterEach(() => {
@@ -779,6 +902,12 @@ if (process.argv.includes("version")) {
       fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
       fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
       if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
+    }
+    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
+    if (bicepBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
+      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
     }
     vi.restoreAllMocks();
   });
