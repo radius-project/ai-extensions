@@ -123,6 +123,7 @@ describe("managed Bicep", () => {
     const bicepPath = path.join(tmp, "bin", BICEP);
     fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
     fs.writeFileSync(bicepPath, "bicep");
+    if (process.platform !== "win32") fs.chmodSync(bicepPath, 0o755);
     const run = vi.fn();
 
     await expect(ensureManagedBicep("managed-rad", { bicepPath, run })).resolves.toBe(bicepPath);
@@ -146,6 +147,20 @@ describe("managed Bicep", () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(fs.readFileSync(bicepPath, "utf8")).toBe("complete-bicep");
     expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("takes over when another downloader releases its lock without a binary", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    const lockPath = `${bicepPath}.download.lock`;
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    fs.writeFileSync(lockPath, "peer");
+    const run = vi.fn(async () => {
+      fs.writeFileSync(bicepPath, "complete-bicep");
+    });
+    setTimeout(() => fs.rmSync(lockPath, { force: true }), 20);
+
+    await expect(ensureManagedBicep("managed-rad", { bicepPath, run })).resolves.toBe(bicepPath);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
 

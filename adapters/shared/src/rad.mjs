@@ -94,7 +94,7 @@ function isExecutableFile(p) {
 function isCompletedBicepFile(p) {
   try {
     const stat = fs.statSync(p);
-    return stat.isFile() && stat.size > 0;
+    return stat.isFile() && stat.size > 0 && (IS_WIN || (stat.mode & 0o111) !== 0);
   } catch {
     return false;
   }
@@ -152,10 +152,12 @@ async function waitForFile(file, timeoutMs, intervalMs = 500) {
 async function waitForBicepDownload(file, lockPath, timeoutMs, intervalMs = 500) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isExecutableFile(lockPath)) return isCompletedBicepFile(file);
+    if (!isExecutableFile(lockPath)) {
+      return isCompletedBicepFile(file) ? "complete" : "available";
+    }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  return !isExecutableFile(lockPath) && isCompletedBicepFile(file);
+  return "timeout";
 }
 
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
@@ -634,12 +636,17 @@ export function ensureManagedBicep(
 
   const preparation = (async () => {
     fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
-    const lockWasPresent = isExecutableFile(lockPath);
-    const release = tryAcquireLock(lockPath);
-    if (!release) {
+    let lockWasPresent = isExecutableFile(lockPath);
+    let release = tryAcquireLock(lockPath);
+    while (!release) {
       log("Another process is downloading the managed Bicep CLI; waiting...");
-      if (await waitForBicepDownload(bicepPath, lockPath, DOWNLOAD_WAIT_MS)) return bicepPath;
-      throw new Error(`Timed out waiting for another process to create ${bicepPath}`);
+      const result = await waitForBicepDownload(bicepPath, lockPath, DOWNLOAD_WAIT_MS);
+      if (result === "complete") return bicepPath;
+      if (result === "timeout") {
+        throw new Error(`Timed out waiting for another process to create ${bicepPath}`);
+      }
+      lockWasPresent = false;
+      release = tryAcquireLock(lockPath);
     }
 
     try {
@@ -662,15 +669,15 @@ export function ensureManagedBicep(
           label: "rad bicep download",
           log,
         });
+        if (!IS_WIN && isExecutableFile(bicepPath)) {
+          try { fs.chmodSync(bicepPath, 0o755); } catch { /* validated below */ }
+        }
         if (!isCompletedBicepFile(bicepPath)) {
           throw new Error(`rad bicep download completed without creating ${bicepPath}`);
         }
       } catch (err) {
         try { fs.rmSync(bicepPath, { force: true }); } catch { /* best-effort */ }
         throw err;
-      }
-      if (!IS_WIN) {
-        try { fs.chmodSync(bicepPath, 0o755); } catch { /* best-effort */ }
       }
       log(`Installed Bicep CLI to ${bicepPath}`);
       return bicepPath;
