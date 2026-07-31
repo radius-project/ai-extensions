@@ -178,11 +178,12 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
     var baseSel = document.getElementById('base-branch');
     var headSel = document.getElementById('head-branch');
     var statusEl = document.getElementById('diff-status');
+    var preserveError = autoCompare === false && statusEl && statusEl.classList.contains('error') && !!statusEl.textContent.trim();
     if (!repo) { if (statusEl) statusEl.textContent = 'No repository context.'; return; }
-    if (statusEl) statusEl.textContent = 'Loading branches…';
+    if (statusEl && !preserveError) statusEl.textContent = 'Loading branches…';
 
     var timeoutId = setTimeout(function() {
-        if (statusEl && statusEl.textContent === 'Loading branches…') {
+        if (!preserveError && statusEl && statusEl.textContent === 'Loading branches…') {
             statusEl.style.display = '';
             statusEl.textContent = 'Loading branches is taking longer than expected…';
             statusEl.className = 'status error';
@@ -196,6 +197,7 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
         .then(function(d) {
             clearTimeout(timeoutId);
             if (d.error) { if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; } return; }
+            var branches = (d && d.branches) || [];
             var workspaceBranch = d.workspaceBranch || '';
             // Base must be a real GitHub ref (the diff is computed against a
             // pushed base). Head may additionally be the local worktree branch —
@@ -227,10 +229,10 @@ function radiusPopulateDiffBranches(repo, preferBase, preferHead, autoCompare) {
             if (!baseSel.value && baseSel.options.length) baseSel.selectedIndex = 0;
 
             if (headSel.value) {
-                if (statusEl) { statusEl.className = 'status info'; statusEl.textContent = 'Comparing ' + baseSel.value + ' → ' + headSel.value + '…'; }
+                if (statusEl && !preserveError) { statusEl.className = 'status info'; statusEl.textContent = 'Comparing ' + baseSel.value + ' → ' + headSel.value + '…'; }
                 // Auto-load the diff for the resolved head branch.
                 if (autoCompare !== false) headSel.dispatchEvent(new Event('change'));
-            } else if (statusEl) {
+            } else if (statusEl && !preserveError) {
                 statusEl.className = 'status info';
                 statusEl.textContent = 'Select a head branch to compare against ' + (baseSel.value || 'main') + '.';
             }
@@ -287,8 +289,8 @@ var RADIUS_DEPLOY_STATUS_COLORS = {
 };
 
 // Maps a deploy status to the corner status badge shown on each node while a
-// deployment is in flight: a resource that is queued or deploying shows an
-// hourglass, a completed one a green check, and a failed one a red X.
+// deployment is in flight: a resource that is queued or deploying shows a
+// progress spinner, a completed one a green check, and a failed one a red X.
 function radiusDeployBadgeKind(status) {
     var s = status || 'pending';
     if (s === 'success') return 'success';
@@ -321,8 +323,8 @@ function radiusDeployBadgeSvg(kind) {
     } else if (k === 'failed') {
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#cf222e" stroke-width="2.4" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
     } else {
-        // Hourglass (queued / in progress).
-        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#9a6700"><path d="M4 1.75a.75.75 0 000 1.5h.5V4.6c0 .93.44 1.8 1.18 2.36L6.83 8l-1.15.94A2.95 2.95 0 004.5 11.3v1.45H4a.75.75 0 000 1.5h8a.75.75 0 000-1.5h-.5V11.3a2.95 2.95 0 00-1.18-2.36L9.17 8l1.15-.94A2.95 2.95 0 0011.5 4.6V3.25h.5a.75.75 0 000-1.5H4zm2 1.5h4V4.6c0 .5-.23.97-.62 1.28L8 7.05 6.62 5.88A1.65 1.65 0 016 4.6V3.25z"/></svg>';
+        // Circular progress indicator (queued / in progress).
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="#8c959f" stroke-width="2" opacity=".35"/><path d="M8 2.5a5.5 5.5 0 015.5 5.5" stroke="#0969da" stroke-width="2" stroke-linecap="round"/></svg>';
     }
     svg = svg.replace('<svg ', '<svg width="40" height="40" ');
     var uri = 'data:image/svg+xml,' + encodeURIComponent(svg);
@@ -538,7 +540,34 @@ function radiusSelectResolvedResource(resource, ownedOutputIds, ownerId) {
     return best;
 }
 
+function radiusShowGraphRenderError(container, detail) {
+    if (!container) return;
+    container.innerHTML = '';
+    var error = document.createElement('div');
+    error.className = 'status error';
+    error.textContent = detail || 'The application graph could not be rendered.';
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'rad-btn rad-btn--secondary';
+    retry.style.marginTop = '10px';
+    retry.textContent = 'Reload graph';
+    retry.addEventListener('click', function() { window.location.reload(); });
+    container.appendChild(error);
+    container.appendChild(retry);
+}
+
 function radiusRenderGraph(containerId, resources, options) {
+    var container = document.getElementById(containerId);
+    if (!container) return null;
+    try {
+        return radiusRenderGraphUnsafe(containerId, resources, options);
+    } catch (err) {
+        radiusShowGraphRenderError(container, 'The application graph could not be rendered. Reload the graph to try again.');
+        return null;
+    }
+}
+
+function radiusRenderGraphUnsafe(containerId, resources, options) {
     options = options || {};
     var container = document.getElementById(containerId);
     if (!container) return null;
@@ -549,7 +578,7 @@ function radiusRenderGraph(containerId, resources, options) {
     // of throwing and breaking the whole panel.
     var RF = window.ReactFlow;
     if (!window.React || !window.ReactDOM || !RF) {
-        container.innerHTML = '<div style="padding:16px;color:var(--rad-danger);font-size:13px;">Graph library failed to load (network unavailable). Reopen the panel once connectivity is restored to render the graph.</div>';
+        radiusShowGraphRenderError(container, 'The graph library failed to load. Restore network connectivity, then reload the graph.');
         return null;
     }
     var React = window.React;
@@ -589,7 +618,9 @@ function radiusRenderGraph(containerId, resources, options) {
 
     var diffMode = options.diffMode || false;
     var deployMode = options.deployMode || false;
+    var deployedMode = options.deployedMode || false;
     var plannedMode = options.plannedMode || false;
+    var resolvedMode = plannedMode || deployMode || deployedMode;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     // In diff mode a "removed" resource's source file lived on the base
@@ -616,8 +647,20 @@ function radiusRenderGraph(containerId, resources, options) {
 
     if (!resources || resources.length === 0) {
         container.innerHTML = '';
-        // A minimal controller so callers can still repopulate later.
-        return { update: function(nr) { if (nr && nr.length) radiusRenderGraph(containerId, nr, options); }, destroy: function() {} };
+        // A minimal controller so callers can still repopulate later. Return the
+        // active controller from update(), matching the populated controller.
+        var emptyController = {
+            update: function(nr) {
+                if (!nr) return emptyController;
+                if (nr.length === 0) {
+                    container.innerHTML = '';
+                    return emptyController;
+                }
+                return radiusRenderGraph(containerId, nr, options) || emptyController;
+            },
+            destroy: function() {}
+        };
+        return emptyController;
     }
 
     container.innerHTML = '';
@@ -718,12 +761,20 @@ function radiusRenderGraph(containerId, resources, options) {
                 default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
             }
         }
+        // The terminal "Deployed Graph" keeps every non-failed card neutral gray;
+        // a failed resource remains red when terminal status data is available.
+        if (deployedMode) {
+            return r.deployStatus === 'failed'
+                ? RADIUS_DEPLOY_STATUS_COLORS.failed
+                : RADIUS_DEPLOY_STATUS_COLORS.pending;
+        }
         // The "Deploying" page passes deployMode. A managed-cluster node always
         // stays gray — its overall status is conveyed by the corner status badge,
         // not the fill. Other resources, including ordinary compute nodes, take the live
         // deploy-status colors (gray while queued/deploying, blue when complete,
         // red on failure).
         if (deployMode) {
+            if (r.deployStatus === 'failed') return RADIUS_DEPLOY_STATUS_COLORS.failed;
             if (radiusIsManagedClusterResource(r)) return RADIUS_DEPLOY_STATUS_COLORS.pending;
             var sc = RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending'] || RADIUS_DEPLOY_STATUS_COLORS.pending;
             return { bg: sc.bg, border: sc.border };
@@ -822,8 +873,8 @@ function radiusRenderGraph(containerId, resources, options) {
             // Data/mySqlDatabases -> Microsoft.DBforMySQL/flexibleServers). The
             // deploying graph therefore matches the planned graph's look; only
             // its borders/lines are solid instead of dashed.
-            var resolvedResource = (plannedMode || deployMode) ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
-            var shortType = (plannedMode || deployMode) && resolvedResource
+            var resolvedResource = resolvedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;
+            var shortType = resolvedMode && resolvedResource
                 ? radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)
                 : radiusFormatTypeLabel(r.type);
             // Collect any cloud (ARM) output resources so the node popup can link
@@ -856,6 +907,7 @@ function radiusRenderGraph(containerId, resources, options) {
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
                 deployStatus: r.deployStatus || '',
+                deployBadgeKind: deployMode ? radiusDeployBadgeKind(r.deployStatus) : '',
                 deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : '',
                 portalUrl: r.portalUrl || '',
                 cloudResources: JSON.stringify(cloudOutputs)
@@ -876,7 +928,7 @@ function radiusRenderGraph(containerId, resources, options) {
             // modeled graph's one-node-per-resource topology and project the
             // resolved type onto that node, so the deploying graph matches the
             // planned graph's shape.
-            if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0) {
+            if (!resolvedMode && r.outputResources && r.outputResources.length > 0) {
                 for (var k = 0; k < r.outputResources.length; k++) {
                     var out = r.outputResources[k];
                     // Skip a concrete resource another top-level resource owns.
@@ -961,6 +1013,17 @@ function radiusRenderGraph(containerId, resources, options) {
     // build to bolt a node-html-label DOM overlay onto its graph nodes.
     function RadNode(props) {
         var d = props.data;
+        var typeRef = React.useRef(null);
+        React.useLayoutEffect(function() {
+            var el = typeRef.current;
+            if (!el) return;
+            var size = 13;
+            el.style.fontSize = size + 'px';
+            while (el.scrollWidth > el.clientWidth && size > 7) {
+                size -= 0.5;
+                el.style.fontSize = size + 'px';
+            }
+        }, [d.typeLabel]);
         var iconEl = d.icon ? h('img', { className: 'rad-node__icon', src: d.icon, alt: '' }) : null;
         var glyph = h('span', { className: 'rad-node__source-glyph' }, '</' + '>');
         var label = h('span', null, 'View source code');
@@ -999,10 +1062,14 @@ function radiusRenderGraph(containerId, resources, options) {
             type: 'button', className: 'rad-node__dots nodrag nopan', 'aria-label': 'Show details',
             onClick: function(e) { e.preventDefault(); e.stopPropagation(); popupCtl.toggle(d, e.currentTarget.closest('.rad-node')); }
         }, '\u2022\u2022\u2022');
-        // Deploy-status badge (hourglass / green check / red X) shown top-right
+        // Deploy-status badge (spinner / green check / red X) shown top-right
         // while a deployment is in flight; absent outside deployMode.
         var badge = d.deployBadge
-            ? h('img', { className: 'rad-node__badge', src: d.deployBadge, alt: '' })
+            ? h('img', {
+                className: 'rad-node__badge' + (d.deployBadgeKind === 'progress' ? ' rad-node__badge--progress' : ''),
+                src: d.deployBadge,
+                alt: d.deployBadgeKind === 'failed' ? 'Failed' : (d.deployBadgeKind === 'success' ? 'Deployed' : 'In progress')
+            })
             : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
@@ -1012,7 +1079,7 @@ function radiusRenderGraph(containerId, resources, options) {
             dots,
             badge,
             h('div', { className: 'rad-node__head' }, iconEl, h('span', { className: 'rad-node__title' }, d.nodeName)),
-            h('div', { className: 'rad-node__type' }, d.typeLabel),
+            h('div', { className: 'rad-node__type', ref: typeRef, title: d.typeLabel }, d.typeLabel),
             srcRow
         );
         return h('div', { className: 'rad-node-shell' },
@@ -1069,6 +1136,27 @@ function radiusRenderGraph(containerId, resources, options) {
         );
     }
 
+    class RadGraphErrorBoundary extends React.Component {
+        constructor(props) {
+            super(props);
+            this.state = { failed: false };
+        }
+        static getDerivedStateFromError() {
+            return { failed: true };
+        }
+        render() {
+            if (!this.state.failed) return this.props.children;
+            return h('div', { className: 'status error' },
+                'The application graph could not be rendered. ',
+                h('button', {
+                    type: 'button',
+                    className: 'rad-btn rad-btn--secondary',
+                    onClick: function() { window.location.reload(); }
+                }, 'Reload graph')
+            );
+        }
+    }
+
     // Mount React into a child host so the popup/legend (siblings of the
     // container) are never clobbered by React's DOM reconciliation.
     var flowHost = document.createElement('div');
@@ -1078,7 +1166,9 @@ function radiusRenderGraph(containerId, resources, options) {
 
     var root = ReactDOM.createRoot(flowHost);
     window.__radRoots[containerId] = root;
-    root.render(h(RadGraphApp, { initialNodes: built.nodes, initialEdges: built.edges }));
+    root.render(h(RadGraphErrorBoundary, null,
+        h(RadGraphApp, { initialNodes: built.nodes, initialEdges: built.edges })
+    ));
 
     // Node click popup
     if (options.enablePopup !== false) {
@@ -1270,10 +1360,15 @@ function radiusRenderGraph(containerId, resources, options) {
     // and pushes it into React state (preserving the viewport); destroy() unmounts.
     var controller = {
         update: function(newResources) {
-            if (!newResources) return;
+            if (!newResources) return controller;
+            if (newResources.length === 0) {
+                controller.destroy();
+                return radiusRenderGraph(containerId, [], options);
+            }
             var b = buildGraph(newResources);
             layout(b.nodes, b.edges);
             if (updater.fn) updater.fn(b.nodes, b.edges);
+            return controller;
         },
         destroy: function() {
             updater.fn = null;

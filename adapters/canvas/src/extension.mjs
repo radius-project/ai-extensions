@@ -31,6 +31,7 @@ import {
     servers,
     getOrCreateServer,
     getLastWebviewActivityAt,
+    isCurrentSourceRefToken,
     setAppBicepHandoff,
     setOpenSourceHandler,
 } from "./server.mjs";
@@ -211,6 +212,7 @@ const session = await joinSession({
                             const resources = filterGraphVisualizationResources(ctx.input.resources);
                             setSourceRefResources(entry, "graph", resources, context);
                             setSourceRefResources(entry, "planned", resources, context);
+                            entry.state.graphLoaded = true;
                             // No authoritative app.bicep fetch on this path — clear any
                             // provenance flag left over from a prior HTTP load so the page
                             // falls back to (fail-closed) repo+branch matching against the
@@ -450,6 +452,7 @@ const session = await joinSession({
                     entry.state.diffBase = ctx.input.baseBranch;
                     entry.state.diffHead = ctx.input.headBranch;
                     entry.state.diffTargetRepo = repo;
+                    delete entry.state.diffError;
                     try {
                         // Fetch the committed/persisted app.bicep on each branch.
                         // Generation is owned by the radius-app-bicep skill.
@@ -473,7 +476,9 @@ const session = await joinSession({
                         const hasChanges = diffResources.some(r => r.diffStatus !== 'unchanged');
                         entry.state.diffNoChanges = !hasChanges;
                     } catch (e) {
-                        // If fetching fails, leave empty for manual comparison
+                        if (isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)) {
+                            entry.state.diffError = e.message;
+                        }
                     }
                 }
 

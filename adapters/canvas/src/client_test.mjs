@@ -34,6 +34,79 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
         expect(CLIENT_GRAPH_JS).not.toContain("/generated-bicep");
     });
 
+    describe("CLIENT_GRAPH_JS — render exception recovery", () => {
+        it("catches synchronous renderer failures and offers a reload action", () => {
+            expect(CLIENT_GRAPH_JS).toContain("function radiusRenderGraphUnsafe");
+            expect(CLIENT_GRAPH_JS).toContain("radiusShowGraphRenderError(container");
+            expect(CLIENT_GRAPH_JS).toContain("window.location.reload()");
+        });
+
+        describe("CLIENT_GRAPH_JS — graph refresh state", () => {
+            it("keeps a populated diff error visible while refreshing selectors without auto-comparing", () => {
+                expect(CLIENT_REPO_BRANCH_JS).toContain("var preserveError = autoCompare === false");
+                expect(CLIENT_REPO_BRANCH_JS).toContain("statusEl && !preserveError");
+            });
+
+            it("returns the active controller from empty and populated graph updates", () => {
+                expect(CLIENT_GRAPH_JS).toContain("return radiusRenderGraph(containerId, nr, options) || emptyController");
+                expect(CLIENT_GRAPH_JS).toContain("return controller;");
+            });
+
+            it("does not overwrite a populated diff error while refreshing branch selectors", async () => {
+                const status = {
+                    textContent: "Unable to compile head graph",
+                    className: "status error",
+                    classList: { contains: (name) => name === "error" },
+                };
+                const makeSelect = () => ({
+                    value: "",
+                    options: [],
+                    set innerHTML(_value) { this.options = []; this.value = ""; },
+                    appendChild(option) {
+                        this.options.push(option);
+                        if (option.selected || !this.value) this.value = option.value;
+                    },
+                    dispatchEvent() { throw new Error("auto-compare should not run"); },
+                });
+                const base = makeSelect();
+                const head = makeSelect();
+                const elements = { "base-branch": base, "head-branch": head, "diff-status": status };
+                const document = {
+                    getElementById: (id) => elements[id] || null,
+                    createElement: () => ({ value: "", textContent: "", selected: false }),
+                    addEventListener() {},
+                };
+                const fetch = () => Promise.resolve({
+                    json: () => Promise.resolve({
+                        branches: [
+                            { name: "main", sha: "abcdef1" },
+                            { name: "feature", sha: "abcdef2" },
+                        ],
+                    }),
+                });
+                const populate = new Function(
+                    "window",
+                    "document",
+                    "fetch",
+                    "Event",
+                    `${CLIENT_REPO_BRANCH_JS}; return radiusPopulateDiffBranches;`,
+                )({ addEventListener() {} }, document, fetch, class Event {});
+
+                populate("octo/app", "main", "feature", false);
+                await new Promise((resolve) => setTimeout(resolve, 0));
+
+                expect(status.textContent).toBe("Unable to compile head graph");
+                expect(status.className).toBe("status error");
+            });
+        });
+
+        it("uses a React error boundary for failures during component rendering", () => {
+            expect(CLIENT_GRAPH_JS).toContain("class RadGraphErrorBoundary extends React.Component");
+            expect(CLIENT_GRAPH_JS).toContain("static getDerivedStateFromError()");
+            expect(CLIENT_GRAPH_JS).toContain("h(RadGraphErrorBoundary");
+        });
+    });
+
     it("has no reference to the removed defGenerated node flag", () => {
         expect(CLIENT_GRAPH_JS).not.toContain("defGenerated");
     });
@@ -106,6 +179,12 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
             // (see the .react-flow__background rules in pages.mjs).
             expect(CLIENT_GRAPH_JS).toContain("h(Background, { gap: 16, size: 1 })");
             expect(CLIENT_GRAPH_JS).not.toMatch(/h\(Background,[^)]*color:[^)]*var\(/);
+        });
+
+        it("scales long concrete resource type labels to the node width", () => {
+            expect(CLIENT_GRAPH_JS).toContain("var typeRef = React.useRef(null)");
+            expect(CLIENT_GRAPH_JS).toContain("while (el.scrollWidth > el.clientWidth && size > 7)");
+            expect(CLIENT_GRAPH_JS).toContain("ref: typeRef, title: d.typeLabel");
         });
     });
 
@@ -268,11 +347,12 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
     it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
-        expect(CLIENT_GRAPH_JS).toContain("if (!plannedMode && !deployMode && r.outputResources && r.outputResources.length > 0)");
+        expect(CLIENT_GRAPH_JS).toContain("var resolvedMode = plannedMode || deployMode || deployedMode");
+        expect(CLIENT_GRAPH_JS).toContain("if (!resolvedMode && r.outputResources && r.outputResources.length > 0)");
     });
 
     it("relabels the modeled node with the recipe-resolved concrete type", () => {
-        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = (plannedMode || deployMode) ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
+        expect(CLIENT_GRAPH_JS).toContain("var resolvedResource = resolvedMode ? radiusSelectResolvedResource(r, ownedOutputIds, r.id || r.name) : null;");
         expect(CLIENT_GRAPH_JS).toContain("radiusFormatResolvedTypeLabel(resolvedResource.type || resolvedResource.displayType)");
     });
 
@@ -334,8 +414,15 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 });
 
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
-    it("keeps only managed-cluster nodes gray and colors ordinary compute nodes by deploy status", () => {
+    it("renders deployed graph cards gray except for failed resources", () => {
+        expect(CLIENT_GRAPH_JS).toContain("if (deployedMode) {");
+        expect(CLIENT_GRAPH_JS).toContain("? RADIUS_DEPLOY_STATUS_COLORS.failed");
+        expect(CLIENT_GRAPH_JS).toContain(": RADIUS_DEPLOY_STATUS_COLORS.pending");
+    });
+
+    it("keeps managed-cluster nodes gray unless they fail and colors ordinary compute nodes by deploy status", () => {
         expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
+        expect(CLIENT_GRAPH_JS).toContain("if (r.deployStatus === 'failed') return RADIUS_DEPLOY_STATUS_COLORS.failed;");
         expect(CLIENT_GRAPH_JS).toContain("if (radiusIsManagedClusterResource(r)) return RADIUS_DEPLOY_STATUS_COLORS.pending;");
         expect(CLIENT_GRAPH_JS).toContain("RADIUS_DEPLOY_STATUS_COLORS[r.deployStatus || 'pending']");
         expect(CLIENT_GRAPH_JS).not.toContain("if (deployMode && r.deployStatus) {");
@@ -369,7 +456,7 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
         expect(CLIENT_GRAPH_JS).not.toContain("color: '#e1e4e8'");
     });
 
-    it("maps each deploy status to a corner badge (hourglass / check / x)", () => {
+    it("maps each deploy status to a corner badge (spinner / check / x)", () => {
         const badgeKind = new Function("window", `${CLIENT_GRAPH_JS}; return radiusDeployBadgeKind;`)({ addEventListener() {} });
         expect(badgeKind("pending")).toBe("progress");
         expect(badgeKind("in_progress")).toBe("progress");
@@ -377,6 +464,8 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
         expect(badgeKind("failed")).toBe("failed");
         // Every node in deployMode carries a rendered status badge.
         expect(CLIENT_GRAPH_JS).toContain("deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : ''");
+        expect(CLIENT_GRAPH_JS).toContain("rad-node__badge--progress");
+        expect(CLIENT_GRAPH_JS).toContain("Circular progress indicator");
         expect(CLIENT_GRAPH_JS).toContain("rad-node__badge");
     });
 
@@ -384,6 +473,6 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
         // The deploying graph matches the planned graph's one-node-per-resource
         // shape and resolved type labels, but its borders/lines stay solid.
         expect(CLIENT_GRAPH_JS).toContain("borderStyle: plannedMode ? 'dashed' : 'solid'");
-        expect(CLIENT_GRAPH_JS).toContain("var shortType = (plannedMode || deployMode) && resolvedResource");
+        expect(CLIENT_GRAPH_JS).toContain("var shortType = resolvedMode && resolvedResource");
     });
 });
