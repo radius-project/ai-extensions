@@ -2,7 +2,7 @@
 //
 // Builds modeled application graphs by running the real
 // `rad app graph <app.bicep> --include-icons`
-// command, which compiles Bicep with rad's embedded Bicep and writes
+// command, which compiles through the extension-managed Bicep CLI and writes
 // `app-graph.json` entirely client-side (no Radius control plane). This module
 // owns every impure, Node-only step that the pure `@radius-project/core`
 // package must not depend on: locating or downloading the static `rad` binary,
@@ -16,11 +16,8 @@
 // Gotchas honored here:
 //   - NEVER use console.log — an adapter's stdout may be a JSON-RPC channel.
 //     Use the injected `log` for any user-visible message.
-//   - `rad app graph` commits to a `radius-graph` orphan branch when
-//     GITHUB_ACTIONS === "true"; we clear it in the child env so it always
-//     writes app-graph.json locally.
-//   - The managed binary lives at a stable path under os.homedir(), never
-//     import.meta (adapters bundle this file into a single artifact).
+//   - The binaries live in the extension-owned ~/.radius/ai-extensions/bin
+//     directory, never relative to import.meta (adapters bundle this file).
 //   - Windows: `.exe` suffix, no chmod.
 //   - The first resolution per process verifies the installed rad is at least
 //     as new as the latest published release and upgrades it if it is older.
@@ -43,6 +40,7 @@ const RELEASES_API = "https://api.github.com/repos/radius-project/radius/release
 // official ~/.rad/bin install, so automatic updates never replace a user's CLI.
 export const MANAGED_RAD_BIN = path.join(os.homedir(), ".radius", "ai-extensions", "bin");
 export const MANAGED_RAD_PATH = path.join(MANAGED_RAD_BIN, `rad${EXE}`);
+export const MANAGED_BICEP_PATH = path.join(MANAGED_RAD_BIN, `bicep${EXE}`);
 
 // Bicep config that registers the Radius extension. `rad app graph` compiles
 // Bicep offline, but bicep still needs this file beside the .bicep to resolve
@@ -58,11 +56,16 @@ export const RADIUS_BICEP_CONFIG = {
 export const RADIUS_BICEP_CONFIG_JSON = JSON.stringify(RADIUS_BICEP_CONFIG, null, 2);
 export const MODELED_APP_GRAPH_FLAGS = Object.freeze(["--include-icons"]);
 
-// Serializes concurrent ensureRadBinary() callers so only one download runs.
+// Serializes concurrent toolchain preparation so only one download runs.
 let ensurePromise = null;
 let cachedRadPath = null;
+const ensureBicepPromises = new Map();
 
 function noop() {}
+
+export function managedBicepEnv(env = {}, bicepPath = MANAGED_BICEP_PATH) {
+  return { ...env, BICEP: bicepPath };
+}
 
 // Maps Node's platform/arch onto the GitHub release asset naming used by rad
 // (rad_<os>_<arch>[.exe]).
@@ -83,6 +86,15 @@ export function releaseAsset(platform = process.platform, architecture = process
 function isExecutableFile(p) {
   try {
     return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isCompletedBicepFile(p) {
+  try {
+    const stat = fs.statSync(p);
+    return stat.isFile() && stat.size > 0 && (IS_WIN || (stat.mode & 0o111) !== 0);
   } catch {
     return false;
   }
@@ -137,6 +149,17 @@ async function waitForFile(file, timeoutMs, intervalMs = 500) {
   return isExecutableFile(file);
 }
 
+async function waitForBicepDownload(file, lockPath, timeoutMs, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isExecutableFile(lockPath)) {
+      return isCompletedBicepFile(file) ? "complete" : "available";
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return "timeout";
+}
+
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
 // the whole process tree; on POSIX, rad is a process-group leader (spawned
 // detached), so signalling the group (-pid) stops rad and its children together.
@@ -186,8 +209,9 @@ export function parseRadVersionOutput(stdout) {
  * running `rad version --cli --output json` and returning its `version` string
  * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
  * it can't be determined. `rad version --cli` skips the control-plane check but
- * still shells out to the bicep binary (getCliVersionInfo -> bicep.Version() ->
- * `bicep --version`). A timeout plus process-tree kill is a hard backstop so a
+ * still shells out to Bicep (getCliVersionInfo -> bicep.Version() ->
+ * `bicep --version`), so BICEP is pinned to the managed path even during version
+ * checks. A timeout plus process-tree kill is a hard backstop so a
  * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
  * installed, rad returns fast with a "bicep not installed" note and still emits
  * `version`.) Never throws — a null result means "version unknown", which callers
@@ -203,6 +227,7 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
       // (windowsHide is best-effort: Windows ignores it under detached, so a
       // brief console window may still appear.)
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
+        env: managedBicepEnv(process.env),
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
         detached: true,
@@ -467,12 +492,13 @@ async function reconcileWithLatest(existing, log) {
 }
 
 /**
- * ensureRadBinary - return a path to a runnable `rad`, downloading once if none
- * is already installed. Concurrent callers share a single in-flight resolution.
+ * ensureRadBinary - return a path to a runnable `rad`, downloading it and its
+ * paired Bicep CLI into the extension-owned bin directory when needed.
+ * Concurrent callers share a single in-flight resolution.
  */
 export function ensureRadBinary({ log = noop } = {}) {
   if (cachedRadPath && isExecutableFile(cachedRadPath)) {
-    return Promise.resolve(cachedRadPath);
+    return ensureManagedBicep(cachedRadPath, { log }).then(() => cachedRadPath);
   }
   if (ensurePromise) return ensurePromise;
 
@@ -490,10 +516,12 @@ export function ensureRadBinary({ log = noop } = {}) {
       // Use the installed rad only if it is at least as new as the latest
       // release; otherwise reconcileWithLatest upgrades it (best-effort).
       cachedRadPath = await reconcileWithLatest(existing, log);
+      await ensureManagedBicep(cachedRadPath, { log });
       return cachedRadPath;
     }
     const downloaded = await downloadRad(log);
     cachedRadPath = downloaded;
+    await ensureManagedBicep(cachedRadPath, { log });
     return downloaded;
   })();
 
@@ -584,14 +612,98 @@ export function spawnRad(radPath, args, { cwd, env = {}, timeout = 120000, label
 }
 
 /**
- * spawnManagedRad - resolve the managed `rad` binary (ensureRadBinary; never
- * PATH/.rad/bin, honoring #170) and run it via spawnRad, merging `env` over
- * process.env. runRadAppGraph predates this helper and keeps its own inline
- * spawn to avoid churn in that heavily tested path.
+ * ensureManagedBicep - install the Bicep CLI beside the extension-managed rad
+ * binary using `rad bicep download`. Concurrent callers preparing the same path
+ * share one operation, and a successful command is accepted only when it
+ * created the expected executable.
+ */
+export function ensureManagedBicep(
+  radPath,
+  {
+    log = noop,
+    timeout = 120000,
+    bicepPath = MANAGED_BICEP_PATH,
+    run = spawnRad,
+  } = {},
+) {
+  const lockPath = `${bicepPath}.download.lock`;
+  if (!isExecutableFile(lockPath) && isCompletedBicepFile(bicepPath)) {
+    return Promise.resolve(bicepPath);
+  }
+
+  const pending = ensureBicepPromises.get(bicepPath);
+  if (pending) return pending;
+
+  const preparation = (async () => {
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    let lockWasPresent = isExecutableFile(lockPath);
+    let release = tryAcquireLock(lockPath);
+    while (!release) {
+      log("Another process is downloading the managed Bicep CLI; waiting...");
+      const result = await waitForBicepDownload(bicepPath, lockPath, DOWNLOAD_WAIT_MS);
+      if (result === "complete") return bicepPath;
+      if (result === "timeout") {
+        throw new Error(`Timed out waiting for another process to create ${bicepPath}`);
+      }
+      lockWasPresent = false;
+      release = tryAcquireLock(lockPath);
+    }
+
+    let tmp = "";
+    try {
+      if (!lockWasPresent && isCompletedBicepFile(bicepPath)) return bicepPath;
+      tmp = `${bicepPath}.${process.pid}.${crypto.randomUUID()}.download`;
+      // Radius requires a BICEP override to exist before its download command
+      // will accept the destination. Download to a unique temporary file so a
+      // stale-lock takeover can never expose partial bytes at the managed path.
+      fs.closeSync(fs.openSync(tmp, "wx"));
+      log(`Downloading Bicep to ${bicepPath}...`);
+      await run(radPath, ["bicep", "download"], {
+        cwd: path.dirname(bicepPath),
+        env: managedBicepEnv({}, tmp),
+        timeout,
+        label: "rad bicep download",
+        log,
+      });
+      if (!IS_WIN && isExecutableFile(tmp)) {
+        try { fs.chmodSync(tmp, 0o755); } catch { /* validated below */ }
+      }
+      if (!isCompletedBicepFile(tmp)) {
+        throw new Error(`rad bicep download completed without creating ${bicepPath}`);
+      }
+
+      if (IS_WIN && isExecutableFile(bicepPath)) {
+        fs.rmSync(bicepPath, { force: true });
+      }
+      fs.renameSync(tmp, bicepPath);
+      tmp = "";
+      log(`Installed Bicep CLI to ${bicepPath}`);
+      return bicepPath;
+    } finally {
+      if (tmp) {
+        try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+      }
+      release();
+    }
+  })();
+
+  ensureBicepPromises.set(bicepPath, preparation);
+  preparation.catch(() => {}).finally(() => {
+    if (ensureBicepPromises.get(bicepPath) === preparation) {
+      ensureBicepPromises.delete(bicepPath);
+    }
+  });
+  return preparation;
+}
+
+/**
+ * spawnManagedRad - resolve `rad` from RADIUS_RAD_BINARY or the extension-owned
+ * ~/.radius/ai-extensions/bin/rad[.exe] path (never PATH or ~/.rad/bin), then
+ * run it with BICEP pinned to ~/.radius/ai-extensions/bin/bicep[.exe].
  */
 async function spawnManagedRad(args, { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}) {
   const radPath = await ensureRadBinary({ log });
-  return await spawnRad(radPath, args, { cwd, env, timeout, label, log });
+  return await spawnRad(radPath, args, { cwd, env: managedBicepEnv(env), timeout, label, log });
 }
 
 /**
@@ -693,6 +805,7 @@ export async function resolveRadForGraph({ log = noop } = {}) {
  */
 export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 120000, saveGraphJsonTo = "" } = {}) {
   const radPath = await resolveRadForGraph({ log });
+  await ensureManagedBicep(radPath, { log, timeout });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
   const absoluteBicep = path.resolve(bicepFilePath);
@@ -711,7 +824,7 @@ export async function runRadAppGraph(bicepFilePath, { log = noop, timeout = 1200
         // running rad inside the parent's job/process group can wedge it so it
         // never exits; its own process group avoids that (timeout + killChildTree
         // back it up). windowsHide is best-effort under detached.
-        env: { ...process.env, GITHUB_ACTIONS: "" },
+        env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         detached: true,
