@@ -186,6 +186,7 @@ describe("createDeployStatusReader", () => {
             app: "",
             graphTag: "pinned-tag",
             stateRegistry: "ghcr.io/acme/app-radius-state-dev-abc",
+            credentials: { username: "octocat", token: "t" },
             pullArtifact: async () => ({ files: { "deploy-graph.json": "[]" } }),
             getBranchContent: async () => null,
         });
