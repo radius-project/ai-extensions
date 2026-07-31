@@ -225,7 +225,7 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
       // (windowsHide is best-effort: Windows ignores it under detached, so a
       // brief console window may still appear.)
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
-        env: managedBicepEnv(),
+        env: managedBicepEnv(process.env),
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
         detached: true,
