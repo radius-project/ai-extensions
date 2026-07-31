@@ -450,6 +450,7 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("confirm('no active Azure session. Would you like to login?')");
         expect(html).toContain("requestAzureCliAssist('login'");
         expect(html).toContain("/api/azure-cli-assist");
+        expect(html).toContain("credVerifyError(data.error)");
     });
 
     it("offers Azure CLI install help when the az command is missing", () => {

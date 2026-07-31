@@ -188,25 +188,29 @@ export function setSessionPromptHandler(fn) { sessionPromptHandler = fn; }
 export function isCliCommandMissing(detail) {
     const text = String(detail || "").trim();
     if (!text) return false;
-    return /\bENOENT\b/i.test(text)
-        || /\bcommand not found\b/i.test(text)
-        || /\bnot recognized as an internal or external command\b/i.test(text)
-        || /\bNo such file or directory\b/i.test(text);
+    return /\bspawn(?:Sync)?\s+az(?:\.exe)?\s+ENOENT\b/i.test(text)
+        || /\baz(?:\.exe)?:\s*command not found\b/i.test(text)
+        || /['"]?az(?:\.exe)?['"]?\s+is not recognized as an internal or external command\b/i.test(text);
 }
 
 export function buildAzureCliAssistPrompt({ action = "login", tenantId = "" } = {}) {
     const safeTenantId = typeof tenantId === "string" && isUuid(tenantId.trim()) ? tenantId.trim() : "";
-    const loginCommand = safeTenantId ? `az login --tenant ${safeTenantId}` : "az login";
+    const loginCommand = `az login --use-device-code${safeTenantId ? ` --tenant ${safeTenantId}` : ""}`;
+    const loginInstructions = [
+        `Run \`${loginCommand}\` in this Copilot session.`,
+        "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
+        "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL.",
+    ].join(" ");
     if (action === "install") {
         return [
             "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
-            `Please install Azure CLI, then run \`${loginCommand}\` in this Copilot session so the Azure sign-in flow opens for me.`,
+            `Please install Azure CLI, then ${loginInstructions}`,
             "After the install and login finish, return to the Radius canvas and click Verify Credentials again.",
         ].join("\n\n");
     }
     return [
         "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
-        `Please run \`${loginCommand}\` in this Copilot session so the Azure sign-in flow opens for me.`,
+        loginInstructions,
         "After the login finishes, return to the Radius canvas and click Verify Credentials again.",
     ].join("\n\n");
 }
@@ -746,9 +750,10 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify(result));
                 }
             } catch (e) {
+                const detail = e instanceof Error ? e.message : String(e || "");
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
+                res.end(JSON.stringify({ error: detail || "Bad request." }));
             }
             return;
         }
@@ -779,7 +784,7 @@ function createRequestHandler(instanceId) {
                 // login opens a browser/device-code flow that blocks indefinitely
                 // and would hang this server. Instead we verify the user's existing
                 // Azure CLI session (and optionally switch subscription). If there
-                // is no session, we tell them to run `az login` in their terminal.
+                // is no session, the canvas can ask Copilot to start device-code login.
                 if (subscriptionId) {
                     try { await runCommand("az", ["account", "set", "--subscription", subscriptionId], { timeout: 10000 }); } catch (e) {}
                 }
@@ -795,7 +800,11 @@ function createRequestHandler(instanceId) {
                     if (isCliCommandMissing(detail)) {
                         res.end(JSON.stringify({ error: "Azure CLI is not installed.", code: "az-cli-missing", tenantId }));
                     } else {
-                        res.end(JSON.stringify({ error: "No active Azure session.", code: "az-login-required", tenantId }));
+                        res.end(JSON.stringify({
+                            error: 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.',
+                            code: "az-login-required",
+                            tenantId,
+                        }));
                     }
                     return;
                 }
@@ -805,7 +814,7 @@ function createRequestHandler(instanceId) {
                 if (tenantId && acct.tenantId && acct.tenantId.toLowerCase() !== tenantId.toLowerCase()) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${acct.tenantId}, not ${tenantId}. Run "az login --tenant ${tenantId}" in your terminal, then click Verify again.` }));
+                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${acct.tenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify again.` }));
                     return;
                 }
 
@@ -832,13 +841,8 @@ function createRequestHandler(instanceId) {
             try {
                 const data = JSON.parse(body || "{}");
                 const action = data.action === "install" ? "install" : "login";
-                const tenantId = typeof data.tenantId === "string" ? data.tenantId.trim() : "";
-                if (tenantId && !isUuid(tenantId)) {
-                    res.setHeader("Content-Type", "application/json");
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: `Invalid tenantId "${tenantId}" (expected a GUID).` }));
-                    return;
-                }
+                const requestedTenantId = typeof data.tenantId === "string" ? data.tenantId.trim() : "";
+                const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
                 if (typeof sessionPromptHandler !== "function") {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(503);
@@ -856,10 +860,9 @@ function createRequestHandler(instanceId) {
                         : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again.",
                 }));
             } catch (e) {
-                const detail = e instanceof Error ? e.message : String(e || "");
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: detail || "Bad request." }));
+                res.end(JSON.stringify({ error: e.message }));
             }
             return;
         }

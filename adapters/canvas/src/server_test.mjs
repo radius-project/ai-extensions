@@ -1,16 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
-    canReuseModeledGraph,
-    graphDefinitionHash,
-    isCurrentSourceRefToken,
-    resolveDeployStatus,
-    isReplicationLagError,
     buildRoleAssignmentArgs,
+    buildAzureCliAssistPrompt,
+    canReuseModeledGraph,
     findFederatedCredentialNameCollision,
-    pickAksResourceGroup,
+    graphDefinitionHash,
     isCrossSiteMutation,
     isCliCommandMissing,
-    buildAzureCliAssistPrompt,
+    isCurrentSourceRefToken,
+    isReplicationLagError,
+    pickAksResourceGroup,
+    resolveDeployStatus,
 } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
@@ -234,14 +234,17 @@ describe("pickAksResourceGroup", () => {
 describe("isCliCommandMissing", () => {
     it("recognizes common missing-command errors", () => {
         expect(isCliCommandMissing("spawn az ENOENT")).toBe(true);
+        expect(isCliCommandMissing("spawn az.exe ENOENT")).toBe(true);
         expect(isCliCommandMissing("/bin/sh: az: command not found")).toBe(true);
         expect(isCliCommandMissing("'az' is not recognized as an internal or external command")).toBe(true);
-        expect(isCliCommandMissing("No such file or directory")).toBe(true);
     });
 
-    it("does not treat ordinary auth failures as a missing CLI", () => {
+    it("does not treat ordinary auth or runtime failures as a missing CLI", () => {
         expect(isCliCommandMissing("Please run 'az login' to setup account.")).toBe(false);
         expect(isCliCommandMissing("ERROR: The subscription was not found.")).toBe(false);
+        expect(isCliCommandMissing("Failed to read token cache: No such file or directory")).toBe(false);
+        expect(isCliCommandMissing("Token cache failed with ENOENT")).toBe(false);
+        expect(isCliCommandMissing("helper: command not found")).toBe(false);
         expect(isCliCommandMissing("")).toBe(false);
     });
 });
@@ -252,13 +255,15 @@ describe("buildAzureCliAssistPrompt", () => {
             action: "login",
             tenantId: "11111111-2222-3333-4444-555555555555",
         });
-        expect(prompt).toContain("Please run `az login --tenant 11111111-2222-3333-4444-555555555555`");
+        expect(prompt).toContain("Run `az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555`");
+        expect(prompt).toContain("remove COPILOT_AGENT_SESSION_ID from the az process environment");
+        expect(prompt).toContain("show me the device code and sign-in URL");
         expect(prompt).toContain("click Verify Credentials again");
     });
 
-    it("falls back to a plain az login prompt for invalid tenant ids", () => {
+    it("falls back to tenant-agnostic device-code login for invalid tenant ids", () => {
         const prompt = buildAzureCliAssistPrompt({ action: "login", tenantId: "not-a-guid" });
-        expect(prompt).toContain("Please run `az login`");
+        expect(prompt).toContain("Run `az login --use-device-code`");
         expect(prompt).not.toContain("--tenant not-a-guid");
     });
 
