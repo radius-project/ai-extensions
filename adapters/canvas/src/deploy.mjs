@@ -6,6 +6,61 @@
 
 import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
+import { pullOciArtifactFiles, loadGhKeyringCredentials, DEPLOY_STATUS_ARTIFACT_TYPE } from "./ghcr.mjs";
+
+// File names the producer's publish-deploy-status action packs into the GHCR
+// deploy-status artifact (radius-project/radius PR #12591). These double as the
+// branch file names on the legacy radius-deploy-status orphan branch.
+export const DEPLOY_STATUS_FILES = {
+    graph: "deploy-graph.json",
+    progress: "deploy-progress.log",
+    activity: "deploy-activity.log",
+    controlPlane: "deploy-controlplane.log",
+    state: "deploy-state.txt",
+};
+
+// deriveGraphRegistry - mirror the producer's registry resolution so the reader
+// pulls from the exact GHCR repo the deploy published to:
+//   1. an explicit graph registry wins (RADIUS_GRAPH_REGISTRY on the producer),
+//   2. else derive from the state registry: swap the first "radius-state" for
+//      "radius-graph", or append "-graph" when the token is absent.
+// Returns "" when neither input is available (GHCR read is then skipped).
+export function deriveGraphRegistry(stateRegistry, graphRegistryOverride) {
+    const override = (graphRegistryOverride || "").trim();
+    if (override) return override;
+    const state = (stateRegistry || "").trim();
+    if (!state) return "";
+    if (state.includes("radius-state")) return state.replace("radius-state", "radius-graph");
+    return `${state}-graph`;
+}
+
+// deriveGraphTag - mirror the producer's tag derivation:
+//   RADIUS_GRAPH_TAG wins; else "<environment>-<app>-latest", lowercased with
+//   every run of characters outside [a-z0-9._-] collapsed to '-', leading and
+//   trailing '-' stripped, capped at 80 chars (falling back to "deploy-status"
+//   when the base sanitizes to empty).
+export function deriveGraphTag(environment, app, tagOverride) {
+    const override = (tagOverride || "").trim();
+    if (override) return override;
+    const base = `${environment || ""}-${app || ""}`
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^-+/, "")
+        .replace(/-+$/, "")
+        .slice(0, 80);
+    return `${base || "deploy-status"}-latest`;
+}
+
+// appNameForGraphTag - replicate the producer's app-name extraction used to
+// build the tag: the first `name: '...'` literal in the app bicep (single
+// quotes, matching its `grep -oP "name:\\s*'\\K[^']+" | head -1`). Returns ""
+// when no literal name is present.
+export function appNameForGraphTag(source) {
+    if (!source) return "";
+    const match = source.match(/name:\s*'([^']+)'/);
+    return match ? match[1] : "";
+}
+
 
 export function ghJson(args, fallback = null, timeout = 15000) {
     return new Promise((resolve) => {
@@ -94,6 +149,126 @@ export function fetchDeployGraph(repo) {
     return ghApiGetContent(`/repos/${repo}/contents/deploy-graph.json?ref=radius-deploy-status`, 12000)
         .then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
 }
+
+// createDeployStatusReader - GHCR-first reader for the deployed graph/status
+// artifact, with a transparent fallback to the legacy radius-deploy-status
+// branch files. The deployed graph (deploy-graph.json) is the real payload the
+// producer publishes to GHCR; the reader pulls the OCI artifact once per TTL
+// window (cached, single-flight) and, when the tag is missing/unconfigured/
+// unauthorized/malformed, reads the same file from the branch instead.
+//
+// Only deploy-graph.json is treated as authoritative from GHCR — the sibling
+// log files the producer packs there are status snapshots, so live-log/state
+// reads stay on the branch (see graph() vs the branch fetch helpers above).
+export function createDeployStatusReader(options = {}) {
+    const {
+        repo,
+        environment = "",
+        app = "",
+        stateRegistry = "",
+        graphRegistry = "",
+        graphTag = "",
+        credentials,
+        loadCredentials = loadGhKeyringCredentials,
+        fetchImpl,
+        registryOrigin,
+        pullArtifact = pullOciArtifactFiles,
+        getBranchContent = ghApiGetContent,
+        ttlMs = 5000,
+        now = () => Date.now(),
+    } = options;
+
+    const registry = deriveGraphRegistry(stateRegistry, graphRegistry);
+    // Only derive a tag when we can build the producer's exact
+    // "<environment>-<app>-latest" (both names present) or an explicit override
+    // is given. A partial tag (e.g. "<environment>-latest") can never match the
+    // producer and would cause repeated GHCR misses; leave it empty so the
+    // reader reports "unconfigured" and cleanly uses the branch fallback.
+    const tag = registry && (graphTag.trim() || (environment.trim() && app.trim()))
+        ? deriveGraphTag(environment, app, graphTag)
+        : "";
+
+    let cache = null;      // { at, result }
+    let inflight = null;   // Promise<result>
+    let credPromise = null;
+
+    function resolveCredentials() {
+        if (credentials) return Promise.resolve(credentials);
+        if (!credPromise) credPromise = Promise.resolve().then(loadCredentials);
+        return credPromise;
+    }
+
+    // pull - fetch (and cache) the GHCR artifact, classifying the outcome:
+    //   ok | missing | malformed | auth | error | unconfigured
+    async function pull() {
+        if (!registry || !tag) {
+            return { status: "unconfigured", files: null, registry, tag, error: null };
+        }
+        if (cache && (now() - cache.at) < ttlMs) return cache.result;
+        if (inflight) return inflight;
+        inflight = (async () => {
+            let result;
+            try {
+                const resolvedCreds = await resolveCredentials();
+                const artifact = await pullArtifact({
+                    registry, tag, credentials: resolvedCreds, fetchImpl, registryOrigin,
+                });
+                if (!artifact) {
+                    result = { status: "missing", files: null, registry, tag, error: null };
+                } else if (artifact.artifactType && artifact.artifactType !== DEPLOY_STATUS_ARTIFACT_TYPE) {
+                    // The tag resolved to an artifact of a different type (e.g. the
+                    // registry was misconfigured to a non-deploy-status package).
+                    // Treat it as malformed and fall back to the branch rather than
+                    // trusting an unexpected payload.
+                    result = { status: "malformed", files: artifact.files || {}, registry, tag, error: null };
+                } else if (!artifact.files || typeof artifact.files[DEPLOY_STATUS_FILES.graph] !== "string") {
+                    result = { status: "malformed", files: artifact.files || {}, registry, tag, error: null };
+                } else {
+                    result = { status: "ok", files: artifact.files, registry, tag, error: null };
+                }
+            } catch (e) {
+                result = {
+                    status: (e && e.code === "GHCR_AUTH") ? "auth" : "error",
+                    files: null, registry, tag, error: e,
+                };
+            }
+            cache = { at: now(), result };
+            inflight = null;
+            return result;
+        })();
+        return inflight;
+    }
+
+    function branchGraph() {
+        return getBranchContent(`/repos/${repo}/contents/${DEPLOY_STATUS_FILES.graph}?ref=radius-deploy-status`, 12000)
+            .then(t => { if (!t) return null; try { return JSON.parse(t); } catch (e) { return null; } });
+    }
+
+    return {
+        registry,
+        tag,
+        pull,
+        status: async () => (await pull()).status,
+        // graph - return the deployed application graph, preferring the GHCR
+        // artifact and falling back to the branch. Resolves
+        // { graph, source: "ghcr"|"branch"|"none", status }.
+        async graph() {
+            const result = await pull();
+            if (result.status === "ok") {
+                try {
+                    return { graph: JSON.parse(result.files[DEPLOY_STATUS_FILES.graph]), source: "ghcr", status: "ok" };
+                } catch (e) {
+                    // Manifest advertised the file but its bytes weren't valid JSON.
+                    const graph = await branchGraph();
+                    return { graph, source: graph ? "branch" : "none", status: "malformed" };
+                }
+            }
+            const graph = await branchGraph();
+            return { graph, source: graph ? "branch" : "none", status: result.status };
+        },
+    };
+}
+
 
 export function normalizeDeployedGraph(resources) {
     if (!Array.isArray(resources) || resources.length < 2) return resources;
