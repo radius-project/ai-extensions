@@ -294,7 +294,7 @@ function sha256(bytes) {
 // Build a pull harness that serves an OCI artifact whose layers carry the given
 // { title: content } files (title => org.opencontainers.image.title annotation),
 // mirroring what `oras push <file>:<mediaType>` records.
-function createPullHarness({ files = {}, manifestStatus = 200, tokenStatus = 200 } = {}) {
+function createPullHarness({ files = {}, manifestStatus = 200, tokenStatus = 200, asIndex = false } = {}) {
     const blobs = new Map(); // digest -> content
     const layers = [];
     for (const [title, content] of Object.entries(files)) {
@@ -314,6 +314,15 @@ function createPullHarness({ files = {}, manifestStatus = 200, tokenStatus = 200
         artifactType: DEPLOY_STATUS_ARTIFACT_TYPE,
         config: { mediaType: "application/vnd.oci.empty.v1+json", digest: sha256(Buffer.from("{}")), size: 2 },
         layers,
+    };
+    // When asIndex, the tag resolves to an image index that points at the concrete
+    // manifest by digest; the reader must follow it to reach the layers.
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    const manifestDigest = sha256(manifestBytes);
+    const index = {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.index.v1+json",
+        manifests: [{ mediaType: "application/vnd.oci.image.manifest.v1+json", digest: manifestDigest, size: manifestBytes.byteLength }],
     };
     const calls = [];
 
@@ -338,6 +347,9 @@ function createPullHarness({ files = {}, manifestStatus = 200, tokenStatus = 200
         if (url.origin === "https://registry.test" && manifestMatch) {
             if (manifestStatus === 404) return json({ errors: [] }, { status: 404 });
             if (manifestStatus === 401 || manifestStatus === 403) return json({ errors: [] }, { status: manifestStatus });
+            // Serve the index for the tag reference; serve the concrete manifest by digest.
+            const reference = decodeURIComponent(manifestMatch[1]);
+            if (asIndex && reference !== manifestDigest) return json(index);
             return json(manifest);
         }
         const blobMatch = url.pathname.match(/\/blobs\/(sha256:[a-f0-9]+)$/);
@@ -372,6 +384,17 @@ test("pullOciArtifactFiles returns files keyed by their title annotation", async
     assert.equal(result.artifactType, DEPLOY_STATUS_ARTIFACT_TYPE);
     assert.equal(result.files["deploy-graph.json"], '{"resources":[]}');
     assert.equal(result.files["deploy-state.txt"], "state=succeeded\n");
+});
+
+test("pullOciArtifactFiles follows an image index to the concrete manifest", async () => {
+    const harness = createPullHarness({
+        asIndex: true,
+        files: { "deploy-graph.json": '{"resources":[{"name":"web"}]}' },
+    });
+
+    const result = await pullOciArtifactFiles({ ...pullOptions, fetchImpl: harness.fetchImpl });
+
+    assert.equal(result.files["deploy-graph.json"], '{"resources":[{"name":"web"}]}');
 });
 
 test("pullOciArtifactFiles returns null when the tag is missing", async () => {

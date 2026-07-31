@@ -6,7 +6,7 @@
 
 import { ghApiGetContent, cliExec } from "./gh.mjs";
 import { generatePortalUrl } from "./infra.mjs";
-import { pullOciArtifactFiles, loadGhKeyringCredentials } from "./ghcr.mjs";
+import { pullOciArtifactFiles, loadGhKeyringCredentials, DEPLOY_STATUS_ARTIFACT_TYPE } from "./ghcr.mjs";
 
 // File names the producer's publish-deploy-status action packs into the GHCR
 // deploy-status artifact (radius-project/radius PR #12591). These double as the
@@ -179,7 +179,14 @@ export function createDeployStatusReader(options = {}) {
     } = options;
 
     const registry = deriveGraphRegistry(stateRegistry, graphRegistry);
-    const tag = registry ? deriveGraphTag(environment, app, graphTag) : "";
+    // Only derive a tag when we can build the producer's exact
+    // "<environment>-<app>-latest" (both names present) or an explicit override
+    // is given. A partial tag (e.g. "<environment>-latest") can never match the
+    // producer and would cause repeated GHCR misses; leave it empty so the
+    // reader reports "unconfigured" and cleanly uses the branch fallback.
+    const tag = registry && (graphTag.trim() || (environment.trim() && app.trim()))
+        ? deriveGraphTag(environment, app, graphTag)
+        : "";
 
     let cache = null;      // { at, result }
     let inflight = null;   // Promise<result>
@@ -208,6 +215,12 @@ export function createDeployStatusReader(options = {}) {
                 });
                 if (!artifact) {
                     result = { status: "missing", files: null, registry, tag, error: null };
+                } else if (artifact.artifactType && artifact.artifactType !== DEPLOY_STATUS_ARTIFACT_TYPE) {
+                    // The tag resolved to an artifact of a different type (e.g. the
+                    // registry was misconfigured to a non-deploy-status package).
+                    // Treat it as malformed and fall back to the branch rather than
+                    // trusting an unexpected payload.
+                    result = { status: "malformed", files: artifact.files || {}, registry, tag, error: null };
                 } else if (!artifact.files || typeof artifact.files[DEPLOY_STATUS_FILES.graph] !== "string") {
                     result = { status: "malformed", files: artifact.files || {}, registry, tag, error: null };
                 } else {

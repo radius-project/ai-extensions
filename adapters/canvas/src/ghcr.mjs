@@ -428,24 +428,48 @@ export async function pullOciArtifactFiles({
     });
 
     const encodedPath = registryPath(parsed.repositoryPath);
-    const manifestResponse = await registryFetch(
-        fetchImpl,
-        parsed.registryOrigin,
-        bearerToken,
-        `/v2/${encodedPath}/manifests/${encodeURIComponent(tag)}`,
-        {
-            headers: { Accept: `${OCI_MANIFEST_MEDIA_TYPE}, ${OCI_IMAGE_INDEX_MEDIA_TYPE}` },
-        },
-    );
-    if (manifestResponse.status === 404) return null;
-    if (manifestResponse.status === 401 || manifestResponse.status === 403) {
-        throw packageAuthError(`GHCR rejected package access for ${parsed.repositoryPath}`);
-    }
-    if (!manifestResponse.ok) {
-        throw new Error(`Failed to read GHCR manifest "${tag}" (HTTP ${manifestResponse.status})${await responseDetail(manifestResponse)}`);
+
+    // fetchManifest - GET a manifest/index by reference (tag or digest). Returns
+    // { manifest } on success, or null on 404 (so a missing tag is a clean
+    // fallback signal rather than an error).
+    async function fetchManifest(reference) {
+        const response = await registryFetch(
+            fetchImpl,
+            parsed.registryOrigin,
+            bearerToken,
+            `/v2/${encodedPath}/manifests/${reference}`,
+            {
+                headers: { Accept: `${OCI_MANIFEST_MEDIA_TYPE}, ${OCI_IMAGE_INDEX_MEDIA_TYPE}` },
+            },
+        );
+        if (response.status === 404) return null;
+        if (response.status === 401 || response.status === 403) {
+            throw packageAuthError(`GHCR rejected package access for ${parsed.repositoryPath}`);
+        }
+        if (!response.ok) {
+            throw new Error(`Failed to read GHCR manifest "${reference}" (HTTP ${response.status})${await responseDetail(response)}`);
+        }
+        return response.json();
     }
 
-    const manifest = await manifestResponse.json();
+    let manifest = await fetchManifest(encodeURIComponent(tag));
+    if (!manifest) return null;
+
+    // GHCR may answer with an image index (fat manifest) rather than the artifact
+    // manifest directly. Follow the first non-attestation child descriptor to the
+    // concrete manifest that actually carries the layers.
+    if (manifest.mediaType === OCI_IMAGE_INDEX_MEDIA_TYPE || Array.isArray(manifest.manifests)) {
+        const children = Array.isArray(manifest.manifests) ? manifest.manifests : [];
+        // Skip referrers/attestation entries (they annotate a subject digest).
+        const child = children.find((entry) => entry?.digest && !entry?.annotations?.["vnd.docker.reference.type"])
+            || children.find((entry) => entry?.digest);
+        if (!child) {
+            return { files: {}, manifest, artifactType: manifest.artifactType || "" };
+        }
+        manifest = await fetchManifest(child.digest);
+        if (!manifest) return null;
+    }
+
     const layers = Array.isArray(manifest.layers) ? manifest.layers : [];
     const files = {};
     for (const layer of layers) {

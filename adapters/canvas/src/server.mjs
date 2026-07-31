@@ -95,14 +95,44 @@ export function isCurrentSourceRefToken(state, view, token) {
 // artifact the deploy published. Falls back to the radius-deploy-status branch
 // when the environment/app/registry can't be resolved or the artifact is
 // absent.
-function deployStatusReaderFromState(state, repo) {
+//
+// The app name is required to build the producer's "<environment>-<app>-latest"
+// tag. It's populated during the deploy flow, but on a fresh session (or when
+// the Deployed tab is opened without first deploying) it's derived here from the
+// repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
+// — and cached back into state so GHCR retrieval works across reloads.
+async function deployStatusReaderFromState(state, repo, branch) {
     const environment = state?.deployEnvName || state?.envName || "";
-    const app = state?.deployAppName || "";
+    let app = state?.deployAppName || "";
+    if (!app && repo && environment) {
+        app = await resolveGraphAppName(repo, branch || state?.deployingBranch || state?.graphBranch || "");
+        if (app && state) state.deployAppName = app;
+    }
     let stateRegistry = "";
     if (repo && environment) {
         try { stateRegistry = stateRegistryForEnvironment(repo, environment); } catch { stateRegistry = ""; }
     }
     return createDeployStatusReader({ repo, environment, app, stateRegistry });
+}
+
+// resolveGraphAppName - extract the Radius app name for the GHCR graph tag using
+// the producer's exact rule (the first `name: '...'` literal in app.bicep). This
+// differs from resolveRepoAppName, which prefers the applications resource name
+// and falls back to the repo basename; the tag must match the producer's grep
+// byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
+async function resolveGraphAppName(repo, branch) {
+    const ref = branch || "main";
+    for (const p of [".radius/app.bicep", "app.bicep"]) {
+        let raw = "";
+        try { raw = await ghOrThrow(["api", `/repos/${repo}/contents/${p}?ref=${ref}`, "--jq", ".content"]); }
+        catch { raw = ""; }
+        if (!raw) continue;
+        let decoded = "";
+        try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
+        const name = appNameForGraphTag(decoded);
+        if (name) return name;
+    }
+    return "";
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -2545,7 +2575,7 @@ function createRequestHandler(instanceId) {
             // Prefer the deployed graph published to GHCR by the deploy workflow
             // (radius-project/radius PR #12591), falling back to the legacy
             // radius-deploy-status branch and then any graph captured in state.
-            const reader = deployStatusReaderFromState(entry?.state, repo);
+            const reader = await deployStatusReaderFromState(entry?.state, repo);
             let graph = (await reader.graph()).graph;
             if (!graph && entry?.state?.deployedGraph) graph = entry.state.deployedGraph;
             let resources = Array.isArray(graph) ? graph : (graph?.resources || []);
@@ -3879,7 +3909,7 @@ function createRequestHandler(instanceId) {
                                     // radius-deploy-status branch when the artifact is
                                     // absent (older producers / git state backend).
                                     addLog('🗺  Retrieving deployed application graph…');
-                                    const graphReader = deployStatusReaderFromState(entry.state, repo);
+                                    const graphReader = await deployStatusReaderFromState(entry.state, repo, branch);
                                     let deployed = null;
                                     let graphSource = 'none';
                                     let graphStatus = null;

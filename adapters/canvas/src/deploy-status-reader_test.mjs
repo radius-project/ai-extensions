@@ -142,6 +142,59 @@ describe("createDeployStatusReader", () => {
         expect(source).toBe("none");
     });
 
+    it("reports malformed when the artifact type is unexpected", async () => {
+        let branchCalls = 0;
+        const reader = createDeployStatusReader({
+            ...READER_BASE,
+            // A valid-looking graph payload but tagged as a different artifact type
+            // (e.g. the registry was pointed at a non-deploy-status package).
+            pullArtifact: async () => ({
+                artifactType: "application/vnd.oci.image.manifest.v1+json",
+                files: { "deploy-graph.json": '{"resources":[]}' },
+            }),
+            getBranchContent: async () => { branchCalls++; return Buffer.from('{"resources":[{"name":"b"}]}'); },
+        });
+        const { status, source, graph } = await reader.graph();
+        expect(status).toBe("malformed");
+        expect(source).toBe("branch");
+        expect(graph).toEqual({ resources: [{ name: "b" }] });
+        expect(branchCalls).toBe(1);
+    });
+
+    it("stays unconfigured (branch only) when the app name is missing and no tag override", async () => {
+        let pullCalls = 0;
+        const reader = createDeployStatusReader({
+            repo: "acme/app",
+            environment: "dev",
+            app: "",
+            stateRegistry: "ghcr.io/acme/app-radius-state-dev-abc",
+            pullArtifact: async () => { pullCalls++; return null; },
+            getBranchContent: async () => Buffer.from('{"resources":[]}'),
+        });
+        expect(reader.registry).toBe("ghcr.io/acme/app-radius-graph-dev-abc");
+        expect(reader.tag).toBe("");
+        const { status, source } = await reader.graph();
+        expect(status).toBe("unconfigured");
+        expect(source).toBe("branch");
+        expect(pullCalls).toBe(0);
+    });
+
+    it("derives a tag from a graphTag override even when the app name is missing", async () => {
+        const reader = createDeployStatusReader({
+            repo: "acme/app",
+            environment: "dev",
+            app: "",
+            graphTag: "pinned-tag",
+            stateRegistry: "ghcr.io/acme/app-radius-state-dev-abc",
+            pullArtifact: async () => ({ files: { "deploy-graph.json": "[]" } }),
+            getBranchContent: async () => null,
+        });
+        expect(reader.tag).toBe("pinned-tag");
+        const { status, source } = await reader.graph();
+        expect(status).toBe("ok");
+        expect(source).toBe("ghcr");
+    });
+
     it("skips GHCR and reads the branch when no registry can be derived", async () => {
         let pullCalls = 0;
         const reader = createDeployStatusReader({
