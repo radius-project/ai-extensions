@@ -410,6 +410,21 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("params.appName !== undefined");
     });
 
+    it("prompts to start Azure login through the Copilot session when no session is active", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("data.code === 'az-login-required'");
+        expect(html).toContain("confirm('no active Azure session. Would you like to login?')");
+        expect(html).toContain("requestAzureCliAssist('login'");
+        expect(html).toContain("/api/azure-cli-assist");
+    });
+
+    it("offers Azure CLI install help when the az command is missing", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("data.code === 'az-cli-missing'");
+        expect(html).toContain("Azure CLI is not installed. Would you like Copilot to help install it?");
+        expect(html).toContain("requestAzureCliAssist('install'");
+    });
+
     it("surfaces repo admin access at open: fetches identity with ?repo and renders repoAccess", () => {
         // Comment #9: the repo admin preflight was submit-only, so a write/maintain
         // developer only hit the 403 after filling the whole form. The client now

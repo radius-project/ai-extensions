@@ -32,6 +32,7 @@ import {
     getOrCreateServer,
     getLastWebviewActivityAt,
     setAppBicepHandoff,
+    setSessionPromptHandler,
     setOpenSourceHandler,
 } from "./server.mjs";
 import {
@@ -741,6 +742,10 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
+
+// Let server routes ask the Copilot session to perform follow-up actions the
+// canvas itself cannot run interactively, such as Azure CLI login/install help.
+setSessionPromptHandler((prompt) => session.send(String(prompt || "")));
 
 // Wire the "View source code" / "View app definition" click for local-workspace
 // graphs to the Copilot editor canvas (side pane). The graph + line numbers are

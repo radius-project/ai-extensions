@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation } from "./server.mjs";
+import {
+    resolveDeployStatus,
+    isReplicationLagError,
+    buildRoleAssignmentArgs,
+    findFederatedCredentialNameCollision,
+    pickAksResourceGroup,
+    isCrossSiteMutation,
+    isCliCommandMissing,
+    buildAzureCliAssistPrompt,
+} from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -180,5 +189,43 @@ describe("pickAksResourceGroup", () => {
 
     it("ignores non-string cluster RG values", () => {
         expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+    });
+});
+
+describe("isCliCommandMissing", () => {
+    it("recognizes common missing-command errors", () => {
+        expect(isCliCommandMissing("spawn az ENOENT")).toBe(true);
+        expect(isCliCommandMissing("/bin/sh: az: command not found")).toBe(true);
+        expect(isCliCommandMissing("'az' is not recognized as an internal or external command")).toBe(true);
+        expect(isCliCommandMissing("No such file or directory")).toBe(true);
+    });
+
+    it("does not treat ordinary auth failures as a missing CLI", () => {
+        expect(isCliCommandMissing("Please run 'az login' to setup account.")).toBe(false);
+        expect(isCliCommandMissing("ERROR: The subscription was not found.")).toBe(false);
+        expect(isCliCommandMissing("")).toBe(false);
+    });
+});
+
+describe("buildAzureCliAssistPrompt", () => {
+    it("builds a login prompt with the requested tenant when it is a valid guid", () => {
+        const prompt = buildAzureCliAssistPrompt({
+            action: "login",
+            tenantId: "11111111-2222-3333-4444-555555555555",
+        });
+        expect(prompt).toContain("Please run `az login --tenant 11111111-2222-3333-4444-555555555555`");
+        expect(prompt).toContain("click Verify Credentials again");
+    });
+
+    it("falls back to a plain az login prompt for invalid tenant ids", () => {
+        const prompt = buildAzureCliAssistPrompt({ action: "login", tenantId: "not-a-guid" });
+        expect(prompt).toContain("Please run `az login`");
+        expect(prompt).not.toContain("--tenant not-a-guid");
+    });
+
+    it("builds install guidance when Azure CLI is missing", () => {
+        const prompt = buildAzureCliAssistPrompt({ action: "install" });
+        expect(prompt).toContain("Azure CLI is not installed");
+        expect(prompt).toContain("install Azure CLI");
     });
 });

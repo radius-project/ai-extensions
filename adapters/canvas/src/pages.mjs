@@ -3106,6 +3106,25 @@ function credVerifyError(msg) {
     st.innerHTML = '<span style="color:var(--rad-danger);">' + escapeHtmlClient(msg) + '</span>';
 }
 
+function credVerifyInfo(msg) {
+    var st = document.getElementById('cred-verify-status');
+    st.style.display = 'block';
+    st.innerHTML = '<span>' + escapeHtmlClient(msg) + '</span>';
+}
+
+function requestAzureCliAssist(action, tenantId) {
+    fetch('/api/azure-cli-assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action, tenantId: tenantId || '' })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data && data.error) { credVerifyError(data.error); return; }
+        credVerifyInfo((data && data.message) || 'Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again.');
+    }).catch(function(err) {
+        credVerifyError('Error: ' + err.message);
+    });
+}
+
 document.getElementById('btn-verify-azure').addEventListener('click', function() {
     var btn = this;
     var profileName = document.getElementById('cred-name-input').value.trim();
@@ -3122,7 +3141,18 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
     fetch('/api/verify-azure-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId }) })
         .then(function(r) { return r.json(); }).then(function(data) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
-            if (data.error) { credVerifyError(data.error); return; }
+            if (data.error) {
+                if (data.code === 'az-login-required' && confirm('no active Azure session. Would you like to login?')) {
+                    requestAzureCliAssist('login', data.tenantId || tenantId);
+                    return;
+                }
+                if (data.code === 'az-cli-missing' && confirm('Azure CLI is not installed. Would you like Copilot to help install it?')) {
+                    requestAzureCliAssist('install', data.tenantId || tenantId);
+                    return;
+                }
+                credVerifyError(data.error);
+                return;
+            }
             if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
             markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId, subscriptionName: data.subscriptionName || '' });
