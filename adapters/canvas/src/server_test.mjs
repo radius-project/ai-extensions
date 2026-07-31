@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+    canReuseModeledGraph,
+    graphDefinitionHash,
+    isCurrentSourceRefToken,
     resolveDeployStatus,
     isReplicationLagError,
     buildRoleAssignmentArgs,
@@ -14,6 +17,42 @@ import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-pr
 describe("resolveDeployStatus", () => {
     it("returns success when the run concluded with success", () => {
         expect(resolveDeployStatus({ runConclusion: "success", runStatus: "completed", state: "pending" })).toBe("success");
+    });
+
+    describe("modeled graph refresh cache", () => {
+        it("hashes the application definition deterministically", () => {
+            expect(graphDefinitionHash("resource app 'Radius.Core/applications@2023-10-01-preview' = {}"))
+                .toBe(graphDefinitionHash("resource app 'Radius.Core/applications@2023-10-01-preview' = {}"));
+            expect(graphDefinitionHash("one")).not.toBe(graphDefinitionHash("two"));
+            expect(graphDefinitionHash("app", "config-one")).not.toBe(graphDefinitionHash("app", "config-two"));
+        });
+
+        describe("graph diff request identity", () => {
+            it("accepts results only for the current diff context", () => {
+                const state = {
+                    sourceRefContexts: {
+                        diff: { token: "diff|octo/app|main...new" },
+                    },
+                };
+                expect(isCurrentSourceRefToken(state, "diff", "diff|octo/app|main...new")).toBe(true);
+                expect(isCurrentSourceRefToken(state, "diff", "diff|octo/app|main...old")).toBe(false);
+                expect(isCurrentSourceRefToken(state, "diff", null)).toBe(false);
+            });
+        });
+
+        it("reuses resources only for the same repo, branch, and definition", () => {
+            const hash = graphDefinitionHash("app");
+            const state = {
+                graphLoaded: true,
+                graphTargetRepo: "octo/app",
+                graphBranch: "main",
+                graphDefinitionHash: hash,
+                graphResources: [],
+            };
+            expect(canReuseModeledGraph(state, "octo/app", "main", hash)).toBe(true);
+            expect(canReuseModeledGraph(state, "octo/app", "feature", hash)).toBe(false);
+            expect(canReuseModeledGraph(state, "octo/app", "main", graphDefinitionHash("changed"))).toBe(false);
+        });
     });
 
     it("returns pending when the run is still in progress (no conclusion yet)", () => {

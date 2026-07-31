@@ -10,6 +10,7 @@
 
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
+import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
   fetchBicepFromRepo,
@@ -44,7 +45,7 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath,
 } from "./workspace.mjs";
-import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
+import { radArtifactsDirForSelection, radArtifactsFingerprint } from "./remote-rad-artifacts.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
   generateAzureOIDC, validateAzureCredentials, generateAWSOIDC,
@@ -69,6 +70,22 @@ import {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map();
+
+export function graphDefinitionHash(content, artifactsFingerprint = "") {
+    return createHash("sha256").update(content).update("\0").update(artifactsFingerprint).digest("hex");
+}
+
+export function canReuseModeledGraph(state, repo, branch, definitionHash) {
+    return state?.graphLoaded === true
+        && state.graphTargetRepo === repo
+        && state.graphBranch === branch
+        && state.graphDefinitionHash === definitionHash
+        && Array.isArray(state.graphResources);
+}
+
+export function isCurrentSourceRefToken(state, view, token) {
+    return !!token && state?.sourceRefContexts?.[view]?.token === token;
+}
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
 // and deploy pages snappy. Invalidated on environment creation.
@@ -2645,6 +2662,9 @@ function createRequestHandler(instanceId) {
                 const repo = data.repo || '';
                 const entry = servers.get(instanceId);
                 const branch = data.branch || defaultBranchForState(entry?.state);
+                const requestGeneration = entry
+                    ? (entry.state.graphBuildGeneration = (entry.state.graphBuildGeneration || 0) + 1)
+                    : 0;
                 if (!repo) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
@@ -2685,10 +2705,33 @@ function createRequestHandler(instanceId) {
 
                 const graphJsonPath = (entry && selection.fromWorkspace) ? workspaceGraphJsonPath(entry.state, selection.bicepPath) : "";
                 const { dir: radArtifactsDir, remote: radArtifactsRemote } = await radArtifactsDirForSelection({ isLocal: !!(entry && selection.fromWorkspace), state: entry?.state, github, repo, branch, bicepRepoPath: selection.bicepPath || ".radius/app.bicep", log: addProgress });
+                const definitionHash = graphDefinitionHash(content, radArtifactsFingerprint(radArtifactsDir));
+                if (entry && entry.state.graphBuildGeneration !== requestGeneration) {
+                    if (radArtifactsRemote && radArtifactsDir) {
+                        try { rmSync(radArtifactsDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+                    }
+                    res.writeHead(409);
+                    res.end(JSON.stringify({ stale: true }));
+                    return;
+                }
+                if (data.refresh && entry && canReuseModeledGraph(entry.state, repo, branch, definitionHash)) {
+                    if (radArtifactsRemote && radArtifactsDir) rmSync(radArtifactsDir, { recursive: true, force: true });
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ reload: false, resources: entry.state.graphResources, cached: true }));
+                    return;
+                }
+
                 const resources = await buildGraphViaRad(content, selection.bicepPath || ".radius/app.bicep", { log: addProgress, saveGraphJsonTo: graphJsonPath, radArtifactsDir, cleanupRadArtifactsDir: radArtifactsRemote });
                 addProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
                 if (entry) {
+                    if (entry.state.graphBuildGeneration !== requestGeneration) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ stale: true }));
+                        return;
+                    }
                     if (!setSourceRefResources(entry, "graph", resources, { repo, branch }, sourceRefContext.token)) {
                         res.setHeader("Content-Type", "application/json");
                         res.writeHead(409);
@@ -2701,10 +2744,12 @@ function createRequestHandler(instanceId) {
                     // actually supplied the app.bicep content (file is on disk).
                     entry.state.graphFromWorkspace = selection.fromWorkspace;
                     entry.state.activeGraphView = "graph";
+                    entry.state.graphLoaded = true;
+                    entry.state.graphDefinitionHash = definitionHash;
                 }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
-                res.end(JSON.stringify({ reload: true }));
+                res.end(JSON.stringify({ reload: !data.refresh, resources }));
             } catch (e) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
@@ -3260,11 +3305,11 @@ function createRequestHandler(instanceId) {
         if (pathname === "/api/diff-branches" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
+            let sourceRefContext = null;
             try {
                 const data = JSON.parse(body);
                 const repo = data.repo || '';
                 const entry = servers.get(instanceId);
-                let sourceRefContext = null;
                 if (entry) {
                     sourceRefContext = prepareSourceRefResources(entry, "diff", {
                         repo,
@@ -3274,6 +3319,7 @@ function createRequestHandler(instanceId) {
                     entry.state.diffBase = data.base;
                     entry.state.diffHead = data.head;
                     entry.state.diffTargetRepo = repo;
+                    delete entry.state.diffError;
                 }
 
                 // Fetch the committed/persisted app.bicep on each branch. app.bicep
@@ -3319,15 +3365,20 @@ function createRequestHandler(instanceId) {
                     entry.state.diffHeadGenerated = false;
                     entry.state.page = 'graphDiff';
                     entry.state.activeGraphView = "diff";
+                    delete entry.state.diffError;
                 }
 
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ message: `Comparing ${data.base} → ${data.head}`, reload: true }));
             } catch (e) {
+                const entry = servers.get(instanceId);
+                if (entry && isCurrentSourceRefToken(entry.state, "diff", sourceRefContext?.token)) {
+                    entry.state.diffError = String(e?.message ?? e);
+                }
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
+                res.end(JSON.stringify({ error: String(e?.message ?? e) }));
             }
             return;
         }
