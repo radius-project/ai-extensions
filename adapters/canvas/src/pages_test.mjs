@@ -93,10 +93,23 @@ describe("graphHeader / graphHeaderClose", () => {
 describe("graphPage — empty resources (initial) branch", () => {
     const html = graphPage({ contextRepo: "octo/app", contextBranch: "dev" });
 
-    it("posts to /api/load-graph and reacts to reload/error only", () => {
+    it("posts to /api/load-graph and keeps retrying while app.bicep is being generated", () => {
         expect(html).toContain("/api/load-graph");
+        expect(html).toContain("requestGraphLoad()");
+        expect(html).toContain("window.radiusGraphRetryTimer");
         expect(html).toContain("d.reload");
         expect(html).toContain("d.error");
+    });
+
+    it("renders a staged progress bar with duration guidance and terminal states", () => {
+        expect(html).toContain('id="progress-stage"');
+        expect(html).toContain('id="progress-percent"');
+        expect(html).toContain('id="progress-bar-fill"');
+        expect(html).toContain('id="progress-eta"');
+        expect(html).toContain("Usually completes in about 5 minutes.");
+        expect(html).toContain("Math.min(72, percent)");
+        expect(html).toContain("setProgressState(100");
+        expect(html).toContain("Graph generation failed");
     });
 
     it("emits none of the removed generated-bicep tokens", () => {
