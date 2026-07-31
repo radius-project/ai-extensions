@@ -235,15 +235,17 @@ describe("triggerDeployRepairHandoff", () => {
         };
     }
 
-    it("hands the failure to the agent with the repo, branch, error, and run URL", () => {
+    it("hands the failure to the agent with the repo, branch, error, run URL, and instance", () => {
         const calls = [];
         setDeployRepairHandoff((payload) => { calls.push(payload); });
-        expect(triggerDeployRepairHandoff(failedEntry())).toBe(true);
+        expect(triggerDeployRepairHandoff(failedEntry(), "radius-panel")).toBe(true);
+        // instanceId is what binds the repair loop to this canvas session.
         expect(calls).toEqual([{
             repo: "octo/app",
             branch: "feat",
             error: "BCP037: unknown property",
             deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+            instanceId: "radius-panel",
         }]);
     });
 

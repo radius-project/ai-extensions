@@ -695,7 +695,7 @@ const session = await joinSession({
                     appFile: { type: "string", description: "Path to the application Bicep file. Defaults to .radius/app.bicep." },
                 },
             },
-            handler: async (args) => {
+            handler: async (args = {}) => {
                 try {
                     const entry = selectDeployEntry(servers, args.deploymentId);
                     if (!entry) {
@@ -731,7 +731,7 @@ const session = await joinSession({
                     logLines: { type: "number", description: "How many trailing deploy log lines to include (default 40, max 200)." },
                 },
             },
-            handler: async (args) => {
+            handler: async (args = {}) => {
                 try {
                     const entry = selectDeployEntry(servers, args.deploymentId);
                     if (!entry) {
