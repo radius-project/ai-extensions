@@ -22,9 +22,15 @@ describe("selectDeployEntry", () => {
         expect(selectDeployEntry(servers)).toBe(newer);
     });
 
-    it("falls back to the most recent deploy when the named instance is gone", () => {
-        const servers = new Map([["b", newer]]);
-        expect(selectDeployEntry(servers, "missing")).toBe(newer);
+    it("fails closed when the named deployment is gone, rather than deploying another one", () => {
+        // During an automatic loop, falling back here could redeploy a different
+        // repository or environment after the original canvas was closed.
+        expect(selectDeployEntry(new Map([["b", newer]]), "missing")).toBeNull();
+        expect(selectDeployEntry(new Map(), "missing")).toBeNull();
+    });
+
+    it("fails closed when the named instance has no server", () => {
+        expect(selectDeployEntry(new Map([["a", { state: {} }]]), "a")).toBeNull();
     });
 
     it("uses any open instance when none has deploy state", () => {

@@ -2,12 +2,14 @@
 // extension.mjs so they can be tested without the SDK or a live canvas server.
 
 // Pick the canvas instance a deploy tool should act on. `deploymentId` comes from
-// the repair handoff and makes ownership deterministic; without it, fall back to
-// the most recently started deploy, then to any open instance.
+// the repair handoff and fails closed: if that instance is gone, return null
+// rather than redeploying whatever else is open, which during an automatic loop
+// could target a different repository or environment. Only unbound calls fall
+// back to the most recently started deploy, then to any open instance.
 export function selectDeployEntry(servers, deploymentId) {
-    if (deploymentId && servers?.get) {
-        const exact = servers.get(deploymentId);
-        if (exact?.baseUrl) return exact;
+    if (deploymentId) {
+        const exact = servers?.get?.(deploymentId);
+        return exact?.baseUrl ? exact : null;
     }
     let found = null;
     for (const entry of servers.values()) {

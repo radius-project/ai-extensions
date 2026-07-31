@@ -698,7 +698,11 @@ const session = await joinSession({
             handler: async (args) => {
                 try {
                     const entry = selectDeployEntry(servers, args.deploymentId);
-                    if (!entry) return "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
+                    if (!entry) {
+                        return args.deploymentId
+                            ? `Deployment "${args.deploymentId}" is no longer open, so this redeploy was not started. Ask the user to reopen the Radius canvas and deploy again rather than retrying against a different deployment.`
+                            : "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
+                    }
                     const payload = buildDeployPayload(args, entry.state || {});
                     const invalid = validateDeployPayload(payload);
                     if (invalid) return invalid;
@@ -730,7 +734,11 @@ const session = await joinSession({
             handler: async (args) => {
                 try {
                     const entry = selectDeployEntry(servers, args.deploymentId);
-                    if (!entry) return "No Radius canvas session is open, so there is no deploy status to report.";
+                    if (!entry) {
+                        return args.deploymentId
+                            ? `Deployment "${args.deploymentId}" is no longer open, so its status is unavailable.`
+                            : "No Radius canvas session is open, so there is no deploy status to report.";
+                    }
                     const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
                     if (!response.ok) return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
                     const d = await response.json().catch(() => ({}));
