@@ -501,6 +501,32 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     });
 });
 
+describe("deployingPage — Deployments landing", () => {
+    it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
+        // The Deployments page carries non-trivial inline client logic (branch
+        // discovery + selected-branch dispatch) inside a template literal, so an
+        // unescaped backtick or stray delimiter silently closes the outer literal
+        // and halts page init. Compile every emitted script to catch that class
+        // of bug (it already caught a stray backtick during development).
+        const html = deployingPage({ contextRepo: "octo/app", contextBranch: "feature-x" });
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+        expect(scripts.length).toBeGreaterThan(0);
+        for (const src of scripts) {
+            expect(() => new Function(src)).not.toThrow();
+        }
+    });
+
+    it("renders a Branch selector defaulting to the session branch and dispatches it", () => {
+        const html = deployingPage({ contextRepo: "octo/app", contextBranch: "feature-x" });
+        // The Branch selector is visible (not a hidden input) and seeded with the
+        // active session branch, and the dispatch reads the selected branch.
+        expect(html).toContain('id="deploy-branch-select"');
+        expect(html).toContain("feature-x");
+        expect(html).toContain("var deployBranch = (branchSelect && branchSelect.value) || CTX_BRANCH;");
+        expect(html).toContain("branch: deployBranch");
+    });
+});
+
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
     it("passes repoUrl, branch (head), and baseBranch to radiusRenderGraph so buildSourceUrl doesn't short-circuit on missing repoUrl", () => {
         const html = graphDiffPage({
