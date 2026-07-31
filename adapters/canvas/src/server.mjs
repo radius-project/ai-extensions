@@ -193,6 +193,16 @@ export function isCliCommandMissing(detail) {
         || /['"]?az(?:\.exe)?['"]?\s+is not recognized as an internal or external command\b/i.test(text);
 }
 
+export function azureCredentialIdValidationError({ tenantId = "", subscriptionId = "" } = {}) {
+    if (tenantId && !isUuid(tenantId)) {
+        return `Invalid tenantId "${tenantId}" (expected a GUID).`;
+    }
+    if (subscriptionId && !isUuid(subscriptionId)) {
+        return `Invalid subscriptionId "${subscriptionId}" (expected a GUID).`;
+    }
+    return "";
+}
+
 export function buildAzureCliAssistPrompt({ action = "login", tenantId = "" } = {}) {
     const safeTenantId = typeof tenantId === "string" && isUuid(tenantId.trim()) ? tenantId.trim() : "";
     const loginCommand = `az login --use-device-code${safeTenantId ? ` --tenant ${safeTenantId}` : ""}`;
@@ -767,16 +777,18 @@ function createRequestHandler(instanceId) {
                 const tenantId = (data.tenantId || '').trim();
                 const subscriptionId = (data.subscriptionId || '').trim();
 
-                // Reject a non-GUID subscriptionId before it reaches the az argv.
+                // Reject non-GUID credential identifiers before using them in
+                // command guidance or passing the subscription to the az argv.
                 // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
                 // quotes args containing whitespace, so a value like "x&calc" would
                 // be parsed by cmd.exe as a command separator. An empty value is
                 // allowed (fall back to the ambient CLI context). Mirrors the guard
                 // already enforced in /api/azure-auto-setup.
-                if (subscriptionId && !isUuid(subscriptionId)) {
+                const validationError = azureCredentialIdValidationError({ tenantId, subscriptionId });
+                if (validationError) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Invalid subscriptionId "${subscriptionId}" (expected a GUID).` }));
+                    res.end(JSON.stringify({ error: validationError }));
                     return;
                 }
 
@@ -860,9 +872,10 @@ function createRequestHandler(instanceId) {
                         : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again.",
                 }));
             } catch (e) {
+                const detail = e instanceof Error ? e.message : String(e || "");
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
+                res.end(JSON.stringify({ error: detail || "Bad request." }));
             }
             return;
         }

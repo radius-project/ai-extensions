@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+    azureCredentialIdValidationError,
     buildRoleAssignmentArgs,
     buildAzureCliAssistPrompt,
     canReuseModeledGraph,
@@ -246,6 +247,26 @@ describe("isCliCommandMissing", () => {
         expect(isCliCommandMissing("Token cache failed with ENOENT")).toBe(false);
         expect(isCliCommandMissing("helper: command not found")).toBe(false);
         expect(isCliCommandMissing("")).toBe(false);
+    });
+});
+
+describe("azureCredentialIdValidationError", () => {
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+    const subscriptionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    it("accepts valid or omitted credential identifiers", () => {
+        expect(azureCredentialIdValidationError({ tenantId, subscriptionId })).toBe("");
+        expect(azureCredentialIdValidationError()).toBe("");
+    });
+
+    it("rejects an invalid tenant before generating login guidance", () => {
+        expect(azureCredentialIdValidationError({ tenantId: "not-a-guid", subscriptionId }))
+            .toBe('Invalid tenantId "not-a-guid" (expected a GUID).');
+    });
+
+    it("rejects an invalid subscription before invoking Azure CLI", () => {
+        expect(azureCredentialIdValidationError({ tenantId, subscriptionId: "not-a-guid" }))
+            .toBe('Invalid subscriptionId "not-a-guid" (expected a GUID).');
     });
 });
 

@@ -447,10 +447,10 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     it("prompts to start Azure login through the Copilot session when no session is active", () => {
         const html = environmentPage({ contextRepo: "octo/app" });
         expect(html).toContain("data.code === 'az-login-required'");
-        expect(html).toContain("confirm('no active Azure session. Would you like to login?')");
-        expect(html).toContain("requestAzureCliAssist('login'");
+        expect(html).toContain("confirm('No active Azure session. Would you like Copilot to start Azure login?')");
+        expect(html).toContain("requestAzureCliAssist('login', data.tenantId || tenantId, data.error)");
         expect(html).toContain("/api/azure-cli-assist");
-        expect(html).toContain("credVerifyError(data.error)");
+        expect(html).toContain("fallbackMessage ? ' ' + fallbackMessage : ''");
     });
 
     it("offers Azure CLI install help when the az command is missing", () => {

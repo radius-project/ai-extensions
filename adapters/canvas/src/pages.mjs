@@ -3151,16 +3151,19 @@ function credVerifyInfo(msg) {
     st.innerHTML = '<span>' + escapeHtmlClient(msg) + '</span>';
 }
 
-function requestAzureCliAssist(action, tenantId) {
+function requestAzureCliAssist(action, tenantId, fallbackMessage) {
     fetch('/api/azure-cli-assist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action, tenantId: tenantId || '' })
     }).then(function(r) { return r.json(); }).then(function(data) {
-        if (data && data.error) { credVerifyError(data.error); return; }
+        if (data && data.error) {
+            credVerifyError(data.error + (fallbackMessage ? ' ' + fallbackMessage : ''));
+            return;
+        }
         credVerifyInfo((data && data.message) || 'Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again.');
     }).catch(function(err) {
-        credVerifyError('Error: ' + err.message);
+        credVerifyError('Error: ' + err.message + (fallbackMessage ? ' ' + fallbackMessage : ''));
     });
 }
 
@@ -3181,8 +3184,8 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
         .then(function(r) { return r.json(); }).then(function(data) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
             if (data.error) {
-                if (data.code === 'az-login-required' && confirm('no active Azure session. Would you like to login?')) {
-                    requestAzureCliAssist('login', data.tenantId || tenantId);
+                if (data.code === 'az-login-required' && confirm('No active Azure session. Would you like Copilot to start Azure login?')) {
+                    requestAzureCliAssist('login', data.tenantId || tenantId, data.error);
                     return;
                 }
                 if (data.code === 'az-cli-missing' && confirm('Azure CLI is not installed. Would you like Copilot to help install it?')) {
