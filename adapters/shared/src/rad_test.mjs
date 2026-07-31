@@ -285,6 +285,43 @@ describe("buildGraphViaRad", () => {
   });
 });
 
+// A failing compile drives the real `rad` binary via RADIUS_RAD_BINARY, so the
+// fake `rad` is an executable node shebang script; that only works on POSIX.
+const describeBuild = process.platform === "win32" ? describe.skip : describe;
+describeBuild("buildGraphViaRad failure surfaces the selected extension", () => {
+  let ws;
+  let bin;
+  let prevBinary;
+  beforeEach(() => {
+    ws = fs.mkdtempSync(path.join(os.tmpdir(), "rad-fail-ws-"));
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-fail-bin-"));
+    bin = path.join(binDir, "rad");
+    // Emulate rad rejecting the compile (e.g. BCP204) with a non-zero exit.
+    fs.writeFileSync(bin, `#!/usr/bin/env node\nprocess.stdout.write("BCP204: Extension not recognized");process.exit(1);\n`, "utf8");
+    fs.chmodSync(bin, 0o755);
+    prevBinary = process.env.RADIUS_RAD_BINARY;
+    process.env.RADIUS_RAD_BINARY = bin;
+  });
+  afterEach(() => {
+    if (prevBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = prevBinary;
+    try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { fs.rmSync(path.dirname(bin), { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it("appends the repository's pinned radius extension to the thrown error even with the default logger", async () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+    }));
+    // No `log` is passed, so the default no-op is used: the extension must still
+    // reach the caller through the thrown error (issue #173).
+    await expect(
+      buildGraphViaRad("resource app 'Radius.Core/applications@2023-10-01-preview' = {}", ".radius/app.bicep", { radArtifactsDir: ws }),
+    ).rejects.toThrow(/Compiled with radius extension: br:biceptypes\.azurecr\.io\/radius:0\.48/);
+  }, 20000);
+});
+
 describe("writeBicepCompileConfig", () => {
   let dir;
   let ws;
@@ -303,11 +340,23 @@ describe("writeBicepCompileConfig", () => {
   }
 
   it("writes only the base Radius config when no workspace artifacts dir is given", () => {
-    writeBicepCompileConfig(dir, "");
+    const returned = writeBicepCompileConfig(dir, "");
     const cfg = readConfig();
     expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
     expect(Object.keys(cfg.extensions)).toEqual(["radius"]);
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+    // The effective config is returned so callers can report the selected
+    // extension even with the default no-op logger.
+    expect(returned.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+  });
+
+  it("returns the effective config carrying the repository's pinned radius extension", () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+    }));
+    const returned = writeBicepCompileConfig(dir, ws);
+    expect(returned.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:0.48");
   });
 
   it("merges workspace extension aliases and copies the local custom-types artifact", () => {
@@ -327,6 +376,56 @@ describe("writeBicepCompileConfig", () => {
 
     const cfg = readConfig();
     expect(cfg.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
+    expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe("TGZBYTES");
+  });
+
+  it("preserves a pinned extensions.radius reference from the repository config", () => {
+    // The canvas must compile against the repository's exact pinned extension,
+    // not the base radius:latest, otherwise validation runs against a different
+    // contract than the generated app targets.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+    }));
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:0.48");
+  });
+
+  it("preserves unrelated Bicep settings from the repository config verbatim", () => {
+    // The applicable bicepconfig.json may carry settings beyond extensions (e.g.
+    // analyzers, formatting); the compile config must keep them so the canvas
+    // compiles with the same Bicep behavior the repository configures.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" },
+      analyzers: { core: { enabled: true, rules: { "no-unused-params": { level: "warning" } } } },
+      formatting: { indentKind: "space", indentSize: 2 },
+    }));
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.analyzers).toEqual({ core: { enabled: true, rules: { "no-unused-params": { level: "warning" } } } });
+    expect(cfg.formatting).toEqual({ indentKind: "space", indentSize: 2 });
+  });
+
+  it("backfills a resolvable radius alias when the repository config omits it", () => {
+    // A repo config might declare only a custom extension; the base radius alias
+    // must be added so `extension radius` still resolves during compilation.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { customTypes: "./custom-types.tgz" },
+    }));
+    fs.writeFileSync(path.join(ws, "custom-types.tgz"), "TGZBYTES");
+
+    writeBicepCompileConfig(dir, ws);
+
+    const cfg = readConfig();
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
     expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
     expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe("TGZBYTES");
   });
@@ -370,6 +469,21 @@ describe("writeBicepCompileConfig", () => {
     const cfg = readConfig();
     expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+  });
+
+  it("recovers a resolvable config when array-valued sections make the repo config malformed", () => {
+    // A JSON-valid but malformed config could set these to arrays; typeof still
+    // reports "object", so the code must reject arrays explicitly, otherwise the
+    // forced extensibility flag and radius alias would be written as dropped
+    // non-index array properties, breaking `extension radius` resolution.
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify({
+      experimentalFeaturesEnabled: [],
+      extensions: [],
+    }));
+    writeBicepCompileConfig(dir, ws);
+    const cfg = readConfig();
+    expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
   });
 });
 
