@@ -1,4 +1,5 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { workspaceRadArtifactsDir } from "./workspace.mjs";
@@ -14,6 +15,49 @@ function safeLocalRef(ref) {
     const rel = ref.replace(/^\.\//, "");
     if (!rel || path.isAbsolute(rel) || rel.split(/[\\/]/).some((seg) => seg === "..")) return "";
     return rel;
+}
+
+export function radArtifactsFingerprint(dir) {
+    const hash = createHash("sha256");
+    hash.update("radius-base-config");
+    if (!dir) return hash.digest("hex");
+
+    const configPath = path.join(dir, "bicepconfig.json");
+    if (!existsSync(configPath)) return hash.digest("hex");
+    let configBytes;
+    try {
+        configBytes = readFileSync(configPath);
+    } catch {
+        hash.update("unreadable-config");
+        return hash.digest("hex");
+    }
+    hash.update(configBytes);
+
+    let config;
+    try {
+        config = JSON.parse(configBytes.toString("utf8"));
+    } catch {
+        return hash.digest("hex");
+    }
+    const extensions = config && typeof config.extensions === "object" ? config.extensions : {};
+    for (const [alias, ref] of Object.entries(extensions).sort(([a], [b]) => a.localeCompare(b))) {
+        hash.update(alias);
+        hash.update(String(ref));
+        if (typeof ref !== "string" || isOciExtensionRef(ref)) continue;
+        const rel = safeLocalRef(ref);
+        if (!rel) continue;
+        const artifactPath = path.join(dir, rel);
+        if (!existsSync(artifactPath)) {
+            hash.update("missing");
+            continue;
+        }
+        try {
+            hash.update(readFileSync(artifactPath));
+        } catch {
+            hash.update("unreadable");
+        }
+    }
+    return hash.digest("hex");
 }
 
 /**
