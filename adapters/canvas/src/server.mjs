@@ -172,6 +172,12 @@ async function ensureWorkflowsCurrent(repo, environment, provider, only, working
 let appBicepHandoff = null;
 export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
 
+// Registered by the SDK entry (extension.mjs) to hand a failed canvas deploy
+// back to the agent for repair. The canvas Deploy button dispatches the workflow
+// itself, so without this a failure dead-ends in the UI.
+let deployRepairHandoff = null;
+export function setDeployRepairHandoff(fn) { deployRepairHandoff = fn; }
+
 // Handler registered by the SDK entry (extension.mjs) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
@@ -194,6 +200,29 @@ function triggerAppBicepHandoff(entry, repo, branches, page) {
         }
         Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(() => {});
     } catch { /* never let a handoff failure break the response */ }
+}
+
+// Hand a failed deploy to the agent to repair and redeploy. Fires at most once
+// per repair loop: once the agent owns the loop it redeploys and re-reads status
+// itself, so re-handing off every failed attempt would double-drive it.
+// `branch-not-pushed` is excluded: the user fixes that with a push, not by
+// editing the model.
+export function triggerDeployRepairHandoff(entry) {
+    try {
+        if (typeof deployRepairHandoff !== "function") return false;
+        const state = entry?.state;
+        if (!state || state.deployStatus !== "failed") return false;
+        if (state.deployErrorKind === "branch-not-pushed") return false;
+        if (state.deployRepairing) return false;
+        const repo = state.deployingRepo || state.plannedRepo || state.contextRepo || "";
+        const branch = state.deployingBranch || "";
+        const error = state.deployError || "";
+        const deployRunUrl = state.deployRunUrl || "";
+        state.deployRepairing = true;
+        Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl })).catch(() => {});
+        return true;
+    } catch { /* never let a handoff failure break the response */ }
+    return false;
 }
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
@@ -2559,6 +2588,9 @@ function createRequestHandler(instanceId) {
             const finishedAt = entry?.state?.deployFinishedAt || null;
             const deployedGraph = entry?.state?.deployedGraph || null;
             const deployRunUrl = entry?.state?.deployRunUrl || null;
+            // Every failure path converges on this poll, so it is where a failed
+            // deploy is handed to the agent to repair (fires once per failure).
+            const repairing = triggerDeployRepairHandoff(entry) || entry?.state?.deployRepairing || false;
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             // Incremental log delivery: when the client passes ?since=<absolute
@@ -2571,9 +2603,9 @@ function createRequestHandler(instanceId) {
             if (Number.isFinite(since)) {
                 const startIdx = Math.max(0, since - logBase);
                 const logsNew = logs.slice(startIdx);
-                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing }));
             } else {
-                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing }));
             }
             return;
         }
@@ -3336,6 +3368,9 @@ function createRequestHandler(instanceId) {
                     entry.state.deployErrorBranch = null;
                     entry.state.deployRunUrl = null;
                     entry.state.deployRunId = null;
+                    // An agent redeploy is already inside a repair loop; a user
+                    // deploy starts fresh and may hand off again on failure.
+                    entry.state.deployRepairing = data.agentInitiated === true;
 
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
                     // Resolve the branch to deploy. When the client doesn't specify

@@ -3273,6 +3273,7 @@ function deployLandingView(state) {
       <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
       <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
         <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
+        <div id="deploy-fail-repair-note" style="display:none; margin-top:10px; font-size:12px; color:var(--rad-text-secondary);"></div>
       </div>
     </div>
   </div>
@@ -3702,7 +3703,7 @@ function resetDeployModal() {
 // icon, show the error message, and offer a button back to the deployments list.
 // The kind argument lets us render a cleaner, tailored panel for well-known
 // failures (e.g. a branch that hasn't been pushed) instead of raw CLI stderr.
-function showDeployFailed(app, env, errText, runUrl, kind, branch) {
+function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing) {
     var modal = document.getElementById('deploy-progress-modal');
     var spin = document.getElementById('deploy-progress-spinner');
     var fail = document.getElementById('deploy-progress-failicon');
@@ -3738,6 +3739,13 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch) {
     if (links) links.style.display = 'none';
     if (failActions) failActions.style.display = 'block';
     if (modal) modal.style.display = 'flex';
+    var repairNote = document.getElementById('deploy-fail-repair-note');
+    if (repairNote) {
+        repairNote.style.display = repairing ? 'block' : 'none';
+        repairNote.textContent = repairing
+            ? 'Copilot is repairing .radius/app.bicep and will redeploy — follow along in the chat.'
+            : '';
+    }
     // Wire the copy button (present only for the branch-not-pushed panel).
     var copyBtn = document.getElementById('deploy-copy-push');
     if (copyBtn) {
@@ -3811,7 +3819,7 @@ deployBtn.addEventListener('click', function() {
                     clearInterval(wfPoll);
                     clearTimeout(autoHide);
                     delete OP_STATUS[opKey(app, env)];
-                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '');
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', (d && d.repairing) || false);
                     loadDeployments(true);
                     return;
                 }

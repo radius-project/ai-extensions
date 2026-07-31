@@ -33,6 +33,7 @@ import {
     getLastWebviewActivityAt,
     isCurrentSourceRefToken,
     setAppBicepHandoff,
+    setDeployRepairHandoff,
     setOpenSourceHandler,
 } from "./server.mjs";
 import {
@@ -41,7 +42,7 @@ import {
     setSourceRefResources,
     updateSourceRefs,
 } from "./source-refs.mjs";
-import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
+import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt, deployRepairHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
@@ -65,6 +66,22 @@ async function fetchBicepForBranch(repo, branch, state) {
         if (local) return local;
     }
     return await fetchBicepFromRepo(github, repo, branch);
+}
+
+// Tool handlers receive no canvas instanceId, so the deploy tools resolve the
+// canvas instance holding the deploy state (most recently started wins), and
+// otherwise fall back to any open instance.
+function deployCanvasEntry() {
+    let found = null;
+    for (const entry of servers.values()) {
+        if (!entry?.baseUrl) continue;
+        const state = entry.state || {};
+        if (!state.deployParams && !state.deployStatus) continue;
+        if (!found || (state.deployStartedAt || 0) > (found.state?.deployStartedAt || 0)) found = entry;
+    }
+    if (found) return found;
+    for (const entry of servers.values()) if (entry?.baseUrl) return entry;
+    return null;
 }
 
 // When a graph canvas is opened but no .radius/app.bicep exists, hand the work
@@ -679,6 +696,81 @@ const session = await joinSession({
                 }
             },
         },
+        {
+            name: "radius_deploy",
+            description: "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. With no arguments it repeats the last deploy from this session, which is what a redeploy after repairing .radius/app.bicep needs.",
+            parameters: {
+                type: "object",
+                properties: {
+                    environment: { type: "string", description: "GitHub environment to deploy to. Defaults to the last deploy's environment." },
+                    repo: { type: "string", description: "Target repository in owner/repo format. Defaults to the last deploy's repository." },
+                    branch: { type: "string", description: "Branch to deploy. Defaults to the last deploy's branch." },
+                    provider: { type: "string", enum: ["azure", "aws"], description: "Cloud provider. Defaults to the last deploy's provider." },
+                    appFile: { type: "string", description: "Path to the application Bicep file. Defaults to .radius/app.bicep." },
+                },
+            },
+            handler: async (args) => {
+                try {
+                    const entry = deployCanvasEntry();
+                    if (!entry) return "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
+                    const last = entry.state?.deployParams || {};
+                    const payload = {
+                        environment: args.environment || last.environment || "",
+                        provider: args.provider || last.provider || "azure",
+                        targetRepo: args.repo || last.targetRepo || entry.state?.contextRepo || "",
+                        branch: args.branch || last.branch || "",
+                        appFile: args.appFile || last.appFile || ".radius/app.bicep",
+                        agentInitiated: true,
+                    };
+                    if (!payload.targetRepo) return "No target repository is known for this deploy. Pass `repo` (owner/repo).";
+                    if (!payload.environment) return "No GitHub environment is known for this deploy. Pass `environment`.";
+                    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const result = await response.json().catch(() => ({}));
+                    if (!response.ok || result.error) {
+                        return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
+                    }
+                    return `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started. Poll the radius_deploy_status tool until it reports success or failed.`;
+                } catch (err) {
+                    return `⚠️ Could not start the deploy: ${err.message}`;
+                }
+            },
+        },
+        {
+            name: "radius_deploy_status",
+            description: "Reports the current Radius deploy state (in_progress, success, or failed) with the error and workflow run URL when it failed, plus the tail of the deploy log. Poll this after calling radius_deploy until it reports a terminal state.",
+            parameters: {
+                type: "object",
+                properties: {
+                    logLines: { type: "number", description: "How many trailing deploy log lines to include (default 40, max 200)." },
+                },
+            },
+            handler: async (args) => {
+                try {
+                    const entry = deployCanvasEntry();
+                    if (!entry) return "No Radius canvas session is open, so there is no deploy status to report.";
+                    const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+                    const d = await response.json().catch(() => ({}));
+                    if (!response.ok) return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
+                    const cap = Math.min(Math.max(Number(args.logLines) || 40, 1), 200);
+                    const logs = Array.isArray(d.logs) ? d.logs.slice(-cap) : [];
+                    return JSON.stringify({
+                        status: d.status || "pending",
+                        error: d.error || null,
+                        errorKind: d.errorKind || null,
+                        deployRunUrl: d.deployRunUrl || null,
+                        startedAt: d.startedAt || null,
+                        finishedAt: d.finishedAt || null,
+                        logTail: logs,
+                    });
+                } catch (err) {
+                    return `⚠️ Could not read the deploy status: ${err.message}`;
+                }
+            },
+        },
     ],
     hooks: {
         // Guard the graph-generating tool calls: if a graph page is opened (or a
@@ -746,6 +838,8 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
+setDeployRepairHandoff(({ repo, branch, error, deployRunUrl }) =>
+    session.send(deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl })));
 
 // Wire the "View source code" / "View app definition" click for local-workspace
 // graphs to the Copilot editor canvas (side pane). The graph + line numbers are

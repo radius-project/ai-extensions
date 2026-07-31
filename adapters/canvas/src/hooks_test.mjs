@@ -3,6 +3,8 @@ import {
     GRAPH_PAGES,
     appBicepReminder,
     appBicepHandoffPrompt,
+    deployRepairHandoffPrompt,
+    DEPLOY_REPAIR_ATTEMPT_CAP,
     graphTriggerTargets,
     evaluateAppBicepHook,
 } from "./hooks.mjs";
@@ -277,5 +279,46 @@ describe("evaluateAppBicepHook", () => {
             deps,
         );
         expect(out?.permissionDecision).toBe("deny");
+    });
+});
+
+describe("deployRepairHandoffPrompt", () => {
+    const failure = {
+        error: "BCP037: The property \"bogus\" is not allowed on objects of type Container.",
+        deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+    };
+
+    it("names the repo, branch, error, and workflow run", () => {
+        const out = deployRepairHandoffPrompt("octo/app", "feat", failure);
+        expect(out).toContain("octo/app");
+        expect(out).toContain("`feat`");
+        expect(out).toContain("BCP037");
+        expect(out).toContain("https://github.com/octo/app/actions/runs/42");
+    });
+
+    it("points at the tools that repair the model and redeploy", () => {
+        const out = deployRepairHandoffPrompt("octo/app", "main", failure);
+        expect(out).toContain("radius_generate_app");
+        expect(out).toContain("radius_deploy");
+        expect(out).toContain("radius_deploy_status");
+        expect(out).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    });
+
+    it("is self-contained: it does not delegate to the radius-deploy skill", () => {
+        // The canvas repair loop is driven by these tools alone, so the prompt
+        // must not depend on another skill being consulted.
+        expect(deployRepairHandoffPrompt("octo/app", "main", failure)).not.toContain("radius-deploy");
+    });
+
+    it("separates modeling failures from infrastructure failures", () => {
+        const out = deployRepairHandoffPrompt("octo/app", "main", failure);
+        expect(out).toMatch(/modeling or schema failure/i);
+        expect(out).toMatch(/infrastructure or environment failure/i);
+    });
+
+    it("still renders without an error message or run URL", () => {
+        const out = deployRepairHandoffPrompt("", "", {});
+        expect(out).toContain("reported a failure with no error text");
+        expect(out).not.toContain("Workflow run");
     });
 });

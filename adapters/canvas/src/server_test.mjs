@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation } from "./server.mjs";
+import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation, triggerDeployRepairHandoff, setDeployRepairHandoff } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -216,5 +216,75 @@ describe("pickAksResourceGroup", () => {
 
     it("ignores non-string cluster RG values", () => {
         expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+    });
+});
+
+describe("triggerDeployRepairHandoff", () => {
+    function failedEntry(overrides = {}) {
+        return {
+            state: {
+                deployStatus: "failed",
+                deployingRepo: "octo/app",
+                deployingBranch: "feat",
+                deployError: "BCP037: unknown property",
+                deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+                ...overrides,
+            },
+        };
+    }
+
+    it("hands the failure to the agent with the repo, branch, error, and run URL", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        expect(triggerDeployRepairHandoff(failedEntry())).toBe(true);
+        expect(calls).toEqual([{
+            repo: "octo/app",
+            branch: "feat",
+            error: "BCP037: unknown property",
+            deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+        }]);
+    });
+
+    it("fires only once so the agent's own redeploys can't double-drive the loop", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        const entry = failedEntry();
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+        // A later attempt in the same loop fails differently; still no second handoff.
+        entry.state.deployRunUrl = "https://github.com/octo/app/actions/runs/43";
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+        expect(calls).toHaveLength(1);
+    });
+
+    it("hands off again once a fresh user-initiated deploy fails", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        const entry = failedEntry();
+        triggerDeployRepairHandoff(entry);
+        // A user deploy resets ownership (see /api/deploy); an agent redeploy does not.
+        entry.state.deployRepairing = false;
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        expect(calls).toHaveLength(2);
+    });
+
+    it("does not hand off a branch-not-pushed failure, which a model fix cannot solve", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        expect(triggerDeployRepairHandoff(failedEntry({ deployErrorKind: "branch-not-pushed" }))).toBe(false);
+        expect(calls).toHaveLength(0);
+    });
+
+    it("does not hand off unless the deploy actually failed", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); });
+        expect(triggerDeployRepairHandoff(failedEntry({ deployStatus: "in_progress" }))).toBe(false);
+        expect(triggerDeployRepairHandoff(undefined)).toBe(false);
+        expect(calls).toHaveLength(0);
+    });
+
+    it("never throws when the handoff itself fails", () => {
+        setDeployRepairHandoff(() => { throw new Error("session gone"); });
+        expect(() => triggerDeployRepairHandoff(failedEntry())).not.toThrow();
     });
 });

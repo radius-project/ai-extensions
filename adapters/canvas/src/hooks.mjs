@@ -152,3 +152,36 @@ export function appBicepHandoffPrompt(repo, page = "graph", branches = []) {
         RECIPE_PACK_NOTE,
     ].join("\n");
 }
+
+// Maximum automatic repair-and-redeploy attempts before handing back to the user.
+export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
+
+// Prompt injected as a new user turn (via session.send) when a deploy started
+// from the canvas Deploy button fails. That path dispatches the workflow
+// directly, so nothing carries the failure back to the agent; this is the
+// bridge. Deliberately self-contained — it names the tools that repair the model
+// and redeploy, so the loop does not depend on another skill being consulted.
+export function deployRepairHandoffPrompt(repo, branch, { error = "", deployRunUrl = "" } = {}) {
+    const where = repo ? ` of ${repo}` : "";
+    const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+    const detail = String(error || "").trim();
+    const lines = [
+        `The Radius deploy${where}${onPhrase} failed. Repair it and redeploy.`,
+        "",
+        detail ? `Reported error:\n\n${detail}` : "The deploy workflow reported a failure with no error text.",
+    ];
+    if (deployRunUrl) lines.push("", `Workflow run (full logs): ${deployRunUrl}`);
+    lines.push(
+        "",
+        "First decide what kind of failure this is:",
+        "- A modeling or schema failure points at .radius/app.bicep — unknown resource type or API version, unknown or missing property, an invalid reference between resources, a wrong credential shape, or a Bicep parse or compile error. Repair these.",
+        "- An infrastructure or environment failure (recipe download or execution, provider mismatch, cluster, credential, or connectivity problems) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user.",
+        "",
+        `For a modeling or schema failure: ${SKILL_HANDOFF}`,
+        "Then redeploy by calling the radius_deploy tool, and poll the radius_deploy_status tool until the deploy reaches a terminal state.",
+        `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. After that, report the result to the user and only try again if they ask.`,
+        "",
+        RECIPE_PACK_NOTE,
+    );
+    return lines.join("\n");
+}
