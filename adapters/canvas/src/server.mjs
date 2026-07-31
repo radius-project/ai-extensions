@@ -839,9 +839,10 @@ function createRequestHandler(instanceId) {
                         : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again.",
                 }));
             } catch (e) {
+                const detail = e instanceof Error ? e.message : String(e || "");
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
+                res.end(JSON.stringify({ error: detail || "Bad request." }));
             }
             return;
         }
