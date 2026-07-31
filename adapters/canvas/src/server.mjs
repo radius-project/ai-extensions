@@ -56,7 +56,8 @@ import {
 } from "./infra.mjs";
 import {
   findWorkflowRun, getRunDetail, fetchRunLog, fetchLiveDeployLog,
-  fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState, fetchDeployGraph,
+  fetchLiveActivityLog, fetchLiveControlPlaneLog, fetchDeployState,
+  createDeployStatusReader, appNameForGraphTag,
   normalizeDeployedGraph, rewireDeployedGraphChain, reduceActivityLog,
   applyActivityToResources, extractErrorLines, extractRadDeployError,
   explainOidcEnterpriseClaim, explainRepoAccessForEnvSetup,
@@ -85,6 +86,53 @@ export function canReuseModeledGraph(state, repo, branch, definitionHash) {
 
 export function isCurrentSourceRefToken(state, view, token) {
     return !!token && state?.sourceRefContexts?.[view]?.token === token;
+}
+
+// deployStatusReaderFromState - build a GHCR-first deployed-graph/status reader
+// from a canvas instance's state. The graph registry/tag are derived the same
+// way the deploy workflow producer derives them (from the environment's GHCR
+// state registry + the environment/app names), so the reader pulls the exact
+// artifact the deploy published. Falls back to the radius-deploy-status branch
+// when the environment/app/registry can't be resolved or the artifact is
+// absent.
+//
+// The app name is required to build the producer's "<environment>-<app>-latest"
+// tag. It's populated during the deploy flow, but on a fresh session (or when
+// the Deployed tab is opened without first deploying) it's derived here from the
+// repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
+// — and cached back into state so GHCR retrieval works across reloads.
+async function deployStatusReaderFromState(state, repo, branch) {
+    const environment = state?.deployEnvName || state?.envName || "";
+    let app = state?.deployAppName || "";
+    if (!app && repo && environment) {
+        app = await resolveGraphAppName(repo, branch || state?.deployingBranch || state?.graphBranch || "");
+        if (app && state) state.deployAppName = app;
+    }
+    let stateRegistry = "";
+    if (repo && environment) {
+        try { stateRegistry = stateRegistryForEnvironment(repo, environment); } catch { stateRegistry = ""; }
+    }
+    return createDeployStatusReader({ repo, environment, app, stateRegistry });
+}
+
+// resolveGraphAppName - extract the Radius app name for the GHCR graph tag using
+// the producer's exact rule (the first `name: '...'` literal in app.bicep). This
+// differs from resolveRepoAppName, which prefers the applications resource name
+// and falls back to the repo basename; the tag must match the producer's grep
+// byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
+async function resolveGraphAppName(repo, branch) {
+    const ref = branch || "main";
+    for (const p of [".radius/app.bicep", "app.bicep"]) {
+        let raw = "";
+        try { raw = await ghOrThrow(["api", `/repos/${repo}/contents/${p}?ref=${ref}`, "--jq", ".content"]); }
+        catch { raw = ""; }
+        if (!raw) continue;
+        let decoded = "";
+        try { decoded = Buffer.from(raw, "base64").toString("utf8"); } catch { decoded = ""; }
+        const name = appNameForGraphTag(decoded);
+        if (name) return name;
+    }
+    return "";
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -2524,9 +2572,11 @@ function createRequestHandler(instanceId) {
                 || entry?.state?.plannedRepo || entry?.state?.graphTargetRepo || '';
             res.setHeader("Content-Type", "application/json");
             if (!repo) { res.writeHead(200); res.end(JSON.stringify({ resources: [], repo: '' })); return; }
-            // Prefer the live deploy-graph.json on the orphan status branch (source
-            // of truth). Fall back to any graph captured in state this session.
-            let graph = await fetchDeployGraph(repo);
+            // Prefer the deployed graph published to GHCR by the deploy workflow
+            // (radius-project/radius PR #12591), falling back to the legacy
+            // radius-deploy-status branch and then any graph captured in state.
+            const reader = await deployStatusReaderFromState(entry?.state, repo);
+            let graph = (await reader.graph()).graph;
             if (!graph && entry?.state?.deployedGraph) graph = entry.state.deployedGraph;
             let resources = Array.isArray(graph) ? graph : (graph?.resources || []);
             // DEMO: present the deployed topology as container → cache → database.
@@ -3425,6 +3475,9 @@ function createRequestHandler(instanceId) {
                         // default) rather than relying on a verify → deploy chain.
                         addLog('━━ Deploying Radius application ━━');
                         const envForDeploy = entry.state.envName || data.environment || 'dev';
+                        // Persist the resolved environment so the deployed-graph
+                        // reader (GHCR artifact tag) can be rebuilt from state later.
+                        entry.state.deployEnvName = envForDeploy;
                         const deployWorkflowFile = DEPLOY_WORKFLOW_FILE;
                         // Deploy the SELECTED branch's code (worktree-consistent): run
                         // the workflow on `branch` so it checks out and `rad deploy`s
@@ -3498,7 +3551,10 @@ function createRequestHandler(instanceId) {
                                 const parsed = appParams(bicepSource);
                                 const resolved = resolveDeployParams(parsed);
                                 const { public: publicParams, secret: secretParams } = partitionParams(parsed, resolved);
-
+                                // Capture the app name (as the producer extracts it) so
+                                // the deployed-graph reader can derive the GHCR artifact
+                                // tag "<environment>-<app>-latest".
+                                entry.state.deployAppName = appNameForGraphTag(bicepSource);
                                 // Ensure the environment carries the secret params the
                                 // deployed app.bicep needs (e.g. an @secure() password).
                                 // The workflow can ONLY read these from the
@@ -3848,17 +3904,34 @@ function createRequestHandler(instanceId) {
                                     // must never leave a node red on a successful deployment.
                                     resources.forEach(r => setStatus(r, 'success'));
                                     // Fetch + store the REAL deployed application graph the
-                                    // workflow published to the orphan status branch.
+                                    // deploy published to GHCR (radius-project/radius PR
+                                    // #12591), falling back to the legacy
+                                    // radius-deploy-status branch when the artifact is
+                                    // absent (older producers / git state backend).
                                     addLog('🗺  Retrieving deployed application graph…');
+                                    const graphReader = await deployStatusReaderFromState(entry.state, repo, branch);
                                     let deployed = null;
+                                    let graphSource = 'none';
+                                    let graphStatus = null;
                                     for (let g = 0; g < 6 && !deployed; g++) {
-                                        deployed = await fetchDeployGraph(repo);
-                                        if (!deployed) await delay(2500);
+                                        const gr = await graphReader.graph();
+                                        graphStatus = gr.status;
+                                        if (gr.graph) { deployed = gr.graph; graphSource = gr.source; break; }
+                                        // Permission failures won't resolve by retrying.
+                                        if (gr.status === 'auth') break;
+                                        await delay(2500);
                                     }
                                     if (deployed) {
                                         entry.state.deployedGraph = deployed;
                                         entry.state.deployedGraphRepo = repo;
-                                        addLog('  ✓ Deployed graph saved.');
+                                        addLog(graphSource === 'ghcr'
+                                            ? '  ✓ Deployed graph saved (from GHCR artifact ' + graphReader.tag + ').'
+                                            : '  ✓ Deployed graph saved (from radius-deploy-status branch).');
+                                    } else if (graphStatus === 'auth') {
+                                        addLog('  ⚠ Deployed graph is published to a private GHCR package but access was denied.');
+                                        addLog('    Grant read access: gh auth refresh -s read:packages');
+                                    } else if (graphStatus === 'malformed') {
+                                        addLog('  ⚠ Deployed graph artifact was found but could not be parsed (malformed). Continuing.');
                                     } else {
                                         addLog('  ⚠ Deployed graph not available yet (continuing).');
                                     }
