@@ -88,10 +88,14 @@ describe("managed Bicep", () => {
     const downloadBlocked = new Promise((resolve) => { releaseDownload = resolve; });
     const run = vi.fn(async (radPath, args, options) => {
       calls.push({ radPath, args, options });
-      expect(fs.existsSync(bicepPath)).toBe(true);
-      expect(fs.statSync(bicepPath).size).toBe(0);
+      expect(options.env.BICEP).toMatch(
+        new RegExp(`^${bicepPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+\\..+\\.download$`),
+      );
+      expect(fs.existsSync(options.env.BICEP)).toBe(true);
+      expect(fs.statSync(options.env.BICEP).size).toBe(0);
+      expect(fs.existsSync(bicepPath)).toBe(false);
       await downloadBlocked;
-      fs.writeFileSync(bicepPath, "bicep");
+      fs.writeFileSync(options.env.BICEP, "bicep");
     });
 
     const first = ensureManagedBicep("managed-rad", { bicepPath, run });
@@ -105,10 +109,11 @@ describe("managed Bicep", () => {
       args: ["bicep", "download"],
       options: {
         cwd: path.dirname(bicepPath),
-        env: { BICEP: bicepPath },
         label: "rad bicep download",
       },
     });
+    expect(fs.readFileSync(bicepPath, "utf8")).toBe("bicep");
+    expect(fs.readdirSync(path.dirname(bicepPath))).toEqual([BICEP]);
   });
 
   it("rejects when rad reports success without creating the managed Bicep binary", async () => {
@@ -117,6 +122,7 @@ describe("managed Bicep", () => {
       ensureManagedBicep("managed-rad", { bicepPath, run: vi.fn().mockResolvedValue({}) }),
     ).rejects.toThrow(`without creating ${bicepPath}`);
     expect(fs.existsSync(bicepPath)).toBe(false);
+    expect(fs.readdirSync(path.dirname(bicepPath))).toEqual([]);
   });
 
   it("skips the download when the managed Bicep binary already exists", async () => {
@@ -138,9 +144,9 @@ describe("managed Bicep", () => {
     fs.writeFileSync(lockPath, "abandoned");
     const stale = new Date(Date.now() - 10 * 60 * 1000);
     fs.utimesSync(lockPath, stale, stale);
-    const run = vi.fn(async () => {
-      expect(fs.readFileSync(bicepPath, "utf8")).toBe("");
-      fs.writeFileSync(bicepPath, "complete-bicep");
+    const run = vi.fn(async (_radPath, _args, options) => {
+      expect(fs.readFileSync(bicepPath, "utf8")).toBe("partial");
+      fs.writeFileSync(options.env.BICEP, "complete-bicep");
     });
 
     await expect(ensureManagedBicep("managed-rad", { bicepPath, run })).resolves.toBe(bicepPath);
@@ -154,8 +160,8 @@ describe("managed Bicep", () => {
     const lockPath = `${bicepPath}.download.lock`;
     fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
     fs.writeFileSync(lockPath, "peer");
-    const run = vi.fn(async () => {
-      fs.writeFileSync(bicepPath, "complete-bicep");
+    const run = vi.fn(async (_radPath, _args, options) => {
+      fs.writeFileSync(options.env.BICEP, "complete-bicep");
     });
     setTimeout(() => fs.rmSync(lockPath, { force: true }), 20);
 

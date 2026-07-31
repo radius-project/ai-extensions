@@ -649,39 +649,40 @@ export function ensureManagedBicep(
       release = tryAcquireLock(lockPath);
     }
 
+    let tmp = "";
     try {
-      // Taking over a stale lock means its owner may have crashed after writing
-      // only part of the binary. Discard that artifact before retrying.
-      if (lockWasPresent) {
-        try { fs.rmSync(bicepPath, { force: true }); } catch { /* best-effort */ }
-      }
-      if (isCompletedBicepFile(bicepPath)) return bicepPath;
+      if (!lockWasPresent && isCompletedBicepFile(bicepPath)) return bicepPath;
+      tmp = `${bicepPath}.${process.pid}.${crypto.randomUUID()}.download`;
       // Radius requires a BICEP override to exist before its download command
-      // will accept the destination. The lock prevents peers from treating this
-      // placeholder as a completed installation.
-      fs.closeSync(fs.openSync(bicepPath, "w"));
+      // will accept the destination. Download to a unique temporary file so a
+      // stale-lock takeover can never expose partial bytes at the managed path.
+      fs.closeSync(fs.openSync(tmp, "wx"));
       log(`Downloading Bicep to ${bicepPath}...`);
-      try {
-        await run(radPath, ["bicep", "download"], {
-          cwd: path.dirname(bicepPath),
-          env: managedBicepEnv({}, bicepPath),
-          timeout,
-          label: "rad bicep download",
-          log,
-        });
-        if (!IS_WIN && isExecutableFile(bicepPath)) {
-          try { fs.chmodSync(bicepPath, 0o755); } catch { /* validated below */ }
-        }
-        if (!isCompletedBicepFile(bicepPath)) {
-          throw new Error(`rad bicep download completed without creating ${bicepPath}`);
-        }
-      } catch (err) {
-        try { fs.rmSync(bicepPath, { force: true }); } catch { /* best-effort */ }
-        throw err;
+      await run(radPath, ["bicep", "download"], {
+        cwd: path.dirname(bicepPath),
+        env: managedBicepEnv({}, tmp),
+        timeout,
+        label: "rad bicep download",
+        log,
+      });
+      if (!IS_WIN && isExecutableFile(tmp)) {
+        try { fs.chmodSync(tmp, 0o755); } catch { /* validated below */ }
       }
+      if (!isCompletedBicepFile(tmp)) {
+        throw new Error(`rad bicep download completed without creating ${bicepPath}`);
+      }
+
+      if (IS_WIN && isExecutableFile(bicepPath)) {
+        fs.rmSync(bicepPath, { force: true });
+      }
+      fs.renameSync(tmp, bicepPath);
+      tmp = "";
       log(`Installed Bicep CLI to ${bicepPath}`);
       return bicepPath;
     } finally {
+      if (tmp) {
+        try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+      }
       release();
     }
   })();
