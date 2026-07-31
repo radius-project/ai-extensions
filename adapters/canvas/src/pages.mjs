@@ -3743,7 +3743,7 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing) {
     if (repairNote) {
         repairNote.style.display = repairing ? 'block' : 'none';
         repairNote.textContent = repairing
-            ? 'Copilot is repairing .radius/app.bicep and will redeploy — follow along in the chat.'
+            ? 'Copilot is analyzing the failure and will repair and redeploy if the app model caused it — follow along in the chat.'
             : '';
     }
     // Wire the copy button (present only for the branch-not-pushed panel).

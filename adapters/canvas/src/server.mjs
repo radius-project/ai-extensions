@@ -207,7 +207,7 @@ function triggerAppBicepHandoff(entry, repo, branches, page) {
 // itself, so re-handing off every failed attempt would double-drive it.
 // `branch-not-pushed` is excluded: the user fixes that with a push, not by
 // editing the model.
-export function triggerDeployRepairHandoff(entry) {
+export function triggerDeployRepairHandoff(entry, instanceId) {
     try {
         if (typeof deployRepairHandoff !== "function") return false;
         const state = entry?.state;
@@ -223,7 +223,7 @@ export function triggerDeployRepairHandoff(entry) {
         // owned, or no later poll or deploy could ever hand off again.
         const release = () => { state.deployRepairing = false; };
         try {
-            Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl })).catch(release);
+            Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl, instanceId })).catch(release);
         } catch {
             release();
             return false;
@@ -2598,7 +2598,7 @@ function createRequestHandler(instanceId) {
             const deployRunUrl = entry?.state?.deployRunUrl || null;
             // Every failure path converges on this poll, so it is where a failed
             // deploy is handed to the agent to repair (once per repair loop).
-            const repairing = triggerDeployRepairHandoff(entry) || entry?.state?.deployRepairing || false;
+            const repairing = triggerDeployRepairHandoff(entry, instanceId) || entry?.state?.deployRepairing || false;
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             // Incremental log delivery: when the client passes ?since=<absolute
