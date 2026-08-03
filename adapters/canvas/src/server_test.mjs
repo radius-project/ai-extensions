@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
     azureCredentialIdValidationError,
+    azureLoginRequiredResponse,
     buildRoleAssignmentArgs,
     buildAzureCliAssistPrompt,
     canReuseModeledGraph,
@@ -10,6 +11,7 @@ import {
     isCliCommandMissing,
     isCurrentSourceRefToken,
     isReplicationLagError,
+    invokeSessionPrompt,
     pickAksResourceGroup,
     resolveDeployStatus,
 } from "./server.mjs";
@@ -267,6 +269,53 @@ describe("azureCredentialIdValidationError", () => {
     it("rejects an invalid subscription before invoking Azure CLI", () => {
         expect(azureCredentialIdValidationError({ tenantId, subscriptionId: "not-a-guid" }))
             .toBe('Invalid subscriptionId "not-a-guid" (expected a GUID).');
+    });
+});
+
+describe("azureLoginRequiredResponse", () => {
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+
+    it("returns structured login guidance for an unauthenticated session", () => {
+        expect(azureLoginRequiredResponse({ tenantId })).toEqual({
+            error: 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.',
+            code: "az-login-required",
+            tenantId,
+        });
+    });
+
+    it("returns structured tenant-specific guidance for the wrong active tenant", () => {
+        const response = azureLoginRequiredResponse({
+            tenantId,
+            activeTenantId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        });
+        expect(response.code).toBe("az-login-required");
+        expect(response.tenantId).toBe(tenantId);
+        expect(response.error).toContain(`--tenant ${tenantId}`);
+    });
+});
+
+describe("invokeSessionPrompt", () => {
+    it("waits for the session prompt handler to finish", async () => {
+        let completed = false;
+        const result = await invokeSessionPrompt(async () => {
+            await Promise.resolve();
+            completed = true;
+        }, "prompt");
+        expect(completed).toBe(true);
+        expect(result).toEqual({ status: 200 });
+    });
+
+    it("surfaces unavailable and rejected handlers as server errors", async () => {
+        await expect(invokeSessionPrompt(null, "prompt")).resolves.toEqual({
+            status: 503,
+            error: "Could not reach the Copilot session to start Azure CLI help.",
+        });
+        await expect(invokeSessionPrompt(async () => {
+            throw new Error("send failed");
+        }, "prompt")).resolves.toEqual({
+            status: 502,
+            error: "The Copilot session could not start Azure CLI help.",
+        });
     });
 });
 

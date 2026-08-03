@@ -251,6 +251,25 @@ export function azureCredentialIdValidationError({ tenantId = "", subscriptionId
     return "";
 }
 
+export function azureLoginRequiredResponse({ tenantId = "", activeTenantId = "" } = {}) {
+    const error = activeTenantId
+        ? `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
+        : 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.';
+    return { error, code: "az-login-required", tenantId };
+}
+
+export async function invokeSessionPrompt(handler, prompt) {
+    if (typeof handler !== "function") {
+        return { status: 503, error: "Could not reach the Copilot session to start Azure CLI help." };
+    }
+    try {
+        await handler(prompt);
+        return { status: 200 };
+    } catch {
+        return { status: 502, error: "The Copilot session could not start Azure CLI help." };
+    }
+}
+
 export function buildAzureCliAssistPrompt({ action = "login", tenantId = "" } = {}) {
     const safeTenantId = typeof tenantId === "string" && isUuid(tenantId.trim()) ? tenantId.trim() : "";
     const loginCommand = `az login --use-device-code${safeTenantId ? ` --tenant ${safeTenantId}` : ""}`;
@@ -860,11 +879,7 @@ function createRequestHandler(instanceId) {
                     if (isCliCommandMissing(detail)) {
                         res.end(JSON.stringify({ error: "Azure CLI is not installed.", code: "az-cli-missing", tenantId }));
                     } else {
-                        res.end(JSON.stringify({
-                            error: 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.',
-                            code: "az-login-required",
-                            tenantId,
-                        }));
+                        res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId })));
                     }
                     return;
                 }
@@ -874,7 +889,7 @@ function createRequestHandler(instanceId) {
                 if (tenantId && acct.tenantId && acct.tenantId.toLowerCase() !== tenantId.toLowerCase()) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${acct.tenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify again.` }));
+                    res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId, activeTenantId: acct.tenantId })));
                     return;
                 }
 
@@ -903,14 +918,14 @@ function createRequestHandler(instanceId) {
                 const action = data.action === "install" ? "install" : "login";
                 const requestedTenantId = typeof data.tenantId === "string" ? data.tenantId.trim() : "";
                 const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-                if (typeof sessionPromptHandler !== "function") {
+                const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+                const promptResult = await invokeSessionPrompt(sessionPromptHandler, prompt);
+                if (promptResult.error) {
                     res.setHeader("Content-Type", "application/json");
-                    res.writeHead(503);
-                    res.end(JSON.stringify({ error: "Could not reach the Copilot session to start Azure CLI help." }));
+                    res.writeHead(promptResult.status);
+                    res.end(JSON.stringify({ error: promptResult.error }));
                     return;
                 }
-                const prompt = buildAzureCliAssistPrompt({ action, tenantId });
-                Promise.resolve(sessionPromptHandler(prompt)).catch(() => {});
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({
