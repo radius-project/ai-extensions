@@ -26,7 +26,7 @@ import {
     workspaceFileExists,
 } from "./workspace.mjs";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
-import { selectDeployEntry, buildDeployPayload, validateDeployPayload, summarizeDeployStatus } from "./deploy-tools.mjs";
+import { selectDeployEntry, buildDeployPayload, validateDeployPayload, validateDeployAttempt, summarizeDeployStatus } from "./deploy-tools.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
     servers,
@@ -687,7 +687,7 @@ const session = await joinSession({
             parameters: {
                 type: "object",
                 properties: {
-                    deploymentId: { type: "string", description: "Deployment this call belongs to, as given in the repair handoff. Defaults to the most recent deploy." },
+                    attemptId: { type: "string", description: "Deploy attempt this call belongs to, as given in the repair handoff. Required when redeploying inside a repair loop; it pins the repository, environment, branch, provider, and app file to that attempt." },
                     environment: { type: "string", description: "GitHub environment to deploy to. Defaults to the last deploy's environment." },
                     repo: { type: "string", description: "Target repository in owner/repo format. Defaults to the last deploy's repository." },
                     branch: { type: "string", description: "Branch to deploy. Defaults to the last deploy's branch." },
@@ -697,12 +697,14 @@ const session = await joinSession({
             },
             handler: async (args = {}) => {
                 try {
-                    const entry = selectDeployEntry(servers, args.deploymentId);
+                    const entry = selectDeployEntry(servers, args.attemptId);
                     if (!entry) {
-                        return args.deploymentId
-                            ? `Deployment "${args.deploymentId}" is no longer open, so this redeploy was not started. Ask the user to reopen the Radius canvas and deploy again rather than retrying against a different deployment.`
+                        return args.attemptId
+                            ? `Deploy attempt "${args.attemptId}" is no longer active, so this redeploy was not started. A newer deploy may have replaced it; ask the user which deploy to repair rather than retrying against a different one.`
                             : "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
                     }
+                    const retarget = validateDeployAttempt(args, entry.state || {});
+                    if (retarget) return retarget;
                     const payload = buildDeployPayload(args, entry.state || {});
                     const invalid = validateDeployPayload(payload);
                     if (invalid) return invalid;
@@ -723,20 +725,20 @@ const session = await joinSession({
         },
         {
             name: "radius_deploy_status",
-            description: "Reports the current Radius deploy state (in_progress, success, or failed) with the error and workflow run URL when it failed, plus the tail of the deploy log. Poll this after calling radius_deploy until it reports a terminal state.",
+            description: "Reports the current Radius deploy state (in_progress, success, or failed) with the workflow run URL and a bounded, fenced diagnostic block when it failed. Poll this after calling radius_deploy until it reports a terminal state.",
             parameters: {
                 type: "object",
                 properties: {
-                    deploymentId: { type: "string", description: "Deployment this call belongs to, as given in the repair handoff. Defaults to the most recent deploy." },
+                    attemptId: { type: "string", description: "Deploy attempt this call belongs to, as given in the repair handoff. Required while following a repair loop." },
                     logLines: { type: "number", description: "How many trailing deploy log lines to include (default 40, max 200)." },
                 },
             },
             handler: async (args = {}) => {
                 try {
-                    const entry = selectDeployEntry(servers, args.deploymentId);
+                    const entry = selectDeployEntry(servers, args.attemptId);
                     if (!entry) {
-                        return args.deploymentId
-                            ? `Deployment "${args.deploymentId}" is no longer open, so its status is unavailable.`
+                        return args.attemptId
+                            ? `Deploy attempt "${args.attemptId}" is no longer active, so its status is unavailable.`
                             : "No Radius canvas session is open, so there is no deploy status to report.";
                     }
                     const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
@@ -815,8 +817,8 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
-setDeployRepairHandoff(({ repo, branch, error, deployRunUrl, instanceId }) =>
-    session.send(deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl, deploymentId: instanceId })));
+setDeployRepairHandoff(({ repo, branch, error, deployRunUrl, attemptId }) =>
+    session.send(deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl, attemptId })));
 
 // Wire the "View source code" / "View app definition" click for local-workspace
 // graphs to the Copilot editor canvas (side pane). The graph + line numbers are

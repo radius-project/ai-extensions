@@ -3743,7 +3743,7 @@ function resetDeployModal() {
 // icon, show the error message, and offer a button back to the deployments list.
 // The kind argument lets us render a cleaner, tailored panel for well-known
 // failures (e.g. a branch that hasn't been pushed) instead of raw CLI stderr.
-function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing) {
+function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, handoff) {
     var modal = document.getElementById('deploy-progress-modal');
     var spin = document.getElementById('deploy-progress-spinner');
     var fail = document.getElementById('deploy-progress-failicon');
@@ -3781,10 +3781,17 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing) {
     if (modal) modal.style.display = 'flex';
     var repairNote = document.getElementById('deploy-fail-repair-note');
     if (repairNote) {
-        repairNote.style.display = repairing ? 'block' : 'none';
-        repairNote.textContent = repairing
-            ? 'Copilot is analyzing the failure and will repair and redeploy if the app model caused it — follow along in the chat.'
-            : '';
+        var hs = (handoff && handoff.state) || 'idle';
+        var msg = '';
+        if (repairing) {
+            msg = 'Copilot is analyzing the failure and will repair and redeploy if the app model caused it — follow along in the chat.';
+        } else if (hs === 'pending' || hs === 'retryable') {
+            msg = 'Handing this failure to Copilot…';
+        } else if (hs === 'failed') {
+            msg = 'Could not reach Copilot to repair this deploy. Ask Copilot in the chat to fix .radius/app.bicep and redeploy.';
+        }
+        repairNote.style.display = msg ? 'block' : 'none';
+        repairNote.textContent = msg;
     }
     // Wire the copy button (present only for the branch-not-pushed panel).
     var copyBtn = document.getElementById('deploy-copy-push');
@@ -3851,15 +3858,24 @@ deployBtn.addEventListener('click', function() {
     // Poll deploy-status to clear the optimistic "Pending" once the run resolves,
     // and to surface a failure dialog if the deploy can't start (e.g. an unpushed
     // branch). We stay on the Deployments page throughout.
+    var failedPolls = 0;
     var wfPoll = setInterval(function() {
         fetch('/api/deploy-status')
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 if (d && d.status === 'failed') {
+                    var handoff = d.handoff || {};
+                    // Delivery of the repair handoff is asynchronous, so keep
+                    // polling until it lands or the server stops retrying.
+                    if (handoff.pending && failedPolls < 20) {
+                        failedPolls++;
+                        showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', false, handoff);
+                        return;
+                    }
                     clearInterval(wfPoll);
                     clearTimeout(autoHide);
                     delete OP_STATUS[opKey(app, env)];
-                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', (d && d.repairing) || false);
+                    showDeployFailed(app, env, (d && d.error) || '', (d && d.deployRunUrl) || '', (d && d.errorKind) || '', (d && d.errorBranch) || '', (d && d.repairing) || false, handoff);
                     loadDeployments(true);
                     return;
                 }

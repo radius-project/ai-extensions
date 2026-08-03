@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation, triggerDeployRepairHandoff, setDeployRepairHandoff } from "./server.mjs";
+import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation, triggerDeployRepairHandoff, setDeployRepairHandoff, deployHandoffStatus, DEPLOY_HANDOFF_MAX_ATTEMPTS } from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -230,6 +230,7 @@ describe("triggerDeployRepairHandoff", () => {
                 deployingBranch: "feat",
                 deployError: "BCP037: unknown property",
                 deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+                deployAttempt: { id: "attempt-A" },
                 ...overrides,
             },
         };
@@ -239,12 +240,13 @@ describe("triggerDeployRepairHandoff", () => {
         const calls = [];
         setDeployRepairHandoff((payload) => { calls.push(payload); });
         expect(triggerDeployRepairHandoff(failedEntry(), "radius-panel")).toBe(true);
-        // instanceId is what binds the repair loop to this canvas session.
+        // attemptId is what binds the repair loop to this deploy attempt.
         expect(calls).toEqual([{
             repo: "octo/app",
             branch: "feat",
             error: "BCP037: unknown property",
             deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+            attemptId: "attempt-A",
             instanceId: "radius-panel",
         }]);
     });
@@ -292,23 +294,48 @@ describe("triggerDeployRepairHandoff", () => {
         expect(() => triggerDeployRepairHandoff(failedEntry())).not.toThrow();
     });
 
-    it("releases the loop when the handoff throws, so a later poll can retry", () => {
-        const entry = failedEntry();
-        setDeployRepairHandoff(() => { throw new Error("session gone"); });
-        expect(triggerDeployRepairHandoff(entry)).toBe(false);
-        expect(entry.state.deployRepairing).toBe(false);
-
-        const calls = [];
-        setDeployRepairHandoff((payload) => { calls.push(payload); });
-        expect(triggerDeployRepairHandoff(entry)).toBe(true);
-        expect(calls).toHaveLength(1);
-    });
-
-    it("releases the loop when the handoff rejects, so a later poll can retry", async () => {
+    it("retries delivery on the next status poll when the first send rejects", async () => {
+        // The browser stops polling once a deploy is terminal, so a rejected send
+        // has to leave the handoff retryable for the poll that is still running.
         const entry = failedEntry();
         setDeployRepairHandoff(() => Promise.reject(new Error("send failed")));
         expect(triggerDeployRepairHandoff(entry)).toBe(true);
         await Promise.resolve();
+        expect(deployHandoffStatus(entry.state)).toMatchObject({ state: "retryable", attempts: 1, pending: true });
         expect(entry.state.deployRepairing).toBe(false);
+
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); return Promise.resolve("message-id"); });
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        await Promise.resolve();
+        expect(calls).toHaveLength(1);
+        expect(deployHandoffStatus(entry.state)).toMatchObject({ state: "delivered", pending: false });
+        expect(entry.state.deployRepairing).toBe(true);
+    });
+
+    it("gives up after the attempt budget so the user gets recovery guidance", async () => {
+        const entry = failedEntry();
+        setDeployRepairHandoff(() => Promise.reject(new Error("send failed")));
+        for (let i = 0; i < DEPLOY_HANDOFF_MAX_ATTEMPTS; i++) {
+            triggerDeployRepairHandoff(entry);
+            await Promise.resolve();
+        }
+        expect(deployHandoffStatus(entry.state)).toMatchObject({
+            state: "failed",
+            attempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
+            pending: false,
+        });
+        // Terminal: no further delivery is attempted.
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+    });
+
+    it("does not deliver twice while a send is still in flight", () => {
+        const calls = [];
+        setDeployRepairHandoff((payload) => { calls.push(payload); return new Promise(() => {}); });
+        const entry = failedEntry();
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+        expect(calls).toHaveLength(1);
+        expect(deployHandoffStatus(entry.state)).toMatchObject({ state: "pending", pending: true });
     });
 });

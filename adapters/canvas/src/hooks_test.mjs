@@ -354,9 +354,10 @@ describe("deployRepairHandoffPrompt", () => {
         expect(out.length).toBeLessThan(DEPLOY_ERROR_CHAR_CAP * 2);
     });
 
-    it("names the deployment so the tools act on the right canvas session", () => {
-        const out = deployRepairHandoffPrompt("octo/app", "main", { ...failure, deploymentId: "radius-panel" });
-        expect(out).toContain('deploymentId "radius-panel"');
-        expect(deployRepairHandoffPrompt("octo/app", "main", failure)).not.toContain("deploymentId");
+    it("names the deploy attempt so the tools cannot act on a later deploy", () => {
+        const out = deployRepairHandoffPrompt("octo/app", "main", { ...failure, attemptId: "attempt-A" });
+        expect(out).toContain('attemptId "attempt-A"');
+        expect(out).toMatch(/Do not pass repo, environment, branch, provider, or appFile/);
+        expect(deployRepairHandoffPrompt("octo/app", "main", failure)).not.toContain("attemptId");
     });
 });
