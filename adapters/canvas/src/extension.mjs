@@ -35,6 +35,7 @@ import {
     isCurrentSourceRefToken,
     setAppBicepHandoff,
     setDeployRepairHandoff,
+    setSessionPromptHandler,
     setOpenSourceHandler,
 } from "./server.mjs";
 import {
@@ -819,6 +820,10 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
 setDeployRepairHandoff(({ repo, branch, error, deployRunUrl, attemptId }) =>
     session.send(deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl, attemptId })));
+
+// Let server routes ask the Copilot session to perform follow-up actions the
+// canvas itself cannot run interactively, such as Azure CLI login/install help.
+setSessionPromptHandler((prompt) => session.send(String(prompt || "")));
 
 // Wire the "View source code" / "View app definition" click for local-workspace
 // graphs to the Copilot editor canvas (side pane). The graph + line numbers are
