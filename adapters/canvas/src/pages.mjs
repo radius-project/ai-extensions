@@ -672,58 +672,235 @@ function generateGraph() {
     var container = document.getElementById('graph-container');
     var statusEl = document.getElementById('graph-status');
     if (statusEl) { statusEl.style.display = 'none'; }
-    container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
-        '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
+    if (window.radiusGraphProgressPoller) clearInterval(window.radiusGraphProgressPoller);
+    if (window.radiusGraphProgressTicker) clearInterval(window.radiusGraphProgressTicker);
+    if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
+    container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:560px; margin:0 auto;">' +
+        '<div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">' +
         '<div class="spinner"></div>' +
         '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
         '</div>' +
+        '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">' +
+        '<strong id="progress-stage" style="font-size:13px; color:var(--rad-text);">Checking for an existing app model</strong>' +
+        '<span id="progress-percent" style="font-size:12px; color:var(--rad-text-tertiary);">5%</span>' +
+        '</div>' +
+        '<div style="height:8px; border-radius:999px; background:var(--rad-bg-subtle); overflow:hidden; margin-bottom:10px;">' +
+        '<div id="progress-bar-fill" style="height:100%; width:5%; border-radius:999px; background:var(--rad-brand); transition:width 0.4s ease, background 0.2s ease;"></div>' +
+        '</div>' +
+        '<div id="progress-status-text" style="font-size:13px; color:var(--rad-text); margin-bottom:4px;">Checking the selected branch for .radius/app.bicep…</div>' +
+        '<div id="progress-eta" style="font-size:12px; color:var(--rad-text-tertiary); margin-bottom:14px;">Usually completes in about 5 minutes.</div>' +
         '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
         '</div>' +
-        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
+        '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-pending::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-bg-subtle);margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}.step-error::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-danger);margin-right:8px;vertical-align:1px}.step-error{color:var(--rad-danger);font-weight:600}</style>';
 
     var stepsEl = document.getElementById('progress-steps');
+    var stageEl = document.getElementById('progress-stage');
+    var percentEl = document.getElementById('progress-percent');
+    var fillEl = document.getElementById('progress-bar-fill');
+    var progressStatusTextEl = document.getElementById('progress-status-text');
+    var etaEl = document.getElementById('progress-eta');
     var shownSteps = 0;
+    var progressStartedAt = Date.now();
+    var lastProgressPercent = 5;
+    var waitingForAppBicep = false;
+    var loadRequestInFlight = false;
+    var graphRunFinished = false;
+    var graphRunToken = Date.now().toString() + Math.random().toString(36).slice(2);
+    window.radiusGraphRunToken = graphRunToken;
+    var EXPECTED_GRAPH_DURATION_MS = 5 * 60 * 1000;
+    var WAITING_STAGE_COPY = [
+        { label: 'Checking for an existing app model', status: 'Checking the selected branch for .radius/app.bicep…' },
+        { label: 'Analyzing the repository structure', status: 'Copilot is reviewing the repository so it can draft .radius/app.bicep.' },
+        { label: 'Drafting .radius/app.bicep', status: 'Still working — larger repositories can take a few minutes at this stage.' },
+        { label: 'Validating relationships for the graph', status: 'Finalizing the generated app model before Radius renders the graph.' }
+    ];
 
-    // Poll for progress updates
-    var pollInterval = setInterval(function() {
+    function clearGraphProgressTimers() {
+        if (window.radiusGraphRunToken !== graphRunToken) return;
+        if (window.radiusGraphProgressPoller) clearInterval(window.radiusGraphProgressPoller);
+        if (window.radiusGraphProgressTicker) clearInterval(window.radiusGraphProgressTicker);
+        if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
+    }
+
+    function formatRemaining(ms) {
+        if (ms <= 0) return 'Finishing up…';
+        var totalSeconds = Math.ceil(ms / 1000);
+        var minutes = Math.floor(totalSeconds / 60);
+        if (minutes >= 2) return 'About ' + minutes + ' minutes remaining';
+        if (minutes === 1) return 'About 1 minute remaining';
+        return 'Less than a minute remaining';
+    }
+
+    function renderWaitingSteps(activeIndex, tone) {
+        stepsEl.innerHTML = '';
+        WAITING_STAGE_COPY.forEach(function(step, idx) {
+            var div = document.createElement('div');
+            div.className = tone === 'error'
+                ? (idx === activeIndex ? 'step-error' : 'step-pending')
+                : (idx < activeIndex ? 'step-done' : (idx === activeIndex ? 'step-active' : 'step-pending'));
+            div.textContent = step.label;
+            stepsEl.appendChild(div);
+        });
+    }
+
+    function setProgressState(percent, stage, statusText, etaText, tone) {
+        var clamped = Math.max(0, Math.min(100, percent));
+        lastProgressPercent = clamped;
+        if (fillEl) {
+            fillEl.style.width = clamped + '%';
+            fillEl.style.background = tone === 'error'
+                ? 'var(--rad-danger)'
+                : tone === 'success'
+                    ? 'var(--rad-success)'
+                    : 'var(--rad-brand)';
+        }
+        if (percentEl) percentEl.textContent = Math.round(clamped) + '%';
+        if (stageEl) stageEl.textContent = stage;
+        if (progressStatusTextEl) progressStatusTextEl.textContent = statusText;
+        if (etaEl) etaEl.textContent = etaText;
+    }
+
+    function updateWaitingProgress() {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished || !waitingForAppBicep) return;
+        var elapsed = Date.now() - progressStartedAt;
+        var activeIndex = elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : elapsed < 270000 ? 2 : 3;
+        var percent = elapsed < EXPECTED_GRAPH_DURATION_MS
+            ? 18 + ((elapsed / EXPECTED_GRAPH_DURATION_MS) * 50)
+            : 72;
+        renderWaitingSteps(activeIndex);
+        setProgressState(
+            Math.min(72, percent),
+            WAITING_STAGE_COPY[activeIndex].label,
+            WAITING_STAGE_COPY[activeIndex].status,
+            elapsed < EXPECTED_GRAPH_DURATION_MS
+                ? 'Usually completes in about 5 minutes. ' + formatRemaining(EXPECTED_GRAPH_DURATION_MS - elapsed) + '.'
+                : 'Still running — complex repositories can take a little longer than 5 minutes.',
+            'running'
+        );
+    }
+
+    function syncProgressMessages(msgs) {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+        if (!Array.isArray(msgs)) msgs = [];
+        if (msgs.length < shownSteps) {
+            shownSteps = 0;
+            stepsEl.innerHTML = '';
+        }
+        for (var i = shownSteps; i < msgs.length; i++) {
+            var prev = stepsEl.querySelector('.step-active');
+            if (prev) prev.className = 'step-done';
+            var div = document.createElement('div');
+            div.className = 'step-active';
+            div.textContent = msgs[i];
+            stepsEl.appendChild(div);
+        }
+        shownSteps = msgs.length;
+        if (!msgs.length) return;
+        var latest = msgs[msgs.length - 1] || '';
+        if (latest.indexOf('Checking ') === 0) {
+            waitingForAppBicep = false;
+            setProgressState(10, 'Checking for an existing app model', latest, 'Usually completes in about 5 minutes.', 'running');
+        } else if (latest.indexOf('.radius/app.bicep not present') === 0) {
+            waitingForAppBicep = true;
+            updateWaitingProgress();
+        } else if (latest.indexOf('Found existing app.bicep') === 0) {
+            waitingForAppBicep = false;
+            setProgressState(82, 'Parsing .radius/app.bicep', latest, 'Final steps — less than a minute remaining.', 'running');
+        } else if (latest.indexOf('Mapped ') === 0) {
+            waitingForAppBicep = false;
+            setProgressState(95, 'Rendering the application graph', latest, 'Almost done — preparing the final graph view.', 'running');
+        } else {
+            waitingForAppBicep = false;
+            setProgressState(Math.max(lastProgressPercent, 88), 'Preparing the application graph', latest, 'Radius is still building the graph.', 'running');
+        }
+    }
+
+    function scheduleGraphRetry(delayMs) {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+        if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
+        window.radiusGraphRetryTimer = setTimeout(function() {
+            if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+            requestGraphLoad();
+        }, delayMs || 10000);
+    }
+
+    function requestGraphLoad() {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished || loadRequestInFlight) return;
+        loadRequestInFlight = true;
+        fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+                if (d.reload) {
+                    waitingForAppBicep = false;
+                    var prev = stepsEl.querySelector('.step-active');
+                    if (prev) prev.className = 'step-done';
+                    var doneDiv = document.createElement('div');
+                    doneDiv.className = 'step-done';
+                    doneDiv.textContent = 'Graph ready!';
+                    stepsEl.appendChild(doneDiv);
+                    setProgressState(100, 'Application graph ready', 'Application graph generated successfully.', 'Completed successfully.', 'success');
+                    graphRunFinished = true;
+                    clearGraphProgressTimers();
+                    setTimeout(function() {
+                        if (window.radiusGraphRunToken !== graphRunToken || !graphRunFinished) return;
+                        window.location.reload();
+                    }, 600);
+                } else if (d.needsAppBicep) {
+                    waitingForAppBicep = true;
+                    if (!shownSteps) {
+                        syncProgressMessages([
+                            'Checking ' + repo + ' for existing app.bicep...',
+                            '.radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.'
+                        ]);
+                    } else {
+                        updateWaitingProgress();
+                    }
+                    scheduleGraphRetry();
+                } else if (d.stale) {
+                    waitingForAppBicep = false;
+                    setProgressState(
+                        Math.max(lastProgressPercent, 88),
+                        'Refreshing the application graph',
+                        'A newer graph request replaced this one.',
+                        'Retrying with the latest request shortly.',
+                        'running'
+                    );
+                    scheduleGraphRetry(1000);
+                } else if (d.error) {
+                    waitingForAppBicep = false;
+                    renderWaitingSteps(WAITING_STAGE_COPY.length - 1, 'error');
+                    setProgressState(Math.min(lastProgressPercent, 95), 'Graph generation failed', 'Error: ' + d.error, 'The workflow stopped before completion.', 'error');
+                    if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
+                    graphRunFinished = true;
+                    clearGraphProgressTimers();
+                }
+            })
+            .catch(function() {
+                if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+                waitingForAppBicep = false;
+                renderWaitingSteps(WAITING_STAGE_COPY.length - 1, 'error');
+                setProgressState(Math.min(lastProgressPercent, 95), 'Graph generation failed', 'Failed to continue generating the application graph.', 'Please try again.', 'error');
+                if (statusEl) { statusEl.textContent = 'Failed to generate the application graph.'; statusEl.className = 'status error'; statusEl.style.display = ''; }
+                graphRunFinished = true;
+                clearGraphProgressTimers();
+            })
+            .finally(function() {
+                if (window.radiusGraphRunToken !== graphRunToken) return;
+                loadRequestInFlight = false;
+            });
+    }
+
+    renderWaitingSteps(0);
+    window.radiusGraphProgressPoller = setInterval(function() {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
         fetch('/api/progress').then(function(r) { return r.json(); }).then(function(d) {
-            var msgs = d.messages || [];
-            for (var i = shownSteps; i < msgs.length; i++) {
-                // Mark previous as done
-                var prev = stepsEl.querySelector('.step-active');
-                if (prev) prev.className = 'step-done';
-                var div = document.createElement('div');
-                div.className = 'step-active';
-                div.textContent = msgs[i];
-                stepsEl.appendChild(div);
-            }
-            shownSteps = msgs.length;
+            if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+            syncProgressMessages(d.messages || []);
         }).catch(function() {});
     }, 800);
-
-    // Start the generation
-    fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-            clearInterval(pollInterval);
-            if (d.reload) {
-                // Final progress update
-                var prev = stepsEl.querySelector('.step-active');
-                if (prev) prev.className = 'step-done';
-                var doneDiv = document.createElement('div');
-                doneDiv.className = 'step-done';
-                doneDiv.textContent = 'Graph ready!';
-                stepsEl.appendChild(doneDiv);
-                setTimeout(function() { window.location.reload(); }, 600);
-            } else if (d.needsAppBicep) {
-                container.innerHTML = '';
-                if (statusEl) { statusEl.textContent = 'Generating app.bicep with the Radius app-bicep skill\u2026 the graph will appear once it is saved. Re-open the graph if it does not refresh automatically.'; statusEl.className = 'status info'; statusEl.style.display = ''; }
-            } else if (d.error) {
-                container.innerHTML = '';
-                if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
-            }
-        })
-        .catch(function() { clearInterval(pollInterval); container.innerHTML = ''; });
+    window.radiusGraphProgressTicker = setInterval(updateWaitingProgress, 1000);
+    requestGraphLoad();
 }
 <\/script>
 ${graphHeaderClose()}`);

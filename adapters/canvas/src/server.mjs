@@ -88,6 +88,13 @@ export function isCurrentSourceRefToken(state, view, token) {
     return !!token && state?.sourceRefContexts?.[view]?.token === token;
 }
 
+export function addGraphProgress(state, generation, message) {
+    if (!state || state.graphBuildGeneration !== generation) return false;
+    if (!state.progressMessages) state.progressMessages = [];
+    state.progressMessages.push(message);
+    return true;
+}
+
 // deployStatusReaderFromState - build a GHCR-first deployed-graph/status reader
 // from a canvas instance's state. The graph registry/tag are derived the same
 // way the deploy workflow producer derives them (from the environment's GHCR
@@ -2757,10 +2764,7 @@ function createRequestHandler(instanceId) {
                     : null;
 
                 function addProgress(msg) {
-                    if (entry) {
-                        if (!entry.state.progressMessages) entry.state.progressMessages = [];
-                        entry.state.progressMessages.push(msg);
-                    }
+                    addGraphProgress(entry?.state, requestGeneration, msg);
                 }
                 // Reset progress
                 if (entry) entry.state.progressMessages = [];

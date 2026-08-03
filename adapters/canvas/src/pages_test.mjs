@@ -101,10 +101,31 @@ describe("graphHeader / graphHeaderClose", () => {
 describe("graphPage — empty resources (initial) branch", () => {
     const html = graphPage({ contextRepo: "octo/app", contextBranch: "dev" });
 
-    it("posts to /api/load-graph and reacts to reload/error only", () => {
+    it("posts to /api/load-graph and keeps retrying while app.bicep is being generated", () => {
         expect(html).toContain("/api/load-graph");
+        expect(html).toContain("requestGraphLoad()");
+        expect(html).toContain("window.radiusGraphRetryTimer");
         expect(html).toContain("d.reload");
+        expect(html).toContain("d.stale");
+        expect(html).toContain("scheduleGraphRetry(1000)");
         expect(html).toContain("d.error");
+    });
+
+    it("ignores stale callbacks and progress updates after the run finishes", () => {
+        expect(html).toContain("var graphRunFinished = false");
+        expect(html).toContain("window.radiusGraphRunToken !== graphRunToken || graphRunFinished");
+        expect(html).toContain("window.radiusGraphRunToken !== graphRunToken || !graphRunFinished");
+    });
+
+    it("renders a staged progress bar with duration guidance and terminal states", () => {
+        expect(html).toContain('id="progress-stage"');
+        expect(html).toContain('id="progress-percent"');
+        expect(html).toContain('id="progress-bar-fill"');
+        expect(html).toContain('id="progress-eta"');
+        expect(html).toContain("Usually completes in about 5 minutes.");
+        expect(html).toContain("Still running — complex repositories can take a little longer than 5 minutes.");
+        expect(html).toContain("Application graph generated successfully.");
+        expect(html).toContain("Graph generation failed");
     });
 
     it("emits none of the removed generated-bicep tokens", () => {
