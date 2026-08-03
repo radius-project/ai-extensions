@@ -444,6 +444,27 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
         expect(html).toContain("params.appName !== undefined");
     });
 
+    it("requires in-canvas consent before asking Copilot to start Azure login", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain('id="azure-cli-assist-modal"');
+        expect(html).toContain('role="dialog"');
+        expect(html).toContain("data.code === 'az-login-required'");
+        expect(html).toContain("showAzureCliAssistPrompt('login', data.tenantId || tenantId, data.error)");
+        expect(html).toContain("document.getElementById('azure-cli-assist-confirm').addEventListener('click'");
+        expect(html).not.toContain("confirm('No active Azure session.");
+        expect(html).toContain("/api/azure-cli-assist");
+        expect(html).toContain("fallbackMessage ? ' ' + fallbackMessage : ''");
+    });
+
+    it("requires in-canvas consent before asking Copilot to install Azure CLI", () => {
+        const html = environmentPage({ contextRepo: "octo/app" });
+        expect(html).toContain("data.code === 'az-cli-missing'");
+        expect(html).toContain("showAzureCliAssistPrompt('install', data.tenantId || tenantId, data.error)");
+        expect(html).toContain("Would you like Copilot to attempt to install it and then start Azure login?");
+        expect(html).toContain("Ask Copilot to install");
+        expect(html).not.toContain("confirm('Azure CLI is not installed.");
+    });
+
     it("surfaces repo admin access at open: fetches identity with ?repo and renders repoAccess", () => {
         // Comment #9: the repo admin preflight was submit-only, so a write/maintain
         // developer only hit the 403 after filling the whole form. The client now

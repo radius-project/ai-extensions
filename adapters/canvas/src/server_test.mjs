@@ -1,5 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { canReuseModeledGraph, graphDefinitionHash, isCurrentSourceRefToken, resolveDeployStatus, isReplicationLagError, buildRoleAssignmentArgs, findFederatedCredentialNameCollision, pickAksResourceGroup, isCrossSiteMutation } from "./server.mjs";
+import {
+    azureCredentialIdValidationError,
+    azureLoginRequiredResponse,
+    buildRoleAssignmentArgs,
+    buildAzureCliAssistPrompt,
+    canReuseModeledGraph,
+    findFederatedCredentialNameCollision,
+    graphDefinitionHash,
+    isCrossSiteMutation,
+    isCliCommandMissing,
+    isCurrentSourceRefToken,
+    isReplicationLagError,
+    invokeSessionPrompt,
+    pickAksResourceGroup,
+    resolveDeployStatus,
+} from "./server.mjs";
 import { buildFederatedCredentialName, buildEnvironmentSuffix } from "@radius-project/core";
 
 describe("resolveDeployStatus", () => {
@@ -216,5 +231,115 @@ describe("pickAksResourceGroup", () => {
 
     it("ignores non-string cluster RG values", () => {
         expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+    });
+});
+
+describe("isCliCommandMissing", () => {
+    it("recognizes common missing-command errors", () => {
+        expect(isCliCommandMissing("spawn az ENOENT")).toBe(true);
+        expect(isCliCommandMissing("spawn az.exe ENOENT")).toBe(true);
+        expect(isCliCommandMissing("/bin/sh: az: command not found")).toBe(true);
+        expect(isCliCommandMissing("'az' is not recognized as an internal or external command")).toBe(true);
+    });
+
+    it("does not treat ordinary auth or runtime failures as a missing CLI", () => {
+        expect(isCliCommandMissing("Please run 'az login' to setup account.")).toBe(false);
+        expect(isCliCommandMissing("ERROR: The subscription was not found.")).toBe(false);
+        expect(isCliCommandMissing("Failed to read token cache: No such file or directory")).toBe(false);
+        expect(isCliCommandMissing("Token cache failed with ENOENT")).toBe(false);
+        expect(isCliCommandMissing("helper: command not found")).toBe(false);
+        expect(isCliCommandMissing("")).toBe(false);
+    });
+});
+
+describe("azureCredentialIdValidationError", () => {
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+    const subscriptionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    it("accepts valid or omitted credential identifiers", () => {
+        expect(azureCredentialIdValidationError({ tenantId, subscriptionId })).toBe("");
+        expect(azureCredentialIdValidationError()).toBe("");
+    });
+
+    it("rejects an invalid tenant before generating login guidance", () => {
+        expect(azureCredentialIdValidationError({ tenantId: "not-a-guid", subscriptionId }))
+            .toBe('Invalid tenantId "not-a-guid" (expected a GUID).');
+    });
+
+    it("rejects an invalid subscription before invoking Azure CLI", () => {
+        expect(azureCredentialIdValidationError({ tenantId, subscriptionId: "not-a-guid" }))
+            .toBe('Invalid subscriptionId "not-a-guid" (expected a GUID).');
+    });
+});
+
+describe("azureLoginRequiredResponse", () => {
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+
+    it("returns structured login guidance for an unauthenticated session", () => {
+        expect(azureLoginRequiredResponse({ tenantId })).toEqual({
+            error: 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.',
+            code: "az-login-required",
+            tenantId,
+        });
+    });
+
+    it("returns structured tenant-specific guidance for the wrong active tenant", () => {
+        const response = azureLoginRequiredResponse({
+            tenantId,
+            activeTenantId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        });
+        expect(response.code).toBe("az-login-required");
+        expect(response.tenantId).toBe(tenantId);
+        expect(response.error).toContain(`--tenant ${tenantId}`);
+    });
+});
+
+describe("invokeSessionPrompt", () => {
+    it("waits for the session prompt handler to finish", async () => {
+        let completed = false;
+        const result = await invokeSessionPrompt(async () => {
+            await Promise.resolve();
+            completed = true;
+        }, "prompt");
+        expect(completed).toBe(true);
+        expect(result).toEqual({ status: 200 });
+    });
+
+    it("surfaces unavailable and rejected handlers as server errors", async () => {
+        await expect(invokeSessionPrompt(null, "prompt")).resolves.toEqual({
+            status: 503,
+            error: "Could not reach the Copilot session to start Azure CLI help.",
+        });
+        await expect(invokeSessionPrompt(async () => {
+            throw new Error("send failed");
+        }, "prompt")).resolves.toEqual({
+            status: 502,
+            error: "The Copilot session could not start Azure CLI help.",
+        });
+    });
+});
+
+describe("buildAzureCliAssistPrompt", () => {
+    it("builds a login prompt with the requested tenant when it is a valid guid", () => {
+        const prompt = buildAzureCliAssistPrompt({
+            action: "login",
+            tenantId: "11111111-2222-3333-4444-555555555555",
+        });
+        expect(prompt).toContain("Run `az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555`");
+        expect(prompt).toContain("remove COPILOT_AGENT_SESSION_ID from the az process environment");
+        expect(prompt).toContain("show me the device code and sign-in URL");
+        expect(prompt).toContain("click Verify Credentials again");
+    });
+
+    it("falls back to tenant-agnostic device-code login for invalid tenant ids", () => {
+        const prompt = buildAzureCliAssistPrompt({ action: "login", tenantId: "not-a-guid" });
+        expect(prompt).toContain("Run `az login --use-device-code`");
+        expect(prompt).not.toContain("--tenant not-a-guid");
+    });
+
+    it("builds install guidance when Azure CLI is missing", () => {
+        const prompt = buildAzureCliAssistPrompt({ action: "install" });
+        expect(prompt).toContain("Azure CLI is not installed");
+        expect(prompt).toContain("install Azure CLI");
     });
 });
