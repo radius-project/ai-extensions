@@ -302,8 +302,14 @@ ${getInlineVendorStyles()}
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
   .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
   .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
+  .rad-node__badge--progress { animation: rad-node-spin 1s linear infinite; }
+  @keyframes rad-node-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .rad-node__badge--progress { animation: none; } }
   .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
-  .rad-node__type { font-size: 13px; color: var(--rad-text-tertiary); margin-top: 6px; }
+  .rad-node__type {
+    width: 100%; min-width: 0; overflow: hidden; white-space: nowrap;
+    font-size: 13px; line-height: 18px; color: var(--rad-text-tertiary); margin-top: 6px;
+  }
   .rad-node__source {
     display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
     font-size: 12px; font-weight: 500; color: var(--rad-link); text-decoration: none; cursor: pointer;
@@ -560,7 +566,7 @@ export function graphPage(state) {
         ? state.graphFromWorkspace
         : isWorkspaceSelection(state, targetRepo, graphBranch);
 
-    if (resources.length === 0) {
+    if (resources.length === 0 && !state?.graphLoaded) {
         return pageShell("Application Graph", `
 ${graphHeader('graph')}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
@@ -892,6 +898,7 @@ ${graphHeader('graph')}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
 </div>
 <div id="graph-container"></div>
+<div id="graph-refresh-status" class="status error" style="display:none;"></div>
 <div style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
 Click a node to view source code links.
 </div>
@@ -967,11 +974,41 @@ document.getElementById('deploy-app-btn').addEventListener('click', function(e) 
 var resources = ${resourcesJson};
 var repoUrl = 'https://github.com/' + document.getElementById('graph-repo').value.trim();
 var branch = document.getElementById('graph-branch').value.trim() || 'main';
-radiusRenderGraph('graph-container', resources, {
+var graphOptions = {
     repoUrl: repoUrl,
     branch: branch,
     localSource: ${localSource ? 'true' : 'false'}
-});
+};
+var graphController = radiusRenderGraph('graph-container', resources, graphOptions);
+
+// Rebuild from app.bicep whenever the panel is loaded. This keeps a reopened
+// panel current after a merge without requiring a new canvas instance.
+fetch('/api/load-graph', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({repo: CONTEXT_REPO, branch: branch, refresh: true})
+})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (Array.isArray(d.resources)) {
+            if (graphController) graphController = graphController.update(d.resources) || graphController;
+            else graphController = radiusRenderGraph('graph-container', d.resources, graphOptions);
+        } else if (d.needsAppBicep) {
+            var generatingStatus = document.getElementById('graph-refresh-status');
+            generatingStatus.className = 'status info';
+            generatingStatus.textContent = 'Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.';
+            generatingStatus.style.display = '';
+        } else if (d.error) {
+            var status = document.getElementById('graph-refresh-status');
+            status.textContent = 'Unable to refresh the application graph: ' + d.error;
+            status.style.display = '';
+        }
+    })
+    .catch(function() {
+        var status = document.getElementById('graph-refresh-status');
+        status.textContent = 'Unable to refresh the application graph.';
+        status.style.display = '';
+    });
 <\/script>
 ${graphHeaderClose()}`);
 }
@@ -1201,7 +1238,7 @@ ${graphHeader('graph-diff')}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status info">Loading branches…</div>
+<div id="diff-status" class="status ${state?.diffError ? 'error' : 'info'}">${state?.diffError ? escapeHtml(state.diffError) : 'Loading branches…'}</div>
 <script>
 var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
@@ -1280,7 +1317,7 @@ ${graphHeader('graph-diff')}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status info" style="display:none;"></div>
+<div id="diff-status" class="status ${state?.diffError ? 'error' : 'info'}" style="${state?.diffError ? '' : 'display:none;'}">${state?.diffError ? escapeHtml(state.diffError) : ''}</div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
@@ -1488,12 +1525,14 @@ function escapeHtmlClient(s) {
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
     }
 
-    function renderGraph(resources) {
+    function renderGraph(resources, showDeployStatus) {
         if (statusEl) { statusEl.style.display = 'none'; }
         radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
             branch: 'main',
-            showLegend: true
+            showLegend: true,
+            deployedMode: !showDeployStatus,
+            deployMode: !!showDeployStatus
         });
     }
 
@@ -1507,11 +1546,11 @@ function escapeHtmlClient(s) {
             var st = s && s.status;
             // Stream deployment logs under the graph whenever a deploy is running
             // or has produced log output.
-            if (st === 'in_progress' || st === 'success' || st === 'complete' || (s && s.logTotal)) {
+            if (st === 'in_progress' || st === 'success' || st === 'complete' || st === 'failed' || (s && s.logTotal)) {
                 startLogStream();
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success')) {
-                renderGraph(liveRes);
+            if (liveRes.length && (st === 'in_progress' || st === 'success' || st === 'failed')) {
+                renderGraph(liveRes, true);
                 if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
                 return;
             }
@@ -1519,7 +1558,7 @@ function escapeHtmlClient(s) {
             fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
                 var resources = (d && d.resources) || [];
                 if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-                renderGraph(resources);
+                renderGraph(resources, false);
             }).catch(function() { showNothing('Nothing deployed yet'); });
         }).catch(function() { showNothing('Nothing deployed yet'); });
     }
@@ -1602,15 +1641,14 @@ export function environmentPage(state) {
     const envName = state?.envName || 'dev';
     const appFile = state?.appFile || 'app.bicep';
     const existingEnvs = state?.existingEnvs || ['dev', 'staging', 'production'];
-    // Deployment reads files and dispatches workflows via GitHub, so an unpushed
-    // worktree-only branch cannot be deployed. Default to 'main' in that case so
-    // the branch dropdown does not silently mislead the user.
+    // Default to the active session branch. A worktree session's branch may
+    // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
+    // GitHub yet), but we no longer fall back to 'main' for that case: the deploy
+    // path fails fast with a clear "push this branch" message when the ref is
+    // absent on GitHub, so silently substituting 'main' would only deploy the
+    // wrong (or empty) branch. The branch stays user-overridable in the UI.
     const deployContextBranch = state?.contextBranch || 'main';
-    const deployWorkspaceBranch = state?.workspaceBranch || '';
-    const deployBranchShas = state?.branchShas || {};
-    const deployDefaultBranch = (deployWorkspaceBranch && deployContextBranch === deployWorkspaceBranch && deployBranchShas[deployWorkspaceBranch] === 'worktree')
-        ? 'main'
-        : deployContextBranch;
+    const deployDefaultBranch = deployContextBranch;
 
     // If deployment result exists, show it
     if (state?.deployResult) {
@@ -3360,6 +3398,10 @@ function deployLandingView(state) {
     <label for="deploy-env-select">Environment:</label>
     <div class="rad-select-wrap"><select id="deploy-env-select"><option value="">Loading…</option></select></div>
   </div>
+  <div class="rad-field">
+    <label for="deploy-branch-select">Branch:</label>
+    <div class="rad-select-wrap"><select id="deploy-branch-select"><option value="${escapeHtml(ctxBranch)}">${escapeHtml(ctxBranch)}</option></select></div>
+  </div>
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
 
@@ -3481,6 +3523,7 @@ function escapeHtmlClient(s) {
 var deployBtn = document.getElementById('deploy-now-btn');
 var appSelect = document.getElementById('deploy-app-select');
 var envSelect = document.getElementById('deploy-env-select');
+var branchSelect = document.getElementById('deploy-branch-select');
 var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
 var HAS_APPS = false;
@@ -3610,6 +3653,42 @@ function loadEnvironmentsDropdown() {
             refreshDeployBtn();
         })
         .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+}
+
+// Populate the Branch dropdown for the deploy dispatch, defaulting to the
+// current session/worktree branch. The chosen branch is the --ref the deploy
+// workflow runs against, so exposing it lets the user redirect a deploy to a
+// different branch (and see which branch a worktree session will deploy).
+function loadBranches() {
+    if (!branchSelect) return;
+    if (!CTX_REPO) { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; return; }
+    fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var branches = (d && d.branches) || [];
+            var workspaceBranch = (d && d.workspaceBranch) || CTX_BRANCH || '';
+            // The branch we want selected by default (and dispatched against):
+            // the server-reported worktree branch, else the session branch.
+            var desired = workspaceBranch || CTX_BRANCH || '';
+            if (branches.length === 0) { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; return; }
+            // The desired branch can be absent from /api/discover-branches (e.g. an
+            // unpushed worktree branch the server didn't inject because the repo
+            // didn't match the workspace). Insert it so the dropdown — and the
+            // dispatch that reads branchSelect.value — never silently falls back to
+            // the first returned branch and deploys the wrong ref.
+            if (desired && !branches.some(function(b) { return b.name === desired; })) {
+                branches.unshift({ name: desired, sha: 'worktree' });
+            }
+            branchSelect.innerHTML = '';
+            branches.forEach(function(b) {
+                var o = document.createElement('option');
+                o.value = b.name;
+                o.textContent = b.name + (b.sha === 'worktree' ? ' (worktree)' : (b.sha ? ' (' + b.sha.slice(0,7) + ')' : ''));
+                if (b.name === desired) o.selected = true;
+                branchSelect.appendChild(o);
+            });
+        })
+        .catch(function() { branchSelect.innerHTML = '<option value="' + escapeHtmlClient(CTX_BRANCH) + '">' + escapeHtmlClient(CTX_BRANCH) + '</option>'; });
 }
 
 function statusCell(status) {
@@ -3935,10 +4014,14 @@ deployBtn.addEventListener('click', function() {
             .catch(function() {});
     }, 2500);
 
+    // The deploy runs against the branch the user selected (defaults to the
+    // session/worktree branch). This value becomes the workflow --ref, so the
+    // dispatched branch always matches what's shown in the Branch dropdown.
+    var deployBranch = (branchSelect && branchSelect.value) || CTX_BRANCH;
     fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: CTX_BRANCH, appFile: '.radius/app.bicep' })
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: deployBranch, appFile: '.radius/app.bicep' })
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .catch(function() {
           clearInterval(wfPoll);
@@ -3969,6 +4052,7 @@ deployBtn.addEventListener('click', function() {
 
 loadApplications();
 loadEnvironmentsDropdown();
+loadBranches();
 loadDeployments();
 <\/script>`, 'deployments');
 }

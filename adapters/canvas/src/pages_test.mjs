@@ -81,6 +81,14 @@ describe("pageShell", () => {
         // The bare selector (which would balloon the radio) must be gone.
         expect(html).not.toMatch(/\n\s*input, select, \.rad-select \{/);
     });
+
+    it("constrains graph type labels to the node card width", () => {
+        const html = pageShell("My Title", "<p>hello</p>");
+        const typeStyles = html.match(/\.rad-node__type\s*\{([^}]*)\}/)?.[1];
+        expect(typeStyles).toContain("width: 100%");
+        expect(typeStyles).toContain("overflow: hidden");
+        expect(typeStyles).toContain("white-space: nowrap");
+    });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
@@ -135,8 +143,34 @@ describe("graphPage — with resources branch", () => {
         expect(html).toContain("Applications.Core/containers");
     });
 
+    it("refreshes the modeled graph from app.bicep when the panel reloads", () => {
+        expect(html).toContain("refresh: true");
+        expect(html).toContain("graphController = graphController.update(d.resources) || graphController");
+        expect(html).toContain("Unable to refresh the application graph");
+    });
+
+    it("shows automatic app.bicep regeneration as progress rather than an error", () => {
+        expect(html).toContain("d.needsAppBicep");
+        expect(html).toContain("generatingStatus.className = 'status info'");
+        expect(html).toContain("Copilot is rebuilding the application graph");
+    });
+
     it("emits none of the removed generated-bicep tokens", () => {
         for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
+    });
+
+    describe("graphPage — successfully loaded empty graph", () => {
+        it("renders an empty graph instead of returning to the generate prompt", () => {
+            const html = graphPage({
+                graphLoaded: true,
+                graphResources: [],
+                graphTargetRepo: "octo/app",
+                graphBranch: "main",
+            });
+            expect(html).toContain("var resources = [];");
+            expect(html).toContain("radiusRenderGraph('graph-container', resources");
+            expect(html).not.toContain("Select a branch to generate the application graph");
+        });
     });
 });
 
@@ -480,6 +514,32 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     });
 });
 
+describe("deployingPage — Deployments landing", () => {
+    it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
+        // The Deployments page carries non-trivial inline client logic (branch
+        // discovery + selected-branch dispatch) inside a template literal, so an
+        // unescaped backtick or stray delimiter silently closes the outer literal
+        // and halts page init. Compile every emitted script to catch that class
+        // of bug (it already caught a stray backtick during development).
+        const html = deployingPage({ contextRepo: "octo/app", contextBranch: "feature-x" });
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+        expect(scripts.length).toBeGreaterThan(0);
+        for (const src of scripts) {
+            expect(() => new Function(src)).not.toThrow();
+        }
+    });
+
+    it("renders a Branch selector defaulting to the session branch and dispatches it", () => {
+        const html = deployingPage({ contextRepo: "octo/app", contextBranch: "feature-x" });
+        // The Branch selector is visible (not a hidden input) and seeded with the
+        // active session branch, and the dispatch reads the selected branch.
+        expect(html).toContain('id="deploy-branch-select"');
+        expect(html).toContain("feature-x");
+        expect(html).toContain("var deployBranch = (branchSelect && branchSelect.value) || CTX_BRANCH;");
+        expect(html).toContain("branch: deployBranch");
+    });
+});
+
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
     it("passes repoUrl, branch (head), and baseBranch to radiusRenderGraph so buildSourceUrl doesn't short-circuit on missing repoUrl", () => {
         const html = graphDiffPage({
@@ -494,6 +554,36 @@ describe("graphDiffPage — passes repo/branch context so source links + popup w
         expect(html).toContain("branch: 'feature'");
         expect(html).toContain("baseBranch: 'main'");
         expect(html).toContain("var DIFF_REPO_URL = 'https://github.com/' + document.getElementById('diff-repo-select').value.trim();");
+    });
+});
+
+describe("graphDiffPage — comparison errors", () => {
+    it.each([{ diffResources: [] }, { diffResources: sampleResources }])("surfaces an automatic comparison failure with existing resources: $diffResources", ({ diffResources }) => {
+        const html = graphDiffPage({
+            diffError: "Unable to compile head graph",
+            diffResources,
+            diffTargetRepo: "octo/app",
+            diffBase: "main",
+            diffHead: "feature",
+        });
+        expect(html).toContain("Unable to compile head graph");
+        expect(html).toContain('class="status error"');
+    });
+});
+
+describe("deployedGraphPage", () => {
+    it("uses resolved concrete labels with planned topology and solid lines", () => {
+        const html = deployedGraphPage({ contextRepo: "octo/app" });
+        const renderGraph = html.match(/function renderGraph\(resources, showDeployStatus\) \{([\s\S]*?)\n    \}/)?.[1];
+        expect(renderGraph).toContain("deployedMode: !showDeployStatus");
+        expect(renderGraph).toContain("deployMode: !!showDeployStatus");
+    });
+
+    it("renders terminal failed resources with deployment status styling", () => {
+        const html = deployedGraphPage({ contextRepo: "octo/app" });
+        expect(html).toContain("st === 'failed'");
+        expect(html).toContain("renderGraph(liveRes, true)");
+        expect(html).toContain("renderGraph(resources, false)");
     });
 });
 

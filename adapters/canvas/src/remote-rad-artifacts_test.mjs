@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "vitest";
-import { stageRemoteRadArtifacts, radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
+import { stageRemoteRadArtifacts, radArtifactsDirForSelection, radArtifactsFingerprint } from "./remote-rad-artifacts.mjs";
 
 const CONFIG_API = "/repos/acme/app/contents/.radius/bicepconfig.json?ref=dev";
 const TGZ_API = "/repos/acme/app/contents/.radius/custom-types.tgz?ref=dev";
@@ -30,6 +30,26 @@ const CONFIG = JSON.stringify({
 function cleanup(dir) {
     if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
+
+test("artifact fingerprint changes with config and local extension content", () => {
+    const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
+    try {
+        fs.writeFileSync(path.join(dir, "bicepconfig.json"), CONFIG);
+        fs.writeFileSync(path.join(dir, "custom-types.tgz"), "one");
+        const first = radArtifactsFingerprint(dir);
+        fs.writeFileSync(path.join(dir, "custom-types.tgz"), "two");
+        const second = radArtifactsFingerprint(dir);
+        assert.notEqual(first, second);
+
+        fs.writeFileSync(path.join(dir, "bicepconfig.json"), JSON.stringify({
+            experimentalFeaturesEnabled: { extensibility: true },
+            extensions: { radius: "br:biceptypes.azurecr.io/radius:v2", customTypes: "./custom-types.tgz" },
+        }));
+        assert.notEqual(second, radArtifactsFingerprint(dir));
+    } finally {
+        cleanup(dir);
+    }
+});
 
 test("stages bicepconfig.json and the referenced custom-types.tgz for a committed branch", async () => {
     const gh = mockGithub({ [CONFIG_API]: CONFIG }, { [TGZ_API]: Buffer.from("TGZBYTES") });
@@ -123,9 +143,10 @@ test("radArtifactsDirForSelection stages a temp dir for a remote selection", asy
 });
 
 test("radArtifactsDirForSelection uses the workspace dir for a local selection", async () => {
+    const workspacePath = path.resolve(path.sep, "tmp", "ws");
     const { dir, remote } = await radArtifactsDirForSelection({
-        isLocal: true, state: { workspacePath: path.join(path.sep, "tmp", "ws") }, bicepRepoPath: ".radius/app.bicep",
+        isLocal: true, state: { workspacePath }, bicepRepoPath: ".radius/app.bicep",
     });
     assert.equal(remote, false);
-    assert.equal(dir, path.join(path.sep, "tmp", "ws", ".radius"));
+    assert.equal(dir, path.join(workspacePath, ".radius"));
 });
