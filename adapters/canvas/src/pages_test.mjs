@@ -109,14 +109,14 @@ describe("graphPage — empty resources (initial) branch", () => {
         expect(html).toContain("d.error");
     });
 
-    it("renders a staged progress bar with duration guidance and terminal states", () => {
+it("renders a staged progress bar with duration guidance and terminal states", () => {
         expect(html).toContain('id="progress-stage"');
         expect(html).toContain('id="progress-percent"');
         expect(html).toContain('id="progress-bar-fill"');
         expect(html).toContain('id="progress-eta"');
         expect(html).toContain("Usually completes in about 5 minutes.");
-        expect(html).toContain("Math.min(72, percent)");
-        expect(html).toContain("setProgressState(100");
+        expect(html).toContain("Still running — complex repositories can take a little longer than 5 minutes.");
+        expect(html).toContain("Application graph generated successfully.");
         expect(html).toContain("Graph generation failed");
     });
 
