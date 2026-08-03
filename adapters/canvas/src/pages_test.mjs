@@ -106,10 +106,18 @@ describe("graphPage — empty resources (initial) branch", () => {
         expect(html).toContain("requestGraphLoad()");
         expect(html).toContain("window.radiusGraphRetryTimer");
         expect(html).toContain("d.reload");
+        expect(html).toContain("d.stale");
+        expect(html).toContain("scheduleGraphRetry(1000)");
         expect(html).toContain("d.error");
     });
 
-it("renders a staged progress bar with duration guidance and terminal states", () => {
+    it("ignores stale callbacks and progress updates after the run finishes", () => {
+        expect(html).toContain("var graphRunFinished = false");
+        expect(html).toContain("window.radiusGraphRunToken !== graphRunToken || graphRunFinished");
+        expect(html).toContain("window.radiusGraphRunToken !== graphRunToken || !graphRunFinished");
+    });
+
+    it("renders a staged progress bar with duration guidance and terminal states", () => {
         expect(html).toContain('id="progress-stage"');
         expect(html).toContain('id="progress-percent"');
         expect(html).toContain('id="progress-bar-fill"');

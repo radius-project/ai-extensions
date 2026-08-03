@@ -704,6 +704,7 @@ function generateGraph() {
     var lastProgressPercent = 5;
     var waitingForAppBicep = false;
     var loadRequestInFlight = false;
+    var graphRunFinished = false;
     var graphRunToken = Date.now().toString() + Math.random().toString(36).slice(2);
     window.radiusGraphRunToken = graphRunToken;
     var EXPECTED_GRAPH_DURATION_MS = 5 * 60 * 1000;
@@ -760,7 +761,7 @@ function generateGraph() {
     }
 
     function updateWaitingProgress() {
-        if (!waitingForAppBicep) return;
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished || !waitingForAppBicep) return;
         var elapsed = Date.now() - progressStartedAt;
         var activeIndex = elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : elapsed < 270000 ? 2 : 3;
         var percent = elapsed < EXPECTED_GRAPH_DURATION_MS
@@ -779,6 +780,7 @@ function generateGraph() {
     }
 
     function syncProgressMessages(msgs) {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
         if (!Array.isArray(msgs)) msgs = [];
         if (msgs.length < shownSteps) {
             shownSteps = 0;
@@ -813,22 +815,22 @@ function generateGraph() {
         }
     }
 
-    function scheduleGraphRetry() {
-        if (!waitingForAppBicep) return;
+    function scheduleGraphRetry(delayMs) {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
         if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
         window.radiusGraphRetryTimer = setTimeout(function() {
-            if (window.radiusGraphRunToken !== graphRunToken) return;
-            if (waitingForAppBicep) requestGraphLoad();
-        }, 10000);
+            if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
+            requestGraphLoad();
+        }, delayMs || 10000);
     }
 
     function requestGraphLoad() {
-        if (loadRequestInFlight) return;
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished || loadRequestInFlight) return;
         loadRequestInFlight = true;
         fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
             .then(function(r) { return r.json(); })
             .then(function(d) {
-                if (window.radiusGraphRunToken !== graphRunToken) return;
+                if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
                 if (d.reload) {
                     waitingForAppBicep = false;
                     var prev = stepsEl.querySelector('.step-active');
@@ -838,8 +840,12 @@ function generateGraph() {
                     doneDiv.textContent = 'Graph ready!';
                     stepsEl.appendChild(doneDiv);
                     setProgressState(100, 'Application graph ready', 'Application graph generated successfully.', 'Completed successfully.', 'success');
+                    graphRunFinished = true;
                     clearGraphProgressTimers();
-                    setTimeout(function() { window.location.reload(); }, 600);
+                    setTimeout(function() {
+                        if (window.radiusGraphRunToken !== graphRunToken || !graphRunFinished) return;
+                        window.location.reload();
+                    }, 600);
                 } else if (d.needsAppBicep) {
                     waitingForAppBicep = true;
                     if (!shownSteps) {
@@ -851,21 +857,33 @@ function generateGraph() {
                         updateWaitingProgress();
                     }
                     scheduleGraphRetry();
+                } else if (d.stale) {
+                    waitingForAppBicep = false;
+                    setProgressState(
+                        Math.max(lastProgressPercent, 88),
+                        'Refreshing the application graph',
+                        'A newer graph request replaced this one.',
+                        'Retrying with the latest request shortly.',
+                        'running'
+                    );
+                    scheduleGraphRetry(1000);
                 } else if (d.error) {
                     waitingForAppBicep = false;
-                    clearGraphProgressTimers();
                     renderWaitingSteps(WAITING_STAGE_COPY.length - 1, 'error');
                     setProgressState(Math.min(lastProgressPercent, 95), 'Graph generation failed', 'Error: ' + d.error, 'The workflow stopped before completion.', 'error');
                     if (statusEl) { statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; statusEl.style.display = ''; }
+                    graphRunFinished = true;
+                    clearGraphProgressTimers();
                 }
             })
             .catch(function() {
-                if (window.radiusGraphRunToken !== graphRunToken) return;
+                if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
                 waitingForAppBicep = false;
-                clearGraphProgressTimers();
                 renderWaitingSteps(WAITING_STAGE_COPY.length - 1, 'error');
                 setProgressState(Math.min(lastProgressPercent, 95), 'Graph generation failed', 'Failed to continue generating the application graph.', 'Please try again.', 'error');
                 if (statusEl) { statusEl.textContent = 'Failed to generate the application graph.'; statusEl.className = 'status error'; statusEl.style.display = ''; }
+                graphRunFinished = true;
+                clearGraphProgressTimers();
             })
             .finally(function() {
                 if (window.radiusGraphRunToken !== graphRunToken) return;
@@ -875,7 +893,9 @@ function generateGraph() {
 
     renderWaitingSteps(0);
     window.radiusGraphProgressPoller = setInterval(function() {
+        if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
         fetch('/api/progress').then(function(r) { return r.json(); }).then(function(d) {
+            if (window.radiusGraphRunToken !== graphRunToken || graphRunFinished) return;
             syncProgressMessages(d.messages || []);
         }).catch(function() {});
     }, 800);
