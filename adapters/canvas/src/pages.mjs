@@ -704,6 +704,8 @@ function generateGraph() {
     var lastProgressPercent = 5;
     var waitingForAppBicep = false;
     var loadRequestInFlight = false;
+    var graphRunToken = Date.now().toString() + Math.random().toString(36).slice(2);
+    window.radiusGraphRunToken = graphRunToken;
     var EXPECTED_GRAPH_DURATION_MS = 5 * 60 * 1000;
     var WAITING_STAGE_COPY = [
         { label: 'Checking for an existing app model', status: 'Checking the selected branch for .radius/app.bicep…' },
@@ -713,6 +715,7 @@ function generateGraph() {
     ];
 
     function clearGraphProgressTimers() {
+        if (window.radiusGraphRunToken !== graphRunToken) return;
         if (window.radiusGraphProgressPoller) clearInterval(window.radiusGraphProgressPoller);
         if (window.radiusGraphProgressTicker) clearInterval(window.radiusGraphProgressTicker);
         if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
@@ -814,6 +817,7 @@ function generateGraph() {
         if (!waitingForAppBicep) return;
         if (window.radiusGraphRetryTimer) clearTimeout(window.radiusGraphRetryTimer);
         window.radiusGraphRetryTimer = setTimeout(function() {
+            if (window.radiusGraphRunToken !== graphRunToken) return;
             if (waitingForAppBicep) requestGraphLoad();
         }, 10000);
     }
@@ -824,6 +828,7 @@ function generateGraph() {
         fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
             .then(function(r) { return r.json(); })
             .then(function(d) {
+                if (window.radiusGraphRunToken !== graphRunToken) return;
                 if (d.reload) {
                     waitingForAppBicep = false;
                     var prev = stepsEl.querySelector('.step-active');
@@ -855,6 +860,7 @@ function generateGraph() {
                 }
             })
             .catch(function() {
+                if (window.radiusGraphRunToken !== graphRunToken) return;
                 waitingForAppBicep = false;
                 clearGraphProgressTimers();
                 renderWaitingSteps(WAITING_STAGE_COPY.length - 1, 'error');
@@ -862,6 +868,7 @@ function generateGraph() {
                 if (statusEl) { statusEl.textContent = 'Failed to generate the application graph.'; statusEl.className = 'status error'; statusEl.style.display = ''; }
             })
             .finally(function() {
+                if (window.radiusGraphRunToken !== graphRunToken) return;
                 loadRequestInFlight = false;
             });
     }
