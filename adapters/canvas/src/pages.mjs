@@ -2042,6 +2042,17 @@ document.getElementById('back-btn').addEventListener('click', function() {
     </div>
   </div>
 </div>
+
+<div id="azure-cli-assist-modal" role="dialog" aria-modal="true" aria-labelledby="azure-cli-assist-title" style="display:none; position:fixed; inset:0; z-index:1003; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:440px; width:90%;">
+    <div id="azure-cli-assist-title" style="font-size:16px; font-weight:600; line-height:1.4; margin-bottom:8px;"></div>
+    <div id="azure-cli-assist-message" style="font-size:13px; color:var(--rad-text-tertiary); line-height:1.5;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+      <button id="azure-cli-assist-cancel" type="button" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
+      <button id="azure-cli-assist-confirm" type="button" class="rad-btn rad-btn--primary" style="margin:0;"></button>
+    </div>
+  </div>
+</div>
 <style>@keyframes spin{to{transform:rotate(360deg)}}
 /* Match Figma: the environments/credentials table's ACTIONS column is left-aligned. */
 #env-landing .rad-table thead th:last-child,
@@ -3321,6 +3332,62 @@ function credVerifyError(msg) {
     st.innerHTML = '<span style="color:var(--rad-danger);">' + escapeHtmlClient(msg) + '</span>';
 }
 
+function credVerifyInfo(msg) {
+    var st = document.getElementById('cred-verify-status');
+    st.style.display = 'block';
+    st.innerHTML = '<span>' + escapeHtmlClient(msg) + '</span>';
+}
+
+function requestAzureCliAssist(action, tenantId, fallbackMessage) {
+    fetch('/api/azure-cli-assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action, tenantId: tenantId || '' })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data && data.error) {
+            credVerifyError(data.error + (fallbackMessage ? ' ' + fallbackMessage : ''));
+            return;
+        }
+        credVerifyInfo((data && data.message) || 'Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again.');
+    }).catch(function(err) {
+        credVerifyError('Error: ' + err.message + (fallbackMessage ? ' ' + fallbackMessage : ''));
+    });
+}
+
+var pendingAzureCliAssist = null;
+function showAzureCliAssistPrompt(action, tenantId, fallbackMessage) {
+    pendingAzureCliAssist = {
+        action: action,
+        tenantId: tenantId || '',
+        fallbackMessage: fallbackMessage || ''
+    };
+    var isInstall = action === 'install';
+    document.getElementById('azure-cli-assist-title').textContent = isInstall ? 'Install Azure CLI?' : 'Start Azure login?';
+    document.getElementById('azure-cli-assist-message').textContent = isInstall
+        ? 'Azure CLI is not installed. Would you like Copilot to attempt to install it and then start Azure login?'
+        : 'No active Azure session was found. Would you like Copilot to start the Azure login flow?';
+    document.getElementById('azure-cli-assist-confirm').textContent = isInstall ? 'Ask Copilot to install' : 'Start Azure login';
+    document.getElementById('azure-cli-assist-modal').style.display = 'flex';
+    document.getElementById('azure-cli-assist-confirm').focus();
+}
+
+function closeAzureCliAssistPrompt() {
+    document.getElementById('azure-cli-assist-modal').style.display = 'none';
+    pendingAzureCliAssist = null;
+}
+
+document.getElementById('azure-cli-assist-cancel').addEventListener('click', function() {
+    var fallbackMessage = pendingAzureCliAssist && pendingAzureCliAssist.fallbackMessage;
+    closeAzureCliAssistPrompt();
+    if (fallbackMessage) credVerifyError(fallbackMessage);
+});
+
+document.getElementById('azure-cli-assist-confirm').addEventListener('click', function() {
+    var request = pendingAzureCliAssist;
+    closeAzureCliAssistPrompt();
+    if (request) requestAzureCliAssist(request.action, request.tenantId, request.fallbackMessage);
+});
+
 document.getElementById('btn-verify-azure').addEventListener('click', function() {
     var btn = this;
     var profileName = document.getElementById('cred-name-input').value.trim();
@@ -3337,7 +3404,18 @@ document.getElementById('btn-verify-azure').addEventListener('click', function()
     fetch('/api/verify-azure-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: tenantId, subscriptionId: subId }) })
         .then(function(r) { return r.json(); }).then(function(data) {
             modal.style.display = 'none'; btn.disabled = false; btn.textContent = 'Verify Credentials';
-            if (data.error) { credVerifyError(data.error); return; }
+            if (data.error) {
+                if (data.code === 'az-login-required') {
+                    showAzureCliAssistPrompt('login', data.tenantId || tenantId, data.error);
+                    return;
+                }
+                if (data.code === 'az-cli-missing') {
+                    showAzureCliAssistPrompt('install', data.tenantId || tenantId, data.error);
+                    return;
+                }
+                credVerifyError(data.error);
+                return;
+            }
             if (data.tenantId) document.getElementById('az-tenant-id').value = data.tenantId;
             if (data.subscriptionId) document.getElementById('az-sub-id').value = data.subscriptionId;
             markVerified(data.user, { tenantId: data.tenantId || tenantId, subscriptionId: data.subscriptionId || subId, subscriptionName: data.subscriptionName || '' });

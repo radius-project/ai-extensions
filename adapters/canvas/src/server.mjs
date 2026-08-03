@@ -234,6 +234,71 @@ export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
 let openSourceHandler = null;
 export function setOpenSourceHandler(fn) { openSourceHandler = fn; }
 
+// The server also cannot inject an arbitrary user turn by itself, so routes that
+// need the Copilot session to take an out-of-band action (for example, kicking
+// off Azure CLI login or install guidance) delegate through this hook.
+let sessionPromptHandler = null;
+export function setSessionPromptHandler(fn) { sessionPromptHandler = fn; }
+
+export function isCliCommandMissing(detail) {
+    const text = String(detail || "").trim();
+    if (!text) return false;
+    return /\bspawn(?:Sync)?\s+az(?:\.exe)?\s+ENOENT\b/i.test(text)
+        || /\baz(?:\.exe)?:\s*command not found\b/i.test(text)
+        || /['"]?az(?:\.exe)?['"]?\s+is not recognized as an internal or external command\b/i.test(text);
+}
+
+export function azureCredentialIdValidationError({ tenantId = "", subscriptionId = "" } = {}) {
+    if (tenantId && !isUuid(tenantId)) {
+        return `Invalid tenantId "${tenantId}" (expected a GUID).`;
+    }
+    if (subscriptionId && !isUuid(subscriptionId)) {
+        return `Invalid subscriptionId "${subscriptionId}" (expected a GUID).`;
+    }
+    return "";
+}
+
+export function azureLoginRequiredResponse({ tenantId = "", activeTenantId = "" } = {}) {
+    const error = activeTenantId
+        ? `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
+        : 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.';
+    return { error, code: "az-login-required", tenantId };
+}
+
+export async function invokeSessionPrompt(handler, prompt) {
+    if (typeof handler !== "function") {
+        return { status: 503, error: "Could not reach the Copilot session to start Azure CLI help." };
+    }
+    try {
+        await handler(prompt);
+        return { status: 200 };
+    } catch {
+        return { status: 502, error: "The Copilot session could not start Azure CLI help." };
+    }
+}
+
+export function buildAzureCliAssistPrompt({ action = "login", tenantId = "" } = {}) {
+    const safeTenantId = typeof tenantId === "string" && isUuid(tenantId.trim()) ? tenantId.trim() : "";
+    const loginCommand = `az login --use-device-code${safeTenantId ? ` --tenant ${safeTenantId}` : ""}`;
+    const loginInstructions = [
+        `Run \`${loginCommand}\` in this Copilot session.`,
+        "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
+        "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL.",
+    ].join(" ");
+    if (action === "install") {
+        return [
+            "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
+            `Please install Azure CLI, then ${loginInstructions}`,
+            "After the install and login finish, return to the Radius canvas and click Verify Credentials again.",
+        ].join("\n\n");
+    }
+    return [
+        "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
+        loginInstructions,
+        "After the login finishes, return to the Radius canvas and click Verify Credentials again.",
+    ].join("\n\n");
+}
+
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(entry, repo, branches, page) {
@@ -769,9 +834,10 @@ function createRequestHandler(instanceId) {
                     res.end(JSON.stringify(result));
                 }
             } catch (e) {
+                const detail = e instanceof Error ? e.message : String(e || "");
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: e.message }));
+                res.end(JSON.stringify({ error: detail || "Bad request." }));
             }
             return;
         }
@@ -785,16 +851,18 @@ function createRequestHandler(instanceId) {
                 const tenantId = (data.tenantId || '').trim();
                 const subscriptionId = (data.subscriptionId || '').trim();
 
-                // Reject a non-GUID subscriptionId before it reaches the az argv.
+                // Reject non-GUID credential identifiers before using them in
+                // command guidance or passing the subscription to the az argv.
                 // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
                 // quotes args containing whitespace, so a value like "x&calc" would
                 // be parsed by cmd.exe as a command separator. An empty value is
                 // allowed (fall back to the ambient CLI context). Mirrors the guard
                 // already enforced in /api/azure-auto-setup.
-                if (subscriptionId && !isUuid(subscriptionId)) {
+                const validationError = azureCredentialIdValidationError({ tenantId, subscriptionId });
+                if (validationError) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Invalid subscriptionId "${subscriptionId}" (expected a GUID).` }));
+                    res.end(JSON.stringify({ error: validationError }));
                     return;
                 }
 
@@ -802,7 +870,7 @@ function createRequestHandler(instanceId) {
                 // login opens a browser/device-code flow that blocks indefinitely
                 // and would hang this server. Instead we verify the user's existing
                 // Azure CLI session (and optionally switch subscription). If there
-                // is no session, we tell them to run `az login` in their terminal.
+                // is no session, the canvas can ask Copilot to start device-code login.
                 if (subscriptionId) {
                     try { await runCommand("az", ["account", "set", "--subscription", subscriptionId], { timeout: 10000 }); } catch (e) {}
                 }
@@ -812,9 +880,14 @@ function createRequestHandler(instanceId) {
                     const acctJson = await runCommand("az", ["account", "show", "-o", "json"], { timeout: 10000 });
                     acct = JSON.parse(acctJson);
                 } catch (e) {
+                    const detail = e instanceof Error ? e.message : String(e || "");
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: 'No active Azure CLI session. Run "az login" in your terminal, then click Verify again.' }));
+                    if (isCliCommandMissing(detail)) {
+                        res.end(JSON.stringify({ error: "Azure CLI is not installed.", code: "az-cli-missing", tenantId }));
+                    } else {
+                        res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId })));
+                    }
                     return;
                 }
 
@@ -823,7 +896,7 @@ function createRequestHandler(instanceId) {
                 if (tenantId && acct.tenantId && acct.tenantId.toLowerCase() !== tenantId.toLowerCase()) {
                     res.setHeader("Content-Type", "application/json");
                     res.writeHead(200);
-                    res.end(JSON.stringify({ error: `Active Azure session is tenant ${acct.tenantId}, not ${tenantId}. Run "az login --tenant ${tenantId}" in your terminal, then click Verify again.` }));
+                    res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId, activeTenantId: acct.tenantId })));
                     return;
                 }
 
@@ -840,6 +913,39 @@ function createRequestHandler(instanceId) {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ error: 'Azure CLI verification failed: ' + e.message }));
+            }
+            return;
+        }
+
+        if (pathname === "/api/azure-cli-assist" && req.method === "POST") {
+            let body = "";
+            for await (const chunk of req) body += chunk;
+            try {
+                const data = JSON.parse(body || "{}");
+                const action = data.action === "install" ? "install" : "login";
+                const requestedTenantId = typeof data.tenantId === "string" ? data.tenantId.trim() : "";
+                const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
+                const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+                const promptResult = await invokeSessionPrompt(sessionPromptHandler, prompt);
+                if (promptResult.error) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.writeHead(promptResult.status);
+                    res.end(JSON.stringify({ error: promptResult.error }));
+                    return;
+                }
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                    success: true,
+                    message: action === "install"
+                        ? "Asked Copilot to help install Azure CLI and start Azure login. Complete the steps it opens, then click Verify Credentials again."
+                        : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again.",
+                }));
+            } catch (e) {
+                const detail = e instanceof Error ? e.message : String(e || "");
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: detail || "Bad request." }));
             }
             return;
         }
