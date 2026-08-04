@@ -44,7 +44,7 @@ import {
     setSourceRefResources,
     updateSourceRefs,
 } from "./source-refs.mjs";
-import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt, deployRepairHandoffPrompt } from "./hooks.mjs";
+import { evaluateAppBicepHook, GRAPH_PAGES, DEFAULT_CANVAS_PAGE, appBicepHandoffPrompt, deployRepairHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
@@ -135,6 +135,7 @@ const session = await joinSession({
                         type: "string",
                         enum: ["credentials", "graph", "planned", "graph-diff", "deployed", "environment", "deploying"],
                         description: "Which page to display",
+                        default: DEFAULT_CANVAS_PAGE,
                     },
                     repo: {
                         type: "string",
@@ -408,7 +409,7 @@ const session = await joinSession({
                 },
             ],
             open: async (ctx) => {
-                const page = ctx.input?.page || "environment";
+                const page = ctx.input?.page || DEFAULT_CANVAS_PAGE;
                 const entry = await getOrCreateServer(ctx.instanceId, page);
                 entry.state.activeGraphView = page === "graph-diff" ? "diff" : page === "planned" ? "planned" : page === "graph" ? "graph" : entry.state.activeGraphView;
                 const workspace = await workspaceState();

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
     GRAPH_PAGES,
+    DEFAULT_CANVAS_PAGE,
     appBicepReminder,
     appBicepHandoffPrompt,
     deployRepairHandoffPrompt,
@@ -13,6 +14,19 @@ import {
 describe("GRAPH_PAGES", () => {
     it("covers the graph-generating canvas pages", () => {
         expect([...GRAPH_PAGES].sort()).toEqual(["graph", "graph-diff", "planned"]);
+    });
+});
+
+describe("DEFAULT_CANVAS_PAGE", () => {
+    it("lands a page-less open on the application graph", () => {
+        expect(DEFAULT_CANVAS_PAGE).toBe("graph");
+    });
+
+    it("is itself a graph page — the invariant the default-page wiring rests on", () => {
+        // graphTriggerTargets, maybeHandoffAppBicep, and the server's PAGE_RENDERERS
+        // all assume a page-less open resolves to a renderable graph page. Pointing
+        // the default at a non-graph page would silently skip the app.bicep gate.
+        expect(GRAPH_PAGES.has(DEFAULT_CANVAS_PAGE)).toBe(true);
     });
 });
 
@@ -149,8 +163,17 @@ describe("graphTriggerTargets", () => {
         ).toEqual({ repo: "", branches: ["main", "feat"] });
     });
 
-    it("handles open_canvas with a missing input object", () => {
-        expect(graphTriggerTargets("open_canvas", { canvasId: "radius" })).toBeNull();
+    it("treats a page-less radius open as the default graph page", () => {
+        // open_canvas with no page lands on DEFAULT_CANVAS_PAGE ("graph"), so the
+        // hook must gate it exactly like an explicit page: "graph".
+        expect(graphTriggerTargets("open_canvas", { canvasId: "radius", repo: "a/b" })).toEqual({
+            repo: "",
+            branches: [undefined],
+        });
+        expect(graphTriggerTargets("open_canvas", { canvasId: "radius", input: { repo: "a/b" } })).toEqual({
+            repo: "a/b",
+            branches: [undefined],
+        });
     });
 
     it("maps radius_generate_pr_diff_markdown to its repo + branches", () => {
