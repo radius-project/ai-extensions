@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
+    addGraphProgress,
     azureCredentialIdValidationError,
     azureLoginRequiredResponse,
     buildRoleAssignmentArgs,
@@ -79,6 +80,16 @@ describe("resolveDeployStatus", () => {
         expect(resolveDeployStatus({ runConclusion: "", runStatus: "", state: "error" })).toBe("failed");
         expect(resolveDeployStatus({ runConclusion: "", runStatus: "", state: "pending" })).toBe("pending");
         expect(resolveDeployStatus({ runConclusion: "", runStatus: "", state: "in_progress" })).toBe("pending");
+    });
+});
+
+describe("addGraphProgress", () => {
+    it("accepts progress only from the current graph generation", () => {
+        const state = { graphBuildGeneration: 2, progressMessages: ["current"] };
+
+        expect(addGraphProgress(state, 1, "stale")).toBe(false);
+        expect(addGraphProgress(state, 2, "latest")).toBe(true);
+        expect(state.progressMessages).toEqual(["current", "latest"]);
     });
 });
 
