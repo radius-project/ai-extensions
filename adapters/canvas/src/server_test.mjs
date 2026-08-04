@@ -298,8 +298,11 @@ describe("triggerDeployRepairHandoff", () => {
         setDeployRepairHandoff((payload) => { calls.push(payload); });
         const entry = failedEntry();
         triggerDeployRepairHandoff(entry);
-        // A user deploy resets ownership (see /api/deploy); an agent redeploy does not.
+        // Exactly what /api/deploy writes for a user-initiated deploy; an agent
+        // redeploy instead keeps ownership by leaving the loop marked delivered.
         entry.state.deployRepairing = false;
+        entry.state.deployHandoffState = "idle";
+        entry.state.deployHandoffAttempts = 0;
         expect(triggerDeployRepairHandoff(entry)).toBe(true);
         expect(calls).toHaveLength(2);
     });
