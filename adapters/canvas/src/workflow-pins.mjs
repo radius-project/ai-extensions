@@ -38,11 +38,19 @@ export function workflowPath(name) {
 /**
  * Compare the workflow files committed in `repo` against the pinset.
  *
- * `files` is a list of bare workflow filenames to check (e.g. the deploy
- * dispatcher plus its provider workflow). Branches: the repo's default branch,
- * because Repo Radius runs from there, plus `opts.deployRef` when a
+ * `files` is a list of bare workflow filenames that GATE the caller (e.g. the
+ * deploy dispatcher plus its provider workflow). Branches: the repo's default
+ * branch, because Repo Radius runs from there, plus `opts.deployRef` when a
  * worktree-consistent deploy will dispatch against a different branch and would
  * therefore check out that branch's copy.
+ *
+ * `opts.alsoUpgrade` names workflows that must never gate the caller but should
+ * still be repaired — the delete workflows, which also run with `id-token:
+ * write` yet must stay usable even when their pins are stale, or a user could
+ * be left unable to tear down cloud resources. They are read only once the
+ * gating files are already outdated, so the common case still costs one read per
+ * gating file and the user's single confirmation fixes every workflow at once
+ * instead of leaving these frozen at whatever SHA created them.
  *
  * Read-only. Resolves `{ status, repo, base, targets, files }` where `status` is
  * `"current"` when there is nothing to do. A branch whose files can't be read
@@ -53,21 +61,31 @@ export async function planWorkflowUpgrade(repo, files, opts = {}) {
   const log = typeof opts.log === "function" ? opts.log : () => {};
   const paths = (files || []).filter(Boolean).map(workflowPath);
   if (!repo || paths.length === 0) return emptyPlan(repo, "");
+  const alsoPaths = (opts.alsoUpgrade || []).filter(Boolean).map(workflowPath).filter((p) => !paths.includes(p));
 
   const base = (await getDefaultBranch(repo)) || "main";
   const deployRef = (opts.deployRef || "").trim();
   const branches = deployRef && deployRef !== base ? [base, deployRef] : [base];
 
-  const targets = [];
-  for (const branch of branches) {
+  const readPins = async (branch, list) => {
     const committed = {};
-    for (const path of paths) {
+    for (const path of list) {
       const body = await fetchFileFromRepo(repo, path, branch);
       if (body) committed[path] = body;
     }
-    const plan = comparePins(committed, REPO_RADIUS_PINSET);
+    return comparePins(committed, REPO_RADIUS_PINSET);
+  };
+
+  const targets = [];
+  for (const branch of branches) {
+    const plan = await readPins(branch, paths);
     if (plan.status === "current") continue;
-    targets.push({ branch, headSha: await getBranchHeadSha(repo, branch), files: plan.files });
+    const alsoPlan = alsoPaths.length ? await readPins(branch, alsoPaths) : { files: [] };
+    targets.push({
+      branch,
+      headSha: await getBranchHeadSha(repo, branch),
+      files: [...plan.files, ...alsoPlan.files],
+    });
   }
 
   if (targets.length === 0) return emptyPlan(repo, base);

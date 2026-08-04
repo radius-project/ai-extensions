@@ -199,13 +199,17 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
 // dispatches as usual; stale pins mean the workflow would run action code older
 // than this extension expects, so the caller stops and asks the user.
 //
+// `alsoUpgrade` names workflows that ride along on someone else's confirmation
+// rather than gating this one — see planWorkflowUpgrade.
+//
 // Read-only. A failure resolves to "current" rather than blocking: a GitHub
 // outage must not stop a deploy that would otherwise work.
-async function checkWorkflowPins(repo, only, deployRef) {
+async function checkWorkflowPins(repo, only, deployRef, alsoUpgrade = []) {
     if (!repo || !only || only.length === 0) return { status: "current", files: [] };
     try {
         const plan = await planWorkflowUpgrade(repo, only, {
             deployRef: deployRef || "",
+            alsoUpgrade,
             log: (m) => console.error(`[radius workflow-pin] ${repo}: ${m}`),
         });
         console.error(
@@ -3862,8 +3866,16 @@ function createRequestHandler(instanceId) {
                         // Up to date is the common case and costs two file reads with
                         // no prompt. Out of date means the run would execute older
                         // action code against the user's cloud account, so the
-                        // dispatch is withheld until they confirm the update.
-                        const pinPlan = await checkWorkflowPins(repo, [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE], deployRef);
+                        // dispatch is withheld until they confirm the update. The
+                        // delete workflows ride along on that same confirmation:
+                        // they are never allowed to block a deploy or a delete, so
+                        // this is the only moment they are ever brought current.
+                        const pinPlan = await checkWorkflowPins(
+                            repo,
+                            [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
+                            deployRef,
+                            [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE],
+                        );
                         if (pinPlan.status === 'outdated') {
                             addLog('⏸ The Repo Radius workflows in ' + repo + ' are older than this version of the Radius plugin requires.');
                             for (const line of describePlan(pinPlan)) addLog('   ' + line);

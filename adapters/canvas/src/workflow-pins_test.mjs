@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
     committed: {},
     heads: {},
     commits: [],
+    reads: [],
     branchRefs: [],
     pulls: [],
     defaultBranch: "main",
@@ -26,6 +27,7 @@ vi.mock("./gh.mjs", async () => {
         getDefaultBranch: async () => h.defaultBranch,
         getBranchHeadSha: async (_repo, branch) => h.heads[branch] || "",
         fetchFileFromRepo: async (_repo, path, branch = "main") => {
+            h.reads.push(path);
             const files = h.committed[branch];
             return files && path in files ? files[path] : null;
         },
@@ -54,6 +56,7 @@ const { planWorkflowUpgrade, applyWorkflowUpgrade, workflowPath } = await import
 
 const DISPATCHER = "run-rad-commands.yml";
 const AZURE = "run-rad-commands-azure.yml";
+const DELETE_AZURE = "delete-azure.yml";
 const PINNED_SHA = REPO_RADIUS_PINSET.templateSource.sha;
 
 // A provider workflow the way a repo created before pinning carries it: the
@@ -68,8 +71,18 @@ jobs:
 const PINNED_AZURE = pinActionRefs(STALE_AZURE, REPO_RADIUS_PINSET);
 // The dispatcher only references local workflow files, so it is never stale.
 const DISPATCHER_BODY = "jobs:\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n";
+// Carries `id-token: write` and four pinset-governed actions upstream, so a
+// stale copy runs old code against the user's cloud exactly as a deploy would.
+const STALE_DELETE = `name: delete-azure
+jobs:
+  azure:
+    steps:
+      - uses: radius-project/radius/.github/extension/actions/delete-resource@main
+      - uses: radius-project/radius/.github/extension/actions/teardown@main
+`;
 
 const AZURE_PATH = workflowPath(AZURE);
+const DELETE_PATH = workflowPath(DELETE_AZURE);
 const PROTECTED = "gh: Validation Failed (HTTP 422) - refusing to allow an OAuth App to create or update workflow `.github/workflows/x.yml` without `workflow` scope";
 const PROTECTED_BRANCH = "HTTP 403: Resource not accessible by integration - protected branch update failed";
 
@@ -83,6 +96,7 @@ describe("planWorkflowUpgrade", () => {
         h.committed = {};
         h.heads = {};
         h.commits = [];
+        h.reads = [];
         h.branchRefs = [];
         h.pulls = [];
         h.defaultBranch = "main";
@@ -154,6 +168,39 @@ describe("planWorkflowUpgrade", () => {
         const plan = await planWorkflowUpgrade("acme/app", [AZURE], { deployRef: "unpushed" });
 
         expect(plan.status).toBe("current");
+    });
+
+    // The delete workflows must never gate anything (a stale pin must not leave
+    // someone unable to tear down cloud resources), so a deploy-time
+    // confirmation is the only occasion they are ever repaired.
+    it("folds ride-along workflows into a plan that is already outdated", async () => {
+        seed("main", { [AZURE_PATH]: STALE_AZURE, [DELETE_PATH]: STALE_DELETE });
+
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { alsoUpgrade: [DELETE_AZURE] });
+
+        expect(plan.files.map((f) => f.path)).toEqual([AZURE_PATH, DELETE_PATH]);
+    });
+
+    // The headline property of the pin check: an up-to-date repo pays for the
+    // gating files only. Ride-alongs must not add a read to every deploy.
+    it("does not read ride-along workflows when the gating files are current", async () => {
+        seed("main", { [AZURE_PATH]: PINNED_AZURE, [DELETE_PATH]: STALE_DELETE });
+
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { alsoUpgrade: [DELETE_AZURE] });
+
+        expect(plan.status).toBe("current");
+        expect(h.reads).not.toContain(DELETE_PATH);
+    });
+
+    it("applies a confirmed plan to the ride-along workflow too", async () => {
+        seed("main", { [AZURE_PATH]: STALE_AZURE, [DELETE_PATH]: STALE_DELETE });
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { alsoUpgrade: [DELETE_AZURE] });
+
+        const result = await applyWorkflowUpgrade("acme/app", plan, "commit");
+
+        expect(result.status).toBe("updated");
+        expect(h.commits.map((c) => c.path)).toEqual([AZURE_PATH, DELETE_PATH]);
+        expect(h.committed.main[DELETE_PATH]).toBe(pinActionRefs(STALE_DELETE, REPO_RADIUS_PINSET));
     });
 });
 
