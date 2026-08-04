@@ -16,6 +16,8 @@
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
+import { fenceDeployDiagnostic, DEPLOY_DIAGNOSTIC_NOTE } from "./deploy-diagnostics.mjs";
+
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
 // skill owns the full authoring workflow (namespaces, types, structure, and
 // writing the file to the working tree), so these hooks only point the agent at that
@@ -151,4 +153,46 @@ export function appBicepHandoffPrompt(repo, page = "graph", branches = []) {
         "",
         RECIPE_PACK_NOTE,
     ].join("\n");
+}
+
+// Maximum automatic repair-and-redeploy attempts before handing back to the user.
+export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
+
+export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.mjs";
+
+// Prompt injected as a new user turn (via session.send) when a deploy started
+// from the canvas Deploy button fails. That path dispatches the workflow
+// directly, so nothing carries the failure back to the agent; this is the
+// bridge. Deliberately self-contained — it names the tools that repair the model
+// and redeploy, so the loop does not depend on another skill being consulted.
+export function deployRepairHandoffPrompt(repo, branch, { error = "", deployRunUrl = "", attemptId = "" } = {}) {
+    const where = repo ? ` of ${repo}` : "";
+    const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+    const fenced = fenceDeployDiagnostic(error);
+    const branchName = branch ? `\`${branch}\`` : "the deployed branch";
+    const lines = [
+        `The Radius deploy${where}${onPhrase} failed. Diagnose it, and repair and redeploy if the app model caused it.`,
+        "",
+        fenced
+            ? `${DEPLOY_DIAGNOSTIC_NOTE}\n\n${fenced}`
+            : "The deploy workflow reported a failure with no error text.",
+    ];
+    if (deployRunUrl) lines.push("", `Workflow run (full logs): ${deployRunUrl}`);
+    lines.push(
+        "",
+        "First decide what kind of failure this is:",
+        "- A modeling or schema failure points at .radius/app.bicep — unknown resource type or API version, unknown or missing property, an invalid reference between resources, a wrong credential shape, or a Bicep parse or compile error. Repair these.",
+        "- An infrastructure or environment failure (recipe download or execution, provider mismatch, cluster, credential, or connectivity problems) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user, and do not redeploy.",
+        "",
+        `For a modeling or schema failure: ${SKILL_HANDOFF}`,
+        `Then commit the repaired .radius/app.bicep and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
+        "Once the fix is pushed, redeploy by calling the radius_deploy tool, and poll the radius_deploy_status tool until the deploy reaches a terminal state.",
+        attemptId
+            ? `Pass attemptId "${attemptId}" to both tools. It identifies this deploy attempt, so the call is rejected rather than acting on a different deploy if the user starts another one. Do not pass repo, environment, branch, provider, or appFile: the attempt already fixes those.`
+            : "",
+        `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. After that, report the result to the user and only try again if they ask.`,
+        "",
+        RECIPE_PACK_NOTE,
+    );
+    return lines.filter((line, i) => line !== "" || lines[i - 1] !== "").join("\n");
 }

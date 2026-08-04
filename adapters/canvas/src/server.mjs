@@ -227,6 +227,12 @@ async function ensureWorkflowsCurrent(repo, environment, provider, only, working
 let appBicepHandoff = null;
 export function setAppBicepHandoff(fn) { appBicepHandoff = fn; }
 
+// Registered by the SDK entry (extension.mjs) to hand a failed canvas deploy
+// back to the agent for repair. The canvas Deploy button dispatches the workflow
+// itself, so without this a failure dead-ends in the UI.
+let deployRepairHandoff = null;
+export function setDeployRepairHandoff(fn) { deployRepairHandoff = fn; }
+
 // Handler registered by the SDK entry (extension.mjs) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
@@ -314,6 +320,67 @@ function triggerAppBicepHandoff(entry, repo, branches, page) {
         }
         Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(() => {});
     } catch { /* never let a handoff failure break the response */ }
+}
+
+// Hand a failed deploy to the agent to repair and redeploy. Fires at most once
+// per repair loop: once the agent owns the loop it redeploys and re-reads status
+// itself, so re-handing off every failed attempt would double-drive it.
+// `branch-not-pushed` is excluded: the user fixes that with a push, not by
+// editing the model.
+//
+// Delivery is tracked explicitly (pending -> delivered | failed) because the
+// browser stops polling once a deploy is terminal: a rejected send has no later
+// poll to piggyback on, so the status route keeps the poll alive while delivery
+// is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
+export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
+
+export function triggerDeployRepairHandoff(entry, instanceId) {
+    try {
+        if (typeof deployRepairHandoff !== "function") return false;
+        const state = entry?.state;
+        if (!state || state.deployStatus !== "failed") return false;
+        if (state.deployErrorKind === "branch-not-pushed") return false;
+        if (state.deployRepairing) return false;
+        if (state.deployHandoffState === "pending" || state.deployHandoffState === "failed") return false;
+        const repo = state.deployingRepo || state.plannedRepo || state.contextRepo || "";
+        const branch = state.deployingBranch || "";
+        const error = state.deployError || "";
+        const deployRunUrl = state.deployRunUrl || "";
+        const attemptId = state.deployAttempt?.id || "";
+        state.deployHandoffState = "pending";
+        state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
+        const delivered = () => {
+            state.deployHandoffState = "delivered";
+            state.deployRepairing = true;
+        };
+        // A handoff that never reached the agent must not leave the loop marked as
+        // owned; it becomes retryable until the attempt budget runs out.
+        const failed = () => {
+            state.deployRepairing = false;
+            state.deployHandoffState =
+                (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS ? "failed" : "retryable";
+        };
+        try {
+            Promise.resolve(deployRepairHandoff({ repo, branch, error, deployRunUrl, attemptId, instanceId }))
+                .then(delivered, failed);
+        } catch {
+            failed();
+            return false;
+        }
+        return true;
+    } catch { /* never let a handoff failure break the response */ }
+    return false;
+}
+
+// What the webview needs to decide whether to keep polling after a failed deploy.
+export function deployHandoffStatus(state) {
+    const handoffState = state?.deployHandoffState || "idle";
+    return {
+        state: handoffState,
+        attempts: state?.deployHandoffAttempts || 0,
+        maxAttempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
+        pending: handoffState === "pending" || handoffState === "retryable",
+    };
 }
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
@@ -2722,6 +2789,10 @@ function createRequestHandler(instanceId) {
             const finishedAt = entry?.state?.deployFinishedAt || null;
             const deployedGraph = entry?.state?.deployedGraph || null;
             const deployRunUrl = entry?.state?.deployRunUrl || null;
+            // Every failure path converges on this poll, so it is where a failed
+            // deploy is handed to the agent to repair (once per repair loop).
+            const repairing = triggerDeployRepairHandoff(entry, instanceId) || entry?.state?.deployRepairing || false;
+            const handoff = deployHandoffStatus(entry?.state);
             res.setHeader("Content-Type", "application/json");
             res.writeHead(200);
             // Incremental log delivery: when the client passes ?since=<absolute
@@ -2734,9 +2805,9 @@ function createRequestHandler(instanceId) {
             if (Number.isFinite(since)) {
                 const startIdx = Math.max(0, since - logBase);
                 const logsNew = logs.slice(startIdx);
-                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logsNew, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
             } else {
-                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl }));
+                res.end(JSON.stringify({ resources, logs, logBase, logTotal, status, error, errorKind, errorBranch, startedAt, finishedAt, deployedGraph, deployRunUrl, repairing, handoff }));
             }
             return;
         }
@@ -3496,6 +3567,11 @@ function createRequestHandler(instanceId) {
                     entry.state.deployErrorBranch = null;
                     entry.state.deployRunUrl = null;
                     entry.state.deployRunId = null;
+                    // An agent redeploy is already inside a repair loop; a user
+                    // deploy starts fresh and may hand off again on failure.
+                    entry.state.deployRepairing = data.agentInitiated === true;
+                    entry.state.deployHandoffState = data.agentInitiated === true ? "delivered" : "idle";
+                    entry.state.deployHandoffAttempts = 0;
 
                     const repo = data.targetRepo || entry.state.plannedRepo || entry.state.contextRepo || '';
                     // Resolve the branch to deploy. When the client doesn't specify
@@ -3509,6 +3585,18 @@ function createRequestHandler(instanceId) {
                     }
                     entry.state.deployingBranch = branch;
                     const provider = data.provider || 'azure';
+                    // Immutable identity for this attempt. A canvas panel is reused
+                    // across deploys, so the repair loop binds to this snapshot
+                    // instead of the panel: a stale repair cannot redeploy whatever
+                    // the user started next.
+                    entry.state.deployAttempt = {
+                        id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                        targetRepo: repo,
+                        environment: entry.state.envName || data.environment || '',
+                        branch,
+                        provider,
+                        appFile: data.appFile || '.radius/app.bicep',
+                    };
                     // Bounded ring buffer: a verbose deploy can stream tens of
                     // thousands of recipe/terraform log lines. Keeping them all in
                     // memory (and re-serializing the whole array to every 1.5s

@@ -26,6 +26,7 @@ import {
     workspaceFileExists,
 } from "./workspace.mjs";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
+import { selectDeployEntry, buildDeployPayload, validateDeployPayload, validateDeployAttempt, summarizeDeployStatus } from "./deploy-tools.mjs";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
     servers,
@@ -33,6 +34,7 @@ import {
     getLastWebviewActivityAt,
     isCurrentSourceRefToken,
     setAppBicepHandoff,
+    setDeployRepairHandoff,
     setSessionPromptHandler,
     setOpenSourceHandler,
 } from "./server.mjs";
@@ -42,7 +44,7 @@ import {
     setSourceRefResources,
     updateSourceRefs,
 } from "./source-refs.mjs";
-import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt } from "./hooks.mjs";
+import { evaluateAppBicepHook, GRAPH_PAGES, appBicepHandoffPrompt, deployRepairHandoffPrompt } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
 import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
@@ -680,6 +682,75 @@ const session = await joinSession({
                 }
             },
         },
+        {
+            name: "radius_deploy",
+            description: "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. The workflow checks out the target branch from GitHub, so commit and push any repair before calling this. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. With no arguments it repeats the last deploy from this session, which is what a redeploy after repairing .radius/app.bicep needs.",
+            parameters: {
+                type: "object",
+                properties: {
+                    attemptId: { type: "string", description: "Deploy attempt this call belongs to, as given in the repair handoff. Required when redeploying inside a repair loop; it pins the repository, environment, branch, provider, and app file to that attempt." },
+                    environment: { type: "string", description: "GitHub environment to deploy to. Defaults to the last deploy's environment." },
+                    repo: { type: "string", description: "Target repository in owner/repo format. Defaults to the last deploy's repository." },
+                    branch: { type: "string", description: "Branch to deploy. Defaults to the last deploy's branch." },
+                    provider: { type: "string", enum: ["azure", "aws"], description: "Cloud provider. Defaults to the last deploy's provider." },
+                    appFile: { type: "string", description: "Path to the application Bicep file. Defaults to .radius/app.bicep." },
+                },
+            },
+            handler: async (args = {}) => {
+                try {
+                    const entry = selectDeployEntry(servers, args.attemptId);
+                    if (!entry) {
+                        return args.attemptId
+                            ? `Deploy attempt "${args.attemptId}" is no longer active, so this redeploy was not started. A newer deploy may have replaced it; ask the user which deploy to repair rather than retrying against a different one.`
+                            : "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
+                    }
+                    const retarget = validateDeployAttempt(args, entry.state || {});
+                    if (retarget) return retarget;
+                    const payload = buildDeployPayload(args, entry.state || {});
+                    const invalid = validateDeployPayload(payload);
+                    if (invalid) return invalid;
+                    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const result = await response.json().catch(() => ({}));
+                    if (!response.ok || result.error) {
+                        return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
+                    }
+                    return `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started. It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed. Poll the radius_deploy_status tool until it reports success or failed.`;
+                } catch (err) {
+                    return `⚠️ Could not start the deploy: ${err.message}`;
+                }
+            },
+        },
+        {
+            name: "radius_deploy_status",
+            description: "Reports the current Radius deploy state (in_progress, success, or failed) with the workflow run URL and a bounded, fenced diagnostic block when it failed. Poll this after calling radius_deploy until it reports a terminal state.",
+            parameters: {
+                type: "object",
+                properties: {
+                    attemptId: { type: "string", description: "Deploy attempt this call belongs to, as given in the repair handoff. Required while following a repair loop." },
+                    logLines: { type: "number", description: "How many trailing deploy log lines to include (default 40, max 200)." },
+                },
+            },
+            handler: async (args = {}) => {
+                try {
+                    const entry = selectDeployEntry(servers, args.attemptId);
+                    if (!entry) {
+                        return args.attemptId
+                            ? `Deploy attempt "${args.attemptId}" is no longer active, so its status is unavailable.`
+                            : "No Radius canvas session is open, so there is no deploy status to report.";
+                    }
+                    const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+                    if (!response.ok) return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
+                    const d = await response.json().catch(() => ({}));
+                    return JSON.stringify(summarizeDeployStatus(d, args.logLines));
+                } catch (err) {
+                    return `⚠️ Could not read the deploy status: ${err.message}`;
+                }
+            },
+        },
     ],
     hooks: {
         // Guard the graph-generating tool calls: if a graph page is opened (or a
@@ -747,6 +818,8 @@ ensureRadBinary({ log: (m) => { try { console.error(`[radius] ${m}`); } catch { 
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
 setAppBicepHandoff(({ repo, branches, page }) => session.send(appBicepHandoffPrompt(repo, page, branches)));
+setDeployRepairHandoff(({ repo, branch, error, deployRunUrl, attemptId }) =>
+    session.send(deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl, attemptId })));
 
 // Let server routes ask the Copilot session to perform follow-up actions the
 // canvas itself cannot run interactively, such as Azure CLI login/install help.
