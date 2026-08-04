@@ -2809,8 +2809,7 @@ function createRequestHandler(instanceId) {
         // a separate route from the status poll: the server must never mutate a
         // repository as a side effect of rendering. `mode` mirrors which button
         // was pressed — "commit" writes to the branches the plan targets,
-        // "pull-request" opens one PR into the default branch after a direct
-        // commit was rejected.
+        // "pull-request" opens one PR into the branch that rejected the commit.
         if (pathname === "/api/workflow-upgrade" && req.method === "POST") {
             let body = "";
             for await (const chunk of req) body += chunk;
@@ -2826,9 +2825,16 @@ function createRequestHandler(instanceId) {
             try { mode = JSON.parse(body || "{}").mode === "pull-request" ? "pull-request" : "commit"; } catch { /* default */ }
             try {
                 const result = await applyWorkflowUpgrade(plan.repo, plan, mode, {
+                    // Which branch refused the direct commit, remembered from the
+                    // call that offered the pull request.
+                    branch: entry?.state?.pendingWorkflowUpgradeBranch || "",
                     log: (m) => console.error(`[radius workflow-pin] ${plan.repo}: ${m}`),
                 });
-                if (result.status === "updated") entry.state.pendingWorkflowUpgrade = null;
+                if (result.status === "updated") {
+                    entry.state.pendingWorkflowUpgrade = null;
+                    entry.state.pendingWorkflowUpgradeBranch = null;
+                }
+                if (result.status === "needs-pull-request") entry.state.pendingWorkflowUpgradeBranch = result.branch || "";
                 console.error(`[radius workflow-pin] ${plan.repo}: ${mode} -> ${result.status}${result.reason ? ` (${result.reason})` : ""}`);
                 res.writeHead(result.status === "stale-plan" ? 409 : 200);
                 res.end(JSON.stringify(result));
@@ -3595,6 +3601,7 @@ function createRequestHandler(instanceId) {
                     entry.state.deployErrorBranch = null;
                     entry.state.deployErrorDetail = null;
                     entry.state.pendingWorkflowUpgrade = null;
+                    entry.state.pendingWorkflowUpgradeBranch = null;
                     entry.state.deployRunUrl = null;
                     entry.state.deployRunId = null;
                     // An agent redeploy is already inside a repair loop; a user

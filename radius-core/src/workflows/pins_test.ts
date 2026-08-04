@@ -8,6 +8,7 @@ import {
 } from "./pins.js";
 import {
   REPO_RADIUS_PINSET,
+  isPinsetOverridden,
   validatePinset,
   type Pinset,
 } from "./pinset.js";
@@ -300,7 +301,9 @@ describe("comparePins", () => {
   });
 });
 
-describe("REPO_RADIUS_PINSET", () => {
+// RADIUS_PINSET_REF swaps in a development pinset that may name a branch, so
+// these shipped-artifact invariants only apply to the compiled-in default.
+describe.skipIf(isPinsetOverridden())("REPO_RADIUS_PINSET", () => {
   it("is well formed", () => {
     expect(validatePinset(REPO_RADIUS_PINSET)).toEqual([]);
   });

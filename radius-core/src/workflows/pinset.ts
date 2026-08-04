@@ -134,9 +134,13 @@ export function isCommitSha(ref: string): boolean {
 }
 
 /**
- * Assert the compiled-in pinset is well-formed. Called by tests and by the CI
- * verification step; a malformed pin must never reach a user's repository.
- * Skipped for the development override, which is allowed to name a branch.
+ * Assert a pinset is well-formed. Called by tests and by the CI verification
+ * step; a malformed pin must never reach a user's repository.
+ *
+ * Validates whatever it is handed, unconditionally — the development override is
+ * allowed to name a branch, so callers that validate the LIVE pinset must skip
+ * on `isPinsetOverridden()` rather than expecting this to relax itself. CI never
+ * sets the override, so the shipped pinset is always fully checked.
  */
 export function validatePinset(pinset: Pinset): string[] {
   const problems: string[] = [];

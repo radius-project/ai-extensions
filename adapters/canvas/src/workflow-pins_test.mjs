@@ -69,6 +69,14 @@ jobs:
       - uses: radius-project/radius/.github/extension/actions/run-rad-commands@main
 `;
 const PINNED_AZURE = pinActionRefs(STALE_AZURE, REPO_RADIUS_PINSET);
+// The same workflow stale in a different way, as a second branch may carry it.
+const STALE_AZURE_TWO_ACTIONS = `name: deploy-azure
+jobs:
+  azure:
+    steps:
+      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@main
+      - uses: radius-project/radius/.github/extension/actions/teardown@main
+`;
 // The dispatcher only references local workflow files, so it is never stale.
 const DISPATCHER_BODY = "jobs:\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n";
 // Carries `id-token: write` and four pinset-governed actions upstream, so a
@@ -202,6 +210,30 @@ describe("planWorkflowUpgrade", () => {
         expect(h.commits.map((c) => c.path)).toEqual([AZURE_PATH, DELETE_PATH]);
         expect(h.committed.main[DELETE_PATH]).toBe(pinActionRefs(STALE_DELETE, REPO_RADIUS_PINSET));
     });
+
+    // Two branches can hold the same workflow stale in different ways. Every
+    // change that will be written has to appear in what the user is shown,
+    // otherwise the confirmation covers less than the commit does.
+    it("reports changes from every branch, not just the first", async () => {
+        seed("main", { [AZURE_PATH]: STALE_AZURE });
+        seed("feature", { [AZURE_PATH]: STALE_AZURE_TWO_ACTIONS });
+
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { deployRef: "feature" });
+
+        expect(plan.files).toHaveLength(1);
+        const refs = plan.files[0].changes.map((c) => c.target);
+        expect(refs).toContain("radius-project/radius/.github/extension/actions/run-rad-commands");
+        expect(refs).toContain("radius-project/radius/.github/extension/actions/teardown");
+    });
+
+    it("collapses a change both branches share to a single line", async () => {
+        seed("main", { [AZURE_PATH]: STALE_AZURE });
+        seed("feature", { [AZURE_PATH]: STALE_AZURE });
+
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { deployRef: "feature" });
+
+        expect(plan.files[0].changes).toHaveLength(1);
+    });
 });
 
 describe("applyWorkflowUpgrade", () => {
@@ -328,6 +360,26 @@ describe("applyWorkflowUpgrade", () => {
         const result = await applyWorkflowUpgrade("acme/app", plan, "pull-request");
 
         expect(result).toMatchObject({ status: "blocked", reason: "no-permission" });
+    });
+
+    // A deploy can target a protected non-default branch. A pull request into
+    // the default branch would never repair the branch the run checks out, so
+    // the PR has to land on whichever branch refused the commit.
+    it("opens the pull request into the protected branch, not the default one", async () => {
+        seed("main", { [AZURE_PATH]: PINNED_AZURE });
+        seed("release", { [AZURE_PATH]: STALE_AZURE });
+        const plan = await planWorkflowUpgrade("acme/app", [AZURE], { deployRef: "release" });
+        h.commitError = PROTECTED_BRANCH;
+
+        const offered = await applyWorkflowUpgrade("acme/app", plan, "commit");
+        expect(offered).toMatchObject({ status: "needs-pull-request", branch: "release" });
+
+        h.commitError = null;
+        const result = await applyWorkflowUpgrade("acme/app", plan, "pull-request", { branch: offered.branch });
+
+        expect(result).toMatchObject({ status: "blocked", reason: "pull-request-open" });
+        expect(h.pulls[0].base).toBe("release");
+        expect(h.branchRefs[0].fromSha).toBe(h.heads.release);
     });
 
     // The plan the user approved is the plan that gets applied — never a

@@ -91,10 +91,22 @@ export async function planWorkflowUpgrade(repo, files, opts = {}) {
   if (targets.length === 0) return emptyPlan(repo, base);
 
   // Union of the per-branch file lists, for rendering and for the commit body.
+  // Branches can be stale in different ways (one pinned to an old SHA, another
+  // still on a moving ref), so changes are unioned per file rather than taking
+  // the first branch's list — everything applyWorkflowUpgrade will write has to
+  // be something the user was shown. Identical changes across branches collapse
+  // to one line.
   const merged = new Map();
   for (const target of targets) {
     for (const file of target.files) {
-      if (!merged.has(file.path)) merged.set(file.path, { path: file.path, changes: file.changes });
+      const entry = merged.get(file.path) || { path: file.path, changes: [] };
+      for (const change of file.changes) {
+        const seen = entry.changes.some(
+          (c) => c.target === change.target && c.from.ref === change.from.ref && c.to.sha === change.to.sha,
+        );
+        if (!seen) entry.changes.push(change);
+      }
+      merged.set(file.path, entry);
     }
   }
   const plan = {
@@ -160,10 +172,15 @@ async function pinFileOnBranch(repo, path, branch, message) {
  * Apply a plan the user has confirmed.
  *
  * `mode` is `"commit"` (write to the branches the plan targets) or
- * `"pull-request"` (open one pull request into the default branch). The two are
- * separate confirmations on purpose: opening a pull request is itself a visible
- * action on a shared repository, so a rejected direct commit reports back and
- * waits rather than silently escalating.
+ * `"pull-request"` (open one pull request into `opts.branch`, defaulting to the
+ * default branch). The two are separate confirmations on purpose: opening a
+ * pull request is itself a visible action on a shared repository, so a rejected
+ * direct commit reports back and waits rather than silently escalating.
+ *
+ * `opts.branch` is the branch a previous call reported as protected. A deploy
+ * can target a non-default branch, and that branch can be the protected one, so
+ * the pull request has to land on whichever branch refused the commit — a pull
+ * request into the default branch would leave the deploy ref unrepaired.
  *
  * `expectedHeadSha` must still match each target branch's head — the plan the
  * user approved is the plan that gets applied, never a repository state they
@@ -171,7 +188,7 @@ async function pinFileOnBranch(repo, path, branch, message) {
  *
  * Resolves one of:
  * - `{ status: "updated", updated: [...] }` — safe to deploy.
- * - `{ status: "needs-pull-request", detail }` — protected branch; offer the PR.
+ * - `{ status: "needs-pull-request", branch, detail }` — protected; offer the PR.
  * - `{ status: "blocked", reason, detail, url? }` — deployment must not proceed.
  * - `{ status: "stale-plan", detail }` — branch moved; recompute and re-show.
  */
@@ -191,7 +208,7 @@ export async function applyWorkflowUpgrade(repo, plan, mode, opts = {}) {
     }
   }
 
-  if (mode === "pull-request") return openUpgradePullRequest(repo, plan, message, log);
+  if (mode === "pull-request") return openUpgradePullRequest(repo, plan, message, log, opts.branch || "");
 
   const updated = [];
   for (const target of plan.targets) {
@@ -228,15 +245,15 @@ export async function applyWorkflowUpgrade(repo, plan, mode, opts = {}) {
 
 /**
  * Commit the updated workflows to a fresh branch and open a pull request into
- * the default branch.
+ * `prBase` — the branch that refused the direct commit, which is the default
+ * branch unless the deploy targets a protected non-default branch.
  *
- * The deployment does NOT proceed on success: Repo Radius runs from the default
- * branch, so until the pull request merges the updated workflows are not where
- * the run would read them. Saying that plainly beats dispatching a run that
- * would execute the old actions.
+ * The deployment does NOT proceed on success: until the pull request merges, the
+ * updated workflows are not on the branch the run would read them from. Saying
+ * that plainly beats dispatching a run that would execute the old actions.
  */
-async function openUpgradePullRequest(repo, plan, message, log) {
-  const base = plan.base || (await getDefaultBranch(repo)) || "main";
+async function openUpgradePullRequest(repo, plan, message, log, prBase) {
+  const base = prBase || plan.base || (await getDefaultBranch(repo)) || "main";
   const baseSha = await getBranchHeadSha(repo, base);
   if (!baseSha) {
     return {
@@ -255,6 +272,8 @@ async function openUpgradePullRequest(repo, plan, message, log) {
     };
   }
 
+  // The pull request carries the changes for the branch it lands on; another
+  // branch's copy of the same file can be stale in a different way.
   const target = plan.targets.find((t) => t.branch === base) || plan.targets[0];
   const committed = [];
   for (const file of target.files) {

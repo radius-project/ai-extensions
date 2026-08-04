@@ -4108,10 +4108,13 @@ function showWorkflowUpgrade(app, detail, mode) {
     if (failActions) failActions.style.display = 'none';
 
     var planLines = (detail.plan || []).join('\\n');
+    var prBase = detail.prBase || detail.base || '';
     var target = applyMode === 'pull-request'
-        ? 'Radius will open a pull request with the updated workflows. Repo Radius runs from <code>' + escapeHtmlClient(detail.base || 'the default branch') + '</code>, so this deployment can\\'t start until that pull request is merged.'
+        ? 'Radius will open a pull request into <code>' + escapeHtmlClient(prBase || 'the default branch') + '</code>. The deploy reads its workflows from that branch, so this deployment can\\'t start until the pull request is merged.'
         : 'The update will be committed to <code>' + escapeHtmlClient(detail.base || 'the default branch') + '</code>.';
-    if (title) title.innerHTML = applyMode === 'pull-request' ? 'Can\\'t commit to the default branch' : 'Repo Radius workflows need updating';
+    if (title) title.innerHTML = applyMode === 'pull-request'
+        ? 'Can\\'t commit to <code>' + escapeHtmlClient(prBase || 'the default branch') + '</code>'
+        : 'Repo Radius workflows need updating';
     if (sub) {
         sub.style.color = 'var(--rad-text-secondary)';
         sub.innerHTML =
@@ -4150,7 +4153,7 @@ function showWorkflowUpgradeBlocked(reason, detail, url) {
             sub.innerHTML =
                 '<div style="color:var(--rad-text);">The updated workflows are waiting for review.</div>' +
                 (url ? '<div style="margin-top:8px;"><a href="' + escapeHtmlClient(url) + '" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View pull request in GitHub ↗</a></div>' : '') +
-                '<div style="margin-top:10px;">Repo Radius runs from the default branch, so this deployment will start working once the pull request is merged.</div>';
+                '<div style="margin-top:10px;">The deploy reads its workflows from <code>' + escapeHtmlClient((PENDING_UPGRADE && (PENDING_UPGRADE.prBase || PENDING_UPGRADE.base)) || 'the default branch') + '</code>, so this deployment will start working once the pull request is merged.</div>';
         }
         return;
     }
@@ -4206,6 +4209,8 @@ function showWorkflowUpgradeBlocked(reason, detail, url) {
                 return;
             }
             if (d.status === 'needs-pull-request') {
+                // The branch that refused the commit is what the PR must target.
+                if (PENDING_UPGRADE) PENDING_UPGRADE.prBase = d.branch || '';
                 showWorkflowUpgrade(app, null, 'pull-request');
                 return;
             }
