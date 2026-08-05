@@ -1,15 +1,15 @@
 // Canvas adapter — reusable UI primitives.
 //
 // Small `props => htmlString` builders that encode the refreshed Radius design
-// system (see the token block in ./pages.mjs `pageShell`). Page renderers in
-// ./pages.mjs compose these instead of hand-writing inline styles, so the look
+// system (see the token block in ./pages.ts `pageShell`). Page renderers in
+// ./pages.ts compose these instead of hand-writing inline styles, so the look
 // stays consistent and Figma components map 1:1 to a function here.
 //
 // No I/O or state — pure string builders. All colors/spacing come from the CSS
 // custom properties defined in pageShell, so these never hard-code hex values.
 
-import { escapeHtml } from "./shared.mjs";
-import { ICON_APP, ICON_ENV, ICON_DEP } from "./navicons.mjs";
+import { escapeHtml } from "./shared.js";
+import { ICON_APP, ICON_ENV, ICON_DEP } from "./navicons.js";
 
 // The Radius brand mark (orange dial). `size` in px.
 export function radiusMark(size = 28) {
@@ -27,7 +27,7 @@ export function radiusMark(size = 28) {
 // tab has dark bold text + an orange underline along the bottom of the bar,
 // inactive tabs are muted. `active` is one of:
 // 'applications' | 'environments' | 'deployments'.
-export function topNav(active) {
+export function topNav(active: string): string {
   const tabs = [
     {
       id: "applications",
@@ -66,7 +66,21 @@ export function topNav(active) {
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).
 // `items` = [{ id, label }], `active` = id, `onNav` = optional JS nav fn name.
-export function subTabs(items, active, onNav = "radiusNavTo") {
+export interface SubTab {
+  id: string;
+  label: string;
+}
+
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
+export function subTabs(
+  items: readonly SubTab[],
+  active: string,
+  onNav = "radiusNavTo"
+): string {
   const links = items
     .map((it) => {
       const cls =
@@ -78,18 +92,22 @@ export function subTabs(items, active, onNav = "radiusNavTo") {
 }
 
 // Page heading with the brand mark.
-export function heading(title, subtitleHtml = "") {
+export function heading(title: string, subtitleHtml = ""): string {
   const sub = subtitleHtml ? `<p class="rad-lede">${subtitleHtml}</p>` : "";
   return `<div class="rad-heading"><h1>${radiusMark(26)}<span>${escapeHtml(title)}</span></h1>${sub}</div>`;
 }
 
 // Labeled form field wrapper.
-export function field(label, controlHtml) {
+export function field(label: string, controlHtml: string): string {
   return `<div class="rad-field"><label>${escapeHtml(label)}</label>${controlHtml}</div>`;
 }
 
 // Native select. `options` = [{ value, label }] or a raw <option> string.
-export function select(id, options, attrs = "") {
+export function select(
+  id: string,
+  options: readonly SelectOption[] | string,
+  attrs = ""
+): string {
   const opts =
     Array.isArray(options) ?
       options
@@ -103,19 +121,24 @@ export function select(id, options, attrs = "") {
 }
 
 // Button. `variant`: 'primary' (green, default) | 'brand' | 'neutral'.
-export function button(id, label, variant = "primary", attrs = "") {
+export function button(
+  id: string,
+  label: string,
+  variant = "primary",
+  attrs = ""
+): string {
   return `<button id="${id}" class="rad-btn rad-btn--${variant}" ${attrs}>${escapeHtml(label)}</button>`;
 }
 
 // Status banner. `kind`: 'info' | 'success' | 'error'.
-export function statusPill(id, kind, html) {
+export function statusPill(id: string, kind: string, html: string): string {
   return `<div id="${id}" class="rad-status rad-status--${kind}">${html}</div>`;
 }
 
 // Floating feedback widget (bottom-right). A dark round chat button that toggles
 // a small popover with "Share feedback" and "Learn about Radius" links. Rendered
 // once in the page shell so it appears on every page.
-export function feedbackWidget() {
+export function feedbackWidget(): string {
   const chat =
     `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">` +
     `<path d="M12 3C6.48 3 2 6.94 2 11.5c0 2.3 1.14 4.36 2.98 5.84L4 21l4.2-1.9c1.16.38 2.44.6 3.8.6 5.52 0 10-3.94 10-8.7S17.52 3 12 3z" ` +
@@ -150,7 +173,11 @@ export function feedbackWidget() {
 }
 
 // A resource node card used in the app graph (icon + title + type label).
-export function nodeCard(title, typeLabel, iconHtml) {
+export function nodeCard(
+  title: string,
+  typeLabel: string,
+  iconHtml?: string
+): string {
   return (
     `<div class="rad-node">` +
     `<div class="rad-node__head"><span class="rad-node__icon">${iconHtml || ""}</span>` +
@@ -170,7 +197,7 @@ export function nodeCard(title, typeLabel, iconHtml) {
 // A nav icon glyph. Painted in the theme's default text color (via a CSS mask)
 // so it stays legible in light/dark and does NOT dim on inactive tabs — only the
 // label changes color for the active/inactive state (matches Figma).
-function navIcon(dataUri, size = 28, fit = "contain") {
+function navIcon(dataUri: string, size = 28, fit = "contain"): string {
   return (
     `<span aria-hidden="true" style="display:inline-block;width:${size}px;height:${size}px;` +
     `background-color:var(--rad-text, currentColor);` +

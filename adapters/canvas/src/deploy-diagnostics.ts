@@ -16,9 +16,9 @@ export const DEPLOY_DIAGNOSTIC_NOTE =
 // markers are dropped so the payload cannot close the fence and speak as the
 // caller, and the body is capped so one failure cannot swamp the context.
 export function fenceDeployDiagnostic(
-  text,
+  text: unknown,
   { cap = DEPLOY_DIAGNOSTIC_CHAR_CAP } = {}
-) {
+): string | null {
   const detail = String(text ?? "").trim();
   if (!detail) return null;
   const sanitized = detail

@@ -4,14 +4,68 @@
 import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
-} from "./deploy-diagnostics.mjs";
+} from "./deploy-diagnostics.js";
+import type {
+  CanvasDeployAttempt,
+  CanvasDeployParams,
+  CanvasState
+} from "./shared.js";
+
+export interface DeployToolArgs {
+  attemptId?: string;
+  repo?: string;
+  environment?: string;
+  branch?: string;
+  provider?: string;
+  appFile?: string;
+}
+
+export interface DeployServerEntry {
+  baseUrl?: string;
+  state: CanvasState;
+}
+
+export interface DeployPayload extends CanvasDeployParams {
+  environment: string;
+  provider: string;
+  targetRepo: string;
+  branch: string;
+  appFile: string;
+  agentInitiated: true;
+}
+
+export interface DeployStatusInput {
+  status?: string;
+  errorKind?: string | null;
+  deployRunUrl?: string | null;
+  startedAt?: string | number | null;
+  finishedAt?: string | number | null;
+  error?: unknown;
+  logs?: unknown;
+}
+
+export interface DeployStatusSummary {
+  status: string;
+  errorKind: string | null;
+  deployRunUrl: string | null;
+  startedAt: string | number | null;
+  finishedAt: string | number | null;
+  diagnosticNote?: string;
+  diagnostic?: string;
+  error?: never;
+  logTail?: never;
+  resources?: never;
+}
 
 // Pick the canvas instance a deploy tool should act on. A repair loop passes the
 // attempt id it was handed, which fails closed: a canvas panel is reused, so
 // binding to the panel alone would let a stale repair redeploy whatever the user
 // started next. Only unbound (manual) calls fall back to the most recently
 // started deploy, then to any open instance.
-export function selectDeployEntry(servers, attemptId) {
+export function selectDeployEntry(
+  servers: ReadonlyMap<unknown, DeployServerEntry>,
+  attemptId?: string
+): DeployServerEntry | null {
   if (attemptId) {
     for (const entry of servers.values()) {
       if (entry?.baseUrl && entry.state?.deployAttempt?.id === attemptId)
@@ -35,7 +89,9 @@ export function selectDeployEntry(servers, attemptId) {
   return null;
 }
 
-const ATTEMPT_FIELDS = [
+const ATTEMPT_FIELDS: ReadonlyArray<
+  readonly [keyof DeployToolArgs, keyof CanvasDeployAttempt]
+> = [
   ["repo", "targetRepo"],
   ["environment", "environment"],
   ["branch", "branch"],
@@ -45,7 +101,10 @@ const ATTEMPT_FIELDS = [
 
 // A repair-loop call names an attempt and must not retarget it: the snapshot
 // taken when that deploy started is the source of truth for what gets redeployed.
-export function validateDeployAttempt(args = {}, state = {}) {
+export function validateDeployAttempt(
+  args: DeployToolArgs = {},
+  state: CanvasState = {}
+): string | null {
   if (!args.attemptId) return null;
   const snapshot = state.deployAttempt;
   if (!snapshot || snapshot.id !== args.attemptId) {
@@ -65,8 +124,12 @@ export function validateDeployAttempt(args = {}, state = {}) {
 
 // Build the /api/deploy body. A repair-loop call replays the attempt snapshot; an
 // unbound call falls back to the session's last deploy parameters.
-export function buildDeployPayload(args = {}, state = {}) {
-  const snapshot = (args.attemptId && state.deployAttempt) || {};
+export function buildDeployPayload(
+  args: DeployToolArgs = {},
+  state: CanvasState = {}
+): DeployPayload {
+  const snapshot: Partial<CanvasDeployAttempt> =
+    (args.attemptId && state.deployAttempt) || {};
   const last = state.deployParams || {};
   return {
     environment:
@@ -86,7 +149,10 @@ export function buildDeployPayload(args = {}, state = {}) {
 }
 
 // Reject a payload that would deploy something unintended rather than guessing.
-export function validateDeployPayload(payload) {
+export function validateDeployPayload(payload: {
+  targetRepo?: unknown;
+  environment?: unknown;
+}): string | null {
   if (!payload.targetRepo)
     return "No target repository is known for this deploy. Pass `repo` (owner/repo).";
   if (!payload.environment)
@@ -101,11 +167,14 @@ export const DEPLOY_LOG_TAIL_MAX = 200;
 // up to 4000 log lines, which would swamp the agent's context. The error and log
 // tail are workflow output, so they are returned as one fenced diagnostic block
 // rather than raw strings, matching the repair handoff.
-export function summarizeDeployStatus(d = {}, logLines) {
+export function summarizeDeployStatus(
+  d: DeployStatusInput = {},
+  logLines?: number
+): DeployStatusSummary {
   const requested = Number(logLines) || DEPLOY_LOG_TAIL_DEFAULT;
   const cap = Math.min(Math.max(requested, 1), DEPLOY_LOG_TAIL_MAX);
   const logs = Array.isArray(d.logs) ? d.logs : [];
-  const sections = [];
+  const sections: string[] = [];
   if (d.error) sections.push(`error: ${d.error}`);
   const tail = logs.slice(-cap);
   if (tail.length)

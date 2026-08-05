@@ -32,7 +32,7 @@ import {
   deleteCredentialProfile,
   getPreferredGitHubLogin,
   setPreferredGitHubLogin
-} from "./shared.mjs";
+} from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
@@ -66,7 +66,7 @@ import {
   isAksClusterName,
   isResourceGroupName,
   GITHUB_API_VERSION
-} from "./azure-oidc.mjs";
+} from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
 import {
   appParams,
@@ -75,7 +75,7 @@ import {
   buildDeployRadCommand,
   buildAppGraphRadCommand,
   extractAppName
-} from "./bicep.mjs";
+} from "./bicep.js";
 import {
   createWorkspaceGitHub,
   defaultBranchForState,
@@ -85,7 +85,7 @@ import {
   resolveSessionId,
   toSafeRepoRelPath,
   workspaceGraphJsonPath
-} from "./workspace.mjs";
+} from "./workspace.js";
 import { DEFAULT_CANVAS_PAGE } from "./hooks.mjs";
 import {
   radArtifactsDirForSelection,
@@ -94,7 +94,7 @@ import {
 import {
   prepareSourceRefResources,
   setSourceRefResources
-} from "./source-refs.mjs";
+} from "./source-refs.js";
 import {
   generateAzureOIDC,
   validateAzureCredentials,
@@ -137,7 +137,7 @@ import {
   deployedGraphPage,
   environmentPage,
   deployingPage
-} from "./pages.mjs";
+} from "./pages.js";
 
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.

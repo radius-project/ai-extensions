@@ -7,7 +7,12 @@ import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
-} from "./publish-targets.mjs";
+} from "./publish-targets.js";
+
+const validationError = (
+  target: unknown,
+  workspaceRepo: string | null | undefined
+): string => validateGhcrTargetForRepo(target, workspaceRepo) ?? "";
 
 const WS = path.join(os.tmpdir(), "ws");
 const RADIUS = path.join(WS, ".radius");
@@ -90,45 +95,45 @@ test("validateGhcrTargetForRepo accepts an immutable target under the modeled re
 
 test("validateGhcrTargetForRepo rejects a cross-repository target", () => {
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/evil/x:1.0.0", "acme/app"),
+    validationError("br:ghcr.io/evil/x:1.0.0", "acme/app"),
     /under the repository being modeled/
   );
   // A repo that is only a prefix of the target owner must not match.
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app-evil:1.0.0", "acme/app"),
+    validationError("br:ghcr.io/acme/app-evil:1.0.0", "acme/app"),
     /under the repository being modeled/
   );
 });
 
 test("validateGhcrTargetForRepo rejects non-ghcr, missing, and malformed tags", () => {
   assert.match(
-    validateGhcrTargetForRepo("br:docker.io/acme/app:1", "acme/app"),
+    validationError("br:docker.io/acme/app:1", "acme/app"),
     /must be br:ghcr.io/
   );
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app/recipe", "acme/app"),
+    validationError("br:ghcr.io/acme/app/recipe", "acme/app"),
     /must be br:ghcr.io/
   );
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app:", "acme/app"),
+    validationError("br:ghcr.io/acme/app:", "acme/app"),
     /must be br:ghcr.io/
   );
 });
 
 test("validateGhcrTargetForRepo rejects the mutable :latest tag", () => {
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app/recipe:latest", "acme/app"),
+    validationError("br:ghcr.io/acme/app/recipe:latest", "acme/app"),
     /immutable tag/
   );
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app/recipe:LATEST", "acme/app"),
+    validationError("br:ghcr.io/acme/app/recipe:LATEST", "acme/app"),
     /immutable tag/
   );
 });
 
 test("validateGhcrTargetForRepo requires a known workspace repo", () => {
   assert.match(
-    validateGhcrTargetForRepo("br:ghcr.io/acme/app:1.0.0", ""),
+    validationError("br:ghcr.io/acme/app:1.0.0", ""),
     /Cannot determine the repository/
   );
 });

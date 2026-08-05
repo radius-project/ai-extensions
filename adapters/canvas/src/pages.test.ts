@@ -17,7 +17,7 @@ import {
   deployedGraphPage,
   environmentPage,
   deployingPage
-} from "./pages.mjs";
+} from "./pages.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -577,7 +577,7 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
 
   it("single-sources the tested azure-oidc helpers into the client via .toString() (no hand-copied twins)", () => {
     // Comment #10: formatServesReposLabel / discoverStatusText were duplicated
-    // as untested browser copies. They are now serialized from azure-oidc.mjs
+    // as untested browser copies. They are now serialized from azure-oidc.ts
     // into the client bundle, so the shipping client runs the exact tested
     // code and the call sites reference the real functions.
     const html = environmentPage({ contextRepo: "octo/app" });
@@ -710,7 +710,7 @@ describe("deployedGraphPage", () => {
 });
 
 describe("remaining pages smoke-render without removed tokens", () => {
-  const cases = [
+  const cases: Array<readonly [string, () => string, (() => string) | null]> = [
     ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],
     [
       "graphDiffPage",

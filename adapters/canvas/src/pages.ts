@@ -1,29 +1,38 @@
 // Canvas adapter — HTML page renderers. Each function is a `state => html`
 // builder for one canvas page; together they are the entire server-side view
-// layer. Browser behaviour lives in the embedded client JS (./client.mjs) and
+// layer. Browser behaviour lives in the embedded client JS (./client.ts) and
 // vendored libraries (./vendor.mjs); cross-cutting helpers/state come from
-// ./shared.mjs. No I/O, routing, or business logic here.
+// ./shared.ts. No I/O, routing, or business logic here.
 
-import { escapeHtml, sharedCredentials } from "./shared.mjs";
-import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.mjs";
+import {
+  cloudCredential,
+  escapeHtml,
+  sharedCredentials,
+  type CanvasState
+} from "./shared.js";
+import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.js";
 import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS
-} from "./client.mjs";
-import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
-import { isWorkspaceSelection } from "./workspace.mjs";
+} from "./client.js";
+import { topNav, radiusMark, feedbackWidget } from "./ui.js";
+import { isWorkspaceSelection } from "./workspace.js";
 
 // Pick the active top-nav section from a page title.
-function navFromTitle(title) {
+function navFromTitle(title: string): string {
   const t = String(title || "").toLowerCase();
   if (t.includes("environment")) return "environments";
   if (t.includes("deploying") || t.includes("deployment")) return "deployments";
   return "applications";
 }
 
-export function pageShell(title, bodyContent, activeNav) {
+export function pageShell(
+  title: string,
+  bodyContent: string,
+  activeNav?: string
+): string {
   const active = activeNav || navFromTitle(title);
   return `<!doctype html>
 <html>
@@ -420,10 +429,10 @@ ${CLIENT_HEARTBEAT_JS}
 </html>`;
 }
 
-export function oidcPage(state) {
+export function oidcPage(state: CanvasState = {}): string {
   const azureResult = state?.oidcAzure;
   const awsResult = state?.oidcAws;
-  const savedAzure = sharedCredentials.azure || {};
+  const savedAzure = cloudCredential(sharedCredentials.azure);
 
   const azureResultHtml =
     azureResult ?
@@ -533,7 +542,7 @@ document.getElementById('btn-aws').addEventListener('click', function() {
   );
 }
 
-export function graphHeader(activePage) {
+export function graphHeader(activePage: string): string {
   const pages = [
     { id: "graph", label: "Modeled" },
     { id: "planned", label: "Planned" },
@@ -564,7 +573,7 @@ export function graphHeaderClose() {
   return `</div>`;
 }
 
-export function graphPage(state) {
+export function graphPage(state: CanvasState = {}): string {
   const resources = state?.graphResources || [];
   const resourcesJson = JSON.stringify(resources);
   const targetRepo = state?.graphTargetRepo || state?.contextRepo || "";
@@ -1060,7 +1069,7 @@ ${graphHeaderClose()}`
   );
 }
 
-export function plannedGraphPage(state) {
+export function plannedGraphPage(state: CanvasState = {}): string {
   const targetRepo =
     state?.plannedRepo || state?.graphTargetRepo || state?.contextRepo || "";
   const provider = state?.plannedProvider || state?.deployProvider || "azure";
@@ -1250,7 +1259,7 @@ ${graphHeaderClose()}`
   );
 }
 
-export function graphDiffPage(state) {
+export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
   const baseBranch = state?.diffBase || "main";
   const headBranch = state?.diffHead || "";
@@ -1456,7 +1465,7 @@ ${graphHeaderClose()}`
   );
 }
 
-export function deployedGraphPage(state) {
+export function deployedGraphPage(state: CanvasState = {}): string {
   const targetRepo =
     state?.contextRepo ||
     state?.deployingRepo ||
@@ -1706,7 +1715,7 @@ ${graphHeaderClose()}`
   );
 }
 
-export function environmentPage(state) {
+export function environmentPage(state: CanvasState = {}): string {
   const envName = state?.envName || "dev";
   // Default to the active session branch. A worktree session's branch may
   // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
@@ -3527,7 +3536,7 @@ if (document.getElementById('pane-credentials').style.display !== 'none') { load
   );
 }
 
-export function deployingPage(state) {
+export function deployingPage(state: CanvasState = {}): string {
   // The Deployments tab is always the landing page (application + environment
   // selectors, a Deploy button, and a table of existing deployments). Live
   // deployment progress (graph + logs) is shown on the Applications → Deployed
@@ -3535,7 +3544,7 @@ export function deployingPage(state) {
   return deployLandingView(state);
 }
 
-function deployLandingView(state) {
+function deployLandingView(state: CanvasState): string {
   const ctxRepo =
     state?.contextRepo ||
     state?.plannedRepo ||

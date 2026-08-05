@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
+import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 
 const context = {
   extensionId: "plugin:radius",

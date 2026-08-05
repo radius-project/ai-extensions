@@ -10,9 +10,9 @@ import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS
-} from "./client.mjs";
+} from "./client.js";
 
-describe("client.mjs exports", () => {
+describe("client.ts exports", () => {
   it("exports the three client script strings", () => {
     expect(typeof CLIENT_REPO_BRANCH_JS).toBe("string");
     expect(typeof CLIENT_GRAPH_JS).toBe("string");
@@ -57,19 +57,34 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
       });
 
       it("does not overwrite a populated diff error while refreshing branch selectors", async () => {
+        interface FakeOption {
+          value: string;
+          textContent: string;
+          selected: boolean;
+        }
+        interface FakeSelect {
+          value: string;
+          options: FakeOption[];
+          innerHTML: string;
+          appendChild(option: FakeOption): void;
+          dispatchEvent(): void;
+        }
         const status = {
           textContent: "Unable to compile head graph",
           className: "status error",
-          classList: { contains: (name) => name === "error" }
+          classList: { contains: (name: string) => name === "error" }
         };
-        const makeSelect = () => ({
+        const makeSelect = (): FakeSelect => ({
           value: "",
           options: [],
-          set innerHTML(_value) {
+          set innerHTML(_value: string) {
             this.options = [];
             this.value = "";
           },
-          appendChild(option) {
+          get innerHTML() {
+            return "";
+          },
+          appendChild(option: FakeOption) {
             this.options.push(option);
             if (option.selected || !this.value) this.value = option.value;
           },
@@ -79,14 +94,14 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
         });
         const base = makeSelect();
         const head = makeSelect();
-        const elements = {
+        const elements: Record<string, FakeSelect | typeof status> = {
           "base-branch": base,
           "head-branch": head,
           "diff-status": status
         };
         const document = {
-          getElementById: (id) => elements[id] || null,
-          createElement: () => ({
+          getElementById: (id: string) => elements[id] || null,
+          createElement: (): FakeOption => ({
             value: "",
             textContent: "",
             selected: false
@@ -173,7 +188,7 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
   it("normalizes single Windows backslashes to '/' in both the GitHub blob path and the repo-relative open path", () => {
     // Behavioral guard (not a source-spelling check): a codeReference generated
     // on Windows carries SINGLE backslashes at runtime. The /\\\\/g written in
-    // the .mjs source sits inside a template literal, so it is halved to /\\/g
+    // the .ts source sits inside a template literal, so it is halved to /\\/g
     // in the browser — a regex that matches ONE backslash. Extract the two
     // helpers from the runtime script and prove they actually convert a Windows
     // path. (This is why the source must keep /\\\\/g: /\\/g in source would
@@ -182,6 +197,7 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
       /function srcPathFromRef\(codeRef\) \{[\s\S]*?return p;\s*\}/
     );
     expect(srcMatch).toBeTruthy();
+    if (!srcMatch) throw new Error("srcPathFromRef was not found");
     const srcPathFromRef = new Function(
       srcMatch[0] + "; return srcPathFromRef;"
     )();
@@ -195,6 +211,7 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
       /function buildSourceUrl\(codeRef, branchOverride\) \{[\s\S]*?return repoUrl \+ '\/tree\/' \+ br;\s*\}/
     );
     expect(urlMatch).toBeTruthy();
+    if (!urlMatch) throw new Error("buildSourceUrl was not found");
     const buildSourceUrl = new Function(
       "repoUrl",
       "branch",
@@ -218,7 +235,7 @@ describe("CLIENT_GRAPH_JS — source links (worktree-aware: local editor canvas 
       // Background forwards `color` to an SVG <circle fill> presentation
       // attribute, where Chromium does NOT substitute var() — the value is
       // dropped and the dots render black. The grid is themed from CSS instead
-      // (see the .react-flow__background rules in pages.mjs).
+      // (see the .react-flow__background rules in pages.ts).
       expect(CLIENT_GRAPH_JS).toContain("h(Background, { gap: 16, size: 1 })");
       expect(CLIENT_GRAPH_JS).not.toMatch(
         /h\(Background,[^)]*color:[^)]*var\(/

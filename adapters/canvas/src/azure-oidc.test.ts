@@ -15,14 +15,17 @@ import {
   decideAppSelection,
   parseServedReposFromSubjects,
   validateAppRegistrationName,
-  formatServesReposLabel
-} from "./azure-oidc.mjs";
+  formatServesReposLabel,
+  type GitHubJsonResponse
+} from "./azure-oidc.js";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
 
 // A runner that maps apiPath -> a canned { ok, status, json, stderr } response.
-function makeRunner(map) {
-  return vi.fn(async (apiPath) => {
+function makeRunner(
+  map: Readonly<Record<string, GitHubJsonResponse | (() => GitHubJsonResponse)>>
+) {
+  return vi.fn(async (apiPath: string) => {
     if (typeof map[apiPath] === "function") return map[apiPath]();
     if (map[apiPath]) return map[apiPath];
     return {
@@ -163,7 +166,7 @@ describe("fetchGitHubJson retry", () => {
       .mockResolvedValueOnce({ ok: false, status: 503, stderr: "boom" })
       .mockResolvedValueOnce({ ok: true, status: 200, json: { a: 1 } });
     const res = await fetchGitHubJson(runner, "/x", noSleep);
-    expect(res.ok).toBe(true);
+    expect(res?.ok).toBe(true);
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
@@ -172,7 +175,7 @@ describe("fetchGitHubJson retry", () => {
       .fn()
       .mockResolvedValue({ ok: false, status: 429, stderr: "rate" });
     const res = await fetchGitHubJson(runner, "/x", { retries: 3, ...noSleep });
-    expect(res.ok).toBe(false);
+    expect(res?.ok).toBe(false);
     expect(runner).toHaveBeenCalledTimes(3);
   });
 
@@ -181,7 +184,7 @@ describe("fetchGitHubJson retry", () => {
       .fn()
       .mockResolvedValue({ ok: false, status: 404, stderr: "nf" });
     const res = await fetchGitHubJson(runner, "/x", noSleep);
-    expect(res.status).toBe(404);
+    expect(res?.status).toBe(404);
     expect(runner).toHaveBeenCalledTimes(1);
   });
 
@@ -191,7 +194,7 @@ describe("fetchGitHubJson retry", () => {
       .mockResolvedValueOnce({ ok: false, status: null, stderr: "ECONNRESET" })
       .mockResolvedValueOnce({ ok: true, status: 200, json: {} });
     const res = await fetchGitHubJson(runner, "/x", noSleep);
-    expect(res.ok).toBe(true);
+    expect(res?.ok).toBe(true);
     expect(runner).toHaveBeenCalledTimes(2);
   });
 });
@@ -492,8 +495,8 @@ describe("resolveOidcSubject", () => {
   });
 
   it("reads /repos before the customization endpoint", async () => {
-    const calls = [];
-    const runner = vi.fn(async (p) => {
+    const calls: string[] = [];
+    const runner = vi.fn(async (p: string) => {
       calls.push(p);
       if (p === "/repos/octo-org/octo-repo") return REPO_OK;
       return {
@@ -798,8 +801,8 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [B, A] });
     expect(r.action).toBe("needs-selection");
     expect(r.defaultAppId).toBe("aaa"); // A is older
-    expect(r.candidates.map((c) => c.appId)).toEqual(["bbb", "aaa"]);
-    expect(r.candidates[0]).toHaveProperty("displayName");
+    expect(r.candidates?.map((c) => c.appId)).toEqual(["bbb", "aaa"]);
+    expect(r.candidates?.[0]).toHaveProperty("displayName");
   });
 
   it("needs-selection default prefers the wired existingClientId among owned", () => {

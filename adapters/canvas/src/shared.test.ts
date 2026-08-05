@@ -6,7 +6,7 @@ import {
   deleteCredentialProfile,
   getPreferredGitHubLogin,
   setPreferredGitHubLogin
-} from "./shared.mjs";
+} from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
 
@@ -49,16 +49,16 @@ describe("credential profiles", () => {
       subscriptionId: "s1",
       subscriptionName: "Radius Test"
     });
-    expect(saved.subscriptionName).toBe("Radius Test");
-    expect(saved.tenantName).toBe("Contoso");
+    expect(saved?.subscriptionName).toBe("Radius Test");
+    expect(saved?.tenantName).toBe("Contoso");
     // Older profiles saved without the display names round-trip as empty strings.
     const bare = saveCredentialProfile(REPO, {
       name: "azure-bare",
       provider: "azure",
       subscriptionId: "s2"
     });
-    expect(bare.subscriptionName).toBe("");
-    expect(bare.tenantName).toBe("");
+    expect(bare?.subscriptionName).toBe("");
+    expect(bare?.tenantName).toBe("");
   });
 
   it("upserts by name (case-insensitive) instead of duplicating", () => {
@@ -79,14 +79,14 @@ describe("credential profiles", () => {
 
   it("defaults an unknown provider to azure and keeps aws when given", () => {
     expect(
-      saveCredentialProfile(REPO, { name: "a", provider: "gcp" }).provider
+      saveCredentialProfile(REPO, { name: "a", provider: "gcp" })?.provider
     ).toBe("azure");
     expect(
       saveCredentialProfile(REPO, {
         name: "b",
         provider: "aws",
         accountId: "123"
-      }).provider
+      })?.provider
     ).toBe("aws");
   });
 

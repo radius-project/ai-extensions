@@ -38,14 +38,23 @@ export const WORKFLOW_MANAGED_PARAMS = new Set([
   "registryPassword"
 ]);
 
+export interface BicepParam {
+  name: string;
+  type: string;
+  secure: boolean;
+  hasDefault: boolean;
+  default: string | null;
+  description: string;
+}
+
 // Parse `param` declarations from Bicep source. Returns one entry per parameter:
 //   { name, type, secure, hasDefault, default, description }
 // Decorators (`@secure()`, `@description('…')`) that precede a `param` line are
 // attributed to it; blank lines and comments between a decorator and its param
 // do not break the association.
-export function parseBicepParams(source) {
+export function parseBicepParams(source: unknown): BicepParam[] {
   if (!source || typeof source !== "string") return [];
-  const params = [];
+  const params: BicepParam[] = [];
   let secure = false;
   let description = "";
   for (const raw of source.split(/\r?\n/)) {
@@ -87,7 +96,7 @@ export function parseBicepParams(source) {
 
 // The subset of parsed params the UI/provisioning cares about: everything the
 // workflow does not manage itself.
-export function appParams(source) {
+export function appParams(source: unknown): BicepParam[] {
   return parseBicepParams(source).filter(
     (p) => !WORKFLOW_MANAGED_PARAMS.has(p.name)
   );
@@ -96,7 +105,7 @@ export function appParams(source) {
 // Generate a value for a param that has no Bicep default and was left blank by
 // the user. Typed so `int`/`bool` produce valid literals; everything else gets
 // a URL-safe random secret (suitable for passwords, keys, etc.).
-export function autogenValue(type) {
+export function autogenValue(type: unknown): string {
   const t = String(type || "").toLowerCase();
   if (t === "int") return String(Math.floor(Math.random() * 1e6));
   if (t === "bool") return "false";
@@ -107,12 +116,15 @@ export function autogenValue(type) {
 // `secure` flag from the parsed Bicep params. Secret values are provisioned as
 // a GitHub secret (and appended by the workflow at runtime); non-secret values
 // are inlined into the `rad deploy` command string the extension builds.
-export function partitionParams(params, resolved) {
+export function partitionParams(
+  params: readonly BicepParam[],
+  resolved: Readonly<Record<string, string>>
+): { secret: Record<string, string>; public: Record<string, string> } {
   const secureNames = new Set(
     params.filter((p) => p.secure).map((p) => p.name)
   );
-  const secret = {};
-  const pub = {};
+  const secret: Record<string, string> = {};
+  const pub: Record<string, string> = {};
   for (const [name, value] of Object.entries(resolved)) {
     if (secureNames.has(name)) secret[name] = value;
     else pub[name] = value;
@@ -124,7 +136,11 @@ export function partitionParams(params, resolved) {
 // input. Only NON-secret params are inlined here (word-split-safe for simple
 // values); secret params are appended by the workflow from the secret JSON so
 // their values never land in the dispatch input or the recorded artifact.
-export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
+export function buildDeployRadCommand(
+  appFile: string,
+  environment: string,
+  publicParams: Readonly<Record<string, string>> = {}
+): string {
   const parts = ["deploy", appFile, "--environment", environment];
   for (const [name, value] of Object.entries(publicParams)) {
     parts.push("--parameters", `${name}=${value}`);
@@ -132,7 +148,7 @@ export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
   return parts.join(" ");
 }
 
-export function buildAppGraphRadCommand(appName) {
+export function buildAppGraphRadCommand(appName: unknown): string {
   const safe = String(appName || "").trim();
   if (!safe || /[\s"'\\]/.test(safe)) {
     throw new Error(
@@ -149,8 +165,8 @@ export function buildAppGraphRadCommand(appName) {
 // `name: '...'` in the file, mirroring the deploy workflow's own extraction
 // (`grep -oP "name:\s*'\K[^']+" .radius/app.bicep | head -1`). Returns "" when
 // no name can be found.
-export function extractAppName(source) {
-  if (!source) return "";
+export function extractAppName(source: unknown): string {
+  if (typeof source !== "string" || !source) return "";
   const onResource = source.match(
     /applications@[^'"]*['"]\s*=\s*\{[\s\S]*?\bname:\s*['"]([^'"]+)['"]/
   );
@@ -165,8 +181,11 @@ export function extractAppName(source) {
 //   - blank + param has a Bicep default -> omit (Bicep applies the default)
 //   - blank + param has no default      -> auto-generate a value
 // Returns a plain object { name: value }.
-export function resolveDeployParams(params, userValues = {}) {
-  const out = {};
+export function resolveDeployParams(
+  params: readonly BicepParam[],
+  userValues: Readonly<Record<string, unknown>> = {}
+): Record<string, string> {
+  const out: Record<string, string> = {};
   for (const p of params) {
     if (WORKFLOW_MANAGED_PARAMS.has(p.name)) continue;
     const raw = userValues[p.name];
