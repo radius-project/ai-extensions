@@ -298,10 +298,28 @@ describe("triggerDeployRepairHandoff", () => {
         setDeployRepairHandoff((payload) => { calls.push(payload); });
         const entry = failedEntry();
         triggerDeployRepairHandoff(entry);
-        // A user deploy resets ownership (see /api/deploy); an agent redeploy does not.
+        // A user deploy resets ownership AND the handoff delivery state; an agent
+        // redeploy does not. Mirror exactly what /api/deploy assigns when
+        // agentInitiated !== true, so this stays honest about the reset it models:
+        // resetting deployRepairing alone leaves deployHandoffState "pending"
+        // (delivery resolves in a microtask), which correctly suppresses a re-handoff.
         entry.state.deployRepairing = false;
+        entry.state.deployHandoffState = "idle";
+        entry.state.deployHandoffAttempts = 0;
         expect(triggerDeployRepairHandoff(entry)).toBe(true);
         expect(calls).toHaveLength(2);
+    });
+
+    it("suppresses a re-handoff while delivery is still in flight", () => {
+        // Ownership alone is not enough: an undelivered ("pending") handoff must not
+        // be re-sent, otherwise a slow send would double-drive the repair loop.
+        const calls = [];
+        setDeployRepairHandoff(() => new Promise(() => {}));
+        const entry = failedEntry();
+        expect(triggerDeployRepairHandoff(entry)).toBe(true);
+        entry.state.deployRepairing = false;
+        expect(triggerDeployRepairHandoff(entry)).toBe(false);
+        expect(entry.state.deployHandoffState).toBe("pending");
     });
 
     it("does not hand off a branch-not-pushed failure, which a model fix cannot solve", () => {

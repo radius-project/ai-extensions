@@ -45,6 +45,7 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath,
 } from "./workspace.mjs";
+import { DEFAULT_CANVAS_PAGE } from "./hooks.mjs";
 import { radArtifactsDirForSelection, radArtifactsFingerprint } from "./remote-rad-artifacts.mjs";
 import { prepareSourceRefResources, setSourceRefResources } from "./source-refs.mjs";
 import {
@@ -4306,7 +4307,7 @@ function createRequestHandler(instanceId) {
         await ensureVendorScripts();
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         const entry = servers.get(instanceId);
-        let page = requestedPage || entry?.page || "environment";
+        let page = requestedPage || entry?.page || DEFAULT_CANVAS_PAGE;
         const state = entry?.state || {};
         // While a deployment is actively in progress, an IMPLICIT landing on the
         // environment / credentials page (a bare "/" load with no ?page=, e.g. a
@@ -4380,7 +4381,7 @@ function listenOn(server, port) {
     });
 }
 
-async function startServer(instanceId, page = "environment") {
+async function startServer(instanceId, page = DEFAULT_CANVAS_PAGE) {
     const handler = createRequestHandler(instanceId);
     // Restore the user's explicitly chosen GitHub account (if any) before priming
     // so the very first strategy resolution honors it. This is what makes the

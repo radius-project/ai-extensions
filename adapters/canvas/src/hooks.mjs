@@ -16,6 +16,11 @@
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
 
+// Page the canvas lands on when a caller opens it without naming one. Owned here
+// (next to GRAPH_PAGES) so the page vocabulary lives in one pure module and the
+// hook below cannot drift from what the canvas actually renders.
+export const DEFAULT_CANVAS_PAGE = "graph";
+
 import { fenceDeployDiagnostic, DEPLOY_DIAGNOSTIC_NOTE } from "./deploy-diagnostics.mjs";
 
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
@@ -83,8 +88,11 @@ export function graphTriggerTargets(toolName, toolArgs) {
     if (toolName === "open_canvas") {
         if (args.canvasId !== "radius") return null;
         const input = args.input && typeof args.input === "object" ? args.input : {};
-        if (!GRAPH_PAGES.has(input.page)) return null;
-        if (input.page === "graph-diff") {
+        // A page-less open lands on the canvas's default page, so resolve it the
+        // same way the canvas does before deciding whether this is a graph trigger.
+        const page = input.page || DEFAULT_CANVAS_PAGE;
+        if (!GRAPH_PAGES.has(page)) return null;
+        if (page === "graph-diff") {
             const branches = [input.baseBranch, input.headBranch].filter(Boolean);
             return { repo: input.repo || "", branches: branches.length ? branches : [undefined] };
         }
