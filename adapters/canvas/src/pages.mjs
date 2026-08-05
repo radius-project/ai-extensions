@@ -1777,6 +1777,13 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <span id="env-warning-banner-text" class="env-warning-banner__text"></span>
     <button type="button" id="env-warning-banner-close" class="env-warning-banner__close" aria-label="Dismiss">×</button>
   </div>
+  <!-- "Ready, action required": setup completed, but the workflows landed on a
+       branch, so credential verification cannot run until the PR merges. -->
+  <div id="env-action-banner" role="status" style="display:none;">
+    <span class="env-action-banner__icon" aria-hidden="true">→</span>
+    <span id="env-action-banner-text" class="env-action-banner__text"></span>
+    <button type="button" id="env-action-banner-close" class="env-action-banner__close" aria-label="Dismiss">×</button>
+  </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
     <table class="rad-table">
@@ -2128,6 +2135,15 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-warning-banner__text strong { font-weight:600; }
 .env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-warning-banner__close:hover { color:var(--rad-text); }
+/* "Ready, action required" banner — the pull-request terminal state. Reads as
+   informational rather than as a failure, because nothing went wrong. */
+#env-action-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-action-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-primary); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-action-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.5; }
+.env-action-banner__text strong { font-weight:600; }
+.env-action-banner__text a { color:var(--rad-primary); }
+.env-action-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-action-banner__close:hover { color:var(--rad-text); }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -2396,6 +2412,31 @@ function showEnvSetupWarnings(steps) {
 var envWarningClose = document.getElementById('env-warning-banner-close');
 if (envWarningClose) envWarningClose.addEventListener('click', function() {
     document.getElementById('env-warning-banner').style.display = 'none';
+});
+
+// The pull-request terminal state. When Radius lacks push access to the default
+// branch it commits the workflows to a branch and opens a PR instead. Nothing
+// failed, and nothing is still running; setup is waiting on the user.
+function showEnvActionRequired(provider, name, pullRequestUrl) {
+    var banner = document.getElementById('env-action-banner');
+    var text = document.getElementById('env-action-banner-text');
+    if (!banner || !text) return;
+    var html = '<strong>' + escapeHtmlClient(providerLabel(provider)) + '</strong> Environment <strong>' +
+        escapeHtmlClient(name) + '</strong> is set up, but one step is left for you. ' +
+        'Radius could not push the deploy workflows to the default branch, so it opened a pull request. ' +
+        'Credential verification and deploys start working once it merges.';
+    // Only render a link for a URL we recognise; anything else is shown as text
+    // so a malformed value can never become an anchor target.
+    if (typeof pullRequestUrl === 'string' && pullRequestUrl.indexOf('https://github.com/') === 0) {
+        html += ' <a href="' + escapeHtmlClient(pullRequestUrl) + '" target="_blank" rel="noopener noreferrer">Review the pull request →</a>';
+    }
+    text.innerHTML = html;
+    banner.style.display = 'flex';
+    banner.scrollIntoView({ block: 'nearest' });
+}
+var envActionClose = document.getElementById('env-action-banner-close');
+if (envActionClose) envActionClose.addEventListener('click', function() {
+    document.getElementById('env-action-banner').style.display = 'none';
 });
 
 function findProfile(name) {
@@ -3232,6 +3273,18 @@ deployBtn.addEventListener('click', function() {
             .then(function(r) { return r.json(); })
             .then(function(envResult) {
                 if (envResult.error) { failEnv('Environment setup failed: ' + envResult.error); return; }
+                if (envResult.pullRequestUrl) {
+                    creatingModal.style.display = 'none';
+                    var verifyModal = document.getElementById('env-verify-modal');
+                    if (verifyModal) verifyModal.style.display = 'none';
+                    btn.textContent = 'Create Environment'; btn.disabled = false;
+                    statusEl.style.display = 'none';
+                    showEnvLanding();
+                    showEnvSetupWarnings(setupSteps.concat(envResult.steps || []));
+                    showEnvActionRequired(provider, env, envResult.pullRequestUrl);
+                    loadEnvTable();
+                    return;
+                }
                 creatingTitle.innerHTML = 'Verifying credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
                 btn.textContent = 'Verifying credentials…';
                 var pollStart = Date.now();
