@@ -148,7 +148,7 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 
 - `plugins/radius/extension.mjs` — React Flow rendering + styling (`radiusRenderGraph`)
 - `plugins/radius/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
-- `adapters/shared/src/rad.mjs` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
+- `adapters/shared/src/rad.ts` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/shared`.
 - `radius-core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
 - `radius-core/src/modeling/repo.ts` — fetches the skill-generated `app.bicep` from the repo (`fetchBicepFromRepo`); source-code reference discovery is now handled by this skill's AI agent (see [source-code-references.md](references/source-code-references.md))
 - `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source
