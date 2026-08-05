@@ -760,9 +760,11 @@ export function pickAksResourceGroup(clusterResourceGroup, resourceGroup) {
 
 export async function planCredentialVerification({
   targetRepo,
+  envName,
   prState,
   pullRequestUrl = "",
-  workflowPath = ".github/workflows/radius-verify-credentials.yml",
+  verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
+  dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
   fetchFile = fetchFileFromRepo,
   resolveDefaultBranch = getDefaultBranch
 }) {
@@ -777,13 +779,91 @@ export async function planCredentialVerification({
 
   const defaultBranch =
     (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
-  const workflow = await fetchFile(targetRepo, workflowPath, defaultBranch);
+  const [verifyWorkflow, dispatcherWorkflow] = await Promise.all([
+    fetchFile(targetRepo, verifyWorkflowPath, defaultBranch),
+    fetchFile(targetRepo, dispatcherWorkflowPath, defaultBranch)
+  ]);
+  const verifyWorkflowExists =
+    verifyWorkflow !== null && verifyWorkflow !== undefined;
+  const dispatcherEnvironment =
+    workflowDispatchEnvironmentDefault(dispatcherWorkflow);
+  const dispatcherMatches = dispatcherEnvironment === envName;
+  let skipReason = "";
+  if (!verifyWorkflowExists) {
+    skipReason = "the verify workflow is not yet on the default branch";
+  } else if (dispatcherWorkflow === null || dispatcherWorkflow === undefined) {
+    skipReason = "the deploy workflow is not yet on the default branch";
+  } else if (!dispatcherMatches) {
+    skipReason =
+      'the deploy workflow on the default branch targets environment "' +
+      (dispatcherEnvironment || "unknown") +
+      '" instead of "' +
+      envName +
+      '"';
+  }
   return {
-    shouldDispatch: workflow !== null && workflow !== undefined,
+    shouldDispatch: verifyWorkflowExists && dispatcherMatches,
     ref: prState.branch,
     defaultBranch,
-    pullRequestUrl
+    pullRequestUrl,
+    skipReason
   };
+}
+
+export function workflowDispatchEnvironmentDefault(workflow) {
+  if (typeof workflow !== "string") return "";
+  const lines = workflow.split(/\r?\n/);
+
+  function indentedBlock(start, parentIndent) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const indent = line.match(/^\s*/)[0].length;
+      if (indent <= parentIndent) {
+        end = i;
+        break;
+      }
+    }
+    return end;
+  }
+
+  const dispatch = lines.findIndex((line) =>
+    /^\s*workflow_dispatch:\s*$/.test(line)
+  );
+  if (dispatch < 0) return "";
+  const dispatchIndent = lines[dispatch].match(/^\s*/)[0].length;
+  const dispatchEnd = indentedBlock(dispatch, dispatchIndent);
+  const inputs = lines.findIndex(
+    (line, i) =>
+      i > dispatch &&
+      i < dispatchEnd &&
+      /^\s*inputs:\s*$/.test(line) &&
+      line.match(/^\s*/)[0].length > dispatchIndent
+  );
+  if (inputs < 0) return "";
+  const inputsIndent = lines[inputs].match(/^\s*/)[0].length;
+  const inputsEnd = Math.min(indentedBlock(inputs, inputsIndent), dispatchEnd);
+  const environment = lines.findIndex(
+    (line, i) =>
+      i > inputs &&
+      i < inputsEnd &&
+      /^\s*environment:\s*$/.test(line) &&
+      line.match(/^\s*/)[0].length > inputsIndent
+  );
+  if (environment < 0) return "";
+  const environmentIndent = lines[environment].match(/^\s*/)[0].length;
+  const environmentEnd = Math.min(
+    indentedBlock(environment, environmentIndent),
+    inputsEnd
+  );
+  for (let i = environment + 1; i < environmentEnd; i++) {
+    const match = lines[i].match(
+      /^\s*default:\s*(?:'([^']*)'|"([^"]*)"|([^\s#]+))\s*(?:#.*)?$/
+    );
+    if (match) return match[1] ?? match[2] ?? match[3] ?? "";
+  }
+  return "";
 }
 
 export function buildVerifyWorkflowDispatchArgs({
@@ -3795,9 +3875,10 @@ function createRequestHandler(instanceId) {
         const dispatchedAt = Date.now();
         const verificationPlan = await planCredentialVerification({
           targetRepo,
+          envName,
           prState,
           pullRequestUrl,
-          workflowPath: verifyPath
+          verifyWorkflowPath: verifyPath
         });
         if (!verificationPlan.shouldDispatch) {
           if (pullRequestUrl) {
@@ -3808,7 +3889,9 @@ function createRequestHandler(instanceId) {
             );
           }
           steps.push(
-            "Skipping credential verification until the pull request is merged."
+            "⏭️ Skipping credential verification until the pull request is merged: " +
+              verificationPlan.skipReason +
+              "."
           );
         } else {
           if (pullRequestUrl) {
@@ -3826,6 +3909,9 @@ function createRequestHandler(instanceId) {
           let dispatchResult = { code: 1, stdout: "", stderr: "" };
           for (const delay of dispatchDelays) {
             if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+            // --ref selects the verify run's branch, but a workflow_run
+            // dispatcher always comes from the default branch. The plan above
+            // therefore verifies that dispatcher targets this environment.
             dispatchResult = await runGhWorkflow(
               buildVerifyWorkflowDispatchArgs({
                 targetRepo,
