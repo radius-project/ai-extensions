@@ -154,6 +154,8 @@ export interface CanvasState {
   deployingResources?: CanvasGraphResource[] | null;
   deployParams?: CanvasDeployParams;
   deployAttempt?: CanvasDeployAttempt;
+  deployStartedAt?: number;
+  deployFinishedAt?: number;
   deployLogs?: string[];
   deployLogBase?: number;
   deployStatus?: string;
