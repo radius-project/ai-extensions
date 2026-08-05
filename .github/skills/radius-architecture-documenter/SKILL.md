@@ -64,7 +64,7 @@ This is the most critical step. **Do not generate diagrams from memory or assump
 - **Find port implementations**: A port is defined in `radius-core` and implemented in an adapter (`adapters/canvas`, `adapters/shared`). Search for the port name across `adapters/` to find its concrete implementation.
 - **Follow canvas registration**: Start at `adapters/canvas/src/extension.mjs` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages.mjs`), the server (`server.mjs`), and actions are wired.
 - **Understand packaging**: `adapters/canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into a single `plugins/radius/extension.mjs`. Note what is source vs. generated when documenting the build.
-- **Read test files**: `*_test.mjs` files (for example, `ghcr_test.mjs`, `rad_test.mjs`) reveal expected behavior and interaction patterns.
+- **Read test files**: `*_test.mjs` and `*.test.ts` files (for example, `ghcr_test.mjs`, `rad.test.ts`) reveal expected behavior and interaction patterns.
 
 ### Step 3: Generate the Diagram
 

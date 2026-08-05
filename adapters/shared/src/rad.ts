@@ -64,6 +64,9 @@ export interface SpawnRadOptions {
   env?: NodeJS.ProcessEnv;
   timeout?: number;
   label?: string;
+}
+
+interface SpawnManagedRadOptions extends SpawnRadOptions {
   log?: Logger;
 }
 
@@ -854,13 +857,7 @@ export function ensureRadBinary({
 export function spawnRad(
   radPath: string,
   args: string[],
-  {
-    cwd,
-    env = {},
-    timeout = 120000,
-    label = "rad",
-    log: _log = noop
-  }: SpawnRadOptions = {}
+  { cwd, env = {}, timeout = 120000, label = "rad" }: SpawnRadOptions = {}
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(radPath, args, {
@@ -1006,8 +1003,7 @@ export function ensureManagedBicep(
         cwd: path.dirname(bicepPath),
         env: managedBicepEnv({}, tmp),
         timeout,
-        label: "rad bicep download",
-        log
+        label: "rad bicep download"
       });
       if (!IS_WIN && isExecutableFile(tmp)) {
         try {
@@ -1065,15 +1061,14 @@ async function spawnManagedRad(
     timeout = 120000,
     label = "rad",
     log = noop
-  }: SpawnRadOptions = {}
+  }: SpawnManagedRadOptions = {}
 ): Promise<ProcessResult> {
   const radPath = await ensureRadBinary({ log });
   return await spawnRad(radPath, args, {
     cwd,
     env: managedBicepEnv(env),
     timeout,
-    label,
-    log
+    label
   });
 }
 
