@@ -51,22 +51,17 @@ export function validateAzureCredentials(data) {
           // Not logged in — trigger login (with tenant if provided)
           const loginArgs = ["login", "--output", "json"];
           if (tenantId) loginArgs.splice(1, 0, "--tenant", tenantId);
-          cliExec(
-            "az",
-            loginArgs,
-            { timeout: 120000 },
-            (loginErr, loginOut) => {
-              if (loginErr) {
-                resolve({
-                  success: false,
-                  error:
-                    "Azure login failed. Please ensure Azure CLI is installed and try again."
-                });
-                return;
-              }
-              finishAuth(subscriptionId, tenantId, resolve);
+          cliExec("az", loginArgs, { timeout: 120000 }, (loginErr) => {
+            if (loginErr) {
+              resolve({
+                success: false,
+                error:
+                  "Azure login failed. Please ensure Azure CLI is installed and try again."
+              });
+              return;
             }
-          );
+            finishAuth(subscriptionId, tenantId, resolve);
+          });
           return;
         }
         // Already logged in

@@ -424,7 +424,6 @@ export function oidcPage(state) {
   const azureResult = state?.oidcAzure;
   const awsResult = state?.oidcAws;
   const savedAzure = sharedCredentials.azure || {};
-  const savedAws = sharedCredentials.aws || {};
 
   const azureResultHtml =
     azureResult ?
@@ -1067,7 +1066,6 @@ export function plannedGraphPage(state) {
   const provider = state?.plannedProvider || state?.deployProvider || "azure";
   const plannedResources = state?.plannedResources || [];
   const graphBranch = state?.plannedBranch || state?.contextBranch || "main";
-  const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
   // Same provenance rule as graphPage: open local files in the editor canvas
   // when the planned graph was resolved against the local workspace checkout.
   // Prefer the authoritative persisted flag; fall back to repo+branch matching.
@@ -1709,18 +1707,7 @@ ${graphHeaderClose()}`
 }
 
 export function environmentPage(state) {
-  const oidcAzure = state?.oidcAzure || sharedCredentials.azure;
-  const oidcAws = state?.oidcAws || sharedCredentials.aws;
-  const hasAzure = !!oidcAzure;
-  const hasAws = !!oidcAws;
-  const provider =
-    state?.deployProvider ||
-    (hasAzure ? "azure"
-    : hasAws ? "aws"
-    : "azure");
   const envName = state?.envName || "dev";
-  const appFile = state?.appFile || "app.bicep";
-  const existingEnvs = state?.existingEnvs || ["dev", "staging", "production"];
   // Default to the active session branch. A worktree session's branch may
   // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
   // GitHub yet), but we no longer fall back to 'main' for that case: the deploy
@@ -4260,139 +4247,5 @@ loadBranches();
 loadDeployments();
 <\/script>`,
     "deployments"
-  );
-}
-
-function deployProgressView(state) {
-  const resources = state?.deployingResources || state?.plannedResources || [];
-  const targetRepo =
-    state?.deployingRepo ||
-    state?.deployParams?.targetRepo ||
-    state?.plannedRepo ||
-    state?.contextRepo ||
-    "";
-  const targetBranch =
-    state?.deployingBranch ||
-    state?.deployParams?.branch ||
-    state?.plannedBranch ||
-    state?.contextBranch ||
-    "main";
-  const provider =
-    state?.deployingProvider ||
-    state?.deployParams?.provider ||
-    state?.plannedProvider ||
-    "azure";
-  const logs = state?.deployLogs || [];
-  const deployStatus = state?.deployStatus || "pending";
-  const deployError = state?.deployError || "";
-  const resourcesJson = JSON.stringify(resources);
-  const logsJson = JSON.stringify(logs);
-
-  return pageShell(
-    "Deploying",
-    `
-<h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Deployment Progress</h1>
-<p style="margin-bottom:12px; color:var(--rad-text-tertiary);">
-  Deploying <strong>${escapeHtml(targetRepo)}</strong> (branch: <code>${escapeHtml(targetBranch)}</code>) to ${provider === "aws" ? "AWS" : "Azure"}
-</p>
-<div id="deploy-error" style="display:${deployStatus === "failed" && deployError ? "block" : "none"}; margin-bottom:12px; padding:12px 14px; background:var(--rad-danger-bg); border:1px solid var(--rad-danger); border-radius:6px;">
-  <div style="font-size:13px; font-weight:600; color:var(--rad-danger); margin-bottom:6px;">❌ Deployment failed</div>
-  <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--rad-mono); font-size:12px; color:var(--rad-text); max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
-</div>
-<h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Application Graph</h2>
-<div id="graph-container" style="height:400px; border:1px solid var(--rad-stroke); border-radius:6px; margin-bottom:16px;"></div>
-<div id="deploy-log-section">
-  <h2 style="font-size:14px; font-weight:600; margin-bottom:8px;">Deployment Logs</h2>
-  <div id="deploy-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:250px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
-</div>
-
-<script>
-var resources = ${resourcesJson};
-var DEPLOY_REPO = ${JSON.stringify(targetRepo)};
-var DEPLOY_BRANCH = ${JSON.stringify(targetBranch)};
-var DEPLOY_PROVIDER = ${JSON.stringify(provider)};
-
-if (resources.length === 0) {
-    var emptyMsg = document.getElementById('graph-container');
-    function showPlanningSpinner(msg) {
-        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite;"></div><p style="font-size:14px;">' + msg + '</p></div>';
-    }
-    showPlanningSpinner('Loading deployment resources...');
-    fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
-        if (d.resources && d.resources.length > 0) {
-            window.location.reload();
-            return;
-        }
-        // No planned graph yet — generate it on the fly from the target repo.
-        if (DEPLOY_REPO) {
-            showPlanningSpinner('Generating planned application graph for ' + DEPLOY_REPO + '...');
-            fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: DEPLOY_REPO, branch: DEPLOY_BRANCH, provider: DEPLOY_PROVIDER }) })
-                .then(function(r) { return r.json(); })
-                .then(function(p) {
-                    if (p && p.reload) { window.location.reload(); }
-                    else {
-                        emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p><p style="font-size:12px;">' + ((p && p.error) ? p.error : 'Unknown error') + '</p></div>';
-                    }
-                })
-                .catch(function() {
-                    emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">Could not generate the planned graph.</p></div>';
-                });
-        } else {
-            emptyMsg.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--rad-text-tertiary);flex-direction:column;gap:8px;"><p style="font-size:14px;">No resources to display.</p><p style="font-size:12px;">Navigate to the <strong>Planned Graph</strong> page first to plan your application, then deploy from the <strong>Environment</strong> page.</p></div>';
-        }
-    });
-}
-
-// Render the planned graph via the shared React Flow renderer. deployMode folds
-// the deploy-status -> node color mapping into the renderer, and the returned
-// controller's update() re-colors nodes as the deployment progresses.
-var graph = resources.length ? radiusRenderGraph('graph-container', resources, { enablePopup: true, deployMode: true }) : null;
-
-// Log output
-var logOutput = document.getElementById('deploy-log-output');
-var logs = ${logsJson};
-// Absolute count of log lines already rendered (base offset + embedded lines),
-// so polls can request only new lines via ?since= and never re-pull the whole buffer.
-var LOG_TOTAL = ${state?.deployLogBase || 0} + logs.length;
-for (var l = 0; l < logs.length; l++) {
-    logOutput.textContent += logs[l] + '\\n';
-}
-logOutput.scrollTop = logOutput.scrollHeight;
-
-// Poll for deployment status updates
-var deployPoll = setInterval(function() {
-    fetch('/api/deploy-status?since=' + LOG_TOTAL).then(function(r) { return r.json(); }).then(function(d) {
-        // Push fresh deploy-status onto the graph; the renderer re-colors nodes
-        // (top-level and output) from each resource's deployStatus.
-        if (d.resources && graph) {
-            graph.update(d.resources);
-        }
-        // Append new logs (incremental — server sends only lines past LOG_TOTAL)
-        if (d.logsNew && d.logsNew.length) {
-            for (var l = 0; l < d.logsNew.length; l++) {
-                logOutput.textContent += d.logsNew[l] + '\\n';
-            }
-            logOutput.scrollTop = logOutput.scrollHeight;
-        }
-        if (typeof d.logTotal === 'number') { LOG_TOTAL = d.logTotal; }
-        // Stop polling when deployment is complete
-        if (d.status === 'complete' || d.status === 'failed') {
-            clearInterval(deployPoll);
-        }
-        // Surface deployment error banner on failure
-        if (d.status === 'failed' && d.error) {
-            var errBox = document.getElementById('deploy-error');
-            var errText = document.getElementById('deploy-error-text');
-            if (errBox && errText) {
-                errText.textContent = d.error;
-                errBox.style.display = 'block';
-            }
-        }
-    }).catch(function() {});
-}, 1500);
-
-// Do NOT auto-start a new deploy — the workflow was already triggered from the environment page.
-// Just poll for status updates on the existing run.
-<\/script>`
   );
 }

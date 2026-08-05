@@ -1,6 +1,7 @@
 {
   "name": "radius",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "main": "extension.mjs",
   "description": "Radius canvas extension: application modeling, graph visualization, and deployment for GitHub Copilot.",

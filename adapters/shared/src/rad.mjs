@@ -413,7 +413,7 @@ export function normalizeSha256(value) {
 // When neither is available the download proceeds without verification — many
 // upstream releases omit per-asset digests — and a warning is surfaced so
 // operators know they can pin RADIUS_RAD_SHA256 for stricter integrity checks.
-export function expectedDigest(assets, assetName, tag) {
+export function expectedDigest(assets, assetName, _tag) {
   const pinned = normalizeSha256(process.env.RADIUS_RAD_SHA256);
   if (pinned) return { hex: pinned, source: "RADIUS_RAD_SHA256" };
 
@@ -626,7 +626,7 @@ export function ensureRadBinary({ log = noop } = {}) {
 export function spawnRad(
   radPath,
   args,
-  { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}
+  { cwd, env = {}, timeout = 120000, label = "rad" } = {}
 ) {
   return new Promise((resolve, reject) => {
     const child = spawn(radPath, args, {

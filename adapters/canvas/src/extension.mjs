@@ -7,7 +7,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
@@ -807,7 +807,7 @@ const session = await joinSession({
           }
         }
       },
-      handler: async (args) => {
+      handler: async () => {
         return "Open the radius canvas with page 'environment' to configure OIDC and deploy. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
       }
     },
@@ -1025,7 +1025,7 @@ const session = await joinSession({
           }
         }
       },
-      handler: async (args) => {
+      handler: async () => {
         return "Open the radius canvas with page 'environment' to create a GitHub environment. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
       }
     },

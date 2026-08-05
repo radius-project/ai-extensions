@@ -25,7 +25,6 @@ import {
 import { buildGraphViaRad } from "@radius-project/shared";
 import { ensureVendorScripts } from "./vendor.mjs";
 import {
-  escapeHtml,
   sharedCredentials,
   saveCredentials,
   listCredentialProfiles,
@@ -287,10 +286,6 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
       console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`)
     );
 }
-
-// Bare filename of the shared verify-credentials workflow (matches
-// infra.mjs's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
-const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
@@ -1041,10 +1036,6 @@ async function fetchBicepSelection(entry, repo, branch) {
     branch: access.branch,
     bicepPath: ""
   };
-}
-
-async function fetchBicepForSelection(entry, repo, branch) {
-  return (await fetchBicepSelection(entry, repo, branch)).content;
 }
 
 async function fetchFileForSelection(entry, repo, branch, repoPath) {
@@ -4718,7 +4709,6 @@ function createRequestHandler(instanceId) {
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
-      const envName = url.searchParams.get("environment") || "";
       const respond = (payload) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");

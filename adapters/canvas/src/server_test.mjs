@@ -443,7 +443,6 @@ describe("triggerDeployRepairHandoff", () => {
   it("suppresses a re-handoff while delivery is still in flight", () => {
     // Ownership alone is not enough: an undelivered ("pending") handoff must not
     // be re-sent, otherwise a slow send would double-drive the repair loop.
-    const calls = [];
     setDeployRepairHandoff(() => new Promise(() => {}));
     const entry = failedEntry();
     expect(triggerDeployRepairHandoff(entry)).toBe(true);

@@ -2,7 +2,11 @@ import eslint from "@eslint/js";
 import babelParser from "@babel/eslint-parser";
 import globals from "globals";
 
-const sourceFiles = ["radius-core/**/*.ts", "adapters/**/*.{ts,mjs}"];
+const sourceFiles = [
+  "eslint.config.js",
+  "radius-core/**/*.ts",
+  "adapters/**/*.{ts,mjs}"
+];
 const restrictedCoreImports = [
   {
     selector:
@@ -68,8 +72,7 @@ export default [
   {
     files: ["adapters/**/*.mjs"],
     rules: {
-      "no-inner-declarations": "off",
-      "no-unused-vars": "off"
+      "no-inner-declarations": "off"
     }
   },
   {
@@ -92,7 +95,12 @@ export default [
           ],
           patterns: [
             {
-              group: ["adapters", "adapters/**", "**/adapters", "**/adapters/**"],
+              group: [
+                "adapters",
+                "adapters/**",
+                "**/adapters",
+                "**/adapters/**"
+              ],
               message: "Core must not depend on adapter implementations."
             },
             {
@@ -141,12 +149,14 @@ export default [
         {
           selector:
             "MemberExpression[object.name=/^(?:global|globalThis)$/][property.name=/^(?:fetch|XMLHttpRequest|document|window)$/]",
-          message: "Core must not access HTTP or DOM implementations through the global object."
+          message:
+            "Core must not access HTTP or DOM implementations through the global object."
         },
         {
           selector:
             "MemberExpression[object.name=/^(?:global|globalThis)$/][computed=true][property.value=/^(?:fetch|XMLHttpRequest|document|window)$/]",
-          message: "Core must not access HTTP or DOM implementations through the global object."
+          message:
+            "Core must not access HTTP or DOM implementations through the global object."
         }
       ]
     }
