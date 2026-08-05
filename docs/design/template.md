@@ -142,15 +142,15 @@ High-level description of updates to each affected component in this repository.
 Delete the subsections that do not apply.
 -->
 
-#### radius-core (if applicable)
+#### Core package — packages/core (if applicable)
 
 <!-- UI-agnostic product logic: modeling, graph, platforms, ports, workflows. -->
 
-#### Canvas adapter — adapters/canvas (if applicable)
+#### Canvas adapter — packages/adapter-canvas (if applicable)
 
 <!-- SDK wiring, canvas/tools, loopback HTTP host, pages/server, build pipeline. -->
 
-#### Shared adapter — adapters/shared (if applicable)
+#### Shared adapter — packages/adapter-shared (if applicable)
 
 #### Plugin — plugins/radius (if applicable)
 

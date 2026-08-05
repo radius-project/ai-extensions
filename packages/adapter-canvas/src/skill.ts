@@ -6,7 +6,7 @@
 // tools like `radius_generate_app` have to fall back to a hand-maintained
 // summary that inevitably drifts from the real schema rules.
 //
-// To keep a single source of truth, the build (adapters/canvas/build.mjs) loads
+// To keep a single source of truth, the build (packages/adapter-canvas/build.mjs) loads
 // these Markdown files as text and inlines them here, so the extension always
 // ships the exact skill content it points the agent at — no separate skills
 // install required.

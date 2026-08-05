@@ -1,7 +1,7 @@
 // Extension: radius — SDK entry (joinSession wiring).
 //
 // The thin Copilot-canvas adapter entry point: it registers the canvas + tools
-// with the SDK and delegates every meaningful operation to a radius-core
+// with the SDK and delegates every meaningful operation to @radius-project/core
 // use-case or a sibling adapter module (server/pages/deploy/infra/gh). It owns
 // no product logic — only the SDK surface and process-lifecycle hardening.
 

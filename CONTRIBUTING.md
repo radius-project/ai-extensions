@@ -33,22 +33,22 @@ fixes, features) as long as they follow a few guidelines:
 This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 `@radius-project` scope.
 
-| Path               | npm name                 | Responsibility                                                                     |
-| ------------------ | ------------------------ | ---------------------------------------------------------------------------------- |
-| `radius-core/`     | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.       |
-| `adapters/shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).            |
-| `adapters/canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview.    |
+| Path                       | npm name                 | Responsibility                                                                  |
+|----------------------------|--------------------------|---------------------------------------------------------------------------------|
+| `packages/core/`           | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
+| `packages/adapter-shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
+| `packages/adapter-canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
 
 ### The dependency rule
 
-`radius-core` never imports from an adapter, the Copilot SDK, `node:http`, or the
+`packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
 DOM. Anything that touches the outside world goes through a **port**
-(`radius-core/src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`,
+(`packages/core/src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`,
 `Logger`. Adapters depend on the core, supply port implementations, and own all
 UI/transport concerns. This keeps the product logic testable in isolation and
 makes adding a second UI a thin layer rather than a fork.
 
-See [`radius-core/README.md`](./radius-core/README.md) for the architecture and
+See [`packages/core/README.md`](./packages/core/README.md) for the architecture and
 step-by-step guides for the three most common changes: **adding a compute
 platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
@@ -82,23 +82,23 @@ pnpm typecheck       # typecheck core + shared + canvas
 
 ## Testing
 
-Tests live in `radius-core` and run with [Vitest](https://vitest.dev/).
+Tests live in `packages/core` and run with [Vitest](https://vitest.dev/).
 
 ```bash
-pnpm -C radius-core test           # run all core tests once
-pnpm -C radius-core test:watch     # run tests in watch mode
+pnpm -C packages/core test           # run all core tests once
+pnpm -C packages/core test:watch     # run tests in watch mode
 ```
 
 Run a single test file:
 
 ```bash
-pnpm -C radius-core test -- src/graph/diff_test.ts
+pnpm -C packages/core test -- src/graph/diff_test.ts
 ```
 
 ## Before you open a pull request
 
 1. `pnpm typecheck` passes.
-2. `pnpm -C radius-core test` passes (add or update tests for behavior changes).
+2. `pnpm -C packages/core test` passes (add or update tests for behavior changes).
 3. `pnpm build` succeeds.
 4. Add a changeset describing your change (see below).
 5. Fill out the [pull request template](./.github/pull_request_template.md).

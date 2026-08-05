@@ -7,7 +7,7 @@
 // owns every impure, Node-only step that the pure `@radius-project/core`
 // package must not depend on: locating or downloading the static `rad` binary,
 // spawning it, and reading its output. The pure conversion into the canvas
-// resource shape lives in `applicationGraphToResources` (radius-core).
+// resource shape lives in `applicationGraphToResources` (@radius-project/core).
 //
 // It is adapter-agnostic: it takes an injected `log` and has no knowledge of
 // any specific adapter (canvas, GitHub, etc). Adapters import it from
@@ -1190,7 +1190,7 @@ export async function resolveRadForGraph({
  * failure to save is logged but never fails the graph build.
  *
  * The returned value is the raw, untyped app-graph.json payload: this module
- * only shuttles it to `applicationGraphToResources` (radius-core), which owns
+ * only shuttles it to `applicationGraphToResources` (@radius-project/core), which owns
  * its shape.
  */
 export async function runRadAppGraph(

@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "coverage": "vitest run --coverage --coverage.provider=v8"
+    "coverage": "vitest run --coverage --coverage.provider=v8",
+    "lint": "eslint \"src/**/*.ts\""
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.10",

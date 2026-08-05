@@ -1,10 +1,10 @@
 // Canvas adapter — HTTP server host for the webview.
 //
 // Owns the local loopback server that backs each canvas instance: the ~21-route
-// request handler (parse request -> call a radius-core use-case or adapter
+// request handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
-// glue; everything substantive is delegated to radius-core or the sibling
+// glue; everything substantive is delegated to @radius-project/core or the sibling
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
