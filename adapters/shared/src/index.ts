@@ -17,4 +17,20 @@ export {
   runRadBicepPublishExtension,
   runRadBicepPublish,
   buildGraphViaRad
-} from "./rad.mjs";
+} from "./rad.js";
+export type {
+  Logger,
+  ProcessResult,
+  SpawnRadOptions,
+  SpawnRadRunner,
+  EnsureManagedBicepOptions,
+  RadReleaseAsset,
+  RadReleaseInfo,
+  ExpectedDigest,
+  BicepCompileConfig,
+  RunRadAppGraphOptions,
+  BuildGraphViaRadOptions,
+  RunRadBicepPublishExtensionOptions,
+  RunRadBicepPublishOptions
+} from "./rad.js";
+export { RadProcessError } from "./rad.js";

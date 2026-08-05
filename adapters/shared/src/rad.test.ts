@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { EventEmitter } from "node:events";
 import https from "node:https";
+import { IncomingMessage } from "node:http";
+import { Socket } from "node:net";
 import {
   RADIUS_BICEP_CONFIG,
   RADIUS_BICEP_CONFIG_JSON,
@@ -28,11 +29,61 @@ import {
   releaseAsset,
   ensureRadBinary,
   ensureManagedBicep,
-  managedBicepEnv
-} from "./rad.mjs";
+  managedBicepEnv,
+  type SpawnRadOptions,
+  type BicepCompileConfig
+} from "./rad.js";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
 const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
+
+interface FakeHttpResponse {
+  statusCode?: number;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+/** Narrows `options.env.BICEP` to a string, asserting the invariant that
+ * `ensureManagedBicep` always calls `run` with a computed BICEP path rather
+ * than silently trusting an unchecked cast. */
+function requireBicepEnvPath(options: SpawnRadOptions): string {
+  const value = options.env?.BICEP;
+  if (typeof value !== "string") {
+    throw new Error("expected options.env.BICEP to be set to a string path");
+  }
+  return value;
+}
+
+function mockHttpsGet(
+  responses: Record<string, FakeHttpResponse>,
+  calls: string[]
+) {
+  const implementation = (
+    url: string | URL,
+    _options: https.RequestOptions,
+    callback?: (res: IncomingMessage) => void
+  ) => {
+    const key = String(url);
+    calls.push(key);
+    const response = responses[key];
+    if (!response) throw new Error(`Unexpected URL: ${key}`);
+    if (!callback) throw new Error("mockHttpsGet requires a callback");
+
+    const req = https.request(url);
+    const resp = new IncomingMessage(new Socket());
+    resp.statusCode = response.statusCode ?? 200;
+    resp.headers = response.headers ?? {};
+    process.nextTick(() => {
+      callback(resp);
+      if (response.body !== undefined) {
+        resp.emit("data", Buffer.from(response.body));
+      }
+      resp.emit("end");
+    });
+    return req;
+  };
+  return vi.spyOn(https, "get").mockImplementation(implementation);
+}
 
 describe("managed rad platform paths", () => {
   it("uses the platform executable suffix at the stable managed location", () => {
@@ -44,7 +95,9 @@ describe("managed rad platform paths", () => {
     );
   });
 
-  it.each([
+  const releaseAssetCases: Array<
+    [NodeJS.Platform, NodeJS.Architecture, string]
+  > = [
     ["win32", "x64", "rad_windows_amd64.exe"],
     ["win32", "arm64", "rad_windows_amd64.exe"],
     ["darwin", "x64", "rad_darwin_amd64"],
@@ -52,9 +105,13 @@ describe("managed rad platform paths", () => {
     ["linux", "x64", "rad_linux_amd64"],
     ["linux", "arm64", "rad_linux_arm64"],
     ["linux", "arm", "rad_linux_arm"]
-  ])("maps %s/%s to %s", (platform, architecture, expected) => {
-    expect(releaseAsset(platform, architecture)).toBe(expected);
-  });
+  ];
+  it.each(releaseAssetCases)(
+    "maps %s/%s to %s",
+    (platform, architecture, expected) => {
+      expect(releaseAsset(platform, architecture)).toBe(expected);
+    }
+  );
 
   it("rejects unsupported platform and architecture combinations", () => {
     expect(() => releaseAsset("freebsd", "x64")).toThrow(
@@ -66,7 +123,7 @@ describe("managed rad platform paths", () => {
 });
 
 describe("managed Bicep", () => {
-  let tmp;
+  let tmp: string;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "managed-bicep-"));
@@ -85,24 +142,33 @@ describe("managed Bicep", () => {
 
   it("downloads Bicep once for concurrent callers and verifies the expected path", async () => {
     const bicepPath = path.join(tmp, "bin", BICEP);
-    const calls = [];
-    let releaseDownload;
-    const downloadBlocked = new Promise((resolve) => {
+    const calls: Array<{
+      radPath: string;
+      args: string[];
+      options: SpawnRadOptions;
+    }> = [];
+    let releaseDownload: () => void = () => {
+      throw new Error("download release callback was not initialized");
+    };
+    const downloadBlocked = new Promise<void>((resolve) => {
       releaseDownload = resolve;
     });
-    const run = vi.fn(async (radPath, args, options) => {
-      calls.push({ radPath, args, options });
-      expect(options.env.BICEP).toMatch(
-        new RegExp(
-          `^${bicepPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+\\..+\\.download$`
-        )
-      );
-      expect(fs.existsSync(options.env.BICEP)).toBe(true);
-      expect(fs.statSync(options.env.BICEP).size).toBe(0);
-      expect(fs.existsSync(bicepPath)).toBe(false);
-      await downloadBlocked;
-      fs.writeFileSync(options.env.BICEP, "bicep");
-    });
+    const run = vi.fn(
+      async (radPath: string, args: string[], options: SpawnRadOptions) => {
+        calls.push({ radPath, args, options });
+        expect(options.env?.BICEP).toMatch(
+          new RegExp(
+            `^${bicepPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+\\..+\\.download$`
+          )
+        );
+        const bicepEnvPath = requireBicepEnvPath(options);
+        expect(fs.existsSync(bicepEnvPath)).toBe(true);
+        expect(fs.statSync(bicepEnvPath).size).toBe(0);
+        expect(fs.existsSync(bicepPath)).toBe(false);
+        await downloadBlocked;
+        fs.writeFileSync(bicepEnvPath, "bicep");
+      }
+    );
 
     const first = ensureManagedBicep("managed-rad", { bicepPath, run });
     const second = ensureManagedBicep("managed-rad", { bicepPath, run });
@@ -158,10 +224,12 @@ describe("managed Bicep", () => {
     fs.writeFileSync(lockPath, "abandoned");
     const stale = new Date(Date.now() - 10 * 60 * 1000);
     fs.utimesSync(lockPath, stale, stale);
-    const run = vi.fn(async (_radPath, _args, options) => {
-      expect(fs.readFileSync(bicepPath, "utf8")).toBe("partial");
-      fs.writeFileSync(options.env.BICEP, "complete-bicep");
-    });
+    const run = vi.fn(
+      async (_radPath: string, _args: string[], options: SpawnRadOptions) => {
+        expect(fs.readFileSync(bicepPath, "utf8")).toBe("partial");
+        fs.writeFileSync(requireBicepEnvPath(options), "complete-bicep");
+      }
+    );
 
     await expect(
       ensureManagedBicep("managed-rad", { bicepPath, run })
@@ -176,9 +244,11 @@ describe("managed Bicep", () => {
     const lockPath = `${bicepPath}.download.lock`;
     fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
     fs.writeFileSync(lockPath, "peer");
-    const run = vi.fn(async (_radPath, _args, options) => {
-      fs.writeFileSync(options.env.BICEP, "complete-bicep");
-    });
+    const run = vi.fn(
+      async (_radPath: string, _args: string[], options: SpawnRadOptions) => {
+        fs.writeFileSync(requireBicepEnvPath(options), "complete-bicep");
+      }
+    );
     setTimeout(() => fs.rmSync(lockPath, { force: true }), 20);
 
     await expect(
@@ -218,9 +288,9 @@ describe("MODELED_APP_GRAPH_FLAGS", () => {
 });
 
 describe("resolveExistingRadBinary", () => {
-  let tmp;
-  let savedBinaryEnv;
-  let managed;
+  let tmp: string;
+  let savedBinaryEnv: string | undefined;
+  let managed: string;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-resolve-"));
@@ -307,45 +377,15 @@ describe("parseRadVersionOutput", () => {
 describe("resolveRadForGraph", () => {
   const RELEASES_API =
     "https://api.github.com/repos/radius-project/radius/releases/latest";
-  const savedEnv = {};
-  let managedBackup = null;
-  let managedMode = null;
-  let bicepBackup = null;
-  let bicepMode = null;
+  const savedEnv: Record<string, string | undefined> = {};
+  let managedBackup: Buffer | null = null;
+  let managedMode: number | null = null;
+  let bicepBackup: Buffer | null = null;
+  let bicepMode: number | null = null;
 
-  function mockHttpsGet(responses, calls) {
-    return vi
-      .spyOn(https, "get")
-      .mockImplementation((url, options, callback) => {
-        const key = String(url);
-        calls.push(key);
-        const response = responses[key];
-        if (!response) throw new Error(`Unexpected URL: ${key}`);
-
-        const req = new EventEmitter();
-        req.destroy = (err) => {
-          if (err) req.emit("error", err);
-        };
-        req.on = req.addListener.bind(req);
-
-        const resp = new EventEmitter();
-        resp.statusCode = response.statusCode ?? 200;
-        resp.headers = response.headers ?? {};
-        resp.resume = () => {};
-        process.nextTick(() => {
-          callback(resp);
-          if (response.body !== undefined) {
-            resp.emit("data", Buffer.from(response.body));
-          }
-          resp.emit("end");
-        });
-        return req;
-      });
-  }
-
-  async function primeCachedRadViaEnsure(calls) {
+  async function primeCachedRadViaEnsure(calls: string[]) {
     vi.resetModules();
-    const mod = await import("./rad.mjs");
+    const mod = await import("./rad.js");
     const asset = mod.releaseAsset();
     const tag = "v0.2.0";
     const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
@@ -417,7 +457,7 @@ describe("resolveRadForGraph", () => {
 
   it("uses an on-disk binary as-is when no cached path exists", async () => {
     vi.resetModules();
-    const mod = await import("./rad.mjs");
+    const mod = await import("./rad.js");
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-existing-"));
     const override = path.join(tmp, RAD);
     fs.writeFileSync(override, "");
@@ -430,7 +470,7 @@ describe("resolveRadForGraph", () => {
 
   it("falls back to ensureRadBinary when no cached or on-disk binary exists", async () => {
     delete process.env.RADIUS_RAD_BINARY;
-    const calls = [];
+    const calls: string[] = [];
     const { resolved } = await primeCachedRadViaEnsure(calls);
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
@@ -439,7 +479,7 @@ describe("resolveRadForGraph", () => {
 
   it("prefers the cached ensure result over a later on-disk override", async () => {
     delete process.env.RADIUS_RAD_BINARY;
-    const calls = [];
+    const calls: string[] = [];
     const { mod, resolved: cached } = await primeCachedRadViaEnsure(calls);
     expect(cached).toBe(MANAGED_RAD_PATH);
 
@@ -467,9 +507,9 @@ const describeBuild = process.platform === "win32" ? describe.skip : describe;
 describeBuild(
   "buildGraphViaRad failure surfaces the selected extension",
   () => {
-    let ws;
-    let bin;
-    let prevBinary;
+    let ws: string;
+    let bin: string;
+    let prevBinary: string | undefined;
     beforeEach(() => {
       ws = fs.mkdtempSync(path.join(os.tmpdir(), "rad-fail-ws-"));
       const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-fail-bin-"));
@@ -523,8 +563,8 @@ describeBuild(
 );
 
 describe("writeBicepCompileConfig", () => {
-  let dir;
-  let ws;
+  let dir: string;
+  let ws: string;
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-cfg-"));
     ws = fs.mkdtempSync(path.join(os.tmpdir(), "rad-ws-"));
@@ -539,7 +579,7 @@ describe("writeBicepCompileConfig", () => {
     }
   });
 
-  function readConfig() {
+  function readConfig(): BicepCompileConfig {
     return JSON.parse(
       fs.readFileSync(path.join(dir, "bicepconfig.json"), "utf8")
     );
@@ -841,7 +881,7 @@ describe("bicep publish arg builders", () => {
 // shebang script; that only works on POSIX. Skip (don't drop) on Windows.
 const describeSpawn = process.platform === "win32" ? describe.skip : describe;
 describeSpawn("spawnRad", () => {
-  let dir;
+  let dir: string;
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "spawnrad-"));
   });
@@ -853,7 +893,7 @@ describeSpawn("spawnRad", () => {
     }
   });
 
-  function fakeRad(body) {
+  function fakeRad(body: string): string {
     const p = path.join(dir, "rad");
     fs.writeFileSync(p, `#!/usr/bin/env node\n${body}\n`, "utf8");
     fs.chmodSync(p, 0o755);
@@ -895,7 +935,7 @@ describeSpawn("spawnRad", () => {
 });
 
 describe("saveGraphJson", () => {
-  let tmp;
+  let tmp: string;
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-save-"));
   });
@@ -914,7 +954,7 @@ describe("saveGraphJson", () => {
     // A directory where the file should go makes writeFileSync fail.
     const dest = path.join(tmp, "collide");
     fs.mkdirSync(dest);
-    const messages = [];
+    const messages: string[] = [];
     expect(() =>
       saveGraphJson(dest, "{}", (m) => messages.push(m))
     ).not.toThrow();
@@ -947,7 +987,7 @@ describe("expectedDigest", () => {
   const publishedHex = "a".repeat(64);
   const pinnedHex = "b".repeat(64);
   const assets = [{ name: ASSET, digest: `sha256:${publishedHex}` }];
-  let savedPin;
+  let savedPin: string | undefined;
 
   beforeEach(() => {
     savedPin = process.env.RADIUS_RAD_SHA256;
@@ -994,8 +1034,8 @@ describe("expectedDigest", () => {
 });
 
 describe("tryAcquireLock", () => {
-  let tmp;
-  let lockPath;
+  let tmp: string;
+  let lockPath: string;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-lock-"));
@@ -1010,7 +1050,7 @@ describe("tryAcquireLock", () => {
     const release = tryAcquireLock(lockPath);
     expect(typeof release).toBe("function");
     expect(fs.existsSync(lockPath)).toBe(true);
-    release();
+    release?.();
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
@@ -1019,7 +1059,7 @@ describe("tryAcquireLock", () => {
     try {
       expect(fs.readFileSync(lockPath, "utf8")).toBe(String(process.pid));
     } finally {
-      release();
+      release?.();
     }
   });
 
@@ -1028,7 +1068,7 @@ describe("tryAcquireLock", () => {
     try {
       expect(tryAcquireLock(lockPath)).toBeNull();
     } finally {
-      release();
+      release?.();
     }
   });
 
@@ -1043,15 +1083,15 @@ describe("tryAcquireLock", () => {
     expect(typeof release).toBe("function");
     // The reaped lock is now owned by us (our pid), not the crashed peer.
     expect(fs.readFileSync(lockPath, "utf8")).toBe(String(process.pid));
-    release();
+    release?.();
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
   it("lets a lock be re-acquired after it is released", () => {
-    tryAcquireLock(lockPath)();
+    tryAcquireLock(lockPath)?.();
     const second = tryAcquireLock(lockPath);
     expect(typeof second).toBe("function");
-    second();
+    second?.();
   });
 });
 
@@ -1128,13 +1168,13 @@ const describeReconcile =
 describeReconcile("ensureRadBinary version reconciliation", () => {
   const RELEASES_API =
     "https://api.github.com/repos/radius-project/radius/releases/latest";
-  const savedEnv = {};
-  let managedBackup = null;
-  let managedMode = null;
-  let bicepBackup = null;
-  let bicepMode = null;
+  const savedEnv: Record<string, string | undefined> = {};
+  let managedBackup: Buffer | null = null;
+  let managedMode: number | null = null;
+  let bicepBackup: Buffer | null = null;
+  let bicepMode: number | null = null;
 
-  function writeFakeRad(dest, version) {
+  function writeFakeRad(dest: string, version: string): void {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(
       dest,
@@ -1146,36 +1186,6 @@ if (process.argv.includes("version")) {
       "utf8"
     );
     fs.chmodSync(dest, 0o755);
-  }
-
-  function mockHttpsGet(responses, calls) {
-    return vi
-      .spyOn(https, "get")
-      .mockImplementation((url, options, callback) => {
-        const key = String(url);
-        calls.push(key);
-        const response = responses[key];
-        if (!response) throw new Error(`Unexpected URL: ${key}`);
-
-        const req = new EventEmitter();
-        req.destroy = (err) => {
-          if (err) req.emit("error", err);
-        };
-        req.on = req.addListener.bind(req);
-
-        const resp = new EventEmitter();
-        resp.statusCode = response.statusCode ?? 200;
-        resp.headers = response.headers ?? {};
-        resp.resume = () => {};
-        process.nextTick(() => {
-          callback(resp);
-          if (response.body !== undefined) {
-            resp.emit("data", Buffer.from(response.body));
-          }
-          resp.emit("end");
-        });
-        return req;
-      });
   }
 
   beforeEach(() => {
@@ -1211,7 +1221,6 @@ if (process.argv.includes("version")) {
     else
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK =
         savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
-
     fs.rmSync(MANAGED_RAD_PATH, { force: true });
     if (managedBackup) {
       fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
@@ -1228,11 +1237,13 @@ if (process.argv.includes("version")) {
   });
 
   it("upgrades an older managed binary to the latest release", async () => {
+    delete process.env.RADIUS_RAD_BINARY;
     writeFakeRad(MANAGED_RAD_PATH, "v0.1.0");
+
     const asset = releaseAsset();
     const tag = "v0.2.0";
     const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
-    const calls = [];
+    const calls: string[] = [];
     mockHttpsGet(
       {
         [RELEASES_API]: {
@@ -1242,13 +1253,17 @@ if (process.argv.includes("version")) {
           })
         },
         [downloadUrl]: {
-          body: "#!/usr/bin/env node\nprocess.stdout.write('{}');\n"
+          body: `#!/usr/bin/env node
+if (process.argv.includes("version")) {
+  process.stdout.write(JSON.stringify({ version: "${tag}" }));
+}
+`
         }
       },
       calls
     );
 
-    const logs = [];
+    const logs: string[] = [];
     const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
@@ -1266,7 +1281,7 @@ if (process.argv.includes("version")) {
     const asset = releaseAsset();
     const tag = "v0.2.0";
     const downloadUrl = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
-    const calls = [];
+    const calls: string[] = [];
     mockHttpsGet(
       {
         [RELEASES_API]: {
@@ -1279,7 +1294,7 @@ if (process.argv.includes("version")) {
       calls
     );
 
-    const logs = [];
+    const logs: string[] = [];
     const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(override);
@@ -1301,7 +1316,7 @@ if (process.argv.includes("version")) {
     process.env.RADIUS_RAD_BINARY = override;
     process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
 
-    const calls = [];
+    const calls: string[] = [];
     mockHttpsGet({}, calls);
     const resolved = await ensureRadBinary();
 

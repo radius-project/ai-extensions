@@ -25,16 +25,174 @@
 //     existing binary. It is skipped entirely via RADIUS_RAD_SKIP_VERSION_CHECK,
 //     and a RADIUS_RAD_BINARY override is never replaced.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { IncomingMessage } from "node:http";
 import {
   applicationGraphToResources,
   filterGraphVisualizationResources
 } from "@radius-project/core";
+
+// --- Shared named types -----------------------------------------------------
+//
+// This module's public surface is impure I/O (spawning processes, downloading
+// releases, reading/writing files), so the types below name the shapes that
+// cross those boundaries: the injected logger, captured process output,
+// release/download metadata, and the options objects (including the
+// dependency-injection seam `EnsureManagedBicepOptions.run`) adapters and
+// tests configure it with.
+
+/**
+ * Progress/diagnostic sink every managed-rad operation reports through.
+ * NEVER console.log — an adapter's stdout may be a JSON-RPC channel.
+ */
+export type Logger = (message: string) => void;
+
+/** Captured output of a completed process invocation. */
+export interface ProcessResult {
+  stdout: string;
+  stderr: string;
+}
+
+/** Options accepted by every managed-rad spawn helper. */
+export interface SpawnRadOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeout?: number;
+  label?: string;
+  log?: Logger;
+}
+
+/**
+ * The process-runner signature `ensureManagedBicep`'s `run` DI seam expects.
+ * The resolved value is intentionally unobserved by every caller — only a
+ * rejection is ever inspected — so it is typed `Promise<unknown>` rather than
+ * `Promise<ProcessResult>`, which also lets tests substitute a fake that
+ * resolves with whatever placeholder value is convenient.
+ */
+export type SpawnRadRunner = (
+  radPath: string,
+  args: string[],
+  options: SpawnRadOptions
+) => Promise<unknown>;
+
+/** Options for {@link ensureManagedBicep}. */
+export interface EnsureManagedBicepOptions {
+  log?: Logger;
+  timeout?: number;
+  bicepPath?: string;
+  run?: SpawnRadRunner;
+}
+
+/** A GitHub release asset, as returned by the releases API. */
+export interface RadReleaseAsset {
+  name: string;
+  digest?: string;
+}
+
+/** The latest-release metadata `ensureRadBinary`/`downloadRad` act on. */
+export interface RadReleaseInfo {
+  tag: string;
+  assets: RadReleaseAsset[];
+}
+
+/** The checksum a download must match, and where it came from. */
+export interface ExpectedDigest {
+  hex: string;
+  source: string;
+}
+
+/**
+ * The effective Bicep config `writeBicepCompileConfig` writes to disk. Every
+ * setting beyond `experimentalFeaturesEnabled`/`extensions` (analyzers,
+ * formatting, moduleAliases, ...) is repository-owned and passed through
+ * untouched — hence the index signature.
+ */
+export interface BicepCompileConfig extends Record<string, unknown> {
+  experimentalFeaturesEnabled: Record<string, unknown> & {
+    extensibility: boolean;
+  };
+  extensions: Record<string, unknown> & { radius: string };
+}
+
+/** Options for {@link runRadAppGraph}. */
+export interface RunRadAppGraphOptions {
+  log?: Logger;
+  timeout?: number;
+  saveGraphJsonTo?: string;
+}
+
+/** Options for {@link buildGraphViaRad}. */
+export interface BuildGraphViaRadOptions {
+  log?: Logger;
+  saveGraphJsonTo?: string;
+  radArtifactsDir?: string;
+  cleanupRadArtifactsDir?: boolean;
+}
+
+/** Options for {@link runRadBicepPublishExtension}. */
+export interface RunRadBicepPublishExtensionOptions {
+  fromFile: string;
+  target: string;
+  log?: Logger;
+  timeout?: number;
+}
+
+/** Options for {@link runRadBicepPublish}. */
+export interface RunRadBicepPublishOptions {
+  file: string;
+  target: string;
+  env?: NodeJS.ProcessEnv;
+  log?: Logger;
+  timeout?: number;
+}
+
+/**
+ * Thrown by a managed rad/bicep process invocation, carrying the captured
+ * stdout/stderr so callers can surface rad's actual diagnostic output (rad
+ * prints Bicep compile errors like BCP* to stdout, not stderr).
+ */
+export class RadProcessError extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(message: string, stdout: string, stderr: string) {
+    super(message);
+    this.name = "RadProcessError";
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+// Narrows an unknown catch binding to a human-readable message without ever
+// assuming it is an Error (a thrown value can be anything in JS/TS).
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
+}
+
+// Pulls the most useful message out of a rejected managed-rad invocation,
+// preferring stderr, then stdout (rad prints BCP* errors there), then the
+// error's own message.
+function radErrorDetail(err: unknown): string {
+  if (err instanceof RadProcessError) {
+    const stderr = err.stderr.trim();
+    const stdout = err.stdout.trim();
+    if (stderr || stdout) return stderr || stdout;
+  }
+  return errorMessage(err) || "unknown error";
+}
 
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
@@ -58,7 +216,10 @@ export const MANAGED_BICEP_PATH = path.join(MANAGED_RAD_BIN, `bicep${EXE}`);
 // binaries). Without it, compilation fails with `BCP204: Extension "radius" is
 // not recognized`. This is the single source of truth reused by adapters that
 // commit the same file into a repo's `.radius/` directory.
-export const RADIUS_BICEP_CONFIG = {
+export const RADIUS_BICEP_CONFIG: {
+  experimentalFeaturesEnabled: { extensibility: boolean };
+  extensions: { radius: string };
+} = {
   experimentalFeaturesEnabled: { extensibility: true },
   extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
 };
@@ -67,34 +228,51 @@ export const RADIUS_BICEP_CONFIG_JSON = JSON.stringify(
   null,
   2
 );
-export const MODELED_APP_GRAPH_FLAGS = Object.freeze(["--include-icons"]);
+export const MODELED_APP_GRAPH_FLAGS: readonly string[] = Object.freeze([
+  "--include-icons"
+]);
 
 // Serializes concurrent toolchain preparation so only one download runs.
-let ensurePromise = null;
-let cachedRadPath = null;
-const ensureBicepPromises = new Map();
+let ensurePromise: Promise<string> | null = null;
+let cachedRadPath: string | null = null;
+const ensureBicepPromises = new Map<string, Promise<string>>();
 
-function noop() {}
+function noop(): void {}
 
-export function managedBicepEnv(env = {}, bicepPath = MANAGED_BICEP_PATH) {
+export function managedBicepEnv(
+  env: NodeJS.ProcessEnv = {},
+  bicepPath: string = MANAGED_BICEP_PATH
+): NodeJS.ProcessEnv {
   return { ...env, BICEP: bicepPath };
 }
 
 // Maps Node's platform/arch onto the GitHub release asset naming used by rad
 // (rad_<os>_<arch>[.exe]).
+const OS_NAMES: Partial<Record<NodeJS.Platform, string>> = {
+  win32: "windows",
+  darwin: "darwin",
+  linux: "linux"
+};
+// Radius currently publishes only an amd64 Windows binary. Windows on ARM64
+// runs it through the OS x64 compatibility layer.
+const WIN_ARCH_ASSETS: Partial<Record<NodeJS.Architecture, string>> = {
+  x64: "amd64",
+  arm64: "amd64"
+};
+const POSIX_ARCH_ASSETS: Partial<Record<NodeJS.Architecture, string>> = {
+  x64: "amd64",
+  arm64: "arm64",
+  arm: "arm"
+};
 export function releaseAsset(
-  platform = process.platform,
-  architecture = process.arch
-) {
-  const osName = { win32: "windows", darwin: "darwin", linux: "linux" }[
-    platform
-  ];
-  // Radius currently publishes only an amd64 Windows binary. Windows on ARM64
-  // runs it through the OS x64 compatibility layer.
+  platform: NodeJS.Platform = process.platform,
+  architecture: NodeJS.Architecture = process.arch
+): string {
+  const osName = OS_NAMES[platform];
   const arch =
     platform === "win32" ?
-      { x64: "amd64", arm64: "amd64" }[architecture]
-    : { x64: "amd64", arm64: "arm64", arm: "arm" }[architecture];
+      WIN_ARCH_ASSETS[architecture]
+    : POSIX_ARCH_ASSETS[architecture];
   if (!osName || !arch) {
     throw new Error(
       `Unsupported platform for rad: ${platform}/${architecture}`
@@ -103,7 +281,7 @@ export function releaseAsset(
   return `rad_${osName}_${arch}${platform === "win32" ? ".exe" : ""}`;
 }
 
-function isExecutableFile(p) {
+function isExecutableFile(p: string): boolean {
   try {
     return fs.statSync(p).isFile();
   } catch {
@@ -111,7 +289,7 @@ function isExecutableFile(p) {
   }
 }
 
-function isCompletedBicepFile(p) {
+function isCompletedBicepFile(p: string): boolean {
   try {
     const stat = fs.statSync(p);
     return (
@@ -138,8 +316,8 @@ const DOWNLOAD_WAIT_MS = 120000;
  * download when two processes cold-start at the same instant. The atomic
  * temp->rename publish in downloadRad keeps concurrent writers safe on its own.
  */
-export function tryAcquireLock(lockPath) {
-  const write = () => {
+export function tryAcquireLock(lockPath: string): (() => void) | null {
+  const write = (): (() => void) => {
     const fd = fs.openSync(lockPath, "wx");
     try {
       fs.writeSync(fd, String(process.pid));
@@ -157,7 +335,7 @@ export function tryAcquireLock(lockPath) {
   try {
     return write();
   } catch (err) {
-    if (!err || err.code !== "EEXIST") throw err;
+    if (!isErrnoException(err) || err.code !== "EEXIST") throw err;
     // Someone holds it. Reap it only if it is stale, then retry the create.
     try {
       const age = Date.now() - fs.statSync(lockPath).mtimeMs;
@@ -174,7 +352,11 @@ export function tryAcquireLock(lockPath) {
 
 // Polls until `file` exists (a peer finished its download) or the timeout
 // elapses. Returns whether the file is present at the end.
-async function waitForFile(file, timeoutMs, intervalMs = 500) {
+async function waitForFile(
+  file: string,
+  timeoutMs: number,
+  intervalMs = 500
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (isExecutableFile(file)) return true;
@@ -183,12 +365,14 @@ async function waitForFile(file, timeoutMs, intervalMs = 500) {
   return isExecutableFile(file);
 }
 
+type BicepDownloadWaitResult = "complete" | "available" | "timeout";
+
 async function waitForBicepDownload(
-  file,
-  lockPath,
-  timeoutMs,
+  file: string,
+  lockPath: string,
+  timeoutMs: number,
   intervalMs = 500
-) {
+): Promise<BicepDownloadWaitResult> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!isExecutableFile(lockPath)) {
@@ -203,7 +387,7 @@ async function waitForBicepDownload(
 // the whole process tree; on POSIX, rad is a process-group leader (spawned
 // detached), so signalling the group (-pid) stops rad and its children together.
 // Best-effort — any failure is swallowed.
-function killChildTree(child) {
+function killChildTree(child: ChildProcess | null | undefined): void {
   if (!child || child.pid == null) return;
   try {
     if (IS_WIN) {
@@ -228,7 +412,9 @@ function killChildTree(child) {
  * Order: RADIUS_RAD_BINARY env -> the stable extension-owned managed path.
  * PATH and the user's official ~/.rad/bin install are deliberately ignored.
  */
-export function resolveExistingRadBinary(managedPath = MANAGED_RAD_PATH) {
+export function resolveExistingRadBinary(
+  managedPath: string = MANAGED_RAD_PATH
+): string | null {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
   if (fromEnv && isExecutableFile(fromEnv)) return fromEnv;
 
@@ -237,11 +423,14 @@ export function resolveExistingRadBinary(managedPath = MANAGED_RAD_PATH) {
   return null;
 }
 
-export function parseRadVersionOutput(stdout) {
+export function parseRadVersionOutput(stdout: string): string | null {
   try {
-    const parsed = JSON.parse(stdout);
+    const parsed: unknown = JSON.parse(stdout);
     const version =
-      parsed && (parsed.version || (parsed.cli && parsed.cli.version));
+      isPlainObject(parsed) ?
+        (parsed.version ??
+        (isPlainObject(parsed.cli) ? parsed.cli.version : undefined))
+      : undefined;
     return typeof version === "string" && version.trim() ?
         version.trim()
       : null;
@@ -263,9 +452,12 @@ export function parseRadVersionOutput(stdout) {
  * `version`.) Never throws — a null result means "version unknown", which callers
  * treat as "leave the existing binary in place".
  */
-export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
+export function radBinaryVersion(
+  radPath: string,
+  { timeout = 10000 }: { timeout?: number } = {}
+): Promise<string | null> {
   return new Promise((resolve) => {
-    let child;
+    let child: ChildProcess;
     try {
       // detached: on Windows, spawning rad inside the parent's job/process group
       // can wedge the child so it never exits; giving it its own process group
@@ -285,7 +477,7 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
 
     let stdout = "";
     let settled = false;
-    const finish = (value) => {
+    const finish = (value: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -296,7 +488,7 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
       finish(null);
     }, timeout);
 
-    child.stdout?.on("data", (c) => {
+    child.stdout?.on("data", (c: Buffer) => {
       if (stdout.length < 1024 * 1024) stdout += c.toString();
     });
     child.on("error", () => finish(null));
@@ -314,7 +506,9 @@ export function radBinaryVersion(radPath, { timeout = 10000 } = {}) {
 // ("v1.2.3", "1.2.3-rc1-1-gdeadbee", "1.2.3+build") into [major, minor, patch].
 // Any prerelease/build suffix is intentionally ignored — only the core drives
 // precedence here. Returns null when the string has no numeric major.minor.patch.
-export function parseVersion(value) {
+export function parseVersion(
+  value: string | null | undefined
+): [number, number, number] | null {
   const m =
     /^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
       (value || "").trim()
@@ -331,7 +525,10 @@ export function parseVersion(value) {
  * suffixes are intentionally ignored: a developer build with the same core
  * version as the latest release must not be replaced.
  */
-export function compareVersions(a, b) {
+export function compareVersions(
+  a: string | null | undefined,
+  b: string | null | undefined
+): -1 | 0 | 1 {
   const pa = parseVersion(a);
   const pb = parseVersion(b);
   if (!pa || !pb) return 0;
@@ -341,7 +538,7 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-function githubAuthHeaders() {
+function githubAuthHeaders(): Record<string, string> {
   // The GitHub Releases API is rate-limited hard for unauthenticated callers,
   // which can make first-run downloads flaky on shared/CI IP addresses. If a
   // token happens to be in the environment, use it to get the authenticated
@@ -350,7 +547,10 @@ function githubAuthHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function httpGet(url, headers) {
+function httpGet(
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
@@ -358,8 +558,9 @@ function httpGet(url, headers) {
         headers: { "User-Agent": "radius-app-graph", ...headers },
         timeout: 30000
       },
-      (resp) => {
+      (resp: IncomingMessage) => {
         if (
+          resp.statusCode !== undefined &&
           resp.statusCode >= 300 &&
           resp.statusCode < 400 &&
           resp.headers.location
@@ -373,8 +574,8 @@ function httpGet(url, headers) {
           reject(new Error(`GET ${url} failed: HTTP ${resp.statusCode}`));
           return;
         }
-        const chunks = [];
-        resp.on("data", (c) => chunks.push(c));
+        const chunks: Buffer[] = [];
+        resp.on("data", (c: Buffer) => chunks.push(c));
         resp.on("end", () => resolve(Buffer.concat(chunks)));
         resp.on("error", reject);
       }
@@ -384,23 +585,32 @@ function httpGet(url, headers) {
   });
 }
 
-async function latestRelease() {
+async function latestRelease(): Promise<RadReleaseInfo> {
   const body = await httpGet(RELEASES_API, {
     Accept: "application/vnd.github+json",
     ...githubAuthHeaders()
   });
-  const parsed = JSON.parse(body.toString("utf8"));
-  if (!parsed || !parsed.tag_name) {
+  const parsed: unknown = JSON.parse(body.toString("utf8"));
+  if (!isPlainObject(parsed) || typeof parsed.tag_name !== "string") {
     throw new Error("Could not determine latest rad release tag");
   }
-  return {
-    tag: parsed.tag_name,
-    assets: Array.isArray(parsed.assets) ? parsed.assets : []
-  };
+  const assets: RadReleaseAsset[] =
+    Array.isArray(parsed.assets) ?
+      parsed.assets
+        .filter(
+          (asset): asset is Record<string, unknown> =>
+            isPlainObject(asset) && typeof asset.name === "string"
+        )
+        .map((asset) => ({
+          name: String(asset.name),
+          digest: typeof asset.digest === "string" ? asset.digest : undefined
+        }))
+    : [];
+  return { tag: parsed.tag_name, assets };
 }
 
 // Normalizes a "sha256:<hex>" or bare-hex value to lowercase hex, or "" if none.
-export function normalizeSha256(value) {
+export function normalizeSha256(value: string | null | undefined): string {
   return (value || "")
     .trim()
     .toLowerCase()
@@ -413,7 +623,11 @@ export function normalizeSha256(value) {
 // When neither is available the download proceeds without verification — many
 // upstream releases omit per-asset digests — and a warning is surfaced so
 // operators know they can pin RADIUS_RAD_SHA256 for stricter integrity checks.
-export function expectedDigest(assets, assetName, _tag) {
+export function expectedDigest(
+  assets: RadReleaseAsset[],
+  assetName: string,
+  _tag: string
+): ExpectedDigest | null {
   const pinned = normalizeSha256(process.env.RADIUS_RAD_SHA256);
   if (pinned) return { hex: pinned, source: "RADIUS_RAD_SHA256" };
 
@@ -429,7 +643,12 @@ export function expectedDigest(assets, assetName, _tag) {
 // Verifies downloaded bytes against the expected SHA-256 before the binary is
 // ever cached or executed. A mismatch aborts the install so a corrupted or
 // tampered download is never trusted.
-function verifyChecksum(data, expected, tag, assetName) {
+function verifyChecksum(
+  data: Buffer,
+  expected: ExpectedDigest,
+  tag: string,
+  assetName: string
+): void {
   const actual = crypto.createHash("sha256").update(data).digest("hex");
   if (actual !== expected.hex) {
     throw new Error(
@@ -438,7 +657,10 @@ function verifyChecksum(data, expected, tag, assetName) {
   }
 }
 
-async function downloadRad(log, { releaseInfo = null } = {}) {
+async function downloadRad(
+  log: Logger,
+  { releaseInfo = null }: { releaseInfo?: RadReleaseInfo | null } = {}
+): Promise<string> {
   const { tag, assets } = releaseInfo || (await latestRelease());
   const asset = releaseAsset();
   const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
@@ -448,7 +670,7 @@ async function downloadRad(log, { releaseInfo = null } = {}) {
 
   // True when the managed binary already exists and its core version is at least
   // the target release — the signal that no (further) download is needed.
-  const upToDate = async () => {
+  const upToDate = async (): Promise<boolean> => {
     if (!isExecutableFile(dest)) return false;
     const current = await radBinaryVersion(dest);
     return current != null && compareVersions(current, tag) >= 0;
@@ -520,15 +742,18 @@ async function downloadRad(log, { releaseInfo = null } = {}) {
  * local version leaves the existing binary in place, so offline/air-gapped use
  * keeps working. Set RADIUS_RAD_SKIP_VERSION_CHECK to skip the check entirely.
  */
-async function reconcileWithLatest(existing, log) {
+async function reconcileWithLatest(
+  existing: string,
+  log: Logger
+): Promise<string> {
   if (process.env.RADIUS_RAD_SKIP_VERSION_CHECK) return existing;
 
-  let latest;
+  let latest: RadReleaseInfo;
   try {
     latest = await latestRelease();
   } catch (err) {
     log(
-      `Could not check the latest rad release (${err?.message ?? err}); using the installed binary.`
+      `Could not check the latest rad release (${errorMessage(err)}); using the installed binary.`
     );
     return existing;
   }
@@ -560,7 +785,7 @@ async function reconcileWithLatest(existing, log) {
     return await downloadRad(log, { releaseInfo: latest });
   } catch (err) {
     log(
-      `Could not upgrade rad to ${latest.tag} (${err?.message ?? err}); using ${localVersion}.`
+      `Could not upgrade rad to ${latest.tag} (${errorMessage(err)}); using ${localVersion}.`
     );
     return existing;
   }
@@ -571,13 +796,16 @@ async function reconcileWithLatest(existing, log) {
  * paired Bicep CLI into the extension-owned bin directory when needed.
  * Concurrent callers share a single in-flight resolution.
  */
-export function ensureRadBinary({ log = noop } = {}) {
+export function ensureRadBinary({
+  log = noop
+}: { log?: Logger } = {}): Promise<string> {
   if (cachedRadPath && isExecutableFile(cachedRadPath)) {
-    return ensureManagedBicep(cachedRadPath, { log }).then(() => cachedRadPath);
+    const resolvedPath = cachedRadPath;
+    return ensureManagedBicep(resolvedPath, { log }).then(() => resolvedPath);
   }
   if (ensurePromise) return ensurePromise;
 
-  ensurePromise = (async () => {
+  ensurePromise = (async (): Promise<string> => {
     const existing = resolveExistingRadBinary();
     if (existing) {
       // Only repair permissions on the extension-owned binary. An explicit
@@ -624,10 +852,16 @@ export function ensureRadBinary({ log = noop } = {}) {
  * Exported for tests; managed-binary resolution lives in spawnManagedRad.
  */
 export function spawnRad(
-  radPath,
-  args,
-  { cwd, env = {}, timeout = 120000, label = "rad" } = {}
-) {
+  radPath: string,
+  args: string[],
+  {
+    cwd,
+    env = {},
+    timeout = 120000,
+    label = "rad",
+    log: _log = noop
+  }: SpawnRadOptions = {}
+): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(radPath, args, {
       cwd,
@@ -641,12 +875,13 @@ export function spawnRad(
     let stdout = "";
     let stderr = "";
     let settled = false;
-    let graceTimer = null;
-    let exited = null;
-    child.stdout?.on("data", (c) => {
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null =
+      null;
+    child.stdout?.on("data", (c: Buffer) => {
       if (stdout.length < MAX) stdout += c.toString();
     });
-    child.stderr?.on("data", (c) => {
+    child.stderr?.on("data", (c: Buffer) => {
       if (stderr.length < MAX) stderr += c.toString();
     });
 
@@ -655,13 +890,16 @@ export function spawnRad(
       settled = true;
       if (graceTimer) clearTimeout(graceTimer);
       killChildTree(child);
-      const err = new Error(`${label} timed out after ${timeout}ms`);
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
+      reject(
+        new RadProcessError(
+          `${label} timed out after ${timeout}ms`,
+          stdout,
+          stderr
+        )
+      );
     }, timeout);
 
-    function finalize(code, signal) {
+    function finalize(code: number | null, signal: NodeJS.Signals | null) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -681,12 +919,13 @@ export function spawnRad(
       } else {
         // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
         // both streams on the error for callers to surface.
-        const err = new Error(
-          `${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
+        reject(
+          new RadProcessError(
+            `${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
+            stdout,
+            stderr
+          )
         );
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
       }
     }
 
@@ -695,9 +934,7 @@ export function spawnRad(
       settled = true;
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
+      reject(new RadProcessError(err.message, stdout, stderr));
     });
 
     child.on("exit", (code, signal) => {
@@ -719,14 +956,14 @@ export function spawnRad(
  * created the expected executable.
  */
 export function ensureManagedBicep(
-  radPath,
+  radPath: string,
   {
     log = noop,
     timeout = 120000,
     bicepPath = MANAGED_BICEP_PATH,
     run = spawnRad
-  } = {}
-) {
+  }: EnsureManagedBicepOptions = {}
+): Promise<string> {
   const lockPath = `${bicepPath}.download.lock`;
   if (!isExecutableFile(lockPath) && isCompletedBicepFile(bicepPath)) {
     return Promise.resolve(bicepPath);
@@ -735,7 +972,7 @@ export function ensureManagedBicep(
   const pending = ensureBicepPromises.get(bicepPath);
   if (pending) return pending;
 
-  const preparation = (async () => {
+  const preparation = (async (): Promise<string> => {
     fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
     let lockWasPresent = isExecutableFile(lockPath);
     let release = tryAcquireLock(lockPath);
@@ -821,9 +1058,15 @@ export function ensureManagedBicep(
  * run it with BICEP pinned to ~/.radius/ai-extensions/bin/bicep[.exe].
  */
 async function spawnManagedRad(
-  args,
-  { cwd, env = {}, timeout = 120000, label = "rad", log = noop } = {}
-) {
+  args: string[],
+  {
+    cwd,
+    env = {},
+    timeout = 120000,
+    label = "rad",
+    log = noop
+  }: SpawnRadOptions = {}
+): Promise<ProcessResult> {
   const radPath = await ensureRadBinary({ log });
   return await spawnRad(radPath, args, {
     cwd,
@@ -838,7 +1081,10 @@ async function spawnManagedRad(
  * Argument builders for the two publish commands. Exported so tests can assert
  * the exact rad CLI invocation without spawning a process.
  */
-export function bicepPublishExtensionArgs(fromFile, target) {
+export function bicepPublishExtensionArgs(
+  fromFile: string,
+  target: string
+): string[] {
   return [
     "bicep",
     "publish-extension",
@@ -849,7 +1095,7 @@ export function bicepPublishExtensionArgs(fromFile, target) {
     "--force"
   ];
 }
-export function bicepPublishArgs(file, target) {
+export function bicepPublishArgs(file: string, target: string): string[] {
   return ["bicep", "publish", "--file", file, "--target", target];
 }
 
@@ -866,7 +1112,7 @@ export async function runRadBicepPublishExtension({
   target,
   log = noop,
   timeout = 120000
-} = {}) {
+}: RunRadBicepPublishExtensionOptions): Promise<string> {
   const from = path.resolve(fromFile);
   const to = path.resolve(target);
   try {
@@ -899,7 +1145,7 @@ export async function runRadBicepPublish({
   env = {},
   log = noop,
   timeout = 120000
-} = {}) {
+}: RunRadBicepPublishOptions): Promise<string> {
   const src = path.resolve(file);
   try {
     await spawnManagedRad(bicepPublishArgs(src, target), {
@@ -916,17 +1162,6 @@ export async function runRadBicepPublish({
 }
 
 /**
- * radErrorDetail - pull the most useful message out of a rejected spawnManagedRad
- * error, preferring stderr, then stdout (rad prints BCP* errors there), then the
- * error message.
- */
-function radErrorDetail(err) {
-  const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
-  const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
-  return stderr || stdout || (err && err.message) || "unknown error";
-}
-
-/**
  * resolveRadForGraph - resolve a `rad` binary to run `rad app graph` WITHOUT
  * running the version check or a download on the hot path. The `rad version --cli`
  * check (and any resulting upgrade) runs in the ensureRadBinary() warm-up on every
@@ -939,7 +1174,9 @@ function radErrorDetail(err) {
  *      load-time ensure has not finished resolving), call ensureRadBinary(),
  *      reusing the in-flight load-time ensure if one is running.
  */
-export async function resolveRadForGraph({ log = noop } = {}) {
+export async function resolveRadForGraph({
+  log = noop
+}: { log?: Logger } = {}): Promise<string> {
   if (cachedRadPath && isExecutableFile(cachedRadPath)) return cachedRadPath;
   const existing = resolveExistingRadBinary();
   if (existing) return existing;
@@ -956,11 +1193,19 @@ export async function resolveRadForGraph({ log = noop } = {}) {
  * the rad CLI is also copied there (parent directories created as needed) so the
  * generated graph is persisted alongside the app.bicep it was built from. A
  * failure to save is logged but never fails the graph build.
+ *
+ * The returned value is the raw, untyped app-graph.json payload: this module
+ * only shuttles it to `applicationGraphToResources` (radius-core), which owns
+ * its shape.
  */
 export async function runRadAppGraph(
-  bicepFilePath,
-  { log = noop, timeout = 120000, saveGraphJsonTo = "" } = {}
-) {
+  bicepFilePath: string,
+  {
+    log = noop,
+    timeout = 120000,
+    saveGraphJsonTo = ""
+  }: RunRadAppGraphOptions = {}
+): Promise<unknown> {
   const radPath = await resolveRadForGraph({ log });
   await ensureManagedBicep(radPath, { log, timeout });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
@@ -968,7 +1213,7 @@ export async function runRadAppGraph(
   const absoluteBicep = path.resolve(bicepFilePath);
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-"));
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       // `rad app graph` shells out to bicep as a grandchild and writes
       // app-graph.json into the temp cwd. The child reference is kept (no unref)
       // so Node awaits it and reads the file it wrote. The timeout below is a
@@ -995,12 +1240,15 @@ export async function runRadAppGraph(
       let stdout = "";
       let stderr = "";
       let settled = false;
-      let graceTimer = null;
-      let exited = null;
-      child.stdout?.on("data", (c) => {
+      let graceTimer: ReturnType<typeof setTimeout> | null = null;
+      let exited: {
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      } | null = null;
+      child.stdout?.on("data", (c: Buffer) => {
         if (stdout.length < MAX) stdout += c.toString();
       });
-      child.stderr?.on("data", (c) => {
+      child.stderr?.on("data", (c: Buffer) => {
         if (stderr.length < MAX) stderr += c.toString();
       });
 
@@ -1009,13 +1257,16 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         killChildTree(child);
-        const err = new Error(`rad app graph timed out after ${timeout}ms`);
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
+        reject(
+          new RadProcessError(
+            `rad app graph timed out after ${timeout}ms`,
+            stdout,
+            stderr
+          )
+        );
       }, timeout);
 
-      function finalize(code, signal) {
+      function finalize(code: number | null, signal: NodeJS.Signals | null) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -1033,16 +1284,17 @@ export async function runRadAppGraph(
           /* best-effort */
         }
         if (code === 0) {
-          resolve({ stdout, stderr });
+          resolve();
         } else {
           // Preserve both streams: rad prints Bicep compile errors (BCP*) to
           // stdout, not stderr, so the error handler below needs stdout too.
-          const err = new Error(
-            `rad exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
+          reject(
+            new RadProcessError(
+              `rad exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
+              stdout,
+              stderr
+            )
           );
-          err.stdout = stdout;
-          err.stderr = stderr;
-          reject(err);
         }
       }
 
@@ -1051,9 +1303,7 @@ export async function runRadAppGraph(
         settled = true;
         clearTimeout(timer);
         if (graceTimer) clearTimeout(graceTimer);
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
+        reject(new RadProcessError(err.message, stdout, stderr));
       });
 
       // Prefer `close`: it fires once the process exited AND all stdio flushed,
@@ -1084,10 +1334,7 @@ export async function runRadAppGraph(
     }
     return JSON.parse(raw);
   } catch (err) {
-    const stderr = (err && err.stderr ? String(err.stderr) : "").trim();
-    const stdout = (err && err.stdout ? String(err.stdout) : "").trim();
-    const detail = stderr || stdout || (err && err.message) || "unknown error";
-    throw new Error(`rad app graph failed: ${detail}`);
+    throw new Error(`rad app graph failed: ${radErrorDetail(err)}`);
   } finally {
     try {
       fs.rmSync(cwd, { recursive: true, force: true });
@@ -1103,21 +1350,25 @@ export async function runRadAppGraph(
  * failure is logged via the injected `log` and swallowed so it can never fail an
  * otherwise-successful graph build.
  */
-export function saveGraphJson(destPath, raw, log = noop) {
+export function saveGraphJson(
+  destPath: string,
+  raw: string,
+  log: Logger = noop
+): void {
   try {
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.writeFileSync(destPath, raw);
     log(`Saved application graph JSON to ${destPath}`);
   } catch (err) {
     log(
-      `Warning: could not save app-graph.json to ${destPath}: ${String(err?.message ?? err)}`
+      `Warning: could not save app-graph.json to ${destPath}: ${errorMessage(err)}`
     );
   }
 }
 
 // isOciExtensionRef - true when a bicepconfig extension alias points at an OCI
 // registry (br:/oci:) rather than a local artifact file.
-function isOciExtensionRef(ref) {
+function isOciExtensionRef(ref: string): boolean {
   return /^(br|oci):/i.test(ref);
 }
 
@@ -1126,7 +1377,12 @@ function isOciExtensionRef(ref) {
 // into the compile dir, preserving its relative path so bicep resolves it next
 // to bicepconfig.json. Refuses absolute or `..`-escaping references and is
 // best-effort: a missing file or copy error is logged and skipped.
-function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
+function copyLocalExtensionArtifact(
+  srcRoot: string,
+  destRoot: string,
+  ref: string,
+  log: Logger = noop
+): void {
   try {
     const rel = ref.replace(/^\.[\\/]/, "");
     if (
@@ -1146,7 +1402,7 @@ function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
     fs.copyFileSync(src, dest);
   } catch (err) {
     log(
-      `Warning: could not copy extension artifact ${ref}: ${String(err?.message ?? err)}`
+      `Warning: could not copy extension artifact ${ref}: ${errorMessage(err)}`
     );
   }
 }
@@ -1176,45 +1432,57 @@ function copyLocalExtensionArtifact(srcRoot, destRoot, ref, log = noop) {
  * selected `extensions.radius` reference (e.g. in a compilation failure) even
  * when `log` is the default no-op.
  */
-export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
-  let config = null;
+export function writeBicepCompileConfig(
+  dir: string,
+  radArtifactsDir: string,
+  log: Logger = noop
+): BicepCompileConfig {
+  let config: BicepCompileConfig | null = null;
   if (radArtifactsDir) {
     try {
       const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
       if (fs.existsSync(wsConfigPath)) {
-        const ws = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
-        if (ws && typeof ws === "object" && !Array.isArray(ws)) {
+        const parsed: unknown = JSON.parse(
+          fs.readFileSync(wsConfigPath, "utf8")
+        );
+        if (isPlainObject(parsed)) {
           // Use the repository config verbatim, then ensure only what a Radius
           // compile requires (extensibility on, a resolvable `radius` alias).
-          config = ws;
-          if (
-            typeof config.experimentalFeaturesEnabled !== "object" ||
-            config.experimentalFeaturesEnabled === null ||
-            Array.isArray(config.experimentalFeaturesEnabled)
-          ) {
-            config.experimentalFeaturesEnabled = {};
-          }
-          config.experimentalFeaturesEnabled.extensibility = true;
-          if (
-            typeof config.extensions !== "object" ||
-            config.extensions === null ||
-            Array.isArray(config.extensions)
-          ) {
-            config.extensions = {};
-          }
-          if (typeof config.extensions.radius !== "string") {
-            config.extensions.radius = RADIUS_BICEP_CONFIG.extensions.radius;
-          }
-          for (const ref of Object.values(config.extensions)) {
+          const experimentalFeaturesEnabled: Record<string, unknown> & {
+            extensibility: boolean;
+          } = {
+            ...(isPlainObject(parsed.experimentalFeaturesEnabled) ?
+              parsed.experimentalFeaturesEnabled
+            : {}),
+            extensibility: true
+          };
+
+          const extensionsSource =
+            isPlainObject(parsed.extensions) ? parsed.extensions : {};
+          const radiusRef =
+            typeof extensionsSource.radius === "string" ?
+              extensionsSource.radius
+            : RADIUS_BICEP_CONFIG.extensions.radius;
+          const extensions: Record<string, unknown> & { radius: string } = {
+            ...extensionsSource,
+            radius: radiusRef
+          };
+          for (const ref of Object.values(extensions)) {
             if (typeof ref !== "string") continue;
             if (!isOciExtensionRef(ref))
               copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
           }
+
+          config = {
+            ...parsed,
+            experimentalFeaturesEnabled,
+            extensions
+          };
         }
       }
     } catch (err) {
       log(
-        `Warning: could not read repository bicepconfig.json; using the base Radius config: ${String(err?.message ?? err)}`
+        `Warning: could not read repository bicepconfig.json; using the base Radius config: ${errorMessage(err)}`
       );
       config = null;
     }
@@ -1241,19 +1509,6 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
  * result into the canvas resource array. Throws (surfaced to the UI) on failure
  * — there is no JS fallback.
  *
- * `saveGraphJsonTo`, when set to an absolute path, persists the raw
- * app-graph.json produced by the rad CLI to that location (e.g. the workspace's
- * `.radius/app-graph.json`, next to the app.bicep it was built from).
- *
- * `radArtifactsDir`, when set to a workspace `.radius/` directory, makes the
- * compile use that repository's applicable bicepconfig.json verbatim — its
- * pinned `extensions.radius` reference, additional extension aliases, local
- * extension artifacts (see writeBicepCompileConfig), and other Bicep settings —
- * so the canvas compiles against the repository's exact configured contract;
- * otherwise the base Radius config is used. When `cleanupRadArtifactsDir` is
- * true (e.g. a temp dir staged from a committed branch), `radArtifactsDir` is
- * removed after the compile.
- *
  * The returned array is passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
  * (containerImages and their ghcr-registry-creds secret) are never rendered in
@@ -1261,15 +1516,15 @@ export function writeBicepCompileConfig(dir, radArtifactsDir, log = noop) {
  * to the returned array; the raw app-graph.json saved above is left complete.
  */
 export async function buildGraphViaRad(
-  content,
+  content: string,
   definitionFile = ".radius/app.bicep",
   {
     log = noop,
     saveGraphJsonTo = "",
     radArtifactsDir = "",
     cleanupRadArtifactsDir = false
-  } = {}
-) {
+  }: BuildGraphViaRadOptions = {}
+): Promise<unknown[]> {
   if (!content) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
   const bicepFile = path.join(dir, "app.bicep");
@@ -1292,9 +1547,9 @@ export async function buildGraphViaRad(
       // actionable even when `log` is the default no-op (issue #173): the caller
       // otherwise only sees the raw `rad` output, not which contract was used.
       const radiusExtension = config?.extensions?.radius;
-      if (radiusExtension) {
+      if (typeof radiusExtension === "string") {
         throw new Error(
-          `${String(err?.message ?? err)}\nCompiled with radius extension: ${radiusExtension}`
+          `${errorMessage(err)}\nCompiled with radius extension: ${radiusExtension}`
         );
       }
       throw err;
