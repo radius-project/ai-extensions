@@ -5,6 +5,7 @@ import {
   azureLoginRequiredResponse,
   buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
+  buildVerifyWorkflowDispatchArgs,
   canReuseModeledGraph,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
@@ -15,6 +16,7 @@ import {
   isCurrentSourceRefToken,
   isReplicationLagError,
   invokeSessionPrompt,
+  planCredentialVerification,
   pickAksResourceGroup,
   resolveDeployStatus,
   setDeployRepairHandoff,
@@ -24,6 +26,72 @@ import {
   buildFederatedCredentialName,
   buildEnvironmentSuffix
 } from "@radius-project/core";
+
+describe("credential verification dispatch planning", () => {
+  const prState = {
+    branch: "radius/setup-dev-workflows-123",
+    base: "main"
+  };
+
+  it("skips a first-time PR setup when the workflow is absent from the default branch and retains the PR URL", async () => {
+    const pullRequestUrl = "https://github.com/octo/app/pull/42";
+
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      prState,
+      pullRequestUrl,
+      fetchFile: async () => null,
+      resolveDefaultBranch: async () => "main"
+    });
+
+    expect(plan).toEqual({
+      shouldDispatch: false,
+      ref: prState.branch,
+      defaultBranch: "main",
+      pullRequestUrl
+    });
+  });
+
+  it("dispatches from the PR branch when the workflow already exists on the default branch", async () => {
+    const fetchFile = async (repo, path, branch) => {
+      expect(repo).toBe("octo/app");
+      expect(path).toBe(".github/workflows/radius-verify-credentials.yml");
+      expect(branch).toBe("trunk");
+      return "name: Verify Radius credentials";
+    };
+
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      prState,
+      pullRequestUrl: "https://github.com/octo/app/pull/42",
+      fetchFile,
+      resolveDefaultBranch: async () => "trunk"
+    });
+
+    expect(plan.shouldDispatch).toBe(true);
+    expect(plan.ref).toBe(prState.branch);
+  });
+
+  it("adds the PR branch ref to the workflow dispatch", () => {
+    expect(
+      buildVerifyWorkflowDispatchArgs({
+        targetRepo: "octo/app",
+        envName: "dev",
+        ref: prState.branch
+      })
+    ).toEqual([
+      "workflow",
+      "run",
+      "radius-verify-credentials.yml",
+      "-f",
+      "environment=dev",
+      "--repo",
+      "octo/app",
+      "--ref",
+      prState.branch
+    ]);
+  });
+});
 
 describe("resolveDeployStatus", () => {
   it("returns success when the run concluded with success", () => {
