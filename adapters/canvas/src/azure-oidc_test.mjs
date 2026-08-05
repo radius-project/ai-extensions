@@ -230,6 +230,34 @@ describe("resolveOidcSubject", () => {
     );
   });
 
+  it("keeps the Azure OIDC subject environment-scoped when verification runs from a PR branch", async () => {
+    const branch = "radius/setup-dev-workflows-123";
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: false,
+        status: 404,
+        json: null,
+        stderr: "Not Found (HTTP 404)"
+      }
+    });
+
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
+    );
+
+    for (const credential of res.federatedCredentials) {
+      expect(credential.subject).toContain(":environment:dev");
+      expect(credential.subject).not.toContain(`:ref:refs/heads/${branch}`);
+    }
+  });
+
   it("still creates both default forms even when the API says use_immutable_subject=false", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,

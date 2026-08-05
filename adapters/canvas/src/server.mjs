@@ -758,6 +758,142 @@ export function pickAksResourceGroup(clusterResourceGroup, resourceGroup) {
   return own || resourceGroup;
 }
 
+export async function planCredentialVerification({
+  targetRepo,
+  envName,
+  prState,
+  pullRequestUrl = "",
+  verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
+  dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
+  fetchFile = fetchFileFromRepo,
+  resolveDefaultBranch = getDefaultBranch
+}) {
+  if (!prState) {
+    return {
+      shouldDispatch: true,
+      ref: "",
+      defaultBranch: "",
+      pullRequestUrl,
+      skipReason: "",
+      dispatcherEnvironment: null
+    };
+  }
+
+  const defaultBranch =
+    (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
+  const verifyWorkflow = await fetchFile(
+    targetRepo,
+    verifyWorkflowPath,
+    defaultBranch
+  );
+  if (verifyWorkflow === null || verifyWorkflow === undefined) {
+    return {
+      shouldDispatch: false,
+      ref: prState.branch,
+      defaultBranch,
+      pullRequestUrl,
+      skipReason: "verify-workflow-missing",
+      dispatcherEnvironment: null
+    };
+  }
+
+  const dispatcherWorkflow = await fetchFile(
+    targetRepo,
+    dispatcherWorkflowPath,
+    defaultBranch
+  );
+  if (dispatcherWorkflow === null || dispatcherWorkflow === undefined) {
+    return {
+      shouldDispatch: false,
+      ref: prState.branch,
+      defaultBranch,
+      pullRequestUrl,
+      skipReason: "dispatcher-workflow-missing",
+      dispatcherEnvironment: null
+    };
+  }
+
+  const dispatcherEnvironment =
+    getWorkflowDispatchEnvironmentDefault(dispatcherWorkflow);
+  const shouldDispatch = dispatcherEnvironment === envName;
+  return {
+    shouldDispatch,
+    ref: prState.branch,
+    defaultBranch,
+    pullRequestUrl,
+    skipReason: shouldDispatch ? "" : "dispatcher-environment-mismatch",
+    dispatcherEnvironment
+  };
+}
+
+const YAML_MAPPING_ENTRY =
+  /^([ \t]*)(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*:\s*(.*)$/;
+
+function findNestedYamlMappingEntry(lines, key, parent) {
+  const start = parent ? parent.index + 1 : 0;
+  const parentIndent = parent ? parent.indent : -1;
+  let childIndent = parent ? null : 0;
+  for (let index = start; index < lines.length; index++) {
+    const match = YAML_MAPPING_ENTRY.exec(lines[index]);
+    if (!match) continue;
+    const indent = match[1].length;
+    if (parent && indent <= parentIndent) return null;
+    if (childIndent === null) childIndent = indent;
+    if (indent === childIndent && (match[2] || match[3] || match[4]) === key) {
+      return { index, indent, value: match[5] };
+    }
+  }
+  return null;
+}
+
+function parseYamlStringScalar(value) {
+  const scalar = value.trim();
+  if (scalar.startsWith("'")) {
+    const match = /^'((?:[^']|'')*)'\s*(?:#.*)?$/.exec(scalar);
+    return match ? match[1].replace(/''/g, "'") : null;
+  }
+  if (scalar.startsWith('"')) {
+    const match = /^("(?:[^"\\]|\\.)*")\s*(?:#.*)?$/.exec(scalar);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[1]);
+    } catch {
+      return null;
+    }
+  }
+  return scalar.replace(/\s+#.*$/, "").trim() || null;
+}
+
+export function getWorkflowDispatchEnvironmentDefault(workflow) {
+  if (typeof workflow !== "string") return null;
+  const lines = workflow.split(/\r?\n/);
+  let entry = findNestedYamlMappingEntry(lines, "on", null);
+  for (const key of ["workflow_dispatch", "inputs", "environment", "default"]) {
+    if (!entry) return null;
+    entry = findNestedYamlMappingEntry(lines, key, entry);
+  }
+  return entry ? parseYamlStringScalar(entry.value) : null;
+}
+
+export function buildVerifyWorkflowDispatchArgs({
+  targetRepo,
+  envName,
+  ref = ""
+}) {
+  return [
+    "workflow",
+    "run",
+    "radius-verify-credentials.yml",
+    "-f",
+    "environment=" + envName,
+    "--repo",
+    targetRepo,
+    // --ref selects verify content only. workflow_run always resolves its
+    // run-rad-commands.yml dispatcher from the repository's default branch.
+    ...(ref ? ["--ref", ref] : [])
+  ];
+}
+
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -3698,9 +3834,7 @@ function createRequestHandler(instanceId) {
         }
 
         // Step 4c: If any workflow commit fell back to a PR branch, open the
-        // pull request now so the user can merge it. Until it's merged, the
-        // workflows don't exist on the default branch, so we skip dispatching
-        // the verify run (it would 404) and tell the user to merge first.
+        // pull request now so the user can merge it.
         let pullRequestUrl = "";
         if (prState) {
           const prTitle =
@@ -3730,11 +3864,6 @@ function createRequestHandler(instanceId) {
           if (pr.ok) {
             pullRequestUrl = pr.url;
             steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
-            steps.push(
-              '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
-                prState.base +
-                '".'
-            );
           } else {
             steps.push(
               '⚠️ Committed workflows to branch "' +
@@ -3748,18 +3877,80 @@ function createRequestHandler(instanceId) {
           }
         }
 
-        // Step 5: Dispatch the verify workflow. Skipped when the workflows
-        // only exist on a PR branch — the workflow file isn't on the
-        // default branch yet, so `workflow run` would 404. It runs
-        // automatically once the PR merges.
+        // Step 5: The generic verify workflow can run from the PR branch, but
+        // its workflow_run continuation always uses the default-branch deploy
+        // dispatcher. Dispatch only when that dispatcher's baked environment
+        // fallback already matches this environment.
         let verifyRunUrl = "";
         let verifyRunId = null;
         const dispatchedAt = Date.now();
-        if (prState) {
-          steps.push(
-            "Skipping credential verification until the pull request is merged."
-          );
+        const verificationPlan = await planCredentialVerification({
+          targetRepo,
+          envName,
+          prState,
+          pullRequestUrl
+        });
+        if (!verificationPlan.shouldDispatch) {
+          if (pullRequestUrl) {
+            if (
+              verificationPlan.skipReason === "dispatcher-environment-mismatch"
+            ) {
+              const currentTarget =
+                verificationPlan.dispatcherEnvironment === null ?
+                  "an unknown environment"
+                : '"' + verificationPlan.dispatcherEnvironment + '"';
+              steps.push(
+                "👉 Merge the pull request above before verification; the default deploy workflow still targets " +
+                  currentTarget +
+                  ' instead of "' +
+                  envName +
+                  '". Deploy workflow updates also require the merge.'
+              );
+            } else {
+              steps.push(
+                '👉 Merge the pull request above to enable credential verification and deploy workflow updates on "' +
+                  verificationPlan.defaultBranch +
+                  '".'
+              );
+            }
+          }
+          if (
+            verificationPlan.skipReason === "dispatcher-environment-mismatch"
+          ) {
+            const currentTarget =
+              verificationPlan.dispatcherEnvironment === null ?
+                "an unknown environment"
+              : '"' + verificationPlan.dispatcherEnvironment + '"';
+            steps.push(
+              "⏭️ Skipping credential verification because the default deploy workflow still targets " +
+                currentTarget +
+                ' instead of "' +
+                envName +
+                '".'
+            );
+          } else if (
+            verificationPlan.skipReason === "dispatcher-workflow-missing"
+          ) {
+            steps.push(
+              '⏭️ Skipping credential verification because the default deploy workflow is not available on "' +
+                verificationPlan.defaultBranch +
+                '".'
+            );
+          } else {
+            steps.push(
+              '⏭️ Skipping credential verification because the verify workflow is not available on "' +
+                verificationPlan.defaultBranch +
+                '".'
+            );
+          }
         } else {
+          if (pullRequestUrl) {
+            steps.push(
+              '👉 Credential verification is running now from "' +
+                verificationPlan.ref +
+                '"; deploy workflow updates still require merging the pull request above.'
+            );
+          }
           steps.push("Dispatching verify-credentials workflow...");
           // Wait briefly for GitHub to index the workflow, then dispatch with
           // a few retries to ride out indexing/propagation races.
@@ -3768,15 +3959,13 @@ function createRequestHandler(instanceId) {
           let dispatchResult = { code: 1, stdout: "", stderr: "" };
           for (const delay of dispatchDelays) {
             if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-            dispatchResult = await runGhWorkflow([
-              "workflow",
-              "run",
-              "radius-verify-credentials.yml",
-              "-f",
-              "environment=" + envName,
-              "--repo",
-              targetRepo
-            ]);
+            dispatchResult = await runGhWorkflow(
+              buildVerifyWorkflowDispatchArgs({
+                targetRepo,
+                envName,
+                ref: verificationPlan.ref
+              })
+            );
             if (dispatchResult.code === 0) break;
           }
 
@@ -3827,6 +4016,7 @@ function createRequestHandler(instanceId) {
                 stateBackend: OCI_STATE_BACKEND,
                 stateRegistry,
                 stateArchive: DEFAULT_STATE_ARCHIVE,
+                pullRequestUrl: verificationPlan.pullRequestUrl,
                 steps
               })
             );
@@ -3857,7 +4047,7 @@ function createRequestHandler(instanceId) {
             stateRegistry,
             stateArchive: DEFAULT_STATE_ARCHIVE,
             verifyRunUrl,
-            pullRequestUrl,
+            pullRequestUrl: verificationPlan.pullRequestUrl,
             steps
           })
         );

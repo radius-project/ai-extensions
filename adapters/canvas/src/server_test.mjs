@@ -5,16 +5,19 @@ import {
   azureLoginRequiredResponse,
   buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
+  buildVerifyWorkflowDispatchArgs,
   canReuseModeledGraph,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
   findFederatedCredentialNameCollision,
   graphDefinitionHash,
+  getWorkflowDispatchEnvironmentDefault,
   isCrossSiteMutation,
   isCliCommandMissing,
   isCurrentSourceRefToken,
   isReplicationLagError,
   invokeSessionPrompt,
+  planCredentialVerification,
   pickAksResourceGroup,
   resolveDeployStatus,
   setDeployRepairHandoff,
@@ -24,6 +27,162 @@ import {
   buildFederatedCredentialName,
   buildEnvironmentSuffix
 } from "@radius-project/core";
+
+describe("credential verification dispatch planning", () => {
+  const prState = {
+    branch: "radius/setup-dev-workflows-123",
+    base: "main"
+  };
+  const verifyPath = ".github/workflows/radius-verify-credentials.yml";
+  const dispatcherPath = ".github/workflows/run-rad-commands.yml";
+  const dispatcherWorkflow = (environment) =>
+    [
+      "name: Run Radius commands",
+      "on:",
+      "  workflow_dispatch:",
+      "    inputs:",
+      "      environment:",
+      "        description: Radius environment",
+      `        default: '${environment}'`,
+      "jobs:",
+      "  unrelated:",
+      "    env:",
+      "      default: wrong"
+    ].join("\n");
+
+  it("dispatches normally when no pull-request fallback was needed", async () => {
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      envName: "dev",
+      prState: null,
+      fetchFile: async () => {
+        throw new Error("default-branch workflows should not be fetched");
+      }
+    });
+
+    expect(plan.shouldDispatch).toBe(true);
+    expect(plan.ref).toBe("");
+  });
+
+  it("skips a first-time PR setup when the workflow is absent from the default branch and retains the PR URL", async () => {
+    const pullRequestUrl = "https://github.com/octo/app/pull/42";
+
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      envName: "dev",
+      prState,
+      pullRequestUrl,
+      fetchFile: async () => null,
+      resolveDefaultBranch: async () => "main"
+    });
+
+    expect(plan).toEqual({
+      shouldDispatch: false,
+      ref: prState.branch,
+      defaultBranch: "main",
+      pullRequestUrl,
+      skipReason: "verify-workflow-missing",
+      dispatcherEnvironment: null
+    });
+  });
+
+  it("dispatches from the PR branch when both default-branch workflows target the environment", async () => {
+    const fetchFile = async (repo, path, branch) => {
+      expect(repo).toBe("octo/app");
+      expect(branch).toBe("trunk");
+      if (path === verifyPath) return "name: Verify Radius credentials";
+      if (path === dispatcherPath) return dispatcherWorkflow("dev[prod]");
+      throw new Error("unexpected workflow path: " + path);
+    };
+
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      envName: "dev[prod]",
+      prState,
+      pullRequestUrl: "https://github.com/octo/app/pull/42",
+      fetchFile,
+      resolveDefaultBranch: async () => "trunk"
+    });
+
+    expect(plan.shouldDispatch).toBe(true);
+    expect(plan.ref).toBe(prState.branch);
+    expect(plan.dispatcherEnvironment).toBe("dev[prod]");
+  });
+
+  it("skips when the default-branch dispatcher is absent", async () => {
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      envName: "dev",
+      prState,
+      pullRequestUrl: "https://github.com/octo/app/pull/42",
+      fetchFile: async (_repo, path) =>
+        path === verifyPath ? "name: Verify Radius credentials" : null,
+      resolveDefaultBranch: async () => "main"
+    });
+
+    expect(plan.shouldDispatch).toBe(false);
+    expect(plan.skipReason).toBe("dispatcher-workflow-missing");
+  });
+
+  it("skips when the default-branch dispatcher targets another environment", async () => {
+    const plan = await planCredentialVerification({
+      targetRepo: "octo/app",
+      envName: "dev[prod]",
+      prState,
+      pullRequestUrl: "https://github.com/octo/app/pull/42",
+      fetchFile: async (_repo, path) =>
+        path === verifyPath ?
+          "name: Verify Radius credentials"
+        : dispatcherWorkflow("staging.*"),
+      resolveDefaultBranch: async () => "main"
+    });
+
+    expect(plan.shouldDispatch).toBe(false);
+    expect(plan.skipReason).toBe("dispatcher-environment-mismatch");
+    expect(plan.dispatcherEnvironment).toBe("staging.*");
+  });
+
+  it("reads only the workflow_dispatch environment default", () => {
+    expect(
+      getWorkflowDispatchEnvironmentDefault(
+        [
+          "default: misleading",
+          "'on':",
+          "  workflow_dispatch:",
+          "    inputs:",
+          "      environment:",
+          "        metadata:",
+          "          default: nested-misleading",
+          '        default: "dev[prod]" # exact string comparison',
+          "jobs:",
+          "  deploy:",
+          "    env:",
+          "      default: also-misleading"
+        ].join("\n")
+      )
+    ).toBe("dev[prod]");
+  });
+
+  it("adds the PR branch ref to the workflow dispatch", () => {
+    expect(
+      buildVerifyWorkflowDispatchArgs({
+        targetRepo: "octo/app",
+        envName: "dev",
+        ref: prState.branch
+      })
+    ).toEqual([
+      "workflow",
+      "run",
+      "radius-verify-credentials.yml",
+      "-f",
+      "environment=dev",
+      "--repo",
+      "octo/app",
+      "--ref",
+      prState.branch
+    ]);
+  });
+});
 
 describe("resolveDeployStatus", () => {
   it("returns success when the run concluded with success", () => {
