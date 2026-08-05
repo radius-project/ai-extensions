@@ -25,7 +25,7 @@ import {
   RADIUS_WORKFLOW_DIR,
   RADIUS_REF,
   DEPLOY_AZURE_FILE,
-  DEPLOY_DISPATCHER_FILE,
+  DEPLOY_DISPATCHER_FILE
 } from "./deploy.js";
 import { VERIFY_AZURE_FILE } from "./verify.js";
 
@@ -59,38 +59,40 @@ function jobBlockContaining(src: string, marker: string): string {
 const jobLevelEnvironment = /^ {4}environment:/m; // job key
 const forwardedEnvironment = /^ {6}environment:/m; // under the caller job's `with:`
 
-describe.skipIf(!LIVE)("live workflow OIDC-environment contract (opt-in: set RUN_LIVE_WORKFLOW_TESTS)", () => {
-  // The job that runs azure/login must bind a GitHub Environment, or the OIDC
-  // token drops the `environment` claim and the environment-scoped FIC fails.
-  it.each([DEPLOY_AZURE_FILE, VERIFY_AZURE_FILE])(
-    "%s binds its azure/login job to a GitHub Environment",
-    async (file) => {
-      const body = await fetchWorkflow(file);
-      const job = jobBlockContaining(body, "azure/login");
-      expect(job, `${file}: no job runs azure/login`).not.toBe("");
-      expect(
-        jobLevelEnvironment.test(job),
-        `${file}: the azure/login job has no job-level environment: binding`,
-      ).toBe(true);
-    },
-    30_000,
-  );
+describe.skipIf(!LIVE)(
+  "live workflow OIDC-environment contract (opt-in: set RUN_LIVE_WORKFLOW_TESTS)",
+  () => {
+    // The job that runs azure/login must bind a GitHub Environment, or the OIDC
+    // token drops the `environment` claim and the environment-scoped FIC fails.
+    it.each([DEPLOY_AZURE_FILE, VERIFY_AZURE_FILE])(
+      "%s binds its azure/login job to a GitHub Environment",
+      async (file) => {
+        const body = await fetchWorkflow(file);
+        const job = jobBlockContaining(body, "azure/login");
+        expect(job, `${file}: no job runs azure/login`).not.toBe("");
+        expect(
+          jobLevelEnvironment.test(job),
+          `${file}: the azure/login job has no job-level environment: binding`
+        ).toBe(true);
+      },
+      30_000
+    );
 
-  // The dispatcher's azure job calls the reusable provider workflow. A `uses:`
-  // job cannot bind an environment itself, so it must forward `environment:` in
-  // its `with:` — otherwise inputs.environment is empty downstream and the
-  // provider's `environment: ${{ inputs.environment }}` binds to nothing.
-  it(
-    `${DEPLOY_DISPATCHER_FILE} forwards environment: to the azure provider job`,
-    async () => {
+    // The dispatcher's azure job calls the reusable provider workflow. A `uses:`
+    // job cannot bind an environment itself, so it must forward `environment:` in
+    // its `with:` — otherwise inputs.environment is empty downstream and the
+    // provider's `environment: ${{ inputs.environment }}` binds to nothing.
+    it(`${DEPLOY_DISPATCHER_FILE} forwards environment: to the azure provider job`, async () => {
       const body = await fetchWorkflow(DEPLOY_DISPATCHER_FILE);
       const job = jobBlockContaining(body, `workflows/${DEPLOY_AZURE_FILE}`);
-      expect(job, `${DEPLOY_DISPATCHER_FILE}: no job calls ${DEPLOY_AZURE_FILE}`).not.toBe("");
+      expect(
+        job,
+        `${DEPLOY_DISPATCHER_FILE}: no job calls ${DEPLOY_AZURE_FILE}`
+      ).not.toBe("");
       expect(
         forwardedEnvironment.test(job),
-        `${DEPLOY_DISPATCHER_FILE}: azure job does not forward environment: to the provider workflow`,
+        `${DEPLOY_DISPATCHER_FILE}: azure job does not forward environment: to the provider workflow`
       ).toBe(true);
-    },
-    30_000,
-  );
-});
+    }, 30_000);
+  }
+);

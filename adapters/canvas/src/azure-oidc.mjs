@@ -12,7 +12,7 @@
 
 import {
   buildOidcSubject,
-  buildFederatedCredentialName,
+  buildFederatedCredentialName
 } from "@radius-project/core";
 
 // owner/repo using GitHub's real charset — an owner is 1-39 chars starting
@@ -27,7 +27,8 @@ export const UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 // AKS cluster name: <=63 chars, alphanumeric bookends, internal `-` and `_`.
 // Leading char is alphanumeric so it can never be mistaken for a CLI flag.
-export const AKS_CLUSTER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,61}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
+export const AKS_CLUSTER_NAME_RE =
+  /^[A-Za-z0-9][A-Za-z0-9_-]{0,61}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
 // Resource group name: <=90 chars from Azure's allowed set, but NOT ending in a
 // dot (Azure rejects a trailing period). Leading char restricted to alphanumeric.
 export const RESOURCE_GROUP_NAME_RE =
@@ -62,12 +63,20 @@ export function oidcError(code, message) {
 }
 
 /** Build the argv for `az ad app create`, adding SMR only when supplied. */
-export function buildAppCreateArgs({ appName, serviceManagementReference } = {}) {
+export function buildAppCreateArgs({
+  appName,
+  serviceManagementReference
+} = {}) {
   const args = [
-    "ad", "app", "create",
-    "--display-name", appName,
-    "--query", "appId",
-    "-o", "tsv",
+    "ad",
+    "app",
+    "create",
+    "--display-name",
+    appName,
+    "--query",
+    "appId",
+    "-o",
+    "tsv"
   ];
   if (serviceManagementReference) {
     // Enterprise Entra tenants enforce a policy requiring every new App
@@ -100,10 +109,15 @@ export function decideAppSelection({
   hasUnownedMatch = false,
   existingClientId,
   explicitAppId,
-  createNew = false,
+  createNew = false
 } = {}) {
-  const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter((m) => m && m.appId);
-  const norm = (v) => String(v || "").trim().toLowerCase();
+  const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter(
+    (m) => m && m.appId
+  );
+  const norm = (v) =>
+    String(v || "")
+      .trim()
+      .toLowerCase();
 
   // An explicit picker choice wins — but only if the caller owns it. An
   // explicitAppId not among the owned candidates is unsafe (we can't verify
@@ -116,7 +130,7 @@ export function decideAppSelection({
       code: "app-registration-not-owned",
       reason:
         "The selected App Registration is not owned by the signed-in user (or no longer exists). " +
-        "Choose an owned application or create a new one.",
+        "Choose an owned application or create a new one."
     };
   }
 
@@ -131,7 +145,7 @@ export function decideAppSelection({
         reason:
           "An App Registration with this name already exists but is owned by another user. " +
           "Reusing it would fail (federated-credential and role writes require ownership). " +
-          "Coordinate with the owner or rename, then retry.",
+          "Coordinate with the owner or rename, then retry."
       };
     }
     return { action: "create" };
@@ -145,14 +159,18 @@ export function decideAppSelection({
   // picker should preselect, but defer to the user.
   let defaultAppId;
   if (existingClientId) {
-    const preferred = owned.find((m) => norm(m.appId) === norm(existingClientId));
+    const preferred = owned.find(
+      (m) => norm(m.appId) === norm(existingClientId)
+    );
     if (preferred) defaultAppId = preferred.appId;
   }
   if (!defaultAppId) {
     const oldest = [...owned].sort((a, b) => {
       const ta = Date.parse(a.createdDateTime || "");
       const tb = Date.parse(b.createdDateTime || "");
-      return (Number.isNaN(ta) ? Infinity : ta) - (Number.isNaN(tb) ? Infinity : tb);
+      return (
+        (Number.isNaN(ta) ? Infinity : ta) - (Number.isNaN(tb) ? Infinity : tb)
+      );
     })[0];
     defaultAppId = oldest.appId;
   }
@@ -161,10 +179,10 @@ export function decideAppSelection({
     candidates: owned.map((m) => ({
       appId: m.appId,
       displayName: m.displayName,
-      createdDateTime: m.createdDateTime,
+      createdDateTime: m.createdDateTime
     })),
     defaultAppId,
-    reason: "Multiple owned App Registrations match this repository's name.",
+    reason: "Multiple owned App Registrations match this repository's name."
   };
 }
 
@@ -218,7 +236,13 @@ export function parseServedReposFromSubjects(subjects) {
 export function formatServesReposLabel(list) {
   if (!Array.isArray(list) || list.length === 0) return "";
   if (list.length <= 3) return "Serves: " + list.join(", ");
-  return "Serves: " + list.slice(0, 3).join(", ") + " +" + (list.length - 3) + " more";
+  return (
+    "Serves: " +
+    list.slice(0, 3).join(", ") +
+    " +" +
+    (list.length - 3) +
+    " more"
+  );
 }
 
 // Entra display names allow a broad set; we restrict to a safe, human-typable
@@ -232,14 +256,27 @@ const APP_NAME_ALLOWED_RE = /^[A-Za-z0-9 ._()-]+$/;
  * @returns {{ok:true, name:string} | {ok:false, reason:string}}
  */
 export function validateAppRegistrationName(name) {
-  if (typeof name !== "string") return { ok: false, reason: "Application name must be a string." };
+  if (typeof name !== "string")
+    return { ok: false, reason: "Application name must be a string." };
   const trimmed = name.trim();
-  if (trimmed.length === 0) return { ok: false, reason: "Application name must not be empty." };
-  if (trimmed.length > 120) return { ok: false, reason: "Application name must be at most 120 characters." };
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return { ok: false, reason: "Application name must not contain control characters." };
+  if (trimmed.length === 0)
+    return { ok: false, reason: "Application name must not be empty." };
+  if (trimmed.length > 120)
+    return {
+      ok: false,
+      reason: "Application name must be at most 120 characters."
+    };
+  if (/[\u0000-\u001f\u007f]/.test(trimmed))
+    return {
+      ok: false,
+      reason: "Application name must not contain control characters."
+    };
   if (!APP_NAME_ALLOWED_RE.test(trimmed)) {
-    return { ok: false, reason: "Application name may only contain letters, digits, spaces, and - . _ ( )." };
+    return {
+      ok: false,
+      reason:
+        "Application name may only contain letters, digits, spaces, and - . _ ( )."
+    };
   }
   return { ok: true, name: trimmed };
 }
@@ -254,13 +291,18 @@ export function validateAppRegistrationName(name) {
  * @param {Iterable<string>} existingSubjects
  * @returns {{name:string,subject:string}[]}
  */
-export function selectMissingFederatedCredentials(desired = [], existingSubjects = []) {
+export function selectMissingFederatedCredentials(
+  desired = [],
+  existingSubjects = []
+) {
   const have = new Set(
     Array.from(existingSubjects || [])
       .filter((s) => typeof s === "string")
-      .map((s) => s.trim()),
+      .map((s) => s.trim())
   );
-  return (Array.isArray(desired) ? desired : []).filter((f) => f && !have.has(String(f.subject).trim()));
+  return (Array.isArray(desired) ? desired : []).filter(
+    (f) => f && !have.has(String(f.subject).trim())
+  );
 }
 
 /**
@@ -279,7 +321,8 @@ export function selectMissingFederatedCredentials(desired = [], existingSubjects
 export function discoverStatusText(data = {}, provider = "azure") {
   const errs = data.errors || {};
   if (provider === "aws") {
-    const errMsg = data.error || errs.vpcs || errs.clusters || errs.subnets || "";
+    const errMsg =
+      data.error || errs.vpcs || errs.clusters || errs.subnets || "";
     if (errMsg) return "Discovery failed: " + errMsg;
     return `Found ${(data.clusters || []).length} cluster(s), ${(data.vpcs || []).length} VPC(s)`;
   }
@@ -325,17 +368,23 @@ export function isAzResourceNotFound(stderr) {
  *   - fatal `client-id-lookup-failed`: a real lookup failure (not a not-found).
  *   - fallthrough: no clientId, or a not-found (stale var) — use the name lookup.
  */
-export function decideExistingClientId({ clientId, showStatus, owned = false } = {}) {
+export function decideExistingClientId({
+  clientId,
+  showStatus,
+  owned = false
+} = {}) {
   if (!clientId || !String(clientId).trim()) return { action: "fallthrough" };
   if (showStatus === "not-found") return { action: "fallthrough" };
-  if (showStatus === "lookup-failed") return { action: "fatal", code: "client-id-lookup-failed" };
+  if (showStatus === "lookup-failed")
+    return { action: "fatal", code: "client-id-lookup-failed" };
   if (showStatus === "found") {
-    return owned ? { action: "reuse" } : { action: "error", code: "client-id-not-owned" };
+    return owned ?
+        { action: "reuse" }
+      : { action: "error", code: "client-id-not-owned" };
   }
   // Unknown status — be conservative and treat as a lookup failure.
   return { action: "fatal", code: "client-id-lookup-failed" };
 }
-
 
 // Reference. These substrings are the real error identifiers and are matched
 // case-insensitively against `az` stderr so we can turn an opaque failure into
@@ -343,7 +392,7 @@ export function decideExistingClientId({ clientId, showStatus, owned = false } =
 export const SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS = [
   "servicemanagementreference",
   "servicetreenullvalueprovided",
-  "servicetreeinvalid",
+  "servicetreeinvalid"
 ];
 
 export function isServiceManagementReferenceError(stderr) {
@@ -367,13 +416,14 @@ function statusText(res) {
 export async function fetchGitHubJson(
   runner,
   apiPath,
-  { retries = 3, baseDelayMs = 300, sleepFn = defaultSleep } = {},
+  { retries = 3, baseDelayMs = 300, sleepFn = defaultSleep } = {}
 ) {
   let last;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     last = await runner(apiPath);
     const status = last?.status;
-    const retriable = status === 429 || (status != null && status >= 500) || status == null;
+    const retriable =
+      status === 429 || (status != null && status >= 500) || status == null;
     if (last?.ok || !retriable || attempt === retries) return last;
     await sleepFn(baseDelayMs * attempt);
   }
@@ -408,12 +458,12 @@ export async function fetchGitHubJson(
 export async function resolveOidcSubject(
   { targetRepo, envName, suffix },
   runner,
-  opts = {},
+  opts = {}
 ) {
   if (!isValidRepoSlug(targetRepo)) {
     throw oidcError(
       "invalid-repo",
-      `Invalid repository "${targetRepo}". Expected "owner/repo".`,
+      `Invalid repository "${targetRepo}". Expected "owner/repo".`
     );
   }
 
@@ -423,7 +473,7 @@ export async function resolveOidcSubject(
     throw oidcError(
       "repo-access",
       `Could not read repository "${targetRepo}" from GitHub (${statusText(repoRes)}). ` +
-        `Verify the repository exists and that you have access, then retry.`,
+        `Verify the repository exists and that you have access, then retry.`
     );
   }
   const repo = repoRes.json || {};
@@ -432,12 +482,14 @@ export async function resolveOidcSubject(
   const repoId = repo.id;
   if (
     !fullName ||
-    !Number.isFinite(Number(ownerId)) || Number(ownerId) <= 0 ||
-    !Number.isFinite(Number(repoId)) || Number(repoId) <= 0
+    !Number.isFinite(Number(ownerId)) ||
+    Number(ownerId) <= 0 ||
+    !Number.isFinite(Number(repoId)) ||
+    Number(repoId) <= 0
   ) {
     throw oidcError(
       "repo-metadata",
-      `GitHub did not return a valid full_name/id/owner.id for "${targetRepo}"; cannot build a reliable OIDC subject.`,
+      `GitHub did not return a valid full_name/id/owner.id for "${targetRepo}"; cannot build a reliable OIDC subject.`
     );
   }
 
@@ -451,7 +503,7 @@ export async function resolveOidcSubject(
   const custRes = await fetchGitHubJson(
     runner,
     `/repos/${fullName}/actions/oidc/customization/sub`,
-    opts,
+    opts
   );
   let subjectConfig;
   if (custRes?.ok) {
@@ -460,12 +512,13 @@ export async function resolveOidcSubject(
       throw oidcError(
         "customization-malformed",
         `GitHub's OIDC customization response for "${fullName}" is missing an ` +
-          `explicit boolean use_default; refusing to guess the subject.`,
+          `explicit boolean use_default; refusing to guess the subject.`
       );
     }
     subjectConfig = {
       useDefault: c.use_default,
-      includeClaimKeys: Array.isArray(c.include_claim_keys) ? c.include_claim_keys : [],
+      includeClaimKeys:
+        Array.isArray(c.include_claim_keys) ? c.include_claim_keys : []
     };
     if (typeof c.use_immutable_subject === "boolean") {
       subjectConfig.useImmutableSubject = c.use_immutable_subject;
@@ -484,7 +537,7 @@ export async function resolveOidcSubject(
     throw oidcError(
       "customization-access",
       `Could not read OIDC subject customization for "${fullName}" (${statusText(custRes)}). ` +
-        `Refusing to guess the subject; resolve GitHub access and retry.`,
+        `Refusing to guess the subject; resolve GitHub access and retry.`
     );
   }
 
@@ -495,15 +548,30 @@ export async function resolveOidcSubject(
     // Emit BOTH default forms so whichever GitHub actually mints matches. This
     // removes the fail-closed dead-end and any user mutable/immutable choice.
     federatedCredentials.push({
-      name: buildFederatedCredentialName({ repoFullName: fullName, envName, variant: "mutable" }),
-      subject: buildOidcSubject({ ...commonInput, subjectConfig: { useDefault: true, useImmutableSubject: false } }),
-    });
-    federatedCredentials.push({
-      name: buildFederatedCredentialName({ repoFullName: fullName, envName, variant: "immutable" }),
+      name: buildFederatedCredentialName({
+        repoFullName: fullName,
+        envName,
+        variant: "mutable"
+      }),
       subject: buildOidcSubject({
         ...commonInput,
-        subjectConfig: { useDefault: true, useImmutableSubject: true, subClaimPrefix: subjectConfig.subClaimPrefix },
+        subjectConfig: { useDefault: true, useImmutableSubject: false }
+      })
+    });
+    federatedCredentials.push({
+      name: buildFederatedCredentialName({
+        repoFullName: fullName,
+        envName,
+        variant: "immutable"
       }),
+      subject: buildOidcSubject({
+        ...commonInput,
+        subjectConfig: {
+          useDefault: true,
+          useImmutableSubject: true,
+          subClaimPrefix: subjectConfig.subClaimPrefix
+        }
+      })
     });
   } else {
     // Customized subject: one exact credential. buildOidcSubject throws if a
@@ -511,7 +579,7 @@ export async function resolveOidcSubject(
     // is the one place a clear failure is acceptable.
     federatedCredentials.push({
       name: buildFederatedCredentialName({ repoFullName: fullName, envName }),
-      subject: buildOidcSubject({ ...commonInput, subjectConfig }),
+      subject: buildOidcSubject({ ...commonInput, subjectConfig })
     });
   }
 

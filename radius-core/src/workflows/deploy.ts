@@ -41,28 +41,30 @@ export type DeployWorkflowFiles = Record<string, string>;
 export function generateDeployWorkflow(
   env: string,
   appFile: string,
-  templates: DeployWorkflowFiles,
+  templates: DeployWorkflowFiles
 ): DeployWorkflowFiles {
   const pick = (file: string): string => {
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing deploy template "${file}". Templates must be fetched from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`,
+        `Missing deploy template "${file}". Templates must be fetched from ${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}".`
       );
     }
     return body;
   };
   return {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), { ENV: env }),
+    [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), {
+      ENV: env
+    }),
     [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), {
       ENV: env,
       APP_FILE: appFile,
-      RADIUS_REF,
+      RADIUS_REF
     }),
     [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), {
       ENV: env,
       APP_FILE: appFile,
-      RADIUS_REF,
-    }),
+      RADIUS_REF
+    })
   };
 }

@@ -9,7 +9,7 @@
 
 export const MODELED_GRAPH_DEFAULTS = {
   plane: "local",
-  resourceGroup: "default",
+  resourceGroup: "default"
 };
 
 export function stripAPIVersion(t: string): string {

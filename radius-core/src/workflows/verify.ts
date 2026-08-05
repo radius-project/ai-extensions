@@ -9,11 +9,13 @@ export const VERIFY_AWS_FILE = "verify-aws.yml";
 
 const VERIFY_FILE_BY_PLATFORM: Record<string, string> = {
   azure: VERIFY_AZURE_FILE,
-  aws: VERIFY_AWS_FILE,
+  aws: VERIFY_AWS_FILE
 };
 
 /** Upstream `.github/extension` file name for a platform's verify template. */
-export function verifyTemplateFile(platform: ComputePlatform): string | undefined {
+export function verifyTemplateFile(
+  platform: ComputePlatform
+): string | undefined {
   return VERIFY_FILE_BY_PLATFORM[platform.id];
 }
 
@@ -26,14 +28,14 @@ export function verifyTemplateFile(platform: ComputePlatform): string | undefine
 export function generateVerifyWorkflow(
   env: string,
   platform: ComputePlatform,
-  template: string,
+  template: string
 ): string {
   if (!template || !template.trim()) {
     throw new Error(
-      `Missing verify template for platform "${platform.id}". It must be fetched from radius-project/radius/.github/extension.`,
+      `Missing verify template for platform "${platform.id}". It must be fetched from radius-project/radius/.github/extension.`
     );
   }
   return fillTemplate(template, {
-    ENV: env,
+    ENV: env
   });
 }

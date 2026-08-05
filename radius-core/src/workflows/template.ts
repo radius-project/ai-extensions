@@ -10,9 +10,9 @@
  */
 export function fillTemplate(
   template: string,
-  vars: Record<string, string>,
+  vars: Record<string, string>
 ): string {
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (match, key: string) =>
-    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match,
+    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match
   );
 }

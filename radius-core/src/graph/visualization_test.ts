@@ -4,11 +4,20 @@ import { buildResourceID } from "./model.js";
 
 const containerId = buildResourceID("Radius.Compute/containers", "api");
 const imageId = buildResourceID("Radius.Compute/containerImages", "apiImage");
-const secretId = buildResourceID("Radius.Security/secrets", "radius-ghcr-registry-creds");
+const secretId = buildResourceID(
+  "Radius.Security/secrets",
+  "radius-ghcr-registry-creds"
+);
 const dbId = buildResourceID("Radius.Data/postgreSQLDatabases", "db");
 
 function makeResource(type: string, name: string, extra: any = {}) {
-  return { id: buildResourceID(type, name), name, type, connections: [], ...extra };
+  return {
+    id: buildResourceID(type, name),
+    name,
+    type,
+    connections: [],
+    ...extra
+  };
 }
 
 describe("filterGraphVisualizationResources", () => {
@@ -20,7 +29,7 @@ describe("filterGraphVisualizationResources", () => {
   it("returns the same array reference when there is nothing to remove", () => {
     const resources = [
       makeResource("Radius.Compute/containers", "api"),
-      makeResource("Radius.Data/postgreSQLDatabases", "db"),
+      makeResource("Radius.Data/postgreSQLDatabases", "db")
     ];
     expect(filterGraphVisualizationResources(resources)).toBe(resources);
   });
@@ -28,7 +37,7 @@ describe("filterGraphVisualizationResources", () => {
   it("removes Radius.Compute/containerImages resources (#145)", () => {
     const resources = [
       makeResource("Radius.Compute/containers", "api"),
-      makeResource("Radius.Compute/containerImages", "apiImage"),
+      makeResource("Radius.Compute/containerImages", "apiImage")
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.type)).toEqual(["Radius.Compute/containers"]);
@@ -41,8 +50,8 @@ describe("filterGraphVisualizationResources", () => {
         id: imageId,
         name: "apiImage",
         type: "Radius.Compute/containerImages@2025-08-01-preview",
-        connections: [],
-      },
+        connections: []
+      }
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result).toHaveLength(1);
@@ -54,8 +63,8 @@ describe("filterGraphVisualizationResources", () => {
       makeResource("Radius.Compute/containers", "api"),
       makeResource("Radius.Compute/containerImages", "apiImage"),
       makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds", {
-        connections: [{ id: imageId, direction: "Inbound" }],
-      }),
+        connections: [{ id: imageId, direction: "Inbound" }]
+      })
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.type)).toEqual(["Radius.Compute/containers"]);
@@ -65,8 +74,8 @@ describe("filterGraphVisualizationResources", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
       makeResource("Radius.Security/secrets", "ghcr-registry-creds", {
-        connections: [{ id: imageId, direction: "Inbound" }],
-      }),
+        connections: [{ id: imageId, direction: "Inbound" }]
+      })
     ];
     expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
   });
@@ -74,7 +83,7 @@ describe("filterGraphVisualizationResources", () => {
   it("keeps a ghcr-registry-creds secret when it is not associated with a containerImage", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds"),
+      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds")
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name)).toEqual(["radius-ghcr-registry-creds"]);
@@ -83,7 +92,7 @@ describe("filterGraphVisualizationResources", () => {
   it("keeps unrelated secrets even when a containerImage is present", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "app-db-credentials"),
+      makeResource("Radius.Security/secrets", "app-db-credentials")
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name)).toEqual(["app-db-credentials"]);
@@ -94,18 +103,24 @@ describe("filterGraphVisualizationResources", () => {
     // not be hidden just because its name contains the substring.
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "my-ghcr-registry-creds-backup"),
+      makeResource("Radius.Security/secrets", "my-ghcr-registry-creds-backup")
     ];
     const result = filterGraphVisualizationResources(resources);
-    expect(result.map((r) => r.name)).toEqual(["my-ghcr-registry-creds-backup"]);
+    expect(result.map((r) => r.name)).toEqual([
+      "my-ghcr-registry-creds-backup"
+    ]);
   });
 
   it("removes the registry-creds secret when its name carries a namespace prefix", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage"),
-      makeResource("Radius.Security/secrets", "myapp/radius-ghcr-registry-creds", {
-        connections: [{ id: imageId, direction: "Inbound" }],
-      }),
+      makeResource(
+        "Radius.Security/secrets",
+        "myapp/radius-ghcr-registry-creds",
+        {
+          connections: [{ id: imageId, direction: "Inbound" }]
+        }
+      )
     ];
     expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
   });
@@ -113,9 +128,9 @@ describe("filterGraphVisualizationResources", () => {
   it("detects association when only the containerImage points to the secret", () => {
     const resources = [
       makeResource("Radius.Compute/containerImages", "apiImage", {
-        connections: [{ id: secretId, direction: "Outbound" }],
+        connections: [{ id: secretId, direction: "Outbound" }]
       }),
-      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds"),
+      makeResource("Radius.Security/secrets", "radius-ghcr-registry-creds")
     ];
     expect(filterGraphVisualizationResources(resources)).toHaveLength(0);
   });
@@ -128,22 +143,27 @@ describe("filterGraphVisualizationResources", () => {
         type: "Radius.Compute/containers",
         connections: [
           { id: imageId, direction: "Outbound" },
-          { id: dbId, direction: "Outbound" },
-        ],
+          { id: dbId, direction: "Outbound" }
+        ]
       },
       {
         id: imageId,
         name: "apiImage",
         type: "Radius.Compute/containerImages",
-        connections: [{ id: secretId, direction: "Outbound" }],
+        connections: [{ id: secretId, direction: "Outbound" }]
       },
       {
         id: secretId,
         name: "radius-ghcr-registry-creds",
         type: "Radius.Security/secrets",
-        connections: [{ id: imageId, direction: "Inbound" }],
+        connections: [{ id: imageId, direction: "Inbound" }]
       },
-      { id: dbId, name: "db", type: "Radius.Data/postgreSQLDatabases", connections: [] },
+      {
+        id: dbId,
+        name: "db",
+        type: "Radius.Data/postgreSQLDatabases",
+        connections: []
+      }
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name).sort()).toEqual(["api", "db"]);
@@ -156,11 +176,11 @@ describe("filterGraphVisualizationResources", () => {
       id: containerId,
       name: "api",
       type: "Radius.Compute/containers",
-      connections: [{ id: imageId, direction: "Outbound" }],
+      connections: [{ id: imageId, direction: "Outbound" }]
     };
     const resources = [
       api,
-      makeResource("Radius.Compute/containerImages", "apiImage"),
+      makeResource("Radius.Compute/containerImages", "apiImage")
     ];
     filterGraphVisualizationResources(resources);
     expect(api.connections).toEqual([{ id: imageId, direction: "Outbound" }]);
@@ -168,8 +188,12 @@ describe("filterGraphVisualizationResources", () => {
 
   it("preserves diffStatus on diff resources it keeps", () => {
     const resources = [
-      makeResource("Radius.Compute/containers", "api", { diffStatus: "modified" }),
-      makeResource("Radius.Compute/containerImages", "apiImage", { diffStatus: "added" }),
+      makeResource("Radius.Compute/containers", "api", {
+        diffStatus: "modified"
+      }),
+      makeResource("Radius.Compute/containerImages", "apiImage", {
+        diffStatus: "added"
+      })
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result).toHaveLength(1);
@@ -186,16 +210,20 @@ describe("filterGraphVisualizationResources", () => {
         type: "Radius.Compute/containers",
         connections: [
           { name: "apiImage", direction: "Outbound" },
-          { name: "db", direction: "Outbound" },
-        ],
+          { name: "db", direction: "Outbound" }
+        ]
       },
-      { name: "apiImage", type: "Radius.Compute/containerImages", connections: [] },
+      {
+        name: "apiImage",
+        type: "Radius.Compute/containerImages",
+        connections: []
+      },
       {
         name: "radius-ghcr-registry-creds",
         type: "Radius.Security/secrets",
-        connections: [{ name: "apiImage", direction: "Inbound" }],
+        connections: [{ name: "apiImage", direction: "Inbound" }]
       },
-      { name: "db", type: "Radius.Data/postgreSQLDatabases", connections: [] },
+      { name: "db", type: "Radius.Data/postgreSQLDatabases", connections: [] }
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name).sort()).toEqual(["api", "db"]);
@@ -207,8 +235,17 @@ describe("filterGraphVisualizationResources", () => {
     // Node removal is by predicate, never by an id/name key set, so this cannot
     // collide even when a nameless containerImage shares text with another id.
     const resources = [
-      { name: "apiImage", type: "Radius.Compute/containerImages", connections: [] },
-      { id: "apiImage", name: "realService", type: "Radius.Compute/containers", connections: [] },
+      {
+        name: "apiImage",
+        type: "Radius.Compute/containerImages",
+        connections: []
+      },
+      {
+        id: "apiImage",
+        name: "realService",
+        type: "Radius.Compute/containers",
+        connections: []
+      }
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name)).toEqual(["realService"]);

@@ -6,20 +6,22 @@
 // caller's real work is already done, so a reload/plumbing failure must not fail
 // the operation — it is logged best-effort and swallowed.
 export async function reloadCanvasInstance(session, context, input) {
+  try {
+    return await session.rpc.canvas.open({
+      extensionId: context.extensionId,
+      canvasId: context.canvasId,
+      instanceId: context.instanceId,
+      ...(input ? { input } : {})
+    });
+  } catch (e) {
     try {
-        return await session.rpc.canvas.open({
-            extensionId: context.extensionId,
-            canvasId: context.canvasId,
-            instanceId: context.instanceId,
-            ...(input ? { input } : {}),
-        });
-    } catch (e) {
-        try {
-            session?.log?.(
-                `Radius: could not reload canvas ${context.instanceId}: ${e && e.message ? e.message : e}`,
-                { level: "warning" },
-            );
-        } catch { /* logging is best-effort */ }
-        return undefined;
+      session?.log?.(
+        `Radius: could not reload canvas ${context.instanceId}: ${e && e.message ? e.message : e}`,
+        { level: "warning" }
+      );
+    } catch {
+      /* logging is best-effort */
     }
+    return undefined;
+  }
 }

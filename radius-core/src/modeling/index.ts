@@ -10,14 +10,9 @@ export {
   recipePackContentPath,
   normalizeRecipeSource,
   deriveConcreteResource,
-  parseRecipePack,
+  parseRecipePack
 } from "./recipe-pack.js";
 export type { ConcreteResource, RecipePackEntry } from "./recipe-pack.js";
 
-export {
-  fetchBicepFromRepo,
-} from "./repo.js";
-export {
-  fetchRecipePack,
-  resolveRecipeOutputs,
-} from "./recipe-resolver.js";
+export { fetchBicepFromRepo } from "./repo.js";
+export { fetchRecipePack, resolveRecipeOutputs } from "./recipe-resolver.js";

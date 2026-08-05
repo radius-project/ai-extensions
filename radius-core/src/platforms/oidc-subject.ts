@@ -54,7 +54,7 @@ function parseOwnerRepo(repoFullName: string): { owner: string; repo: string } {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(
-      `Invalid repository full name: expected "owner/repo", got "${repoFullName}".`,
+      `Invalid repository full name: expected "owner/repo", got "${repoFullName}".`
     );
   }
   return { owner: parts[0], repo: parts[1] };
@@ -63,11 +63,11 @@ function parseOwnerRepo(repoFullName: string): { owner: string; repo: string } {
 function requireId(
   value: number | string | undefined,
   label: string,
-  repoFullName: string,
+  repoFullName: string
 ): string {
   if (value === undefined || value === null || `${value}`.trim() === "") {
     throw new Error(
-      `OIDC subject for ${repoFullName} requires ${label}, but it was not provided.`,
+      `OIDC subject for ${repoFullName} requires ${label}, but it was not provided.`
     );
   }
   return `${value}`.trim();
@@ -95,7 +95,7 @@ function immutableSlug(
   repo: string,
   ownerId: string,
   repoId: string,
-  subClaimPrefix?: string,
+  subClaimPrefix?: string
 ): string {
   if (subClaimPrefix) {
     // sub_claim_prefix is reported as "repo:{owner}@{oid}/{repo}@{rid}".
@@ -119,7 +119,7 @@ const SUPPORTED_CLAIM_KEYS: ReadonlySet<string> = new Set([
   "repository_owner_id",
   "environment",
   "context",
-  "repo",
+  "repo"
 ]);
 
 /**
@@ -156,7 +156,7 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
   if (keys.length === 0) {
     throw new Error(
       `OIDC config for ${canonical} has use_default=false but no claim keys ` +
-        `(include_claim_keys is empty).`,
+        `(include_claim_keys is empty).`
     );
   }
 
@@ -177,7 +177,7 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
         `To proceed: reset this repository's OIDC subject-claim customization ` +
         `to GitHub's default for the deploy environment, or track assisted ` +
         `manual-subject entry at ` +
-        `https://github.com/radius-project/ai-extensions/issues/185.`,
+        `https://github.com/radius-project/ai-extensions/issues/185.`
     );
   }
 
@@ -191,7 +191,7 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
           `repository/repo claim, but whether it uses GitHub's immutable ` +
           `subject format could not be determined. Refusing to guess — resolve ` +
           `the customization (so use_immutable_subject / sub_claim_prefix is ` +
-          `available) and retry.`,
+          `available) and retry.`
       );
     }
     if (!subjectConfig.useImmutableSubject) return canonical;
@@ -207,13 +207,17 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
         parts.push(`repository:${slugForRepoKeys()}`);
         break;
       case "repository_id":
-        parts.push(`repository_id:${requireId(repoId, "the numeric repository id", canonical)}`);
+        parts.push(
+          `repository_id:${requireId(repoId, "the numeric repository id", canonical)}`
+        );
         break;
       case "repository_owner":
         parts.push(`repository_owner:${owner}`);
         break;
       case "repository_owner_id":
-        parts.push(`repository_owner_id:${requireId(ownerId, "the numeric owner id", canonical)}`);
+        parts.push(
+          `repository_owner_id:${requireId(ownerId, "the numeric owner id", canonical)}`
+        );
         break;
       case "environment":
       case "context":
@@ -232,7 +236,7 @@ export function buildOidcSubject(input: BuildOidcSubjectInput): string {
         throw new Error(
           `Internal error: claim key "${key}" for ${canonical} is listed as ` +
             `supported but has no mapping. SUPPORTED_CLAIM_KEYS and the ` +
-            `buildOidcSubject switch are out of sync.`,
+            `buildOidcSubject switch are out of sync.`
         );
     }
   }

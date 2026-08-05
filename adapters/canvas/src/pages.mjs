@@ -7,21 +7,25 @@
 import { escapeHtml, sharedCredentials } from "./shared.mjs";
 import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.mjs";
 import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
-import { CLIENT_REPO_BRANCH_JS, CLIENT_GRAPH_JS, CLIENT_HEARTBEAT_JS } from "./client.mjs";
+import {
+  CLIENT_REPO_BRANCH_JS,
+  CLIENT_GRAPH_JS,
+  CLIENT_HEARTBEAT_JS
+} from "./client.mjs";
 import { topNav, radiusMark, feedbackWidget } from "./ui.mjs";
 import { isWorkspaceSelection } from "./workspace.mjs";
 
 // Pick the active top-nav section from a page title.
 function navFromTitle(title) {
-    const t = String(title || '').toLowerCase();
-    if (t.includes('environment')) return 'environments';
-    if (t.includes('deploying') || t.includes('deployment')) return 'deployments';
-    return 'applications';
+  const t = String(title || "").toLowerCase();
+  if (t.includes("environment")) return "environments";
+  if (t.includes("deploying") || t.includes("deployment")) return "deployments";
+  return "applications";
 }
 
 export function pageShell(title, bodyContent, activeNav) {
-    const active = activeNav || navFromTitle(title);
-    return `<!doctype html>
+  const active = activeNav || navFromTitle(title);
+  return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
@@ -417,24 +421,30 @@ ${CLIENT_HEARTBEAT_JS}
 }
 
 export function oidcPage(state) {
-    const azureResult = state?.oidcAzure;
-    const awsResult = state?.oidcAws;
-    const savedAzure = sharedCredentials.azure || {};
-    const savedAws = sharedCredentials.aws || {};
+  const azureResult = state?.oidcAzure;
+  const awsResult = state?.oidcAws;
+  const savedAzure = sharedCredentials.azure || {};
+  const savedAws = sharedCredentials.aws || {};
 
-    const azureResultHtml = azureResult
-        ? `<div class="status success">${escapeHtml(azureResult.message)}</div>
+  const azureResultHtml =
+    azureResult ?
+      `<div class="status success">${escapeHtml(azureResult.message)}</div>
 <div class="field"><span class="field-label">Tenant</span><div class="field-value">${escapeHtml(azureResult.tenantName || "")}${azureResult.tenantName ? " — " : ""}${escapeHtml(azureResult.tenantId)}</div></div>
 <div class="field"><span class="field-label">Subscription</span><div class="field-value">${escapeHtml(azureResult.subscriptionName || "")}${azureResult.subscriptionName ? " — " : ""}${escapeHtml(azureResult.subscriptionId)}</div></div>
 <div class="field"><span class="field-label">App Registration</span><div class="field-value">${escapeHtml(azureResult.clientName || "")}${azureResult.clientName ? " — " : ""}${escapeHtml(azureResult.clientId)}</div></div>
-` : "";
+`
+    : "";
 
-    const awsResultHtml = awsResult
-        ? `<div class="status success">${escapeHtml(awsResult.message)}</div>
+  const awsResultHtml =
+    awsResult ?
+      `<div class="status success">${escapeHtml(awsResult.message)}</div>
 <div class="field"><span class="field-label">Account</span><div class="field-value">${escapeHtml(awsResult.accountName || "")}${awsResult.accountName ? " — " : ""}${escapeHtml(awsResult.accountId)}</div></div>
-<div class="field"><span class="field-label">Region</span><div class="field-value">${escapeHtml(awsResult.region)}</div></div>` : "";
+<div class="field"><span class="field-label">Region</span><div class="field-value">${escapeHtml(awsResult.region)}</div></div>`
+    : "";
 
-    return pageShell("Accounts", `
+  return pageShell(
+    "Accounts",
+    `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Cloud Accounts</h1>
 <p style="margin-bottom:16px; color:var(--rad-text-tertiary);">
   Set up OpenID Connect federation so GitHub Actions can authenticate to your cloud provider without long-lived secrets.
@@ -520,21 +530,25 @@ document.getElementById('btn-aws').addEventListener('click', function() {
         })
         .catch(function(e) { resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
 });
-<\/script>`);
+<\/script>`
+  );
 }
 
 export function graphHeader(activePage) {
-    const pages = [
-        { id: 'graph', label: 'Modeled' },
-        { id: 'planned', label: 'Planned' },
-        { id: 'deployed', label: 'Deployed' },
-        { id: 'graph-diff', label: 'Diff' }
-    ];
-    const navLinks = pages.map(p => {
-        const cls = p.id === activePage ? 'rad-subtab rad-subtab--active' : 'rad-subtab';
-        return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
-    }).join('\n  ');
-    return `
+  const pages = [
+    { id: "graph", label: "Modeled" },
+    { id: "planned", label: "Planned" },
+    { id: "deployed", label: "Deployed" },
+    { id: "graph-diff", label: "Diff" }
+  ];
+  const navLinks = pages
+    .map((p) => {
+      const cls =
+        p.id === activePage ? "rad-subtab rad-subtab--active" : "rad-subtab";
+      return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
+    })
+    .join("\n  ");
+  return `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Application Graph</span></h1>
   <p class="rad-lede">
@@ -548,27 +562,30 @@ export function graphHeader(activePage) {
 }
 
 export function graphHeaderClose() {
-    return `</div>`;
+  return `</div>`;
 }
 
 export function graphPage(state) {
-    const resources = state?.graphResources || [];
-    const resourcesJson = JSON.stringify(resources);
-    const targetRepo = state?.graphTargetRepo || state?.contextRepo || '';
-    const graphBranch = state?.graphBranch || state?.contextBranch || 'main';
-    // Local-workspace graphs are built from the on-disk worktree checkout, so the
-    // "View source code" link should open the local file in the editor canvas
-    // rather than a GitHub blob URL (which 404s for an unpushed worktree branch).
-    // Prefer the authoritative provenance flag persisted by the graph handler
-    // (true only when the local workspace actually supplied the app.bicep); fall
-    // back to repo+branch matching only for render paths that don't set it (MCP).
-    const localSource = typeof state?.graphFromWorkspace === "boolean"
-        ? state.graphFromWorkspace
-        : isWorkspaceSelection(state, targetRepo, graphBranch);
+  const resources = state?.graphResources || [];
+  const resourcesJson = JSON.stringify(resources);
+  const targetRepo = state?.graphTargetRepo || state?.contextRepo || "";
+  const graphBranch = state?.graphBranch || state?.contextBranch || "main";
+  // Local-workspace graphs are built from the on-disk worktree checkout, so the
+  // "View source code" link should open the local file in the editor canvas
+  // rather than a GitHub blob URL (which 404s for an unpushed worktree branch).
+  // Prefer the authoritative provenance flag persisted by the graph handler
+  // (true only when the local workspace actually supplied the app.bicep); fall
+  // back to repo+branch matching only for render paths that don't set it (MCP).
+  const localSource =
+    typeof state?.graphFromWorkspace === "boolean" ?
+      state.graphFromWorkspace
+    : isWorkspaceSelection(state, targetRepo, graphBranch);
 
-    if (resources.length === 0 && !state?.graphLoaded) {
-        return pageShell("Application Graph", `
-${graphHeader('graph')}
+  if (resources.length === 0 && !state?.graphLoaded) {
+    return pageShell(
+      "Application Graph",
+      `
+${graphHeader("graph")}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -903,11 +920,14 @@ function generateGraph() {
     requestGraphLoad();
 }
 <\/script>
-${graphHeaderClose()}`);
-    }
+${graphHeaderClose()}`
+    );
+  }
 
-    return pageShell("Application Graph", `
-${graphHeader('graph')}
+  return pageShell(
+    "Application Graph",
+    `
+${graphHeader("graph")}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
   <div class="rad-field">
@@ -919,7 +939,7 @@ ${graphHeader('graph')}
   <div class="rad-field">
     <label>Branch</label>
     <select id="graph-branch" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
-      <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch || 'main')}</option>
+      <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch || "main")}</option>
     </select>
   </div>
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
@@ -932,7 +952,7 @@ Click a node to view source code links.
 
 <script>
 var CONTEXT_REPO = document.getElementById('graph-repo').value;
-var CURRENT_BRANCH = '${escapeHtml(graphBranch || 'main')}';
+var CURRENT_BRANCH = '${escapeHtml(graphBranch || "main")}';
 
 // Populate the Application dropdown for the current repository.
 (function() {
@@ -1004,7 +1024,7 @@ var branch = document.getElementById('graph-branch').value.trim() || 'main';
 var graphOptions = {
     repoUrl: repoUrl,
     branch: branch,
-    localSource: ${localSource ? 'true' : 'false'}
+    localSource: ${localSource ? "true" : "false"}
 };
 var graphController = radiusRenderGraph('graph-container', resources, graphOptions);
 
@@ -1037,27 +1057,32 @@ fetch('/api/load-graph', {
         status.style.display = '';
     });
 <\/script>
-${graphHeaderClose()}`);
+${graphHeaderClose()}`
+  );
 }
 
 export function plannedGraphPage(state) {
-    const targetRepo = state?.plannedRepo || state?.graphTargetRepo || state?.contextRepo || '';
-    const provider = state?.plannedProvider || state?.deployProvider || 'azure';
-    const plannedResources = state?.plannedResources || [];
-    const graphBranch = state?.plannedBranch || state?.contextBranch || 'main';
-    const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
-    // Same provenance rule as graphPage: open local files in the editor canvas
-    // when the planned graph was resolved against the local workspace checkout.
-    // Prefer the authoritative persisted flag; fall back to repo+branch matching.
-    const localSource = typeof state?.plannedFromWorkspace === "boolean"
-        ? state.plannedFromWorkspace
-        : isWorkspaceSelection(state, targetRepo, graphBranch);
+  const targetRepo =
+    state?.plannedRepo || state?.graphTargetRepo || state?.contextRepo || "";
+  const provider = state?.plannedProvider || state?.deployProvider || "azure";
+  const plannedResources = state?.plannedResources || [];
+  const graphBranch = state?.plannedBranch || state?.contextBranch || "main";
+  const hasCredentials = !!(state?.oidcAzure || state?.oidcAws);
+  // Same provenance rule as graphPage: open local files in the editor canvas
+  // when the planned graph was resolved against the local workspace checkout.
+  // Prefer the authoritative persisted flag; fall back to repo+branch matching.
+  const localSource =
+    typeof state?.plannedFromWorkspace === "boolean" ?
+      state.plannedFromWorkspace
+    : isWorkspaceSelection(state, targetRepo, graphBranch);
 
-    const resourcesJson = JSON.stringify(plannedResources);
+  const resourcesJson = JSON.stringify(plannedResources);
 
-    if (plannedResources.length === 0) {
-        return pageShell("Planned Graph", `
-${graphHeader('planned')}
+  if (plannedResources.length === 0) {
+    return pageShell(
+      "Planned Graph",
+      `
+${graphHeader("planned")}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1152,12 +1177,15 @@ document.getElementById('plan-btn').addEventListener('click', function() {
         .catch(function() { clearInterval(pollInterval); btn.textContent = 'Plan Deployment'; btn.disabled = false; });
 });
 <\/script>
-${graphHeaderClose()}`);
-    }
+${graphHeaderClose()}`
+    );
+  }
 
-    // Render the planned graph with real resources
-    return pageShell("Planned Graph", `
-${graphHeader('planned')}
+  // Render the planned graph with real resources
+  return pageShell(
+    "Planned Graph",
+    `
+${graphHeader("planned")}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1216,33 +1244,40 @@ var resources = ${resourcesJson};
 radiusRenderGraph('graph-container', resources, {
     repoUrl: 'https://github.com/' + CONTEXT_REPO,
     branch: CONTEXT_BRANCH,
-    localSource: ${localSource ? 'true' : 'false'},
+    localSource: ${localSource ? "true" : "false"},
     plannedMode: true
 });
 <\/script>
-${graphHeaderClose()}`);
+${graphHeaderClose()}`
+  );
 }
 
 export function graphDiffPage(state) {
-    const resources = state?.diffResources || [];
-    const baseBranch = state?.diffBase || 'main';
-    const headBranch = state?.diffHead || '';
-    const branches = state?.branches || [];
-    const branchShas = state?.branchShas || {};
+  const resources = state?.diffResources || [];
+  const baseBranch = state?.diffBase || "main";
+  const headBranch = state?.diffHead || "";
+  const branches = state?.branches || [];
+  const branchShas = state?.branchShas || {};
 
-    const branchOptionsBase = branches.map(b => {
-        const sha = branchShas[b] ? ` (${branchShas[b].slice(0,7)})` : '';
-        return `<option value="${b}"${b === baseBranch ? ' selected' : ''}>${b}${sha}</option>`;
-    }).join('');
-    const branchOptionsHead = branches.map(b => {
-        const sha = branchShas[b] ? ` (${branchShas[b].slice(0,7)})` : '';
-        return `<option value="${b}"${b === headBranch ? ' selected' : ''}>${b}${sha}</option>`;
-    }).join('');
+  const branchOptionsBase = branches
+    .map((b) => {
+      const sha = branchShas[b] ? ` (${branchShas[b].slice(0, 7)})` : "";
+      return `<option value="${b}"${b === baseBranch ? " selected" : ""}>${b}${sha}</option>`;
+    })
+    .join("");
+  const branchOptionsHead = branches
+    .map((b) => {
+      const sha = branchShas[b] ? ` (${branchShas[b].slice(0, 7)})` : "";
+      return `<option value="${b}"${b === headBranch ? " selected" : ""}>${b}${sha}</option>`;
+    })
+    .join("");
 
-    if (resources.length === 0) {
-        const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
-        return pageShell("Graph Diff", `
-${graphHeader('graph-diff')}
+  if (resources.length === 0) {
+    const targetRepo = state?.diffTargetRepo || state?.contextRepo || "";
+    return pageShell(
+      "Graph Diff",
+      `
+${graphHeader("graph-diff")}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1265,7 +1300,7 @@ ${graphHeader('graph-diff')}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status ${state?.diffError ? 'error' : 'info'}">${state?.diffError ? escapeHtml(state.diffError) : 'Loading branches…'}</div>
+<div id="diff-status" class="status ${state?.diffError ? "error" : "info"}">${state?.diffError ? escapeHtml(state.diffError) : "Loading branches…"}</div>
 <script>
 var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
@@ -1312,16 +1347,21 @@ document.getElementById('base-branch').addEventListener('change', function() {
     if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
-${graphHeaderClose()}`);
-    }
-    const resourcesJson = JSON.stringify(resources);
-    const added = resources.filter(r => r.diffStatus === "added").length;
-    const removed = resources.filter(r => r.diffStatus === "removed").length;
-    const modified = resources.filter(r => r.diffStatus === "modified").length;
-    const unchanged = resources.filter(r => r.diffStatus === "unchanged").length;
-    const targetRepo = state?.diffTargetRepo || state?.contextRepo || '';
-    return pageShell("Graph Diff", `
-${graphHeader('graph-diff')}
+${graphHeaderClose()}`
+    );
+  }
+  const resourcesJson = JSON.stringify(resources);
+  const added = resources.filter((r) => r.diffStatus === "added").length;
+  const removed = resources.filter((r) => r.diffStatus === "removed").length;
+  const modified = resources.filter((r) => r.diffStatus === "modified").length;
+  const unchanged = resources.filter(
+    (r) => r.diffStatus === "unchanged"
+  ).length;
+  const targetRepo = state?.diffTargetRepo || state?.contextRepo || "";
+  return pageShell(
+    "Graph Diff",
+    `
+${graphHeader("graph-diff")}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1344,7 +1384,7 @@ ${graphHeader('graph-diff')}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status ${state?.diffError ? 'error' : 'info'}" style="${state?.diffError ? '' : 'display:none;'}">${state?.diffError ? escapeHtml(state.diffError) : ''}</div>
+<div id="diff-status" class="status ${state?.diffError ? "error" : "info"}" style="${state?.diffError ? "" : "display:none;"}">${state?.diffError ? escapeHtml(state.diffError) : ""}</div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
@@ -1353,7 +1393,7 @@ ${graphHeader('graph-diff')}
   <span style="color:var(--rad-warning)">~${modified} modified</span>,
   ${unchanged} unchanged
 </div>
-${(added === 0 && removed === 0 && modified === 0) ? `<div style="margin-top:12px; padding:10px 14px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; color:var(--rad-text-tertiary);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ''}
+${added === 0 && removed === 0 && modified === 0 ? `<div style="margin-top:12px; padding:10px 14px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; color:var(--rad-text-tertiary);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ""}
 
 <script>
 var resources = ${resourcesJson};
@@ -1414,13 +1454,21 @@ document.getElementById('base-branch').addEventListener('change', function() {
     if (document.getElementById('head-branch').value) queueDiff();
 });
 <\/script>
-${graphHeaderClose()}`);
+${graphHeaderClose()}`
+  );
 }
 
 export function deployedGraphPage(state) {
-    const targetRepo = state?.contextRepo || state?.deployingRepo || state?.plannedRepo || state?.graphTargetRepo || '';
-    return pageShell("Deployed Graph", `
-${graphHeader('deployed')}
+  const targetRepo =
+    state?.contextRepo ||
+    state?.deployingRepo ||
+    state?.plannedRepo ||
+    state?.graphTargetRepo ||
+    "";
+  return pageShell(
+    "Deployed Graph",
+    `
+${graphHeader("deployed")}
 <div class="rad-deployed-controls">
   <div class="rad-field">
     <label for="deployed-app-select">Application:</label>
@@ -1656,31 +1704,38 @@ function escapeHtmlClient(s) {
     });
 })();
 <\/script>
-${graphHeaderClose()}`);
+${graphHeaderClose()}`
+  );
 }
 
 export function environmentPage(state) {
-    const oidcAzure = state?.oidcAzure || sharedCredentials.azure;
-    const oidcAws = state?.oidcAws || sharedCredentials.aws;
-    const hasAzure = !!oidcAzure;
-    const hasAws = !!oidcAws;
-    const provider = state?.deployProvider || (hasAzure ? 'azure' : hasAws ? 'aws' : 'azure');
-    const envName = state?.envName || 'dev';
-    const appFile = state?.appFile || 'app.bicep';
-    const existingEnvs = state?.existingEnvs || ['dev', 'staging', 'production'];
-    // Default to the active session branch. A worktree session's branch may
-    // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
-    // GitHub yet), but we no longer fall back to 'main' for that case: the deploy
-    // path fails fast with a clear "push this branch" message when the ref is
-    // absent on GitHub, so silently substituting 'main' would only deploy the
-    // wrong (or empty) branch. The branch stays user-overridable in the UI.
-    const deployContextBranch = state?.contextBranch || 'main';
-    const deployDefaultBranch = deployContextBranch;
+  const oidcAzure = state?.oidcAzure || sharedCredentials.azure;
+  const oidcAws = state?.oidcAws || sharedCredentials.aws;
+  const hasAzure = !!oidcAzure;
+  const hasAws = !!oidcAws;
+  const provider =
+    state?.deployProvider ||
+    (hasAzure ? "azure"
+    : hasAws ? "aws"
+    : "azure");
+  const envName = state?.envName || "dev";
+  const appFile = state?.appFile || "app.bicep";
+  const existingEnvs = state?.existingEnvs || ["dev", "staging", "production"];
+  // Default to the active session branch. A worktree session's branch may
+  // exist only locally (branchShas[b] === 'worktree' means it isn't pushed to
+  // GitHub yet), but we no longer fall back to 'main' for that case: the deploy
+  // path fails fast with a clear "push this branch" message when the ref is
+  // absent on GitHub, so silently substituting 'main' would only deploy the
+  // wrong (or empty) branch. The branch stays user-overridable in the UI.
+  const deployContextBranch = state?.contextBranch || "main";
+  const deployDefaultBranch = deployContextBranch;
 
-    // If deployment result exists, show it
-    if (state?.deployResult) {
-        const r = state.deployResult;
-        return pageShell(r.error ? "Deployment Failed" : "Deployment Initiated", `
+  // If deployment result exists, show it
+  if (state?.deployResult) {
+    const r = state.deployResult;
+    return pageShell(
+      r.error ? "Deployment Failed" : "Deployment Initiated",
+      `
 <h1>${r.error ? "⚠ Deployment Failed" : "🚀 Deployment Initiated"}</h1>
 <div class="status ${r.error ? "error" : "success"}">${escapeHtml(r.error || r.message)}</div>
 ${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>` : ""}
@@ -1690,24 +1745,32 @@ ${r.workflow ? `<h2>Generated Workflow</h2><pre style="max-height:400px; overflo
 document.getElementById('back-btn').addEventListener('click', function() {
     fetch('/api/deploy-reset', { method: 'POST' }).then(function() { window.location.reload(); });
 });
-<\/script>`);
-    }
+<\/script>`
+    );
+  }
 
-    const ctxRepo = state?.targetRepo || state?.contextRepo || '';
-    const ctxBranch = state?.contextBranch || state?.plannedBranch || state?.graphBranch || 'main';
-    const activeSubtab = state?.activeSubtab === 'credentials' ? 'credentials' : 'environments';
+  const ctxRepo = state?.targetRepo || state?.contextRepo || "";
+  const ctxBranch =
+    state?.contextBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
+  const activeSubtab =
+    state?.activeSubtab === "credentials" ? "credentials" : "environments";
 
-    return pageShell("Environments", `
+  return pageShell(
+    "Environments",
+    `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Environments</span></h1>
 </div>
 <nav class="rad-subtabs" id="env-subtabs">
-  <a href="/?page=environment" data-subtab="environments" class="rad-subtab${activeSubtab === 'environments' ? ' rad-subtab--active' : ''}">Environments</a>
-  <a href="/?page=credentials" data-subtab="credentials" class="rad-subtab${activeSubtab === 'credentials' ? ' rad-subtab--active' : ''}">Credentials</a>
+  <a href="/?page=environment" data-subtab="environments" class="rad-subtab${activeSubtab === "environments" ? " rad-subtab--active" : ""}">Environments</a>
+  <a href="/?page=credentials" data-subtab="credentials" class="rad-subtab${activeSubtab === "credentials" ? " rad-subtab--active" : ""}">Credentials</a>
 </nav>
 
 <!-- ══════════════ ENVIRONMENTS SUBTAB ══════════════ -->
-<section id="pane-environments" style="${activeSubtab === 'environments' ? '' : 'display:none;'}">
+<section id="pane-environments" style="${activeSubtab === "environments" ? "" : "display:none;"}">
 <p class="rad-lede" style="margin-bottom:20px;">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
 
 <!-- Landing: New Environment button + environments table -->
@@ -1755,7 +1818,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
       </div>
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
-      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || 'main')}" />
+      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || "main")}" />
       <input type="hidden" id="az-client-id" value="" />
       <input type="hidden" id="env-selected-provider" value="" />
     </div>
@@ -1830,7 +1893,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
         <label>Azure app registration</label>
-        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || '').replace('/', '-'))}" />
+        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || "").replace("/", "-"))}" />
         <input type="hidden" id="az-selected-app-id" value="" />
         <div class="rad-field__help">
           Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
@@ -1912,7 +1975,7 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </div>
 </section>
 <!-- ══════════════ CREDENTIALS SUBTAB ══════════════ -->
-<section id="pane-credentials" style="${activeSubtab === 'credentials' ? '' : 'display:none;'}">
+<section id="pane-credentials" style="${activeSubtab === "credentials" ? "" : "display:none;"}">
 <p class="rad-lede" style="margin-bottom:20px;">Configure and manage the credentials needed to connect to your cloud account. Each environment requires credentials to deploy infrastructure.</p>
 
 <div id="cred-landing">
@@ -3473,22 +3536,34 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
 
 // ============================ Init =============================
 if (document.getElementById('pane-credentials').style.display !== 'none') { loadCredTable(); } else { loadEnvTable(); }
-<\/script>`);
+<\/script>`
+  );
 }
 
 export function deployingPage(state) {
-    // The Deployments tab is always the landing page (application + environment
-    // selectors, a Deploy button, and a table of existing deployments). Live
-    // deployment progress (graph + logs) is shown on the Applications → Deployed
-    // tab instead, so navigating back here always shows the listing view.
-    return deployLandingView(state);
+  // The Deployments tab is always the landing page (application + environment
+  // selectors, a Deploy button, and a table of existing deployments). Live
+  // deployment progress (graph + logs) is shown on the Applications → Deployed
+  // tab instead, so navigating back here always shows the listing view.
+  return deployLandingView(state);
 }
 
 function deployLandingView(state) {
-    const ctxRepo = state?.contextRepo || state?.plannedRepo || state?.graphTargetRepo || state?.deployingRepo || '';
-    const ctxBranch = state?.contextBranch || state?.plannedBranch || state?.graphBranch || 'main';
+  const ctxRepo =
+    state?.contextRepo ||
+    state?.plannedRepo ||
+    state?.graphTargetRepo ||
+    state?.deployingRepo ||
+    "";
+  const ctxBranch =
+    state?.contextBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
 
-    return pageShell("Deployments", `
+  return pageShell(
+    "Deployments",
+    `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Deployments</span></h1>
   <p class="rad-lede">Deploy your application to one of your configured environments. Radius will provision the necessary cloud infrastructure required to run your application.</p>
@@ -4183,26 +4258,44 @@ loadApplications();
 loadEnvironmentsDropdown();
 loadBranches();
 loadDeployments();
-<\/script>`, 'deployments');
+<\/script>`,
+    "deployments"
+  );
 }
 
 function deployProgressView(state) {
-    const resources = state?.deployingResources || state?.plannedResources || [];
-    const targetRepo = state?.deployingRepo || state?.deployParams?.targetRepo || state?.plannedRepo || state?.contextRepo || '';
-    const targetBranch = state?.deployingBranch || state?.deployParams?.branch || state?.plannedBranch || state?.contextBranch || 'main';
-    const provider = state?.deployingProvider || state?.deployParams?.provider || state?.plannedProvider || 'azure';
-    const logs = state?.deployLogs || [];
-    const deployStatus = state?.deployStatus || 'pending';
-    const deployError = state?.deployError || '';
-    const resourcesJson = JSON.stringify(resources);
-    const logsJson = JSON.stringify(logs);
+  const resources = state?.deployingResources || state?.plannedResources || [];
+  const targetRepo =
+    state?.deployingRepo ||
+    state?.deployParams?.targetRepo ||
+    state?.plannedRepo ||
+    state?.contextRepo ||
+    "";
+  const targetBranch =
+    state?.deployingBranch ||
+    state?.deployParams?.branch ||
+    state?.plannedBranch ||
+    state?.contextBranch ||
+    "main";
+  const provider =
+    state?.deployingProvider ||
+    state?.deployParams?.provider ||
+    state?.plannedProvider ||
+    "azure";
+  const logs = state?.deployLogs || [];
+  const deployStatus = state?.deployStatus || "pending";
+  const deployError = state?.deployError || "";
+  const resourcesJson = JSON.stringify(resources);
+  const logsJson = JSON.stringify(logs);
 
-    return pageShell("Deploying", `
+  return pageShell(
+    "Deploying",
+    `
 <h1 style="display:flex; align-items:center; gap:10px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28"><circle cx="64" cy="64" r="64" fill="#da4c2a"/><circle cx="64" cy="64" r="56" fill="#bb311e" opacity="0.3"/><line x1="64" y1="64" x2="34" y2="28" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="white"/></svg>Deployment Progress</h1>
 <p style="margin-bottom:12px; color:var(--rad-text-tertiary);">
-  Deploying <strong>${escapeHtml(targetRepo)}</strong> (branch: <code>${escapeHtml(targetBranch)}</code>) to ${provider === 'aws' ? 'AWS' : 'Azure'}
+  Deploying <strong>${escapeHtml(targetRepo)}</strong> (branch: <code>${escapeHtml(targetBranch)}</code>) to ${provider === "aws" ? "AWS" : "Azure"}
 </p>
-<div id="deploy-error" style="display:${deployStatus === 'failed' && deployError ? 'block' : 'none'}; margin-bottom:12px; padding:12px 14px; background:var(--rad-danger-bg); border:1px solid var(--rad-danger); border-radius:6px;">
+<div id="deploy-error" style="display:${deployStatus === "failed" && deployError ? "block" : "none"}; margin-bottom:12px; padding:12px 14px; background:var(--rad-danger-bg); border:1px solid var(--rad-danger); border-radius:6px;">
   <div style="font-size:13px; font-weight:600; color:var(--rad-danger); margin-bottom:6px;">❌ Deployment failed</div>
   <pre id="deploy-error-text" style="margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--rad-mono); font-size:12px; color:var(--rad-text); max-height:220px; overflow-y:auto;">${escapeHtml(deployError)}</pre>
 </div>
@@ -4260,7 +4353,7 @@ var logOutput = document.getElementById('deploy-log-output');
 var logs = ${logsJson};
 // Absolute count of log lines already rendered (base offset + embedded lines),
 // so polls can request only new lines via ?since= and never re-pull the whole buffer.
-var LOG_TOTAL = ${(state?.deployLogBase || 0)} + logs.length;
+var LOG_TOTAL = ${state?.deployLogBase || 0} + logs.length;
 for (var l = 0; l < logs.length; l++) {
     logOutput.textContent += logs[l] + '\\n';
 }
@@ -4300,5 +4393,6 @@ var deployPoll = setInterval(function() {
 
 // Do NOT auto-start a new deploy — the workflow was already triggered from the environment page.
 // Just poll for status updates on the existing run.
-<\/script>`);
+<\/script>`
+  );
 }

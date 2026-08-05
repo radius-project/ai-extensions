@@ -16,5 +16,5 @@ export {
   runRadAppGraph,
   runRadBicepPublishExtension,
   runRadBicepPublish,
-  buildGraphViaRad,
+  buildGraphViaRad
 } from "./rad.mjs";
