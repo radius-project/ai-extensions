@@ -4,7 +4,7 @@ import {
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
   extractErrorLines
-} from "./deploy.mjs";
+} from "./deploy.js";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
 // a personal-account repo hits a tenant that enforces the enterprise claim.

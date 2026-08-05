@@ -1,10 +1,23 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// Shared mock state for the ./gh.mjs stub. `vi.hoisted` runs before the module
+interface RecordedCommit {
+  path: string;
+  content: string;
+  branch: string;
+  message: string;
+}
+
+interface InfraMockState {
+  committed: Record<string, Record<string, string>>;
+  commits: RecordedCommit[];
+  upstream: Record<string, string>;
+}
+
+// Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
 // factory below so the mock can close over it. `committed` is keyed by branch:
 // `{ [branch]: { [path]: body } }`, mirroring that each branch has its own copy
 // of the committed workflow files (and an unpushed branch has none).
-const h = vi.hoisted(() => ({
+const h = vi.hoisted<InfraMockState>(() => ({
   committed: {}, // branch -> { path -> committed body } (absent = file missing)
   commits: [], // recorded commitFileToRepo calls
   upstream: {
@@ -24,21 +37,27 @@ const h = vi.hoisted(() => ({
   }
 }));
 
-vi.mock("./gh.mjs", () => ({
+vi.mock("./gh.js", () => ({
   cliExec: () => {},
-  fetchFileFromRepoResult: async (_repo, path) => {
+  fetchFileFromRepoResult: async (_repo: string, path: string) => {
     const file = path.split("/").pop();
-    const body = h.upstream[file];
+    const body = file ? h.upstream[file] : undefined;
     return body == null ?
         { content: null, error: `no template ${file}` }
       : { content: body, error: null };
   },
   getDefaultBranch: async () => "main",
-  fetchFileFromRepo: async (_repo, path, branch = "main") => {
+  fetchFileFromRepo: async (_repo: string, path: string, branch = "main") => {
     const files = h.committed[branch];
     return files && path in files ? files[path] : null;
   },
-  commitFileToRepo: async (_repo, path, content, branch, message) => {
+  commitFileToRepo: async (
+    _repo: string,
+    path: string,
+    content: string,
+    branch: string,
+    message: string
+  ) => {
     h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
@@ -50,14 +69,17 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow
-} = await import("./infra.mjs");
+} = await import("./infra.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
 
 // Build the full expected committed-file map the extension would produce for one
 // environment, so tests can seed an "in sync" branch.
-async function expectedFilesFor(env, provider) {
-  const files = {};
+async function expectedFilesFor(
+  env: string,
+  provider: string
+): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
   files[VERIFY_PATH] = await generateVerifyWorkflow(env, provider);
   for (const [name, body] of Object.entries(
     await generateDeployWorkflow(env, ".radius/app.bicep")
@@ -150,7 +172,7 @@ describe("syncRepoWorkflows", () => {
   });
 
   it("keeps an AWS verify file in sync when the env provider is unknown", async () => {
-    // server.mjs passes provider "" when it can't infer one. A committed AWS
+    // server.ts passes provider "" when it can't infer one. A committed AWS
     // verify file that already matches upstream must NOT be rewritten with the
     // Azure template — the unknown provider generates BOTH candidates.
     h.committed.main = {

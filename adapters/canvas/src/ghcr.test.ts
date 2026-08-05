@@ -11,9 +11,40 @@ import {
   loadGhKeyringCredentials,
   pullOciArtifactFiles,
   withGhcrDockerConfig
-} from "./ghcr.mjs";
+} from "./ghcr.js";
+import type { FetchImplementation } from "./ghcr.js";
 
-function json(body, init = {}) {
+interface HarnessOptions {
+  accountType?: string;
+  initialMetadata?: {
+    visibility: string;
+    repository: { full_name: string } | null;
+  } | null;
+  finalVisibility?: string;
+  finalRepository?: string | null;
+  metadataDelay?: number;
+  tokenStatus?: number;
+}
+
+interface FetchCall {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: Buffer;
+}
+
+interface BootstrapManifest {
+  artifactType?: string;
+  layers?: Array<{
+    digest?: string;
+    mediaType?: string;
+    size?: number;
+    annotations?: Record<string, string>;
+  }>;
+  annotations?: Record<string, string>;
+}
+
+function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status || 200,
     headers: { "Content-Type": "application/json", ...(init.headers || {}) }
@@ -27,15 +58,15 @@ function createHarness({
   finalRepository = "acme/app",
   metadataDelay = 0,
   tokenStatus = 200
-} = {}) {
-  const calls = [];
-  const blobs = new Set();
+}: HarnessOptions = {}) {
+  const calls: FetchCall[] = [];
+  const blobs = new Set<string>();
   let uploadID = 0;
-  let manifest = null;
+  let manifest: BootstrapManifest | null = null;
   let manifestPushes = 0;
   let packageReadsAfterPush = 0;
 
-  async function fetchImpl(input, options = {}) {
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
     const url = new URL(input);
     const method = options.method || "GET";
     calls.push({
@@ -104,12 +135,12 @@ function createHarness({
       url.pathname.startsWith("/uploads/")
     ) {
       const digest = url.searchParams.get("digest");
-      const body = Buffer.from(options.body);
+      const body = Buffer.from(options.body || "");
       assert.equal(
         `sha256:${createHash("sha256").update(body).digest("hex")}`,
         digest
       );
-      blobs.add(digest);
+      if (digest) blobs.add(digest);
       return new Response("", { status: 201 });
     }
     if (
@@ -117,12 +148,12 @@ function createHarness({
       method === "PUT" &&
       url.pathname.endsWith("/manifests/bootstrap")
     ) {
-      manifest = JSON.parse(Buffer.from(options.body).toString("utf8"));
+      manifest = JSON.parse(Buffer.from(options.body || "").toString("utf8"));
       manifestPushes++;
       return new Response("", { status: 201 });
     }
     throw new Error(`Unexpected request: ${method} ${url}`);
-  }
+  };
 
   return {
     fetchImpl,
@@ -170,19 +201,21 @@ test("pushes a deterministic linked bootstrap artifact and is idempotent", async
     harness.calls.filter((call) => call.method === "POST").length,
     2
   );
-  assert.equal(harness.manifest.artifactType, BOOTSTRAP_ARTIFACT_TYPE);
+  const manifest = harness.manifest;
+  assert.ok(manifest);
+  assert.ok(manifest.annotations);
+  assert.ok(manifest.layers);
+  assert.equal(manifest.artifactType, BOOTSTRAP_ARTIFACT_TYPE);
   assert.equal(
-    harness.manifest.annotations["org.opencontainers.image.source"],
+    manifest.annotations["org.opencontainers.image.source"],
     "https://github.com/acme/app"
   );
-  assert.equal(harness.manifest.layers[0].mediaType, "text/plain");
-  assert.equal(
-    harness.manifest.layers[0].size,
-    Buffer.byteLength(BOOTSTRAP_CONTENT)
-  );
+  assert.equal(manifest.layers[0].mediaType, "text/plain");
+  assert.equal(manifest.layers[0].size, Buffer.byteLength(BOOTSTRAP_CONTENT));
   const tokenCall = harness.calls.find(
     (call) => new URL(call.url).pathname === "/token"
   );
+  assert.ok(tokenCall);
   assert.equal(
     tokenCall.headers.Authorization,
     `Basic ${Buffer.from("octocat:keyring-token").toString("base64")}`
@@ -318,7 +351,7 @@ test("requires a stored gh keyring credential", async () => {
 });
 
 test("pins keyring credential lookup to github.com", async () => {
-  const calls = [];
+  const calls: string[][] = [];
   const credentials = await loadGhKeyringCredentials({
     runKeyringCommand: async (args) => {
       calls.push(args);
@@ -390,21 +423,33 @@ test("withGhcrDockerConfig removes the temp docker config even when publish fail
 
 // ── pullOciArtifactFiles ────────────────────────────────────────────────────
 
-function sha256(bytes) {
+function sha256(bytes: Buffer): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 // Build a pull harness that serves an OCI artifact whose layers carry the given
 // { title: content } files (title => org.opencontainers.image.title annotation),
 // mirroring what `oras push <file>:<mediaType>` records.
+interface PullHarnessOptions {
+  files?: Record<string, string>;
+  manifestStatus?: number;
+  tokenStatus?: number;
+  asIndex?: boolean;
+}
+
 function createPullHarness({
   files = {},
   manifestStatus = 200,
   tokenStatus = 200,
   asIndex = false
-} = {}) {
-  const blobs = new Map(); // digest -> content
-  const layers = [];
+}: PullHarnessOptions = {}) {
+  const blobs = new Map<string, Buffer>();
+  const layers: Array<{
+    mediaType: string;
+    digest: string;
+    size: number;
+    annotations: Record<string, string>;
+  }> = [];
   for (const [title, content] of Object.entries(files)) {
     const bytes = Buffer.from(content);
     const digest = sha256(bytes);
@@ -442,9 +487,9 @@ function createPullHarness({
       }
     ]
   };
-  const calls = [];
+  const calls: Array<{ url: string; method: string }> = [];
 
-  async function fetchImpl(input, options = {}) {
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
     const url = new URL(input);
     const method = options.method || "GET";
     calls.push({ url: url.toString(), method });
@@ -485,7 +530,7 @@ function createPullHarness({
       return new Response(bytes, { status: 200 });
     }
     throw new Error(`Unexpected request: ${method} ${url}`);
-  }
+  };
 
   return { fetchImpl, calls };
 }
@@ -509,6 +554,7 @@ test("pullOciArtifactFiles returns files keyed by their title annotation", async
     ...pullOptions,
     fetchImpl: harness.fetchImpl
   });
+  assert.ok(result);
 
   assert.equal(result.artifactType, DEPLOY_STATUS_ARTIFACT_TYPE);
   assert.equal(result.files["deploy-graph.json"], '{"resources":[]}');
@@ -525,6 +571,7 @@ test("pullOciArtifactFiles follows an image index to the concrete manifest", asy
     ...pullOptions,
     fetchImpl: harness.fetchImpl
   });
+  assert.ok(result);
 
   assert.equal(
     result.files["deploy-graph.json"],
@@ -545,7 +592,9 @@ test("pullOciArtifactFiles surfaces package-scope guidance on a 403 manifest", a
   const harness = createPullHarness({ manifestStatus: 403 });
   await assert.rejects(
     pullOciArtifactFiles({ ...pullOptions, fetchImpl: harness.fetchImpl }),
-    (err) =>
+    (err: unknown) =>
+      err instanceof Error &&
+      "code" in err &&
       err.code === "GHCR_AUTH" &&
       /gh auth refresh -s read:packages/.test(err.message)
   );

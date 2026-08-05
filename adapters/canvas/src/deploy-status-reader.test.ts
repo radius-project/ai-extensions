@@ -4,7 +4,7 @@ import {
   deriveGraphTag,
   appNameForGraphTag,
   createDeployStatusReader
-} from "./deploy.mjs";
+} from "./deploy.js";
 
 // The producer (radius-project/radius PR #12591) derives the graph registry/tag
 // in bash; these tests lock the reader's derivation to byte-for-byte parity so

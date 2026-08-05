@@ -28,16 +28,93 @@ import {
   fetchFileFromRepo,
   getDefaultBranch,
   commitFileToRepo
-} from "./gh.mjs";
+} from "./gh.js";
+import type { CanvasState } from "./shared.js";
+
+interface OidcInput {
+  [key: string]: unknown;
+}
+
+interface AzureCredentialInput {
+  tenantId?: string;
+  subscriptionId?: string;
+}
+
+export interface AzureCredentialResult {
+  success: boolean;
+  error?: string;
+  tenantId?: string;
+  subscriptionId?: string;
+  subscriptionName?: string;
+  userName?: string;
+}
+
+interface AzureAccount {
+  tenantId?: string;
+  id?: string;
+  name?: string;
+  user?: { name?: string };
+}
+
+interface ManagedEnvironment {
+  name: string;
+  provider?: string;
+}
+
+interface SyncWorkflowOptions {
+  log?: (message: string) => void;
+  only?: string[];
+  workingBranch?: string;
+}
+
+interface WorkflowCandidate {
+  content: string;
+  provider: string | null;
+}
+
+interface TemplateCacheEntry {
+  at: number;
+  body: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parseAzureAccount(text: string): AzureAccount {
+  const value: unknown = JSON.parse(text);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const fields = Object.fromEntries(Object.entries(value));
+  const user =
+    (
+      fields.user !== null &&
+      typeof fields.user === "object" &&
+      !Array.isArray(fields.user)
+    ) ?
+      Object.fromEntries(Object.entries(fields.user))
+    : {};
+  return {
+    tenantId: typeof fields.tenantId === "string" ? fields.tenantId : undefined,
+    id: typeof fields.id === "string" ? fields.id : undefined,
+    name: typeof fields.name === "string" ? fields.name : undefined,
+    user: { name: typeof user.name === "string" ? user.name : undefined }
+  };
+}
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
 
-export function generateAzureOIDC(data) {
-  return getPlatform("azure").generateOidc(data);
+export function generateAzureOIDC(data: OidcInput) {
+  const platform = getPlatform("azure");
+  if (!platform) throw new Error("Azure platform is not registered.");
+  return platform.generateOidc(data);
 }
 
-export function validateAzureCredentials(data) {
+export function validateAzureCredentials(
+  data: AzureCredentialInput
+): Promise<AzureCredentialResult> {
   return new Promise((resolve) => {
     const tenantId = data.tenantId || "";
     const subscriptionId = data.subscriptionId || "";
@@ -66,7 +143,7 @@ export function validateAzureCredentials(data) {
         }
         // Already logged in
         try {
-          const account = JSON.parse(stdout);
+          const account = parseAzureAccount(stdout);
           if (tenantId && account.tenantId !== tenantId) {
             // Different tenant — re-login
             cliExec(
@@ -85,7 +162,11 @@ export function validateAzureCredentials(data) {
               }
             );
           } else {
-            finishAuth(subscriptionId, tenantId || account.tenantId, resolve);
+            finishAuth(
+              subscriptionId,
+              tenantId || account.tenantId || "",
+              resolve
+            );
           }
         } catch (e) {
           finishAuth(subscriptionId, tenantId, resolve);
@@ -95,7 +176,11 @@ export function validateAzureCredentials(data) {
   });
 }
 
-export function finishAuth(subscriptionId, tenantId, resolve) {
+export function finishAuth(
+  subscriptionId: string,
+  tenantId: string,
+  resolve: (result: AzureCredentialResult) => void
+): void {
   if (subscriptionId) {
     setSubscription(subscriptionId, tenantId, resolve);
   } else {
@@ -110,7 +195,7 @@ export function finishAuth(subscriptionId, tenantId, resolve) {
           return;
         }
         try {
-          const info = JSON.parse(stdout);
+          const info = parseAzureAccount(stdout);
           resolve({
             success: true,
             tenantId: info.tenantId || tenantId,
@@ -132,7 +217,11 @@ export function finishAuth(subscriptionId, tenantId, resolve) {
   }
 }
 
-export function setSubscription(subscriptionId, tenantId, resolve) {
+export function setSubscription(
+  subscriptionId: string,
+  tenantId: string,
+  resolve: (result: AzureCredentialResult) => void
+): void {
   cliExec(
     "az",
     ["account", "set", "--subscription", subscriptionId],
@@ -159,7 +248,7 @@ export function setSubscription(subscriptionId, tenantId, resolve) {
             return;
           }
           try {
-            const info = JSON.parse(stdout2);
+            const info = parseAzureAccount(stdout2);
             resolve({
               success: true,
               tenantId: info.tenantId || tenantId,
@@ -182,8 +271,10 @@ export function setSubscription(subscriptionId, tenantId, resolve) {
   );
 }
 
-export function generateAWSOIDC(data) {
-  return getPlatform("aws").generateOidc(data);
+export function generateAWSOIDC(data: OidcInput) {
+  const platform = getPlatform("aws");
+  if (!platform) throw new Error("AWS platform is not registered.");
+  return platform.generateOidc(data);
 }
 
 /**
@@ -194,9 +285,12 @@ export function generateAWSOIDC(data) {
  * (gh stderr, 404, decode error) is surfaced in the thrown message.
  */
 const TEMPLATE_CACHE_TTL_MS = 60_000;
-const templateCache = new Map(); // `${ref}\0${fileName}` -> { at, body }
+const templateCache = new Map<string, TemplateCacheEntry>();
 
-async function fetchRadiusTemplate(fileName, ref = RADIUS_REF) {
+async function fetchRadiusTemplate(
+  fileName: string,
+  ref = RADIUS_REF
+): Promise<string> {
   // Cache decoded template bodies briefly so a single drift-sync pass (which
   // regenerates workflows for every managed environment) fetches each upstream
   // template once instead of once per environment.
@@ -221,7 +315,10 @@ async function fetchRadiusTemplate(fileName, ref = RADIUS_REF) {
   return content;
 }
 
-export async function generateVerifyWorkflow(env, provider) {
+export async function generateVerifyWorkflow(
+  env: string,
+  provider: string
+): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
     throw new Error(
@@ -246,14 +343,17 @@ export async function generateVerifyWorkflow(env, provider) {
  * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
  * there is no bundled fallback, so a fetch failure surfaces as an error.
  */
-export async function generateDeployWorkflow(env, appFile) {
+export async function generateDeployWorkflow(
+  env: string,
+  appFile: string
+): Promise<Record<string, string>> {
   // Only the dispatcher + the Azure provider workflow are fetched and committed;
   // the AWS provider workflow is intentionally never fetched or committed. The
   // dispatcher's `aws:` job (which `uses:` the absent AWS provider file) is
   // stripped below so GitHub can still parse the committed workflow.
   const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
   const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
-  const templates = {};
+  const templates: Record<string, string> = {};
   files.forEach((f, i) => {
     templates[f] = bodies[i];
   });
@@ -289,12 +389,14 @@ export async function generateDeployWorkflow(env, appFile) {
  * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
  * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
  */
-export async function generateDeleteWorkflow(env) {
+export async function generateDeleteWorkflow(
+  env: string
+): Promise<Record<string, string>> {
   const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
   const bodies = await Promise.all(
     files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
   );
-  const templates = {};
+  const templates: Record<string, string> = {};
   files.forEach((f, i) => {
     templates[f] = bodies[i];
   });
@@ -317,7 +419,7 @@ export async function generateDeleteWorkflow(env) {
  * a parse error (HTTP 422). Jobs are indented two spaces; the block runs until
  * the next two-space-indented key, a top-level key, or EOF.
  */
-function stripAwsDispatcherJob(yaml) {
+function stripAwsDispatcherJob(yaml: string): string {
   const lines = yaml.split("\n");
   const start = lines.findIndex((l) => /^  aws:\s*$/.test(l));
   if (start === -1) return yaml;
@@ -343,7 +445,7 @@ function stripAwsDispatcherJob(yaml) {
  * trigger. Operates on the `on:` mapping where triggers are indented two spaces
  * and their children deeper.
  */
-function stripWorkflowRunTrigger(yaml) {
+function stripWorkflowRunTrigger(yaml: string): string {
   const lines = yaml.split("\n");
   const start = lines.findIndex((l) => /^  workflow_run:\s*$/.test(l));
   if (start === -1) return yaml;
@@ -367,7 +469,11 @@ function stripWorkflowRunTrigger(yaml) {
   lines.splice(from, to - from);
   return lines.join("\n");
 }
-export function generatePortalUrl(resourceType, provider, state) {
+export function generatePortalUrl(
+  resourceType: string,
+  provider: string,
+  state: CanvasState
+): string {
   return coreGeneratePortalUrl(resourceType, provider, state);
 }
 
@@ -411,7 +517,11 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
  * rather than aborting the pass. Returns `{ updated, branches, skipped }` where
  * `updated` is the de-duplicated set of paths changed on any branch.
  */
-export async function syncRepoWorkflows(repo, environments, opts = {}) {
+export async function syncRepoWorkflows(
+  repo: string,
+  environments: ManagedEnvironment[],
+  opts: SyncWorkflowOptions = {}
+): Promise<{ updated: string[]; branches?: string[]; skipped: boolean }> {
   const log = typeof opts.log === "function" ? opts.log : () => {};
   const envs = (environments || []).filter((e) => e && e.name);
   if (!repo || envs.length === 0) return { updated: [], skipped: true };
@@ -435,19 +545,19 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
   // path -> [{ content, provider }]: every committed workflow file mapped to
   // the acceptable (upstream-matching) contents, one candidate per environment.
   // Branch-independent, so it's built once and reused across every branch.
-  const byPath = new Map();
-  const add = (path, content, provider) => {
+  const byPath = new Map<string, WorkflowCandidate[]>();
+  const add = (path: string, content: string, provider: string | null) => {
     if (typeof content !== "string" || !content) return;
     if (onlySet && !onlySet.has(path.split("/").pop())) return;
     const list = byPath.get(path) || [];
     list.push({ content, provider });
     byPath.set(path, list);
   };
-  const wf = (name) => `.github/workflows/${name}`;
+  const wf = (name: string) => `.github/workflows/${name}`;
 
   for (const env of envs) {
     // Which providers to generate verify candidates for. An environment whose
-    // provider couldn't be inferred (server.mjs passes "") gets BOTH, so a
+    // provider couldn't be inferred (server.ts passes "") gets BOTH, so a
     // committed AWS verify file is never rewritten with the Azure template
     // (or vice versa) merely because the provider was unknown — matching the
     // in-sync check against either provider's template and preferring the
@@ -465,7 +575,7 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
         );
       } catch (e) {
         log(
-          `skipped verify template for "${env.name}" (${provider}): ${e.message}`
+          `skipped verify template for "${env.name}" (${provider}): ${errorMessage(e)}`
         );
       }
     }
@@ -480,18 +590,18 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
       for (const [file, content] of Object.entries(deploy))
         add(wf(file), content, null);
     } catch (e) {
-      log(`skipped deploy templates for "${env.name}": ${e.message}`);
+      log(`skipped deploy templates for "${env.name}": ${errorMessage(e)}`);
     }
     try {
       const del = await generateDeleteWorkflow(env.name);
       for (const [file, content] of Object.entries(del))
         add(wf(file), content, null);
     } catch (e) {
-      log(`skipped delete templates for "${env.name}": ${e.message}`);
+      log(`skipped delete templates for "${env.name}": ${errorMessage(e)}`);
     }
   }
 
-  const updated = new Set();
+  const updated = new Set<string>();
   for (const branch of branches) {
     for (const [path, candidates] of byPath.entries()) {
       const committed = await fetchFileFromRepo(repo, path, branch);
@@ -527,7 +637,7 @@ export async function syncRepoWorkflows(repo, environments, opts = {}) {
         updated.add(path);
         log(`updated ${path} on "${branch}"`);
       } catch (e) {
-        log(`could not update ${path} on "${branch}": ${e.message}`);
+        log(`could not update ${path} on "${branch}": ${errorMessage(e)}`);
       }
     }
   }

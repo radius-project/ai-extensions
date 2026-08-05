@@ -1,7 +1,7 @@
 // Canvas adapter — HTML page renderers. Each function is a `state => html`
 // builder for one canvas page; together they are the entire server-side view
 // layer. Browser behaviour lives in the embedded client JS (./client.ts) and
-// vendored libraries (./vendor.mjs); cross-cutting helpers/state come from
+// vendored libraries (./vendor.ts); cross-cutting helpers/state come from
 // ./shared.ts. No I/O, routing, or business logic here.
 
 import {
@@ -11,7 +11,7 @@ import {
   type CanvasState
 } from "./shared.js";
 import { formatServesReposLabel, discoverStatusText } from "./azure-oidc.js";
-import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.mjs";
+import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.js";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
@@ -2990,7 +2990,7 @@ function promptSmr() {
 }
 
 // Single source of truth: these two pure helpers are authored and unit-tested
-// in azure-oidc.mjs, then serialized into this browser bundle via .toString()
+// in azure-oidc.ts, then serialized into this browser bundle via .toString()
 // so the SHIPPING client runs the exact tested code instead of a hand-copied
 // twin that drifts and has no coverage. Emitted as function declarations (they
 // hoist, so earlier call sites in this script — e.g. discoverResources — resolve

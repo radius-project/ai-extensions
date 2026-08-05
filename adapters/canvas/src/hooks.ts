@@ -1,4 +1,4 @@
-// hooks.mjs — pre-tool-use hook logic for auto-triggering app.bicep creation.
+// Pre-tool-use hook logic for auto-triggering app.bicep creation.
 //
 // With the recipe-pack refactor, .radius/app.bicep is authored exclusively by
 // the radius-app-bicep skill (the agent) — this adapter never fabricates bicep.
@@ -11,7 +11,7 @@
 // never writes bicep; it only triggers the skill.
 //
 // Kept as a pure module (no SDK imports, no top-level joinSession) so the hook
-// decision can be unit-tested in isolation from extension.mjs.
+// decision can be unit-tested in isolation from extension.ts.
 
 // Canvas pages that render an application graph built from app.bicep.
 export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
@@ -25,6 +25,50 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "./deploy-diagnostics.js";
+import type { CanvasState } from "./shared.js";
+
+interface GraphTriggerTarget {
+  repo: string;
+  branches: Array<string | undefined>;
+}
+
+interface AppBicepHookInput {
+  toolName?: unknown;
+  toolArgs?: unknown;
+}
+
+interface AppBicepHookDependencies {
+  workspaceState(): Promise<CanvasState>;
+  fetchBicep(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<string | null>;
+  defaultBranchForState(state: CanvasState): string;
+}
+
+export interface AppBicepHookOutput {
+  permissionDecision: "deny";
+  permissionDecisionReason: string;
+  additionalContext: string;
+}
+
+interface DeployRepairDetails {
+  error?: string;
+  deployRunUrl?: string;
+  attemptId?: string;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value));
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
 
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
 // skill owns the full authoring workflow (namespaces, types, structure, and
@@ -41,8 +85,8 @@ const RECIPE_PACK_NOTE =
 // "the default branch for the current state") into a human-readable phrase
 // for the prompts below, e.g. "branch `main`" or "branches `main`, `feat`".
 // Returns "" when there is nothing usable to name.
-function branchPhrase(branches) {
-  const names = (branches || []).filter(Boolean);
+function branchPhrase(branches: ReadonlyArray<string | undefined>): string {
+  const names = branches.filter((branch): branch is string => Boolean(branch));
   if (!names.length) return "";
   const quoted = names.map((b) => `\`${b}\``);
   return names.length === 1 ?
@@ -55,7 +99,11 @@ function branchPhrase(branches) {
 // workspace branch (write to the working tree, no push needed) vs. a
 // different branch (model that branch's code, commit + push there, prefer a
 // PR, never silently push to a protected branch like main).
-function graphSourceNote(page, repo, branches) {
+function graphSourceNote(
+  page: string,
+  repo: string,
+  branches: ReadonlyArray<string | undefined>
+): string {
   const phrase = branchPhrase(branches);
   const where = repo ? ` for ${repo}` : "";
   const onPhrase = phrase ? ` on ${phrase}` : "";
@@ -70,7 +118,10 @@ function graphSourceNote(page, repo, branches) {
 // Instruction fed back to the agent (as additionalContext) when a graph tool is
 // denied because app.bicep is missing. It must steer the agent to the skill and
 // to write the file, never to fabricate a graph or singleton recipes.
-export function appBicepReminder(repo, branches = []) {
+export function appBicepReminder(
+  repo: string,
+  branches: Array<string | undefined> = []
+): string {
   const where = repo ? ` for ${repo}` : "";
   return [
     `No .radius/app.bicep exists${where}, so the application graph cannot be generated yet.`,
@@ -87,31 +138,42 @@ export function appBicepReminder(repo, branches = []) {
 // null when the tool is not a graph-generating trigger this hook governs.
 // `branches` may contain a single `undefined` entry meaning "the default branch
 // for the current workspace/state" (resolved by the caller via deps).
-export function graphTriggerTargets(toolName, toolArgs) {
-  const args = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
+export function graphTriggerTargets(
+  toolName: unknown,
+  toolArgs: unknown
+): GraphTriggerTarget | null {
+  const args = record(toolArgs);
 
   if (toolName === "open_canvas") {
     if (args.canvasId !== "radius") return null;
-    const input =
-      args.input && typeof args.input === "object" ? args.input : {};
+    const input = record(args.input);
     // A page-less open lands on the canvas's default page, so resolve it the
     // same way the canvas does before deciding whether this is a graph trigger.
-    const page = input.page || DEFAULT_CANVAS_PAGE;
+    const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
     if (!GRAPH_PAGES.has(page)) return null;
     if (page === "graph-diff") {
-      const branches = [input.baseBranch, input.headBranch].filter(Boolean);
+      const branches = [
+        optionalString(input.baseBranch),
+        optionalString(input.headBranch)
+      ].filter((branch): branch is string => Boolean(branch));
       return {
-        repo: input.repo || "",
+        repo: optionalString(input.repo) || "",
         branches: branches.length ? branches : [undefined]
       };
     }
-    return { repo: input.repo || "", branches: [input.branch] };
+    return {
+      repo: optionalString(input.repo) || "",
+      branches: [optionalString(input.branch)]
+    };
   }
 
   if (toolName === "radius_generate_pr_diff_markdown") {
-    const branches = [args.baseBranch, args.headBranch].filter(Boolean);
+    const branches = [
+      optionalString(args.baseBranch),
+      optionalString(args.headBranch)
+    ].filter((branch): branch is string => Boolean(branch));
     return {
-      repo: args.repo || "",
+      repo: optionalString(args.repo) || "",
       branches: branches.length ? branches : [undefined]
     };
   }
@@ -128,8 +190,11 @@ export function graphTriggerTargets(toolName, toolArgs) {
 // graph trigger fires and no app.bicep is found on any target branch; otherwise
 // returns undefined (allow). For multi-branch triggers (graph-diff) a graph can
 // still render if only one side has bicep, so it denies only when ALL are empty.
-export async function evaluateAppBicepHook(input, deps) {
-  const targets = graphTriggerTargets(input?.toolName, input?.toolArgs);
+export async function evaluateAppBicepHook(
+  input: AppBicepHookInput,
+  deps: AppBicepHookDependencies
+): Promise<AppBicepHookOutput | undefined> {
+  const targets = graphTriggerTargets(input.toolName, input.toolArgs);
   if (!targets) return undefined;
 
   const state = await deps.workspaceState();
@@ -162,7 +227,11 @@ export async function evaluateAppBicepHook(input, deps) {
 // surfaced as a visible turn, keep it free of internal tool mechanics and
 // agent-only meta-instructions; it points the agent at the skill and states the
 // graph's data source, nothing more.
-export function appBicepHandoffPrompt(repo, page = "graph", branches = []) {
+export function appBicepHandoffPrompt(
+  repo: string,
+  page = "graph",
+  branches: Array<string | undefined> = []
+): string {
   const where = repo ? ` for ${repo}` : "";
   const phrase = branchPhrase(branches);
   const onPhrase = phrase ? ` (${phrase})` : "";
@@ -188,10 +257,10 @@ export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-di
 // bridge. Deliberately self-contained — it names the tools that repair the model
 // and redeploy, so the loop does not depend on another skill being consulted.
 export function deployRepairHandoffPrompt(
-  repo,
-  branch,
-  { error = "", deployRunUrl = "", attemptId = "" } = {}
-) {
+  repo: string,
+  branch: string,
+  { error = "", deployRunUrl = "", attemptId = "" }: DeployRepairDetails = {}
+): string {
   const where = repo ? ` of ${repo}` : "";
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
   const fenced = fenceDeployDiagnostic(error);

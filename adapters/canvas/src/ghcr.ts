@@ -3,6 +3,154 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+export interface GhCredentials {
+  token: string;
+  username: string;
+}
+
+interface HttpResponse {
+  ok: boolean;
+  status: number;
+  headers: { get(name: string): string | null };
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+export type FetchImplementation = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: Buffer;
+    redirect?: "error" | "follow";
+  }
+) => Promise<HttpResponse>;
+
+interface OciDescriptor {
+  mediaType?: string;
+  digest: string;
+  size?: number;
+  annotations?: Record<string, string>;
+}
+
+export interface OciManifest {
+  mediaType?: string;
+  artifactType?: string;
+  manifests?: OciDescriptor[];
+  layers?: OciDescriptor[];
+  [key: string]: unknown;
+}
+
+export interface PulledOciArtifact {
+  files: Record<string, string>;
+  manifest: OciManifest;
+  artifactType: string;
+}
+
+interface GitHubPackageMetadata {
+  visibility?: string;
+  repository?: { full_name?: string };
+}
+
+interface RegistryCoordinates {
+  owner: string;
+  packageName: string;
+  repositoryPath: string;
+  registryOrigin: string;
+}
+
+interface RegistryTokenOptions extends GhCredentials {
+  fetchImpl: FetchImplementation;
+  registryOrigin: string;
+  repositoryPath: string;
+  scope?: string;
+}
+
+interface BlobOptions {
+  fetchImpl: FetchImplementation;
+  registryOrigin: string;
+  repositoryPath: string;
+  bearerToken: string;
+  bytes: Buffer;
+  digest: string;
+}
+
+interface BootstrapManifestOptions {
+  fetchImpl: FetchImplementation;
+  registryOrigin: string;
+  repositoryPath: string;
+  bearerToken: string;
+  targetRepository: string;
+}
+
+type CredentialLoader = () => Promise<GhCredentials>;
+type KeyringCommand = (args: string[]) => Promise<string>;
+
+export interface BootstrapGhcrOptions {
+  targetRepository: string;
+  registry: string;
+  credentials?: GhCredentials;
+  fetchImpl?: FetchImplementation;
+  registryOrigin?: string;
+  apiBaseUrl?: string;
+  sleep?: (milliseconds: number) => Promise<void>;
+  metadataAttempts?: number;
+}
+
+export interface PullOciOptions {
+  registry: string;
+  tag: string;
+  credentials?: GhCredentials;
+  loadCredentials?: CredentialLoader;
+  fetchImpl?: FetchImplementation;
+  registryOrigin?: string;
+}
+
+class GhcrAuthError extends Error {
+  readonly code = "GHCR_AUTH";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseManifest(value: unknown): OciManifest {
+  if (!isRecord(value))
+    throw new Error("GHCR returned an invalid OCI manifest.");
+  const descriptors = (input: unknown): OciDescriptor[] | undefined =>
+    Array.isArray(input) ?
+      input.filter(
+        (entry): entry is OciDescriptor =>
+          isRecord(entry) && typeof entry.digest === "string"
+      )
+    : undefined;
+  return {
+    ...value,
+    mediaType:
+      typeof value.mediaType === "string" ? value.mediaType : undefined,
+    artifactType:
+      typeof value.artifactType === "string" ? value.artifactType : undefined,
+    manifests: descriptors(value.manifests),
+    layers: descriptors(value.layers)
+  };
+}
+
+function parsePackageMetadata(value: unknown): GitHubPackageMetadata {
+  if (!isRecord(value)) {
+    throw new Error("GitHub Packages API returned an invalid response.");
+  }
+  const repository = isRecord(value.repository) ? value.repository : undefined;
+  return {
+    visibility:
+      typeof value.visibility === "string" ? value.visibility : undefined,
+    repository:
+      repository && typeof repository.full_name === "string" ?
+        { full_name: repository.full_name }
+      : undefined
+  };
+}
+
 export const BOOTSTRAP_TAG = "bootstrap";
 export const BOOTSTRAP_ARTIFACT_TYPE =
   "application/vnd.radius.statearchive.bootstrap.v1";
@@ -20,16 +168,24 @@ const PACKAGE_AUTH_GUIDANCE =
 export const DEPLOY_STATUS_ARTIFACT_TYPE =
   "application/vnd.radius.deploy-status.v1+json";
 
-async function defaultRunKeyringCommand(args) {
-  const { runGhKeyringCommand } = await import("./gh.mjs");
-  return runGhKeyringCommand(args);
+async function defaultRunKeyringCommand(args: string[]): Promise<string> {
+  const { runGhKeyringCommand } = await import("./gh.js");
+  const value = await runGhKeyringCommand(args);
+  if (typeof value !== "string") {
+    throw new Error("GitHub CLI returned an invalid credential response.");
+  }
+  return value;
 }
 
-function sha256(bytes) {
+function sha256(bytes: Buffer): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-function descriptor(mediaType, bytes, annotations) {
+function descriptor(
+  mediaType: string,
+  bytes: Buffer,
+  annotations?: Record<string, string>
+): OciDescriptor {
   return {
     mediaType,
     digest: sha256(bytes),
@@ -38,7 +194,10 @@ function descriptor(mediaType, bytes, annotations) {
   };
 }
 
-function parseRegistry(registry, registryOrigin) {
+function parseRegistry(
+  registry: string,
+  registryOrigin?: string
+): RegistryCoordinates {
   if (!registry || registry.includes("://") || registry.includes("@")) {
     throw new Error(`Invalid GHCR state repository "${registry}".`);
   }
@@ -66,24 +225,22 @@ function parseRegistry(registry, registryOrigin) {
   };
 }
 
-async function responseDetail(response) {
+async function responseDetail(response: HttpResponse): Promise<string> {
   const text = (await response.text().catch(() => "")).trim();
   return text ? `: ${text.slice(0, 1000)}` : "";
 }
 
-function packageAuthError(message) {
-  const error = new Error(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
-  // Tag so callers can distinguish a permission problem from a transient/HTTP
-  // failure and surface auth-specific guidance.
-  error.code = "GHCR_AUTH";
-  return error;
+function packageAuthError(message: string): GhcrAuthError {
+  return new GhcrAuthError(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
 }
 
-function parseBearerChallenge(header) {
+function parseBearerChallenge(
+  header: string | null
+): Record<string, string> & { realm: string } {
   if (!header || !/^Bearer\s+/i.test(header)) {
     throw new Error("GHCR did not return a Bearer authentication challenge.");
   }
-  const params = {};
+  const params: Record<string, string> = {};
   const expression = /([a-zA-Z]+)="([^"]*)"/g;
   let match;
   while ((match = expression.exec(header)) !== null) {
@@ -94,7 +251,7 @@ function parseBearerChallenge(header) {
       "GHCR authentication challenge did not include a token realm."
     );
   }
-  return params;
+  return { ...params, realm: params.realm };
 }
 
 async function getRegistryBearerToken({
@@ -104,7 +261,7 @@ async function getRegistryBearerToken({
   username,
   token,
   scope = "pull,push"
-}) {
+}: RegistryTokenOptions): Promise<string> {
   const challengeResponse = await fetchImpl(`${registryOrigin}/v2/`, {
     headers: { Accept: "application/json" },
     redirect: "error"
@@ -145,24 +302,32 @@ async function getRegistryBearerToken({
     );
   }
   const body = await response.json();
-  const bearerToken = body.token || body.access_token;
+  const tokenBody = isRecord(body) ? body : {};
+  const bearerToken =
+    typeof tokenBody.token === "string" ? tokenBody.token
+    : typeof tokenBody.access_token === "string" ? tokenBody.access_token
+    : "";
   if (!bearerToken) {
     throw new Error("GHCR token response did not include an access token.");
   }
   return bearerToken;
 }
 
-function registryPath(repositoryPath) {
+function registryPath(repositoryPath: string): string {
   return repositoryPath.split("/").map(encodeURIComponent).join("/");
 }
 
 async function registryFetch(
-  fetchImpl,
-  registryOrigin,
-  bearerToken,
-  path,
-  options = {}
-) {
+  fetchImpl: FetchImplementation,
+  registryOrigin: string,
+  bearerToken: string,
+  path: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: Buffer;
+  } = {}
+): Promise<HttpResponse> {
   return fetchImpl(`${registryOrigin}${path}`, {
     ...options,
     headers: {
@@ -180,7 +345,7 @@ async function pushBlob({
   bearerToken,
   bytes,
   digest
-}) {
+}: BlobOptions): Promise<void> {
   const encodedPath = registryPath(repositoryPath);
   const blobPath = `/v2/${encodedPath}/blobs/${digest}`;
   const existing = await registryFetch(
@@ -243,7 +408,7 @@ async function pushBootstrapManifest({
   repositoryPath,
   bearerToken,
   targetRepository
-}) {
+}: BootstrapManifestOptions): Promise<void> {
   const configBytes = Buffer.from("{}");
   const layerBytes = Buffer.from(BOOTSTRAP_CONTENT);
   const config = descriptor(OCI_EMPTY_CONFIG_MEDIA_TYPE, configBytes);
@@ -297,7 +462,12 @@ async function pushBootstrapManifest({
   }
 }
 
-async function githubJson(fetchImpl, url, token, allowNotFound = false) {
+async function githubJson(
+  fetchImpl: FetchImplementation,
+  url: string,
+  token: string,
+  allowNotFound = false
+): Promise<unknown | null> {
   const response = await fetchImpl(url, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -326,25 +496,39 @@ async function packageEndpoint({
   owner,
   packageName,
   token
-}) {
+}: {
+  fetchImpl: FetchImplementation;
+  apiBaseUrl: string;
+  owner: string;
+  packageName: string;
+  token: string;
+}): Promise<string> {
   const ownerMetadata = await githubJson(
     fetchImpl,
     `${apiBaseUrl}/users/${encodeURIComponent(owner)}`,
     token
   );
+  const ownerType =
+    isRecord(ownerMetadata) && typeof ownerMetadata.type === "string" ?
+      ownerMetadata.type
+    : "";
   const scope =
-    ownerMetadata.type === "Organization" ? "orgs"
-    : ownerMetadata.type === "User" ? "users"
+    ownerType === "Organization" ? "orgs"
+    : ownerType === "User" ? "users"
     : null;
   if (!scope) {
     throw new Error(
-      `Unsupported GitHub account type "${ownerMetadata.type}" for GHCR owner "${owner}".`
+      `Unsupported GitHub account type "${ownerType}" for GHCR owner "${owner}".`
     );
   }
   return `${apiBaseUrl}/${scope}/${encodeURIComponent(owner)}/packages/container/${encodeURIComponent(packageName)}`;
 }
 
-function validatePackage(metadata, targetRepository, allowMissingLink = false) {
+function validatePackage(
+  metadata: GitHubPackageMetadata,
+  targetRepository: string,
+  allowMissingLink = false
+): boolean {
   if (metadata.visibility !== "private" && metadata.visibility !== "internal") {
     throw new Error(
       `GHCR state package must be private or internal; current visibility is "${metadata.visibility || "unknown"}".`
@@ -364,7 +548,7 @@ function validatePackage(metadata, targetRepository, allowMissingLink = false) {
 
 export async function loadGhKeyringCredentials({
   runKeyringCommand = defaultRunKeyringCommand
-} = {}) {
+}: { runKeyringCommand?: KeyringCommand } = {}): Promise<GhCredentials> {
   try {
     const [token, username] = await Promise.all([
       runKeyringCommand(["auth", "token", "--hostname", "github.com"]),
@@ -395,9 +579,13 @@ export async function loadGhKeyringCredentials({
  * `finally`, so the token never persists on disk beyond the publish call.
  */
 export async function withGhcrDockerConfig(
-  fn,
-  { loadCredentials = loadGhKeyringCredentials } = {}
-) {
+  fn: (env: { DOCKER_CONFIG: string }) => Promise<unknown>,
+  {
+    loadCredentials = loadGhKeyringCredentials
+  }: {
+    loadCredentials?: CredentialLoader;
+  } = {}
+): Promise<unknown> {
   const { token, username } = await loadCredentials();
   const dir = mkdtempSync(path.join(os.tmpdir(), "radius-ghcr-"));
   try {
@@ -427,7 +615,11 @@ export async function bootstrapGHCRStatePackage({
   sleep = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   metadataAttempts = 6
-}) {
+}: BootstrapGhcrOptions): Promise<{
+  registry: string;
+  bootstrapTag: string;
+  visibility: string | undefined;
+}> {
   if (typeof fetchImpl !== "function") {
     throw new Error("This Node.js runtime does not provide fetch.");
   }
@@ -441,8 +633,13 @@ export async function bootstrapGHCRStatePackage({
     token: auth.token
   });
 
-  const existing = await githubJson(fetchImpl, endpoint, auth.token, true);
-  if (existing) validatePackage(existing, targetRepository, true);
+  const existingValue = await githubJson(fetchImpl, endpoint, auth.token, true);
+  if (existingValue)
+    validatePackage(
+      parsePackageMetadata(existingValue),
+      targetRepository,
+      true
+    );
 
   const bearerToken = await getRegistryBearerToken({
     fetchImpl,
@@ -459,9 +656,10 @@ export async function bootstrapGHCRStatePackage({
     targetRepository
   });
 
-  let metadata = null;
+  let metadata: GitHubPackageMetadata | null = null;
   for (let attempt = 0; attempt < metadataAttempts; attempt++) {
-    metadata = await githubJson(fetchImpl, endpoint, auth.token, true);
+    const value = await githubJson(fetchImpl, endpoint, auth.token, true);
+    metadata = value ? parsePackageMetadata(value) : null;
     // validatePackage fails fast on public visibility and on a wrong repository
     // link; a not-yet-propagated (missing) link returns false so we keep retrying.
     if (metadata && validatePackage(metadata, targetRepository, true)) {
@@ -482,6 +680,11 @@ export async function bootstrapGHCRStatePackage({
     );
   }
   validatePackage(metadata, targetRepository);
+  return {
+    registry,
+    bootstrapTag: BOOTSTRAP_TAG,
+    visibility: metadata.visibility
+  };
 }
 
 /**
@@ -503,7 +706,7 @@ export async function pullOciArtifactFiles({
   loadCredentials = loadGhKeyringCredentials,
   fetchImpl = globalThis.fetch,
   registryOrigin
-}) {
+}: PullOciOptions): Promise<PulledOciArtifact | null> {
   if (typeof fetchImpl !== "function") {
     throw new Error("This Node.js runtime does not provide fetch.");
   }
@@ -527,7 +730,7 @@ export async function pullOciArtifactFiles({
   // fetchManifest - GET a manifest/index by reference (tag or digest). Returns
   // { manifest } on success, or null on 404 (so a missing tag is a clean
   // fallback signal rather than an error).
-  async function fetchManifest(reference) {
+  async function fetchManifest(reference: string): Promise<OciManifest | null> {
     const response = await registryFetch(
       fetchImpl,
       parsed.registryOrigin,
@@ -550,7 +753,7 @@ export async function pullOciArtifactFiles({
         `Failed to read GHCR manifest "${reference}" (HTTP ${response.status})${await responseDetail(response)}`
       );
     }
-    return response.json();
+    return parseManifest(await response.json());
   }
 
   let manifest = await fetchManifest(encodeURIComponent(tag));
@@ -579,7 +782,7 @@ export async function pullOciArtifactFiles({
   }
 
   const layers = Array.isArray(manifest.layers) ? manifest.layers : [];
-  const files = {};
+  const files: Record<string, string> = {};
   for (const layer of layers) {
     const title = layer?.annotations?.["org.opencontainers.image.title"];
     if (!title || !layer.digest) continue;

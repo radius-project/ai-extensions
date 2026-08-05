@@ -1,12 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(
-  new URL("./extension.mjs", import.meta.url),
-  "utf8"
-);
+const source = readFileSync(new URL("./extension.ts", import.meta.url), "utf8");
 const serverSource = readFileSync(
-  new URL("./server.mjs", import.meta.url),
+  new URL("./server.ts", import.meta.url),
   "utf8"
 );
 
@@ -17,31 +14,31 @@ describe("render_graph action", () => {
     )?.[0];
     expect(handler).toContain("entry.state.graphLoaded = true");
     expect(handler).toMatch(
-      /filterGraphVisualizationResources\(\s*ctx\.input\.resources\s*\)/
+      /filterGraphVisualizationResources\(\s*graphResources\(input\.resources\)\s*\)/
     );
   });
 });
 
 describe("default canvas page", () => {
   // The default's value and its graph-page invariant are asserted behaviorally in
-  // hooks_test.mjs against the real export. These only pin the wiring, which
-  // can't be reached at runtime: extension.mjs runs joinSession() at import time
-  // and server.mjs's page router is not exported.
+  // hooks.test.ts against the real export. These only pin the wiring, which
+  // can't be reached at runtime: extension.ts runs joinSession() at import time
+  // and server.ts's page router is not exported.
   it("resolves both the canvas open handler and the HTTP page router from the shared default", () => {
     expect(source).toContain(
-      "const page = ctx.input?.page || DEFAULT_CANVAS_PAGE"
+      "const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE"
     );
     expect(serverSource).toContain(
       "requestedPage || entry?.page || DEFAULT_CANVAS_PAGE"
     );
   });
 
-  it("sources the default from hooks.mjs so the page vocabulary has a single owner", () => {
+  it("sources the default from hooks.ts so the page vocabulary has a single owner", () => {
     expect(source).toMatch(
-      /import \{[^}]*DEFAULT_CANVAS_PAGE[^}]*\} from "\.\/hooks\.mjs"/
+      /import \{[^}]*DEFAULT_CANVAS_PAGE[^}]*\} from "\.\/hooks\.js"/
     );
     expect(serverSource).toMatch(
-      /import \{[^}]*DEFAULT_CANVAS_PAGE[^}]*\} from "\.\/hooks\.mjs"/
+      /import \{[^}]*DEFAULT_CANVAS_PAGE[^}]*\} from "\.\/hooks\.js"/
     );
   });
 });

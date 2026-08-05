@@ -49,17 +49,9 @@ const REFERENCES = [
   ["references/todo-list-app-example.md", todoListAppExample]
 ];
 
-/**
- * The `repoPath` argument is caller-controlled and gets embedded in the returned
- * string, which the agent consumes as instructions. An unsanitized value with
- * newlines or backticks could inject additional prompt content, so reduce it to
- * a single, inert, length-bounded token before echoing it. Returns a safe
- * placeholder when the input is empty or has no usable characters.
- *
- * @param {unknown} repoPath
- * @returns {string}
- */
-function sanitizeRepoPath(repoPath) {
+// The repo path is caller-controlled and embedded in agent instructions, so
+// reduce it to a single, inert, length-bounded token.
+function sanitizeRepoPath(repoPath: unknown): string {
   const FALLBACK = "the current workspace";
   if (typeof repoPath !== "string") return FALLBACK;
   // Collapse any whitespace (including newlines/tabs) to single spaces, drop
@@ -74,15 +66,8 @@ function sanitizeRepoPath(repoPath) {
   return cleaned || FALLBACK;
 }
 
-/**
- * Returns the full radius-app-bicep skill (SKILL.md plus every reference file it
- * links to) as a single string, so the agent has the authoritative, schema-
- * accurate, compile-tested guidance even when only the extension is installed.
- *
- * @param {string} [repoPath] Path to the repository to model.
- * @returns {string}
- */
-export function radiusAppBicepSkill(repoPath) {
+// Returns the full skill and every referenced file as one standalone prompt.
+export function radiusAppBicepSkill(repoPath?: string): string {
   const target = sanitizeRepoPath(repoPath);
   const intro =
     `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +

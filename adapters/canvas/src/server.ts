@@ -9,6 +9,11 @@
 // extension.ts.
 
 import { createServer } from "node:http";
+import type {
+  IncomingMessage,
+  Server as HttpServer,
+  ServerResponse
+} from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -23,9 +28,10 @@ import {
   buildEnvironmentSuffix
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/shared";
-import { ensureVendorScripts } from "./vendor.mjs";
+import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
+  cloudCredential,
   saveCredentials,
   listCredentialProfiles,
   saveCredentialProfile,
@@ -33,6 +39,7 @@ import {
   getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
+import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
@@ -50,7 +57,8 @@ import {
   resetGhIdentityCache,
   primeGhIdentity,
   setPreferredGhLogin
-} from "./gh.mjs";
+} from "./gh.js";
+import type { CliOptions } from "./gh.js";
 import {
   resolveOidcSubject,
   buildAppCreateArgs,
@@ -67,7 +75,8 @@ import {
   isResourceGroupName,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
-import { bootstrapGHCRStatePackage } from "./ghcr.mjs";
+import type { GitHubJsonResponse, GitHubJsonRunner } from "./azure-oidc.js";
+import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
   appParams,
   resolveDeployParams,
@@ -86,11 +95,11 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./hooks.mjs";
+import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import {
   radArtifactsDirForSelection,
   radArtifactsFingerprint
-} from "./remote-rad-artifacts.mjs";
+} from "./remote-rad-artifacts.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -108,7 +117,7 @@ import {
   DEPLOY_AZURE_FILE,
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE
-} from "./infra.mjs";
+} from "./infra.js";
 import {
   findWorkflowRun,
   getRunDetail,
@@ -129,7 +138,7 @@ import {
   explainRepoAccessForEnvSetup,
   parseResourceProgress,
   parseRadDeployLog
-} from "./deploy.mjs";
+} from "./deploy.js";
 import {
   graphPage,
   plannedGraphPage,
@@ -139,11 +148,251 @@ import {
   deployingPage
 } from "./pages.js";
 
+export interface CanvasServerEntry {
+  server: HttpServer;
+  baseUrl: string;
+  url: string;
+  page: string;
+  state: CanvasState;
+}
+
+interface CommandResult {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+}
+
+interface PullRequestState {
+  branch: string;
+  base: string;
+}
+
+interface EnvironmentListResult {
+  error?: string;
+  stdout?: string;
+}
+
+interface VerifyRun {
+  status: string;
+  conclusion: string;
+}
+
+interface DiscoveryItem {
+  id: string;
+  name: string;
+  resourceGroup?: string;
+}
+
+interface DiscoveryResult {
+  clusters: DiscoveryItem[];
+  resourceGroups: DiscoveryItem[];
+  namespaces: string[];
+  vpcs: DiscoveryItem[];
+  subnets: DiscoveryItem[];
+  errors?: Record<string, string>;
+}
+
+interface BranchInfo {
+  name: string;
+  sha: string;
+}
+
+interface BranchResult {
+  branches?: BranchInfo[];
+  workspaceBranch?: string;
+  error?: string;
+}
+
+interface ChildProcessInput {
+  stdin: { end(): unknown } | null;
+}
+
+function discoveryItems(value: unknown): DiscoveryItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const fields = record(item);
+    return {
+      id: optionalString(fields.id),
+      name: optionalString(fields.name),
+      resourceGroup: optionalString(fields.resourceGroup)
+    };
+  });
+}
+
+export function endChildInput(child: ChildProcessInput): void {
+  try {
+    child.stdin?.end();
+  } catch (_error: unknown) {
+    // Closing stdin is best-effort; the command callback remains authoritative.
+  }
+}
+
+function runCliCommand(
+  cmd: string,
+  args: string[],
+  timeout = 60000
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? err.code || 1 : 0,
+        stdout: stdout || "",
+        stderr: stderr || ""
+      });
+    });
+    endChildInput(child);
+  });
+}
+
+interface ManagedEnvironment {
+  name: string;
+  provider?: string;
+}
+
+interface CachedPayload {
+  at: number;
+  payload: unknown;
+}
+
+interface AppBicepHandoffInput {
+  repo: string;
+  branches: string[];
+  page: string;
+}
+
+export interface DeployRepairHandoffInput {
+  repo: string;
+  branch: string;
+  error: string;
+  deployRunUrl: string;
+  attemptId: string;
+  instanceId: string;
+}
+
+interface OpenSourceInput {
+  path: string;
+  line: number;
+  instanceId: string;
+  state?: CanvasState;
+}
+
+type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
+type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
+type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
+type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+
+interface IdValidationInput {
+  tenantId?: string;
+  subscriptionId?: string;
+}
+
+interface AzureLoginInput {
+  tenantId?: string;
+  activeTenantId?: string;
+}
+
+interface AzureCliAssistInput {
+  action?: string;
+  tenantId?: string;
+}
+
+interface DeployHandoffSummary {
+  state: string;
+  attempts: number;
+  maxAttempts: number;
+  pending: boolean;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error: unknown, fallback: string): string {
+  const value = record(error).code;
+  return typeof value === "string" && value ? value : fallback;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value));
+}
+
+function optionalString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
+  return values.map((value) => {
+    const item = record(value);
+    const connections =
+      Array.isArray(item.connections) ?
+        item.connections.map((connection) => {
+          const fields = record(connection);
+          return {
+            ...fields,
+            id: optionalString(fields.id),
+            name: optionalString(fields.name),
+            direction: optionalString(fields.direction)
+          };
+        })
+      : undefined;
+    return {
+      ...item,
+      id: optionalString(item.id),
+      name: optionalString(item.name),
+      type: optionalString(item.type),
+      ...(connections ? { connections } : {})
+    };
+  });
+}
+
+interface DeploymentRecord {
+  id: string;
+  state: string;
+  runUrl: string;
+  isDeploy: boolean;
+  isDelete: boolean;
+  runStatus: string;
+  runConclusion: string;
+}
+
+interface DeploymentRow {
+  app: string;
+  environment: string;
+  provider: string;
+  status: string;
+  deploymentId: string;
+  runUrl: string;
+}
+
+interface DeployStatusRecord {
+  runConclusion?: string;
+  runStatus?: string;
+  state?: string;
+}
+
+interface RoleAssignmentInput {
+  objectId: string;
+  role: string;
+  scope: string;
+  subscriptionId: string;
+}
+
+interface FederatedCredential {
+  name: string;
+  subject: string;
+}
+
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map();
+export const servers = new Map<string, CanvasServerEntry>();
 
-export function graphDefinitionHash(content, artifactsFingerprint = "") {
+export function graphDefinitionHash(
+  content: string,
+  artifactsFingerprint = ""
+): string {
   return createHash("sha256")
     .update(content)
     .update("\0")
@@ -151,7 +400,12 @@ export function graphDefinitionHash(content, artifactsFingerprint = "") {
     .digest("hex");
 }
 
-export function canReuseModeledGraph(state, repo, branch, definitionHash) {
+export function canReuseModeledGraph(
+  state: CanvasState,
+  repo: string,
+  branch: string,
+  definitionHash: string
+): boolean {
   return (
     state?.graphLoaded === true &&
     state.graphTargetRepo === repo &&
@@ -161,11 +415,21 @@ export function canReuseModeledGraph(state, repo, branch, definitionHash) {
   );
 }
 
-export function isCurrentSourceRefToken(state, view, token) {
+export function isCurrentSourceRefToken(
+  state: {
+    sourceRefContexts?: Partial<Record<GraphView, { token?: string }>>;
+  },
+  view: GraphView,
+  token: unknown
+): boolean {
   return !!token && state?.sourceRefContexts?.[view]?.token === token;
 }
 
-export function addGraphProgress(state, generation, message) {
+export function addGraphProgress(
+  state: CanvasState,
+  generation: number,
+  message: string
+): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
   if (!state.progressMessages) state.progressMessages = [];
   state.progressMessages.push(message);
@@ -185,7 +449,11 @@ export function addGraphProgress(state, generation, message) {
 // the Deployed tab is opened without first deploying) it's derived here from the
 // repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
 // — and cached back into state so GHCR retrieval works across reloads.
-async function deployStatusReaderFromState(state, repo, branch) {
+async function deployStatusReaderFromState(
+  state: CanvasState,
+  repo: string,
+  branch: string
+) {
   const environment = state?.deployEnvName || state?.envName || "";
   let app = state?.deployAppName || "";
   if (!app && repo && environment) {
@@ -211,7 +479,10 @@ async function deployStatusReaderFromState(state, repo, branch) {
 // differs from resolveRepoAppName, which prefers the applications resource name
 // and falls back to the repo basename; the tag must match the producer's grep
 // byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
-async function resolveGraphAppName(repo, branch) {
+async function resolveGraphAppName(
+  repo: string,
+  branch: string
+): Promise<string> {
   const ref = branch || "main";
   for (const p of [".radius/app.bicep", "app.bicep"]) {
     let raw = "";
@@ -241,20 +512,20 @@ async function resolveGraphAppName(repo, branch) {
 // Short-lived cache for the /api/list-environments listing to keep the planned
 // and deploy pages snappy. Invalidated on environment creation.
 const ENV_LIST_TTL_MS = 15000;
-const envListCache = new Map(); // repo -> { at, payload }
+const envListCache = new Map<string, CachedPayload>();
 
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
 // dispatched (see /api/deploy and /api/delete-deployment).
 const DEPLOY_LIST_TTL_MS = 15000;
-const deployListCache = new Map(); // repo -> { at, payload }
+const deployListCache = new Map<string, CachedPayload>();
 
 // Throttle for the background workflow drift-sync kicked off from the
 // environments listing: repo -> last-attempt epoch ms. Keeps the sync from
 // re-running on every page load / poll while still self-healing stale workflows.
 const WORKFLOW_SYNC_TTL_MS = 5 * 60 * 1000;
-const workflowSyncState = new Map(); // `${repo}\0${workingBranch}` -> lastAttemptAt
+const workflowSyncState = new Map<string, number>();
 
 // Fire-and-forget: re-sync the repo's committed Radius workflow files with the
 // upstream templates when they've drifted. Runs in the background so it never
@@ -263,7 +534,11 @@ const workflowSyncState = new Map(); // `${repo}\0${workingBranch}` -> lastAttem
 // content, so this is only called on the fresh-compute path. `workingBranch` is
 // the session worktree branch (when it matches the repo) so the sync updates
 // both the default branch and the branch a worktree-consistent deploy runs.
-function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
+function kickoffWorkflowSync(
+  repo: string,
+  managedEnvironments: ManagedEnvironment[],
+  workingBranch: string
+): void {
   if (!repo || !managedEnvironments || managedEnvironments.length === 0) return;
   // Throttle per repo+branch so switching the working branch triggers a fresh
   // sync instead of waiting out a repo-wide cooldown.
@@ -282,11 +557,13 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
         );
       }
     })
-    .catch((e) =>
-      console.error(`[radius workflow-sync] ${repo}: ${e?.message || e}`)
+    .catch((e: unknown) =>
+      console.error(`[radius workflow-sync] ${repo}: ${errorMessage(e)}`)
     );
 }
 
+// Bare filename of the shared verify-credentials workflow (matches
+// infra.ts's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
 // are in sync with the upstream Radius templates so the run never executes a
@@ -298,12 +575,12 @@ function kickoffWorkflowSync(repo, managedEnvironments, workingBranch) {
 // verify. `workingBranch` (when it matches the repo) is synced alongside the
 // default branch so a worktree-consistent run uses current files on both.
 async function ensureWorkflowsCurrent(
-  repo,
-  environment,
-  provider,
-  only,
-  workingBranch
-) {
+  repo: string,
+  environment: string,
+  provider: string,
+  only: string[],
+  workingBranch = ""
+): Promise<void> {
   if (!repo || !environment || !only || only.length === 0) return;
   try {
     const r = await syncRepoWorkflows(
@@ -321,7 +598,7 @@ async function ensureWorkflowsCurrent(
       );
     }
   } catch (e) {
-    console.error(`[radius workflow-presync] ${repo}: ${e?.message || e}`);
+    console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
   }
 }
 
@@ -329,37 +606,37 @@ async function ensureWorkflowsCurrent(
 // app.bicep it delegates through this hook, which injects a user turn asking the
 // agent to run the radius-app-bicep skill. This is what makes branch/repo
 // selection (not just canvas open) trigger generation automatically.
-let appBicepHandoff = null;
-export function setAppBicepHandoff(fn) {
+let appBicepHandoff: AppBicepHandoff | null = null;
+export function setAppBicepHandoff(fn: AppBicepHandoff): void {
   appBicepHandoff = fn;
 }
 
-// Registered by the SDK entry (extension.mjs) to hand a failed canvas deploy
+// Registered by the SDK entry (extension.ts) to hand a failed canvas deploy
 // back to the agent for repair. The canvas Deploy button dispatches the workflow
 // itself, so without this a failure dead-ends in the UI.
-let deployRepairHandoff = null;
-export function setDeployRepairHandoff(fn) {
+let deployRepairHandoff: DeployRepairHandoff | null = null;
+export function setDeployRepairHandoff(fn: DeployRepairHandoff | null): void {
   deployRepairHandoff = fn;
 }
 
-// Handler registered by the SDK entry (extension.mjs) that opens a repo file in
+// Handler registered by the SDK entry (extension.ts) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
 // reaches the SDK through this hook. Mirrors setAppBicepHandoff.
-let openSourceHandler = null;
-export function setOpenSourceHandler(fn) {
+let openSourceHandler: OpenSourceHandler | null = null;
+export function setOpenSourceHandler(fn: OpenSourceHandler): void {
   openSourceHandler = fn;
 }
 
 // The server also cannot inject an arbitrary user turn by itself, so routes that
 // need the Copilot session to take an out-of-band action (for example, kicking
 // off Azure CLI login or install guidance) delegate through this hook.
-let sessionPromptHandler = null;
-export function setSessionPromptHandler(fn) {
+let sessionPromptHandler: SessionPromptHandler | null = null;
+export function setSessionPromptHandler(fn: SessionPromptHandler): void {
   sessionPromptHandler = fn;
 }
 
-export function isCliCommandMissing(detail) {
+export function isCliCommandMissing(detail: unknown): boolean {
   const text = String(detail || "").trim();
   if (!text) return false;
   return (
@@ -374,7 +651,7 @@ export function isCliCommandMissing(detail) {
 export function azureCredentialIdValidationError({
   tenantId = "",
   subscriptionId = ""
-} = {}) {
+}: IdValidationInput = {}): string {
   if (tenantId && !isUuid(tenantId)) {
     return `Invalid tenantId "${tenantId}" (expected a GUID).`;
   }
@@ -387,7 +664,11 @@ export function azureCredentialIdValidationError({
 export function azureLoginRequiredResponse({
   tenantId = "",
   activeTenantId = ""
-} = {}) {
+}: AzureLoginInput = {}): {
+  error: string;
+  code: string;
+  tenantId: string;
+} {
   const error =
     activeTenantId ?
       `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
@@ -395,7 +676,10 @@ export function azureLoginRequiredResponse({
   return { error, code: "az-login-required", tenantId };
 }
 
-export async function invokeSessionPrompt(handler, prompt) {
+export async function invokeSessionPrompt(
+  handler: SessionPromptHandler | null,
+  prompt: string
+): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
       status: 503,
@@ -416,7 +700,7 @@ export async function invokeSessionPrompt(handler, prompt) {
 export function buildAzureCliAssistPrompt({
   action = "login",
   tenantId = ""
-} = {}) {
+}: AzureCliAssistInput = {}): string {
   const safeTenantId =
     typeof tenantId === "string" && isUuid(tenantId.trim()) ?
       tenantId.trim()
@@ -443,12 +727,17 @@ export function buildAzureCliAssistPrompt({
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
-function triggerAppBicepHandoff(entry, repo, branches, page) {
+function triggerAppBicepHandoff(
+  entry: CanvasServerEntry | undefined,
+  repo: string,
+  branches: string | string[],
+  page: string
+): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
     if (!repo) return;
     const list = (Array.isArray(branches) ? branches : [branches]).filter(
-      Boolean
+      (branch): branch is string => Boolean(branch)
     );
     const state = entry?.state;
     const key = `${repo}::${list.join(",")}`;
@@ -476,7 +765,10 @@ function triggerAppBicepHandoff(entry, repo, branches, page) {
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
 export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
 
-export function triggerDeployRepairHandoff(entry, instanceId) {
+export function triggerDeployRepairHandoff(
+  entry: { state: CanvasState } | undefined,
+  instanceId = ""
+): boolean {
   try {
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
@@ -532,7 +824,7 @@ export function triggerDeployRepairHandoff(entry, instanceId) {
 }
 
 // What the webview needs to decide whether to keep polling after a failed deploy.
-export function deployHandoffStatus(state) {
+export function deployHandoffStatus(state: CanvasState): DeployHandoffSummary {
   const handoffState = state?.deployHandoffState || "idle";
   return {
     state: handoffState,
@@ -558,15 +850,10 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // silently treating a GitHub outage or timeout as "no data". Used by the
 // deployment-resolution paths where an empty result must not be mistaken for a
 // definitive answer (e.g. "no app is deployed" → allow environment deletion).
-function ghOrThrow(args, timeout = 12000) {
+function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
   return new Promise((resolve, reject) => {
     cliExec("gh", args, { timeout }, (err, stdout) => {
-      if (err)
-        reject(
-          err instanceof Error ? err : (
-            new Error(String((err && err.message) || "gh command failed"))
-          )
-        );
+      if (err) reject(err);
       else resolve((stdout || "").trim());
     });
   });
@@ -584,21 +871,27 @@ function ghOrThrow(args, timeout = 12000) {
 // non-JSON body, or an unparseable status — is treated as ambiguous and returns
 // '' so the preflight never silently misdirects; the real op then surfaces the
 // true error. GitHub still enforces permissions server-side regardless.
-async function preflightRepoAdmin(repo) {
+async function preflightRepoAdmin(repo: string): Promise<string> {
   let login = "";
   const who = await ghApiJson("user");
-  if (who.ok) login = (who.json && who.json.login) || "";
+  if (who.ok) login = optionalString(record(who.json).login);
   let readFailed = false,
     permissions = null;
   const res = await ghApiJson(`repos/${repo}`);
   if (res.ok) {
-    permissions = (res.json && res.json.permissions) || null;
+    const value = record(res.json).permissions;
+    permissions = value && typeof value === "object" ? record(value) : null;
   } else if (res.status === 404) {
     readFailed = true;
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
   }
-  return explainRepoAccessForEnvSetup({ repo, login, readFailed, permissions });
+  return explainRepoAccessForEnvSetup({
+    repo,
+    login,
+    readFailed,
+    permissions
+  });
 }
 
 // How many of an environment's newest deployment records to resolve
@@ -612,7 +905,10 @@ const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 // Radius application in this model. Best-effort — a read failure falls back to the
 // basename rather than throwing, since callers use the name only for display and for
 // targeting the app's deploy/delete, not for the fail-closed deployment check itself.
-async function resolveRepoAppName(repo, branch) {
+async function resolveRepoAppName(
+  repo: string,
+  branch: string
+): Promise<string> {
   let appName = repo.split("/").pop() || repo;
   const ref = branch || "main";
   for (const p of [".radius/app.bicep", "app.bicep"]) {
@@ -649,7 +945,7 @@ async function resolveRepoAppName(repo, branch) {
 //
 // `rec` must carry: { runConclusion, runStatus, state }
 // Returns one of: "success" | "failed" | "pending"
-export function resolveDeployStatus(rec) {
+export function resolveDeployStatus(rec: DeployStatusRecord): string {
   if (rec.runConclusion === "success") return "success";
   if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
   if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
@@ -667,7 +963,7 @@ export function resolveDeployStatus(rec) {
 // surface immediately instead of being masked by pointless retries. See the
 // Step-6 role-assignment block for why this race exists and why it is platform
 // independent (not a macOS/Windows difference).
-export function isReplicationLagError(stderr) {
+export function isReplicationLagError(stderr?: string): boolean {
   if (!stderr) return false;
   return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
     stderr
@@ -686,7 +982,7 @@ export function buildRoleAssignmentArgs({
   role,
   scope,
   subscriptionId
-}) {
+}: RoleAssignmentInput): string[] {
   return [
     "role",
     "assignment",
@@ -718,16 +1014,20 @@ export function buildRoleAssignmentArgs({
 // with a subject already present would have been deduped upstream, so any name
 // hit here is genuinely a different environment.
 export function findFederatedCredentialNameCollision(
-  desired,
-  existingNameToSubject
-) {
+  desired: Array<Partial<FederatedCredential>> | null,
+  existingNameToSubject: Map<string, string> | Record<string, string> | null
+): {
+  name: string;
+  existingSubject: string | undefined;
+  desiredSubject: string;
+} | null {
   if (!desired || !existingNameToSubject) return null;
   const lookup =
     existingNameToSubject instanceof Map ?
       existingNameToSubject
     : new Map(Object.entries(existingNameToSubject));
   for (const fic of desired) {
-    if (!fic || !fic.name) continue;
+    if (!fic || !fic.name || !fic.subject) continue;
     if (lookup.has(fic.name) && lookup.get(fic.name) !== fic.subject) {
       return {
         name: fic.name,
@@ -752,7 +1052,10 @@ export function findFederatedCredentialNameCollision(
 // cluster's own resourceGroup) and is therefore authoritative when present;
 // fall back to the deployment resource group only when it is absent (e.g. a
 // custom-typed cluster name that never came from discovery).
-export function pickAksResourceGroup(clusterResourceGroup, resourceGroup) {
+export function pickAksResourceGroup(
+  clusterResourceGroup: unknown,
+  resourceGroup: string
+): string {
   const own =
     typeof clusterResourceGroup === "string" ? clusterResourceGroup.trim() : "";
   return own || resourceGroup;
@@ -770,7 +1073,11 @@ export function pickAksResourceGroup(clusterResourceGroup, resourceGroup) {
 // app.bicep, not the repo basename — the environment-deletion guard dispatches a
 // delete for this name and redirects to it, and the deployments list links to it.
 // Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
-async function resolveEnvDeployment(repo, environment, appName) {
+async function resolveEnvDeployment(
+  repo: string,
+  environment: string,
+  appName: string
+): Promise<DeploymentRow | null> {
   appName = appName || repo.split("/").pop() || repo;
   // Provider is cosmetic (drives portal links only), so a lookup failure here
   // must not block the whole resolution — soft-fail to an empty provider.
@@ -797,7 +1104,7 @@ async function resolveEnvDeployment(repo, environment, appName) {
   ]);
   const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
 
-  const resolveRecord = async (id) => {
+  const resolveRecord = async (id: string): Promise<DeploymentRecord> => {
     const stateRaw = await ghOrThrow([
       "api",
       `/repos/${repo}/deployments/${id}/statuses?per_page=1`,
@@ -839,7 +1146,7 @@ async function resolveEnvDeployment(repo, environment, appName) {
   //   'skip'  → not relevant (verify-credentials, or a failed delete); keep walking
   //   null    → app deleted; environment has no active deployment
   //   object  → the deployment row for this environment
-  const decide = (rec) => {
+  const decide = (rec: DeploymentRecord): DeploymentRow | "skip" | null => {
     if (!rec.isDeploy && !rec.isDelete) return "skip";
     if (rec.isDelete && rec.runConclusion === "success") return null;
     if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success")
@@ -890,7 +1197,7 @@ async function resolveEnvDeployment(repo, environment, appName) {
  * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
  * it can be called from any request handler regardless of its local gh runner.
  */
-function deleteLegacyDeployWorkflow(targetRepo) {
+function deleteLegacyDeployWorkflow(targetRepo: string): Promise<boolean> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
   return new Promise((resolve) => {
     cliExec(
@@ -932,18 +1239,18 @@ function deleteLegacyDeployWorkflow(targetRepo) {
 // committed onto `branch`; existing ones are left untouched. Best-effort per
 // file — a commit failure is surfaced by the caller, not thrown here.
 async function ensureDeployWorkflowsOnBranch(
-  repo,
-  branch,
-  envName,
-  log = () => {}
-) {
+  repo: string,
+  branch: string,
+  envName: string,
+  log: (message: string) => void = () => {}
+): Promise<void> {
   if (!repo || !branch) return;
   // Only the dispatcher + the Azure provider workflow are published to target
   // repos today (the AWS provider file is intentionally withheld, matching the
   // env-creation commit step), so those are the two a `--ref` dispatch needs.
   const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
-  const existsOnBranch = (file) =>
-    new Promise((resolve) => {
+  const existsOnBranch = (file: string): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
       cliExec(
         "gh",
         [
@@ -986,11 +1293,15 @@ async function ensureDeployWorkflowsOnBranch(
 // request handler and read by the host-channel keepalive via the getter below
 // to tell whether a panel is actively open (so the process isn't idle-reaped).
 let lastWebviewActivityAt = 0;
-export function getLastWebviewActivityAt() {
+export function getLastWebviewActivityAt(): number {
   return lastWebviewActivityAt;
 }
 
-function accessForSelection(entry, repo, branch) {
+function accessForSelection(
+  entry: CanvasServerEntry,
+  repo: string,
+  branch: string
+) {
   const state = entry?.state || {};
   const selectedBranch = branch || defaultBranchForState(state);
   const useWorkspace = isWorkspaceSelection(state, repo, selectedBranch);
@@ -1004,10 +1315,10 @@ function accessForSelection(entry, repo, branch) {
   };
 }
 
-// Unlike repoMatches() in workspace.mjs, this helper always receives a
+// Unlike repoMatches() in workspace.ts, this helper always receives a
 // non-empty repo string and performs strict equality only (no falsy-arg
-// shortcut), so the workspace.mjs version is not reused here.
-function repoMatchesWorkspace(state, repo) {
+// shortcut), so the workspace.ts version is not reused here.
+function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
   const workspaceRepo = state?.workspaceRepo || "";
   return !!workspaceRepo && repo === workspaceRepo;
 }
@@ -1017,7 +1328,16 @@ function repoMatchesWorkspace(state, repo) {
 // supplied the content (not when we fell back to the remote repo), and
 // `bicepPath` is the repo-relative path of the local file so callers can save
 // sibling artifacts next to the exact app.bicep that was graphed.
-async function fetchBicepSelection(entry, repo, branch) {
+async function fetchBicepSelection(
+  entry: CanvasServerEntry,
+  repo: string,
+  branch: string
+): Promise<{
+  content: string | null;
+  fromWorkspace: boolean;
+  branch: string;
+  bicepPath: string;
+}> {
   const access = accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
     const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
@@ -1038,7 +1358,12 @@ async function fetchBicepSelection(entry, repo, branch) {
   };
 }
 
-async function fetchFileForSelection(entry, repo, branch, repoPath) {
+async function fetchFileForSelection(
+  entry: CanvasServerEntry,
+  repo: string,
+  branch: string,
+  repoPath: string
+): Promise<string | null> {
   const access = accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
     const local = await fetchWorkspaceFile(
@@ -1052,27 +1377,11 @@ async function fetchFileForSelection(entry, repo, branch, repoPath) {
   return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
-/**
- * CSRF defense-in-depth for the loopback API server.
- *
- * The server binds 127.0.0.1 but has no per-instance token, so a page in the
- * developer's browser can send a CORS "simple" POST (e.g. text/plain, which
- * skips preflight) to the derived port and trigger a state change without ever
- * reading the response. Since this surface now includes "create an Entra app",
- * "assign Azure roles", and "switch the active gh account", reject requests the
- * browser labels as originating from another site.
- *
- * Rules: read-only GET/HEAD always pass. A missing Sec-Fetch-Site header is
- * allowed — non-browser callers (the extension host, curl) never send it, and
- * every modern browser does. Only the browser-set `same-site` and `cross-site`
- * values are rejected; `same-origin` (the extension's own page) and `none`
- * (user-initiated navigation) pass.
- *
- * @param {string} method HTTP method.
- * @param {string|string[]|undefined|null} secFetchSite The Sec-Fetch-Site header.
- * @returns {boolean} true when the request should be rejected as cross-site.
- */
-export function isCrossSiteMutation(method, secFetchSite) {
+// Reject browser-labeled cross-site mutations while allowing non-browser clients.
+export function isCrossSiteMutation(
+  method: string | undefined,
+  secFetchSite: string | string[] | undefined | null
+): boolean {
   const m = String(method || "").toUpperCase();
   if (m === "GET" || m === "HEAD") return false;
   const site = String(
@@ -1084,10 +1393,13 @@ export function isCrossSiteMutation(method, secFetchSite) {
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(instanceId) {
-  return async (req, res) => {
+function createRequestHandler(instanceId: string) {
+  return async (
+    req: IncomingMessage,
+    res: ServerResponse<IncomingMessage>
+  ): Promise<void> => {
     lastWebviewActivityAt = Date.now();
-    const url = new URL(req.url, `http://localhost`);
+    const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
     // CSRF defense-in-depth: reject cross-site state-changing requests before
     // any routing or body parse. See isCrossSiteMutation for the rules.
@@ -1131,7 +1443,7 @@ function createRequestHandler(instanceId) {
     // Open a source file from the local workspace in the Copilot editor
     // canvas (side pane). Only the webview for a local-workspace graph calls
     // this (client passes localSource); the actual open is delegated to the
-    // SDK session via the handler registered in extension.mjs. Status codes
+    // SDK session via the handler registered in extension.ts. Status codes
     // are meaningful so the webview can flag a failed open to the user:
     // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
     if (pathname === "/api/open-source" && req.method === "POST") {
@@ -1176,7 +1488,7 @@ function createRequestHandler(instanceId) {
         res.end(
           JSON.stringify({
             ok: false,
-            error: e && e.message ? e.message : "failed"
+            error: e instanceof Error ? e.message : "failed"
           })
         );
       }
@@ -1362,7 +1674,7 @@ function createRequestHandler(instanceId) {
         res.writeHead(200);
         res.end(
           JSON.stringify({
-            error: "Azure CLI verification failed: " + e.message
+            error: "Azure CLI verification failed: " + errorMessage(e)
           })
         );
       }
@@ -1454,7 +1766,9 @@ function createRequestHandler(instanceId) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(
-          JSON.stringify({ error: "AWS CLI verification failed: " + e.message })
+          JSON.stringify({
+            error: "AWS CLI verification failed: " + errorMessage(e)
+          })
         );
       }
       return;
@@ -1506,7 +1820,7 @@ function createRequestHandler(instanceId) {
         res.end(JSON.stringify(identity));
       } catch (e) {
         res.writeHead(200);
-        res.end(JSON.stringify({ error: e.message, accounts: [] }));
+        res.end(JSON.stringify({ error: errorMessage(e), accounts: [] }));
       }
       return;
     }
@@ -1541,7 +1855,7 @@ function createRequestHandler(instanceId) {
         );
       } catch (e) {
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -1567,7 +1881,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -1590,7 +1904,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -1633,13 +1947,13 @@ function createRequestHandler(instanceId) {
           // deployed (e.g. GitHub is unavailable), do NOT delete — that
           // could orphan the application's cloud resources.
           console.error(
-            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${e?.message || e}`
+            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${errorMessage(e)}`
           );
           res.setHeader("Content-Type", "application/json");
           res.writeHead(503);
           res.end(
             JSON.stringify({
-              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${e?.message || "unknown error"}). The environment was not deleted — please try again.`
+              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${errorMessage(e)}). The environment was not deleted — please try again.`
             })
           );
           return;
@@ -1678,9 +1992,7 @@ function createRequestHandler(instanceId) {
           res.writeHead(500);
           res.end(
             JSON.stringify({
-              error:
-                "Could not delete environment: " +
-                (e.message || "unknown error")
+              error: "Could not delete environment: " + errorMessage(e)
             })
           );
           return;
@@ -1692,7 +2004,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -1735,7 +2047,12 @@ function createRequestHandler(instanceId) {
         // the az CLI context to it before the Graph calls (issue #125).
         const requestedSubscriptionId = (data.subscriptionId || "").trim();
 
-        function fail(status, error, code, extra) {
+        const fail = (
+          status: number,
+          error: string,
+          code: string,
+          extra: Record<string, unknown> = {}
+        ): void => {
           res.setHeader("Content-Type", "application/json");
           res.writeHead(status);
           res.end(
@@ -1745,7 +2062,7 @@ function createRequestHandler(instanceId) {
               ...(extra || {})
             })
           );
-        }
+        };
 
         if (!targetRepo || !resourceGroup || !clusterName) {
           fail(
@@ -1848,33 +2165,29 @@ function createRequestHandler(instanceId) {
 
         // Run `az` non-interactively: close stdin so it can never block on
         // an interactive prompt inside this GUI host process.
-        function runCmd(cmd, args) {
-          return new Promise((resolve) => {
-            const child = cliExec(
-              cmd,
-              args,
-              { timeout: 60000 },
-              (err, stdout, stderr) => {
-                resolve({
-                  code: err ? err.code || 1 : 0,
-                  stdout: stdout || "",
-                  stderr: stderr || ""
-                });
-              }
-            );
-            try {
-              child.stdin?.end();
-            } catch {
-              /* best-effort */
-            }
-          });
-        }
-        const ghJsonRunner = (apiPath) =>
-          ghApiJson(apiPath, {
+        const runCmd = runCliCommand;
+        const ghJsonRunner: GitHubJsonRunner = async (
+          apiPath: string
+        ): Promise<GitHubJsonResponse> => {
+          const result = await ghApiJson(apiPath, {
             headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
           });
+          return {
+            ok: result.ok,
+            status: result.status,
+            json:
+              (
+                result.json !== null &&
+                typeof result.json === "object" &&
+                !Array.isArray(result.json)
+              ) ?
+                record(result.json)
+              : null,
+            stderr: result.stderr
+          };
+        };
 
-        const steps = [];
+        const steps: string[] = [];
 
         // Record the GitHub identity setup is acting as, so the setup
         // log makes it obvious when mutations run as a different account
@@ -1944,9 +2257,10 @@ function createRequestHandler(instanceId) {
           );
           return;
         }
-        let account;
+        let account: Record<string, unknown>;
         try {
-          account = JSON.parse(acctResult.stdout);
+          const parsed: unknown = JSON.parse(acctResult.stdout);
+          account = record(parsed);
         } catch (e) {
           fail(
             400,
@@ -1956,10 +2270,10 @@ function createRequestHandler(instanceId) {
           );
           return;
         }
-        const activeTenantId = account.tenantId || "";
+        const activeTenantId = optionalString(account.tenantId);
         // Prefer the active account's id as the canonical subscription
         // after switching context.
-        subscriptionId = account.id || subscriptionId;
+        subscriptionId = optionalString(account.id) || subscriptionId;
 
         // Fail with guidance when the selected tenant is not the active
         // one — otherwise the app would land in the wrong directory.
@@ -2012,7 +2326,7 @@ function createRequestHandler(instanceId) {
         // claim needs an immutability decision it cannot make).
         steps.push("Resolving GitHub OIDC subject...");
         // Note: enterprise-claim rejection (AADSTS7002381) is handled at
-        // Actions-run failure time via explainOidcEnterpriseClaim (deploy.mjs),
+        // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
         // which surfaces a tenant-agnostic explanation. Package-scope /
         // workflow-permission changes remain out of scope for this fix.
         let oidc;
@@ -2026,7 +2340,9 @@ function createRequestHandler(instanceId) {
             ghJsonRunner
           );
         } catch (e) {
-          fail(400, e.message, e.code || "oidc-subject-failed", { steps });
+          fail(400, errorMessage(e), errorCode(e, "oidc-subject-failed"), {
+            steps
+          });
           return;
         }
         steps.push(
@@ -2100,8 +2416,10 @@ function createRequestHandler(instanceId) {
 
         // Signed-in user id + ownership check, fetched once and cached —
         // reused for both the existingClientId path and name scoping.
-        let signedInUserId = null;
-        const getSignedInUserId = async () => {
+        let signedInUserId: string | null = null;
+        const getSignedInUserId = async (): Promise<
+          { ok: true; id: string } | { ok: false; stderr: string }
+        > => {
           if (signedInUserId !== null) return { ok: true, id: signedInUserId };
           const meRes = await runCmd("az", [
             "ad",
@@ -2116,7 +2434,7 @@ function createRequestHandler(instanceId) {
           signedInUserId = meRes.stdout.trim().toLowerCase();
           return { ok: true, id: signedInUserId };
         };
-        const isOwnedBySignedInUser = async (appId) => {
+        const isOwnedBySignedInUser = async (appId: string) => {
           const me = await getSignedInUserId();
           if (!me.ok) return { ok: false, stderr: me.stderr };
           const ownRes = await runCmd("az", [
@@ -2144,7 +2462,7 @@ function createRequestHandler(instanceId) {
         // this is a single-user local canvas server, so concurrent
         // same-repo setup is implausible; a mutex+re-list+delete-loser is
         // disproportionate.
-        let clientId;
+        let clientId = "";
 
         // Step 3a: existingClientId-first. If AZURE_CLIENT_ID already
         // points at an app we own, reuse it directly — the wired identity
@@ -2186,7 +2504,7 @@ function createRequestHandler(instanceId) {
               );
               return;
             }
-            owned = own.owned;
+            owned = own.owned === true;
           }
           const decision = decideExistingClientId({
             clientId: existingClientId,
@@ -2198,7 +2516,7 @@ function createRequestHandler(instanceId) {
               400,
               `Could not verify the repository's AZURE_CLIENT_ID (${existingClientId}): ` +
                 showRes.stderr,
-              decision.code,
+              decision.code || "existing-client-id-failed",
               { steps, azError: showRes.stderr }
             );
             return;
@@ -2207,7 +2525,7 @@ function createRequestHandler(instanceId) {
             fail(
               400,
               `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration owned by another user. Verify or clear the variable and retry.`,
-              decision.code,
+              decision.code || "existing-client-id-not-owned",
               { steps }
             );
             return;
@@ -2228,7 +2546,7 @@ function createRequestHandler(instanceId) {
         if (!clientId) {
           // Per-candidate FIC → served-repos enrichment. Best-effort: a
           // FIC-list failure just omits servesRepos for that candidate.
-          const listServesRepos = async (appId) => {
+          const listServesRepos = async (appId: string) => {
             const ficRes = await runCmd("az", [
               "ad",
               "app",
@@ -2375,7 +2693,12 @@ function createRequestHandler(instanceId) {
             });
 
             if (selection.action === "error") {
-              fail(400, selection.reason, selection.code, { steps, appName });
+              fail(
+                400,
+                selection.reason || "Could not select an App Registration.",
+                selection.code || "app-selection-failed",
+                { steps, appName }
+              );
               return;
             }
 
@@ -2385,7 +2708,7 @@ function createRequestHandler(instanceId) {
               // (from its FIC subjects) so the user can choose
               // knowingly, then ask the frontend to prompt.
               const candidates = [];
-              for (const c of selection.candidates) {
+              for (const c of selection.candidates || []) {
                 const servesRepos = await listServesRepos(c.appId);
                 candidates.push({
                   appId: c.appId,
@@ -2409,7 +2732,7 @@ function createRequestHandler(instanceId) {
             }
 
             if (selection.action === "reuse") {
-              clientId = selection.appId;
+              clientId = selection.appId || "";
               // Reuse path: never touch the existing Service Management
               // Reference — it may be approval-gated. SMR only applies
               // when creating a new app below.
@@ -2424,7 +2747,10 @@ function createRequestHandler(instanceId) {
               steps.push(`Creating App Registration: ${appName}...`);
               const appResult = await runCmd(
                 "az",
-                buildAppCreateArgs({ appName, serviceManagementReference })
+                buildAppCreateArgs({
+                  appName,
+                  serviceManagementReference
+                }).filter((arg): arg is string => typeof arg === "string")
               );
               if (appResult.code !== 0) {
                 if (
@@ -2671,7 +2997,7 @@ function createRequestHandler(instanceId) {
         // Errors meaning "the principal hasn't replicated yet" are
         // retried; genuine failures (notably AuthorizationFailed) surface
         // immediately. See isReplicationLagError / buildRoleAssignmentArgs.
-        async function resolveSpObjectId() {
+        const resolveSpObjectId = async () => {
           let lastErr = "";
           for (let attempt = 0; attempt < 6; attempt++) {
             const show = await runCmd("az", [
@@ -2692,10 +3018,14 @@ function createRequestHandler(instanceId) {
               await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           }
           return { objectId: "", error: lastErr };
-        }
+        };
 
-        async function assignRoleByObjectId(objectId, role, scope) {
-          let last = { code: 1, stdout: "", stderr: "" };
+        const assignRoleByObjectId = async (
+          objectId: string,
+          role: string,
+          scope: string
+        ) => {
+          let last: CommandResult = { code: 1, stdout: "", stderr: "" };
           for (let attempt = 0; attempt < 6; attempt++) {
             last = await runCmd(
               "az",
@@ -2708,7 +3038,7 @@ function createRequestHandler(instanceId) {
               await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           }
           return { ok: false, stderr: last.stderr };
-        }
+        };
 
         steps.push("Resolving Service Principal object id...");
         const spObjLookup = await resolveSpObjectId();
@@ -2812,7 +3142,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       } finally {
         if (fedTmpFile) {
           try {
@@ -2834,27 +3164,7 @@ function createRequestHandler(instanceId) {
       pathname === "/api/list-azure-app-registrations" &&
       req.method === "GET"
     ) {
-      function runCmd(cmd, args) {
-        return new Promise((resolve) => {
-          const child = cliExec(
-            cmd,
-            args,
-            { timeout: 60000 },
-            (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: stdout || "",
-                stderr: stderr || ""
-              });
-            }
-          );
-          try {
-            child.stdin?.end();
-          } catch {
-            /* best-effort */
-          }
-        });
-      }
+      const runCmd = runCliCommand;
       try {
         // `--show-mine` scopes to apps the signed-in user owns, so we
         // avoid an O(N) owner lookup across the whole tenant.
@@ -2918,7 +3228,9 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message, code: "app-list-failed" }));
+        res.end(
+          JSON.stringify({ error: errorMessage(e), code: "app-list-failed" })
+        );
       }
       return;
     }
@@ -2942,27 +3254,7 @@ function createRequestHandler(instanceId) {
         );
         return;
       }
-      function runCmd(cmd, args) {
-        return new Promise((resolve) => {
-          const child = cliExec(
-            cmd,
-            args,
-            { timeout: 60000 },
-            (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: stdout || "",
-                stderr: stderr || ""
-              });
-            }
-          );
-          try {
-            child.stdin?.end();
-          } catch {
-            /* best-effort */
-          }
-        });
-      }
+      const runCmd = runCliCommand;
       let servesRepos = null;
       const ficRes = await runCmd("az", [
         "ad",
@@ -3036,7 +3328,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
-        res.end(JSON.stringify({ error: e.message, params: [] }));
+        res.end(JSON.stringify({ error: errorMessage(e), params: [] }));
       }
       return;
     }
@@ -3082,7 +3374,11 @@ function createRequestHandler(instanceId) {
           return;
         }
 
-        function runGh(args, stdin, extraOpts) {
+        const runGh = (
+          args: string[],
+          stdin?: string,
+          extraOpts: CliOptions = {}
+        ): Promise<CommandResult> => {
           return new Promise((resolve) => {
             const child = cliExec(
               "gh",
@@ -3098,18 +3394,25 @@ function createRequestHandler(instanceId) {
             );
             if (stdin !== undefined) child.stdin?.end(stdin);
           });
-        }
+        };
 
-        async function runGhOrThrow(args, message, stdin) {
+        const runGhOrThrow = async (
+          args: string[],
+          message: string,
+          stdin?: string
+        ): Promise<CommandResult> => {
           const result = await runGh(args, stdin);
           if (result.code !== 0) {
             const detail = (result.stderr || result.stdout || "").trim();
             throw new Error(detail ? `${message}: ${detail}` : message);
           }
           return result;
-        }
+        };
 
-        async function setEnvironmentVariable(name, value) {
+        const setEnvironmentVariable = async (
+          name: string,
+          value: string
+        ): Promise<boolean> => {
           if (!value) return false;
           await runGhOrThrow(
             [
@@ -3126,7 +3429,7 @@ function createRequestHandler(instanceId) {
             `Failed to set ${name} on GitHub environment "${envName}"`
           );
           return true;
-        }
+        };
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
         // `workflow` scope, which is required to create/update files under
@@ -3137,13 +3440,16 @@ function createRequestHandler(instanceId) {
         // to the keyring credential. (A missing `workflow` scope surfaces as
         // either a 403 "without workflow scope" on updates or a bare 404 on
         // creates, so we retry on any failure rather than pattern-matching.)
-        function needsWorkflowScope(stderr) {
+        const needsWorkflowScope = (stderr?: string): boolean => {
           return (
             /workflow.{0,20}scope/i.test(stderr || "") ||
             /without .?workflow.? scope/i.test(stderr || "")
           );
-        }
-        async function runGhWorkflow(args, stdin) {
+        };
+        const runGhWorkflow = async (
+          args: string[],
+          stdin?: string
+        ): Promise<CommandResult> => {
           const first = await runGh(args, stdin);
           if (first.code === 0) return first;
           const hasInjectedToken = !!(
@@ -3157,9 +3463,9 @@ function createRequestHandler(instanceId) {
           // Prefer the retry only if it actually succeeded; otherwise keep the
           // original error, which is usually the more meaningful one.
           return retry.code === 0 ? retry : first;
-        }
+        };
 
-        const steps = [];
+        const steps: string[] = [];
         const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
 
         steps.push(
@@ -3178,7 +3484,7 @@ function createRequestHandler(instanceId) {
           res.writeHead(403);
           res.end(
             JSON.stringify({
-              error: `Could not authenticate to GitHub Packages for this repository. ${e.message}`,
+              error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(e)}`,
               code: "ghcr-auth-failed",
               steps
             })
@@ -3233,19 +3539,19 @@ function createRequestHandler(instanceId) {
         // a missing `workflow` token scope, which a PR can't fix). Kept
         // deliberately broad; branch creation gates the fallback, so a
         // genuine no-access repo still surfaces the original error.
-        function isProtectedBranchFailure(stderr) {
+        const isProtectedBranchFailure = (stderr: string): boolean => {
           const s = stderr || "";
           if (needsWorkflowScope(s)) return false;
           return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(
             s
           );
-        }
+        };
 
         // PR-fallback state; populated lazily on the first protected-branch
         // failure. Once set, every subsequent workflow commit targets the
         // PR branch instead of the default branch.
-        let prState = null; // { branch, base }
-        async function beginPrFallback() {
+        let prState: PullRequestState | undefined;
+        const beginPrFallback = async (): Promise<PullRequestState> => {
           if (prState) return prState;
           const base = (await getDefaultBranch(targetRepo)) || "main";
           const baseSha = await getBranchHeadSha(targetRepo, base);
@@ -3262,13 +3568,18 @@ function createRequestHandler(instanceId) {
             `ℹ️ No permission to push to "${base}" directly — committing workflows to branch "${branch}" and opening a pull request.`
           );
           return prState;
-        }
+        };
 
         // Commit one workflow file via the contents API. `branch === ''`
         // targets the default branch. Looks up the existing blob SHA on the
         // same ref so a re-commit is an update rather than a rejected
         // create. Returns the raw runGhWorkflow result ({ code, stderr }).
-        async function putWorkflowContent(path, contentB64, message, branch) {
+        const putWorkflowContent = async (
+          path: string,
+          contentB64: string,
+          message: string,
+          branch = ""
+        ): Promise<CommandResult> => {
           const refQ = branch ? "?ref=" + encodeURIComponent(branch) : "";
           const shaRes = await runGh([
             "api",
@@ -3304,12 +3615,16 @@ function createRequestHandler(instanceId) {
             unlinkSync(tmp);
           } catch {}
           return r;
-        }
+        };
 
         // Commit a workflow file, transparently switching to the PR branch
         // (creating it on first use) when the default branch rejects the
         // push for permission reasons. Returns { ok, stderr, viaPr }.
-        async function commitWorkflowFileSmart(path, contentB64, message) {
+        const commitWorkflowFileSmart = async (
+          path: string,
+          contentB64: string,
+          message: string
+        ): Promise<{ ok: boolean; stderr?: string; viaPr: boolean }> => {
           if (prState) {
             const r = await putWorkflowContent(
               path,
@@ -3327,12 +3642,14 @@ function createRequestHandler(instanceId) {
           );
           if (direct.code === 0) return { ok: true, viaPr: false };
           if (isProtectedBranchFailure(direct.stderr)) {
+            let fallback: PullRequestState;
             try {
-              await beginPrFallback();
+              fallback = await beginPrFallback();
+              prState = fallback;
             } catch (e) {
               return {
                 ok: false,
-                stderr: `${direct.stderr} (PR fallback failed: ${e.message})`,
+                stderr: `${direct.stderr} (PR fallback failed: ${errorMessage(e)})`,
                 viaPr: false
               };
             }
@@ -3340,12 +3657,12 @@ function createRequestHandler(instanceId) {
               path,
               contentB64,
               message,
-              prState.branch
+              fallback.branch
             );
             return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
           }
           return { ok: false, stderr: direct.stderr, viaPr: false };
-        }
+        };
 
         // Step 1: Create the GitHub environment
         steps.push('Creating GitHub environment "' + envName + '"...');
@@ -3389,14 +3706,14 @@ function createRequestHandler(instanceId) {
         // Step 2: Set environment variables and secrets based on provider
         steps.push("Setting environment variables and secrets...");
         // Fall back to shared credentials for values not provided in the request
-        const azureCreds = sharedCredentials.azure || {};
-        const awsCreds = sharedCredentials.aws || {};
+        const azureCreds = cloudCredential(sharedCredentials.azure);
+        const awsCreds = cloudCredential(sharedCredentials.aws);
 
         if (provider === "azure") {
-          const clientId = data.clientId || azureCreds.clientId || "";
-          const tenantId = data.tenantId || azureCreds.tenantId || "";
+          const clientId = data.clientId || optionalString(azureCreds.clientId);
+          const tenantId = data.tenantId || optionalString(azureCreds.tenantId);
           const subscriptionId =
-            data.subscriptionId || azureCreds.subscriptionId || "";
+            data.subscriptionId || optionalString(azureCreds.subscriptionId);
           const rg = data.resourceGroup || "";
           const k8s = data.cluster || "";
 
@@ -3425,8 +3742,10 @@ function createRequestHandler(instanceId) {
           }
         } else {
           const roleArn = data.roleArn || "";
-          const region = data.region || awsCreds.region || "us-east-1";
-          const accountId = data.accountId || awsCreds.accountId || "";
+          const region =
+            data.region || optionalString(awsCreds.region) || "us-east-1";
+          const accountId =
+            data.accountId || optionalString(awsCreds.accountId);
           const k8s = data.cluster || "";
 
           await setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
@@ -3563,7 +3882,8 @@ function createRequestHandler(instanceId) {
           }
         } catch (paramErr) {
           steps.push(
-            "⚠️ Could not resolve application parameters: " + paramErr.message
+            "⚠️ Could not resolve application parameters: " +
+              errorMessage(paramErr)
           );
         }
 
@@ -3693,7 +4013,8 @@ function createRequestHandler(instanceId) {
           // Delete workflows are non-critical to environment creation, so
           // surface the failure but don't abort the whole flow.
           steps.push(
-            "⚠️ Could not generate/commit delete workflows: " + delErr.message
+            "⚠️ Could not generate/commit delete workflows: " +
+              errorMessage(delErr)
           );
         }
 
@@ -3728,7 +4049,7 @@ function createRequestHandler(instanceId) {
             prBody
           );
           if (pr.ok) {
-            pullRequestUrl = pr.url;
+            pullRequestUrl = pr.url || "";
             steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
             steps.push(
               '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
@@ -3765,7 +4086,11 @@ function createRequestHandler(instanceId) {
           // a few retries to ride out indexing/propagation races.
           await new Promise((r) => setTimeout(r, 3000));
           const dispatchDelays = [0, 2000, 5000];
-          let dispatchResult = { code: 1, stdout: "", stderr: "" };
+          let dispatchResult: CommandResult = {
+            code: 1,
+            stdout: "",
+            stderr: ""
+          };
           for (const delay of dispatchDelays) {
             if (delay > 0) await new Promise((r) => setTimeout(r, delay));
             dispatchResult = await runGhWorkflow([
@@ -3795,7 +4120,8 @@ function createRequestHandler(instanceId) {
               targetRepo
             ]);
             try {
-              const runs = JSON.parse(runsResult.stdout);
+              const parsed: unknown = JSON.parse(runsResult.stdout);
+              const runs = Array.isArray(parsed) ? parsed : [];
               if (runs.length > 0) {
                 verifyRunId = runs[0].databaseId;
                 verifyRunUrl =
@@ -3864,15 +4190,20 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
 
     if (pathname === "/api/load-graph-stream" && req.method === "GET") {
-      const url = new URL(req.url, `http://127.0.0.1`);
+      const url = new URL(req.url || "/", `http://127.0.0.1`);
       const repo = url.searchParams.get("repo") || "";
       const entry = servers.get(instanceId);
+      if (!entry) {
+        res.writeHead(503);
+        res.end("Canvas server state is unavailable.");
+        return;
+      }
       const branch =
         url.searchParams.get("branch") || defaultBranchForState(entry?.state);
       const sourceRefContext =
@@ -3885,13 +4216,13 @@ function createRequestHandler(instanceId) {
       res.setHeader("Connection", "keep-alive");
       res.writeHead(200);
 
-      function sendProgress(message) {
+      const sendProgress = (message: string): void => {
         res.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
-      }
-      function sendDone(data) {
+      };
+      const sendDone = (data: unknown): void => {
         res.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
         res.end();
-      }
+      };
 
       if (!repo) {
         sendDone({ error: "Please select a repository." });
@@ -3930,21 +4261,23 @@ function createRequestHandler(instanceId) {
             bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
             log: sendProgress
           });
-        const resources = await buildGraphViaRad(
-          content,
-          selection.bicepPath || ".radius/app.bicep",
-          {
-            log: sendProgress,
-            saveGraphJsonTo: graphJsonPath,
-            radArtifactsDir,
-            cleanupRadArtifactsDir: radArtifactsRemote
-          }
+        const resources = canvasGraphResources(
+          await buildGraphViaRad(
+            content,
+            selection.bicepPath || ".radius/app.bicep",
+            {
+              log: sendProgress,
+              saveGraphJsonTo: graphJsonPath,
+              radArtifactsDir,
+              cleanupRadArtifactsDir: radArtifactsRemote
+            }
+          )
         );
         sendProgress(
           `Mapped ${resources.length} resource(s) — rendering graph...`
         );
 
-        if (entry) {
+        if (entry && sourceRefContext) {
           if (
             !setSourceRefResources(
               entry,
@@ -3967,7 +4300,7 @@ function createRequestHandler(instanceId) {
 
         sendDone({ reload: true });
       } catch (e) {
-        sendDone({ error: e.message });
+        sendDone({ error: errorMessage(e) });
       }
       return;
     }
@@ -3983,7 +4316,7 @@ function createRequestHandler(instanceId) {
 
     if (pathname === "/api/deployed-graph" && req.method === "GET") {
       const entry = servers.get(instanceId);
-      const reqUrl = new URL(req.url, `http://127.0.0.1`);
+      const reqUrl = new URL(req.url || "/", `http://127.0.0.1`);
       const repo =
         (reqUrl.searchParams.get("repo") || "").trim() ||
         entry?.state?.contextRepo ||
@@ -4000,16 +4333,27 @@ function createRequestHandler(instanceId) {
       // Prefer the deployed graph published to GHCR by the deploy workflow
       // (radius-project/radius PR #12591), falling back to the legacy
       // radius-deploy-status branch and then any graph captured in state.
-      const reader = await deployStatusReaderFromState(entry?.state, repo);
+      const reader = await deployStatusReaderFromState(
+        entry?.state || {},
+        repo,
+        ""
+      );
       let graph = (await reader.graph()).graph;
       if (!graph && entry?.state?.deployedGraph)
         graph = entry.state.deployedGraph;
-      let resources = Array.isArray(graph) ? graph : graph?.resources || [];
+      const graphRecord = record(graph);
+      let resources = canvasGraphResources(
+        Array.isArray(graph) ? graph
+        : Array.isArray(graphRecord.resources) ? graphRecord.resources
+        : []
+      );
       // DEMO: present the deployed topology as container → cache → database.
-      resources = rewireDeployedGraphChain(resources);
+      resources = canvasGraphResources(
+        rewireDeployedGraphChain(resources) || []
+      );
       // Re-derive connections (e.g. database→secret) that rad app graph
       // omits, so the deployed graph renders connected like the planned one.
-      resources = normalizeDeployedGraph(resources);
+      resources = canvasGraphResources(normalizeDeployedGraph(resources) || []);
       // Hide implementation-detail resources (containerImages + their
       // ghcr-registry-creds secret) from the deployed view too, matching
       // every other graph state. Applied last so any edges the rewire/
@@ -4056,7 +4400,7 @@ function createRequestHandler(instanceId) {
         triggerDeployRepairHandoff(entry, instanceId) ||
         entry?.state?.deployRepairing ||
         false;
-      const handoff = deployHandoffStatus(entry?.state);
+      const handoff = deployHandoffStatus(entry?.state || {});
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       // Incremental log delivery: when the client passes ?since=<absolute
@@ -4117,7 +4461,22 @@ function createRequestHandler(instanceId) {
         const data = JSON.parse(body);
         const repo = data.repo || "";
         const entry = servers.get(instanceId);
-        const branch = data.branch || defaultBranchForState(entry?.state);
+        if (!entry) {
+          res.writeHead(503);
+          res.end(
+            JSON.stringify({ error: "Canvas server state is unavailable." })
+          );
+          return;
+        }
+        if (!entry) {
+          res.writeHead(503);
+          res.end(
+            JSON.stringify({ error: "Canvas server state is unavailable." })
+          );
+          return;
+        }
+        const state = entry.state;
+        const branch = data.branch || defaultBranchForState(state);
         const requestGeneration =
           entry ?
             (entry.state.graphBuildGeneration =
@@ -4134,9 +4493,9 @@ function createRequestHandler(instanceId) {
             prepareSourceRefResources(entry, "graph", { repo, branch })
           : null;
 
-        function addProgress(msg) {
-          addGraphProgress(entry?.state, requestGeneration, msg);
-        }
+        const addProgress = (msg: string): void => {
+          addGraphProgress(state, requestGeneration, msg);
+        };
         // Reset progress
         if (entry) entry.state.progressMessages = [];
 
@@ -4212,21 +4571,23 @@ function createRequestHandler(instanceId) {
           return;
         }
 
-        const resources = await buildGraphViaRad(
-          content,
-          selection.bicepPath || ".radius/app.bicep",
-          {
-            log: addProgress,
-            saveGraphJsonTo: graphJsonPath,
-            radArtifactsDir,
-            cleanupRadArtifactsDir: radArtifactsRemote
-          }
+        const resources = canvasGraphResources(
+          await buildGraphViaRad(
+            content,
+            selection.bicepPath || ".radius/app.bicep",
+            {
+              log: addProgress,
+              saveGraphJsonTo: graphJsonPath,
+              radArtifactsDir,
+              cleanupRadArtifactsDir: radArtifactsRemote
+            }
+          )
         );
         addProgress(
           `Mapped ${resources.length} resource(s) — rendering graph...`
         );
 
-        if (entry) {
+        if (entry && sourceRefContext) {
           if (entry.state.graphBuildGeneration !== requestGeneration) {
             res.setHeader("Content-Type", "application/json");
             res.writeHead(409);
@@ -4262,14 +4623,14 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
 
     if (pathname === "/api/list-environments" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
-      const respond = (payload) => {
+      const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.writeHead(200);
@@ -4286,8 +4647,8 @@ function createRequestHandler(instanceId) {
         return;
       }
 
-      const gh = (args, timeout = 12000) =>
-        new Promise((resolve) => {
+      const gh = (args: string[], timeout = 12000): Promise<string> =>
+        new Promise<string>((resolve) => {
           cliExec("gh", args, { timeout }, (err, stdout) => {
             if (err) {
               resolve("");
@@ -4307,7 +4668,7 @@ function createRequestHandler(instanceId) {
           "--jq",
           '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
         ]);
-        const namesRes = await new Promise((resolve) => {
+        const namesRes = await new Promise<EnvironmentListResult>((resolve) => {
           cliExec(
             "gh",
             [
@@ -4338,7 +4699,7 @@ function createRequestHandler(instanceId) {
           respond({ environments: [], error: namesRes.error });
           return;
         }
-        const namesRaw = namesRes.stdout;
+        const namesRaw = namesRes.stdout || "";
         const rows =
           namesRaw ?
             namesRaw
@@ -4363,7 +4724,7 @@ function createRequestHandler(instanceId) {
         // environment is "Success" only once it exists AND its
         // verify-credentials workflow has passed.
         const verifyRunsRaw = await verifyRunsPromise;
-        const verifyRuns = new Map();
+        const verifyRuns = new Map<string, VerifyRun>();
         if (verifyRunsRaw) {
           for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
             const [rid, rstatus, rconclusion] = line.split("\t");
@@ -4371,7 +4732,7 @@ function createRequestHandler(instanceId) {
           }
         }
         // Map a verify run's outcome to an environment status.
-        const verifyStatusOf = (run) => {
+        const verifyStatusOf = (run?: VerifyRun): string | null => {
           if (!run) return null;
           if (run.status !== "completed") return "pending"; // queued / in_progress
           if (run.conclusion === "success") return "success";
@@ -4407,7 +4768,7 @@ function createRequestHandler(instanceId) {
             // surface environments created by this extension (tagged with a
             // RADIUS_MANAGED variable at creation time); anything without it
             // was created outside Radius and is filtered out below.
-            const vars = {};
+            const vars: Record<string, string> = {};
             for (const line of varsRaw ?
               varsRaw.split("\n").filter(Boolean)
             : []) {
@@ -4467,7 +4828,9 @@ function createRequestHandler(instanceId) {
           })
         );
 
-        const managedEnvironments = environments.filter(Boolean);
+        const managedEnvironments = environments.filter(
+          (environment) => environment !== null
+        );
         respond({ environments: managedEnvironments });
         envListCache.set(repo, {
           at: Date.now(),
@@ -4488,14 +4851,14 @@ function createRequestHandler(instanceId) {
           : "";
         kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
       } catch (e) {
-        respond({ environments: [], error: e.message });
+        respond({ environments: [], error: errorMessage(e) });
       }
       return;
     }
 
     if (pathname === "/api/list-applications" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
-      const respond = (payload) => {
+      const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.writeHead(200);
@@ -4520,7 +4883,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         respond({
           applications: [{ name: repo.split("/").pop() || repo }],
-          error: e.message
+          error: errorMessage(e)
         });
       }
       return;
@@ -4528,7 +4891,7 @@ function createRequestHandler(instanceId) {
 
     if (pathname === "/api/list-deployments" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
-      const respond = (payload) => {
+      const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.writeHead(200);
@@ -4587,7 +4950,7 @@ function createRequestHandler(instanceId) {
         // A GitHub failure surfaces as an error (not a silently-empty list)
         // so the client keeps its current view / keeps polling rather than
         // treating an incomplete listing as the truth.
-        respond({ deployments: [], error: e.message });
+        respond({ deployments: [], error: errorMessage(e) });
       }
       return;
     }
@@ -4595,7 +4958,7 @@ function createRequestHandler(instanceId) {
     if (pathname === "/api/delete-deployment" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
-      const respond = (code, payload) => {
+      const respond = (code: number, payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(code);
         res.end(JSON.stringify(payload));
@@ -4612,9 +4975,13 @@ function createRequestHandler(instanceId) {
           return;
         }
 
-        const gh = (args, timeout = 20000, extraEnv) =>
-          new Promise((resolve) => {
-            const opts = { timeout };
+        const gh = (
+          args: string[],
+          timeout = 20000,
+          extraEnv?: NodeJS.ProcessEnv
+        ): Promise<CommandResult> =>
+          new Promise<CommandResult>((resolve) => {
+            const opts: CliOptions = { timeout };
             if (extraEnv) opts.env = extraEnv;
             cliExec("gh", args, opts, (err, stdout, stderr) => {
               resolve({
@@ -4627,7 +4994,7 @@ function createRequestHandler(instanceId) {
         // Dispatching a workflow requires the `workflow` scope, which an
         // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
         // back to the keyring credential.
-        const ghWorkflow = async (args) => {
+        const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
           const first = await gh(args);
           if (first.code === 0) return first;
           if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
@@ -4702,14 +5069,14 @@ function createRequestHandler(instanceId) {
         deployListCache.delete(repo);
         respond(200, { success: true, runUrl });
       } catch (e) {
-        respond(400, { error: e.message });
+        respond(400, { error: errorMessage(e) });
       }
       return;
     }
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
-      const respond = (payload) => {
+      const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.writeHead(200);
@@ -4775,7 +5142,7 @@ function createRequestHandler(instanceId) {
           errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
         respond({ state: "failed", runId, runUrl, error: errMsg });
       } catch (e) {
-        respond({ state: "unknown", error: e.message });
+        respond({ state: "unknown", error: errorMessage(e) });
       }
       return;
     }
@@ -4784,7 +5151,7 @@ function createRequestHandler(instanceId) {
       try {
         // Fetch personal repos and org repos in parallel
         const [personalRepos, orgRepos] = await Promise.all([
-          new Promise((resolve) => {
+          new Promise<string[]>((resolve) => {
             cliExec(
               "gh",
               [
@@ -4807,7 +5174,7 @@ function createRequestHandler(instanceId) {
               }
             );
           }),
-          new Promise((resolve) => {
+          new Promise<string[]>((resolve) => {
             // Get orgs the user belongs to, then fetch repos from each
             cliExec(
               "gh",
@@ -4821,7 +5188,7 @@ function createRequestHandler(instanceId) {
                 const orgs = stdout.trim().split("\n").filter(Boolean);
                 const orgPromises = orgs.map(
                   (org) =>
-                    new Promise((res2) => {
+                    new Promise<string[]>((res2) => {
                       cliExec(
                         "gh",
                         [
@@ -4876,7 +5243,7 @@ function createRequestHandler(instanceId) {
           res.end(JSON.stringify({ branches: [] }));
           return;
         }
-        const result = await new Promise((resolve) => {
+        const result = await new Promise<string[]>((resolve) => {
           cliExec(
             "gh",
             [
@@ -4914,20 +5281,27 @@ function createRequestHandler(instanceId) {
         const data = JSON.parse(body);
         const repo = data.repo || "";
         const entry = servers.get(instanceId);
-        const branch = data.branch || defaultBranchForState(entry?.state);
+        if (!entry) {
+          res.writeHead(503);
+          res.end(
+            JSON.stringify({ error: "Canvas server state is unavailable." })
+          );
+          return;
+        }
+        const branch = data.branch || defaultBranchForState(entry.state);
         const provider = data.provider || "azure";
         const sourceRefContext =
           entry ?
             prepareSourceRefResources(entry, "planned", { repo, branch })
           : null;
 
-        function addProgress(msg) {
+        const addProgress = (msg: string): void => {
           if (entry) {
             if (!entry.state.progressMessages)
               entry.state.progressMessages = [];
             entry.state.progressMessages.push(msg);
           }
-        }
+        };
         if (entry) entry.state.progressMessages = [];
 
         addProgress(`Checking ${repo} for app.bicep...`);
@@ -4962,21 +5336,23 @@ function createRequestHandler(instanceId) {
             bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
             log: addProgress
           });
-        const resources = await buildGraphViaRad(
-          content,
-          selection.bicepPath || ".radius/app.bicep",
-          {
-            log: addProgress,
-            radArtifactsDir,
-            cleanupRadArtifactsDir: radArtifactsRemote
-          }
+        const resources = canvasGraphResources(
+          await buildGraphViaRad(
+            content,
+            selection.bicepPath || ".radius/app.bicep",
+            {
+              log: addProgress,
+              radArtifactsDir,
+              cleanupRadArtifactsDir: radArtifactsRemote
+            }
+          )
         );
         addProgress(
           `Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`
         );
 
         // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
-        let recipes = [];
+        let recipes: unknown[] = [];
         addProgress("Fetching the default recipe pack from GitHub...");
         recipes = await fetchRecipePack(github, provider);
         addProgress(
@@ -4987,28 +5363,26 @@ function createRequestHandler(instanceId) {
         // the gap is visible (rather than silently rendering the abstract
         // type). Empty today for the Azure pack; fires if the pack adds a
         // recipe source the curated map doesn't yet cover.
-        const unmappedRecipes = (Array.isArray(recipes) ? recipes : []).filter(
-          (r) => !r.concreteResources || r.concreteResources.length === 0
-        );
+        const unmappedRecipes = recipes.filter((recipe) => {
+          const concrete = record(recipe).concreteResources;
+          return !Array.isArray(concrete) || concrete.length === 0;
+        });
         if (unmappedRecipes.length) {
           addProgress(
-            `Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map((r) => r.resourceType).join(", ")}); those nodes show their abstract Radius type.`
+            `Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map((recipe) => optionalString(record(recipe).resourceType)).join(", ")}); those nodes show their abstract Radius type.`
           );
         }
 
         // For each abstract resource, resolve its recipe and concrete output resources
         addProgress("Resolving recipe outputs for planned resources...");
-        const plannedResources = await resolveRecipeOutputs(
-          github,
-          resources,
-          recipes,
-          provider
+        const plannedResources = canvasGraphResources(
+          await resolveRecipeOutputs(github, resources, recipes, provider)
         );
         addProgress(
           `Planned ${plannedResources.length} resource(s) — rendering graph...`
         );
 
-        if (entry) {
+        if (entry && sourceRefContext) {
           if (
             !setSourceRefResources(
               entry,
@@ -5038,7 +5412,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -5049,7 +5423,7 @@ function createRequestHandler(instanceId) {
       try {
         const data = JSON.parse(body);
         const repo = data.repo || "";
-        const result = await new Promise((resolve) => {
+        const result = await new Promise<BranchResult>((resolve) => {
           cliExec(
             "gh",
             ["api", "--paginate", `/repos/${repo}/branches?per_page=100`],
@@ -5060,11 +5434,17 @@ function createRequestHandler(instanceId) {
                 return;
               }
               try {
-                const raw = JSON.parse(stdout.trim());
-                const branches = raw.map((b) => ({
-                  name: b.name,
-                  sha: b.commit?.sha || ""
-                }));
+                const raw: unknown = JSON.parse(stdout.trim());
+                const branches =
+                  Array.isArray(raw) ?
+                    raw.map((value) => {
+                      const branch = record(value);
+                      return {
+                        name: optionalString(branch.name),
+                        sha: optionalString(record(branch.commit).sha)
+                      };
+                    })
+                  : [];
                 resolve({ branches });
               } catch (e) {
                 resolve({ error: "Failed to parse branch data" });
@@ -5073,6 +5453,13 @@ function createRequestHandler(instanceId) {
           );
         });
         const entry = servers.get(instanceId);
+        if (!entry) {
+          res.writeHead(503);
+          res.end(
+            JSON.stringify({ error: "Canvas server state is unavailable." })
+          );
+          return;
+        }
         if (
           entry?.state?.workspaceBranch &&
           repoMatchesWorkspace(entry.state, repo)
@@ -5100,7 +5487,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -5113,17 +5500,22 @@ function createRequestHandler(instanceId) {
         const data = JSON.parse(body);
         const repo = data.repo || "";
         const entry = servers.get(instanceId);
-        if (entry) {
-          sourceRefContext = prepareSourceRefResources(entry, "diff", {
-            repo,
-            baseBranch: data.base,
-            headBranch: data.head
-          });
-          entry.state.diffBase = data.base;
-          entry.state.diffHead = data.head;
-          entry.state.diffTargetRepo = repo;
-          delete entry.state.diffError;
+        if (!entry) {
+          res.writeHead(503);
+          res.end(
+            JSON.stringify({ error: "Canvas server state is unavailable." })
+          );
+          return;
         }
+        sourceRefContext = prepareSourceRefResources(entry, "diff", {
+          repo,
+          baseBranch: data.base,
+          headBranch: data.head
+        });
+        entry.state.diffBase = data.base;
+        entry.state.diffHead = data.head;
+        entry.state.diffTargetRepo = repo;
+        delete entry.state.diffError;
 
         // Fetch the committed/persisted app.bicep on each branch. app.bicep
         // generation is owned by the Radius app-bicep skill, so branches
@@ -5170,27 +5562,31 @@ function createRequestHandler(instanceId) {
             branch: data.head,
             bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep"
           });
-        const baseResources = await buildGraphViaRad(
-          baseSelection.content || "",
-          baseSelection.bicepPath || ".radius/app.bicep",
-          {
-            radArtifactsDir: baseRadArtifactsDir,
-            cleanupRadArtifactsDir: baseRadArtifactsRemote
-          }
+        const baseResources = canvasGraphResources(
+          await buildGraphViaRad(
+            baseSelection.content || "",
+            baseSelection.bicepPath || ".radius/app.bicep",
+            {
+              radArtifactsDir: baseRadArtifactsDir,
+              cleanupRadArtifactsDir: baseRadArtifactsRemote
+            }
+          )
         );
-        const headResources = await buildGraphViaRad(
-          headSelection.content || "",
-          headSelection.bicepPath || ".radius/app.bicep",
-          {
-            radArtifactsDir: headRadArtifactsDir,
-            cleanupRadArtifactsDir: headRadArtifactsRemote
-          }
+        const headResources = canvasGraphResources(
+          await buildGraphViaRad(
+            headSelection.content || "",
+            headSelection.bicepPath || ".radius/app.bicep",
+            {
+              radArtifactsDir: headRadArtifactsDir,
+              cleanupRadArtifactsDir: headRadArtifactsRemote
+            }
+          )
         );
 
         // Compute diff using the shared algorithm (see computeGraphDiff).
         const diffResources = computeGraphDiff(baseResources, headResources);
 
-        if (entry) {
+        if (entry && sourceRefContext) {
           if (
             !setSourceRefResources(
               entry,
@@ -5228,13 +5624,17 @@ function createRequestHandler(instanceId) {
         const entry = servers.get(instanceId);
         if (
           entry &&
-          isCurrentSourceRefToken(entry.state, "diff", sourceRefContext?.token)
+          isCurrentSourceRefToken(
+            entry.state,
+            "diff",
+            sourceRefContext?.token || ""
+          )
         ) {
-          entry.state.diffError = String(e?.message ?? e);
+          entry.state.diffError = errorMessage(e);
         }
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -5256,8 +5656,11 @@ function createRequestHandler(instanceId) {
           // Snapshot the planned graph (nodes start as pending). If the
           // planned graph hasn't been resolved yet, it is built on the fly
           // inside the monitor so the deploying page always shows it.
-          let resources = JSON.parse(
+          const cloned: unknown = JSON.parse(
             JSON.stringify(entry.state.plannedResources || [])
+          );
+          let resources = canvasGraphResources(
+            Array.isArray(cloned) ? cloned : []
           );
           resources.forEach((r) => {
             r.deployStatus = "pending";
@@ -5328,8 +5731,9 @@ function createRequestHandler(instanceId) {
           // lines were dropped so the client can still page through new
           // lines by absolute offset.
           const DEPLOY_LOG_CAP = 4000;
-          const addLog = (msg) => {
-            const dl = entry.state.deployLogs;
+          const addLog = (msg: string): void => {
+            const dl = entry.state.deployLogs || [];
+            entry.state.deployLogs = dl;
             dl.push(msg);
             if (dl.length > DEPLOY_LOG_CAP) {
               const drop = dl.length - DEPLOY_LOG_CAP;
@@ -5338,16 +5742,20 @@ function createRequestHandler(instanceId) {
                 (entry.state.deployLogBase || 0) + drop;
             }
           };
-          const setStatus = (r, s) => {
+          const setStatus = (
+            r: CanvasGraphResource,
+            s: "pending" | "in_progress" | "success" | "failed"
+          ): void => {
             r.deployStatus = s;
             if (r.outputResources)
               r.outputResources.forEach((o) => {
                 o.deployStatus = s;
                 if (s === "success") {
-                  const portalUrlKey =
+                  const portalUrlKey = optionalString(
                     provider === "azure" ?
                       o.id || o.type || o.displayType || ""
-                    : o.type || o.displayType || o.id || "";
+                    : o.type || o.displayType || o.id || ""
+                  );
                   o.portalUrl = generatePortalUrl(
                     portalUrlKey,
                     provider,
@@ -5361,7 +5769,8 @@ function createRequestHandler(instanceId) {
           // then the deploy workflow. Do NOT dispatch — they were already
           // triggered from the environment page.
           (async () => {
-            const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+            const delay = (ms: number) =>
+              new Promise<void>((resolve) => setTimeout(resolve, ms));
 
             if (!repo) {
               addLog("❌ No target repository specified.");
@@ -5397,21 +5806,25 @@ function createRequestHandler(instanceId) {
                       bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
                       log: addLog
                     });
-                  const parsed = await buildGraphViaRad(
-                    content,
-                    selection.bicepPath || ".radius/app.bicep",
-                    {
-                      log: addLog,
-                      radArtifactsDir,
-                      cleanupRadArtifactsDir: radArtifactsRemote
-                    }
+                  const parsed = canvasGraphResources(
+                    await buildGraphViaRad(
+                      content,
+                      selection.bicepPath || ".radius/app.bicep",
+                      {
+                        log: addLog,
+                        radArtifactsDir,
+                        cleanupRadArtifactsDir: radArtifactsRemote
+                      }
+                    )
                   );
                   const recipes = await fetchRecipePack(github, provider);
-                  const planned = await resolveRecipeOutputs(
-                    github,
-                    parsed,
-                    recipes,
-                    provider
+                  const planned = canvasGraphResources(
+                    await resolveRecipeOutputs(
+                      github,
+                      parsed,
+                      recipes,
+                      provider
+                    )
                   );
                   planned.forEach((r) => {
                     r.deployStatus = "pending";
@@ -5440,7 +5853,7 @@ function createRequestHandler(instanceId) {
                   );
                 }
               } catch (e) {
-                addLog("⚠ Could not resolve planned graph: " + e.message);
+                addLog("⚠ Could not resolve planned graph: " + errorMessage(e));
               }
             }
 
@@ -5501,8 +5914,11 @@ function createRequestHandler(instanceId) {
                 }
               }
             }
-            const runGhDeploy = (args, envOverride) =>
-              new Promise((resolve) => {
+            const runGhDeploy = (
+              args: string[],
+              envOverride?: NodeJS.ProcessEnv
+            ): Promise<CommandResult> =>
+              new Promise<CommandResult>((resolve) => {
                 cliExec(
                   "gh",
                   args,
@@ -5521,7 +5937,11 @@ function createRequestHandler(instanceId) {
               });
             // Like runGhDeploy but feeds a value (e.g. a secret JSON) over
             // stdin so it never lands on the argv/process list.
-            const runGhDeployStdin = (args, stdin, envOverride) =>
+            const runGhDeployStdin = (
+              args: string[],
+              stdin: string,
+              envOverride?: NodeJS.ProcessEnv
+            ): Promise<CommandResult> =>
               new Promise((resolve) => {
                 const child = cliExec(
                   "gh",
@@ -5705,7 +6125,7 @@ function createRequestHandler(instanceId) {
             } catch (e) {
               addLog(
                 "⚠ Could not compute rad commands from bicep (" +
-                  e.message +
+                  errorMessage(e) +
                   "); falling back to the environment default."
               );
             }
@@ -5733,7 +6153,7 @@ function createRequestHandler(instanceId) {
                 '⚠ Could not publish deploy workflows to branch "' +
                   deployRef +
                   '": ' +
-                  (e.message || e) +
+                  errorMessage(e) +
                   ". The dispatch below will fail if the branch has no run-rad-commands workflow."
               );
             }
@@ -5863,8 +6283,8 @@ function createRequestHandler(instanceId) {
             if (resources.length > 0 && resources[0].deployStatus === "pending")
               setStatus(resources[0], "in_progress");
 
-            const seenD = new Set();
-            const startedD = new Set();
+            const seenD = new Set<string>();
+            const startedD = new Set<string>();
             let deployStepStartedAt = 0;
             let beatStep = "";
             let beatStepStartedAt = 0;
@@ -5876,7 +6296,7 @@ function createRequestHandler(instanceId) {
             let deployStarted = false;
             // Track which activity-log status changes we've already
             // streamed so we only announce new transitions.
-            const activitySeen = new Set();
+            const activitySeen = new Set<string>();
             // Track how many control-plane / recipe log lines we've surfaced.
             let cpLogShown = 0;
             let cpLogTail = "";
@@ -5924,10 +6344,11 @@ function createRequestHandler(instanceId) {
             // graph shows gray→yellow→green/red per node. rad deploy in CI
             // (non-TTY) prints no intermediate per-resource lines, so the
             // control-plane/recipe log + activity log are the real signals.
-            const applyProgress = (text) => {
+            const applyProgress = (text: string): void => {
               if (!text) return;
               const prog = parseResourceProgress(text, resources);
               for (const r of resources) {
+                if (!r.name) continue;
                 const s = prog[r.name];
                 if (!s) continue;
                 const cur = r.deployStatus;
@@ -5961,19 +6382,20 @@ function createRequestHandler(instanceId) {
               // (in_progress) and again when it COMPLETES so the feed
               // never goes silent during long-running steps.
               for (const s of detail.steps) {
-                if (s.status === "in_progress" && !startedD.has(s.name)) {
-                  startedD.add(s.name);
-                  addLog("  ▶ " + s.name + "…");
+                const stepName = s.name || "";
+                if (s.status === "in_progress" && !startedD.has(stepName)) {
+                  startedD.add(stepName);
+                  addLog("  ▶ " + stepName + "…");
                 }
-                if (s.status === "completed" && !seenD.has(s.name)) {
-                  seenD.add(s.name);
+                if (s.status === "completed" && !seenD.has(stepName)) {
+                  seenD.add(stepName);
                   addLog(
                     "  " +
                       (s.conclusion === "success" ? "✓"
                       : s.conclusion ? "✗"
                       : "•") +
                       " " +
-                      s.name
+                      stepName
                   );
                 }
               }
@@ -5986,15 +6408,16 @@ function createRequestHandler(instanceId) {
                 (s) => s.status === "in_progress"
               );
               if (running) {
-                if (beatStep !== running.name) {
-                  beatStep = running.name;
+                const runningName = running.name || "";
+                if (beatStep !== runningName) {
+                  beatStep = runningName;
                   beatStepStartedAt = Date.now();
                   lastBeatAt = Date.now();
                 } else if (Date.now() - lastBeatAt > 30000) {
                   lastBeatAt = Date.now();
                   addLog(
                     "    … " +
-                      running.name +
+                      runningName +
                       " still running (" +
                       Math.round((Date.now() - beatStepStartedAt) / 1000) +
                       "s)"
@@ -6191,9 +6614,11 @@ function createRequestHandler(instanceId) {
                   );
                 } else {
                   resources.forEach((r) => {
-                    if (parsed[r.name] === "success") setStatus(r, "success");
+                    const resourceName = r.name || "";
+                    if (parsed[resourceName] === "success")
+                      setStatus(r, "success");
                     else if (
-                      parsed[r.name] === "failed" ||
+                      parsed[resourceName] === "failed" ||
                       r.deployStatus === "pending" ||
                       r.deployStatus === "in_progress"
                     )
@@ -6305,7 +6730,7 @@ function createRequestHandler(instanceId) {
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
@@ -6326,7 +6751,7 @@ function createRequestHandler(instanceId) {
       for await (const chunk of req) body += chunk;
       try {
         const data = JSON.parse(body);
-        const result = {
+        const result: DiscoveryResult = {
           clusters: [],
           resourceGroups: [],
           namespaces: [],
@@ -6384,14 +6809,11 @@ function createRequestHandler(instanceId) {
               ],
               { timeout: 30000 }
             );
-            result.clusters = JSON.parse(aksJson);
+            result.clusters = discoveryItems(JSON.parse(aksJson));
           } catch (e) {
             result.clusters = [];
             result.errors = result.errors || {};
-            result.errors.clusters = String((e && e.message) || e).slice(
-              0,
-              800
-            );
+            result.errors.clusters = errorMessage(e).slice(0, 800);
           }
           try {
             const rgJson = await runCommand(
@@ -6407,14 +6829,11 @@ function createRequestHandler(instanceId) {
               ],
               { timeout: 30000 }
             );
-            result.resourceGroups = JSON.parse(rgJson);
+            result.resourceGroups = discoveryItems(JSON.parse(rgJson));
           } catch (e) {
             result.resourceGroups = [];
             result.errors = result.errors || {};
-            result.errors.resourceGroups = String((e && e.message) || e).slice(
-              0,
-              800
-            );
+            result.errors.resourceGroups = errorMessage(e).slice(0, 800);
           }
           // If we got a cluster, try to get namespaces from it
           if (result.clusters.length > 0) {
@@ -6475,15 +6894,17 @@ function createRequestHandler(instanceId) {
               ],
               { timeout: 15000 }
             );
-            const clusterNames = JSON.parse(eksJson);
-            result.clusters = clusterNames.map((n) => ({ id: n, name: n }));
+            const clusterNames: unknown = JSON.parse(eksJson);
+            result.clusters =
+              Array.isArray(clusterNames) ?
+                clusterNames
+                  .filter((name): name is string => typeof name === "string")
+                  .map((name) => ({ id: name, name }))
+              : [];
           } catch (e) {
             result.clusters = [];
             result.errors = result.errors || {};
-            result.errors.clusters = String((e && e.message) || e).slice(
-              0,
-              800
-            );
+            result.errors.clusters = errorMessage(e).slice(0, 800);
           }
           try {
             const vpcJson = await runCommand(
@@ -6498,11 +6919,11 @@ function createRequestHandler(instanceId) {
               ],
               { timeout: 15000 }
             );
-            result.vpcs = JSON.parse(vpcJson);
+            result.vpcs = discoveryItems(JSON.parse(vpcJson));
           } catch (e) {
             result.vpcs = [];
             result.errors = result.errors || {};
-            result.errors.vpcs = String((e && e.message) || e).slice(0, 800);
+            result.errors.vpcs = errorMessage(e).slice(0, 800);
           }
           try {
             const subnetJson = await runCommand(
@@ -6517,11 +6938,11 @@ function createRequestHandler(instanceId) {
               ],
               { timeout: 15000 }
             );
-            result.subnets = JSON.parse(subnetJson);
+            result.subnets = discoveryItems(JSON.parse(subnetJson));
           } catch (e) {
             result.subnets = [];
             result.errors = result.errors || {};
-            result.errors.subnets = String((e && e.message) || e).slice(0, 800);
+            result.errors.subnets = errorMessage(e).slice(0, 800);
           }
           result.namespaces = ["default", "kube-system", "radius-system"];
         }
@@ -6534,7 +6955,7 @@ function createRequestHandler(instanceId) {
         res.writeHead(200);
         res.end(
           JSON.stringify({
-            error: e.message,
+            error: errorMessage(e),
             clusters: [],
             resourceGroups: [],
             namespaces: ["default"],
@@ -6566,7 +6987,7 @@ function createRequestHandler(instanceId) {
     ) {
       page = "deploying";
     }
-    const renderer = PAGE_RENDERERS[page];
+    const renderer = isCanvasPage(page) ? PAGE_RENDERERS[page] : undefined;
     // Tell the Environments renderer which subtab to activate (Environments vs
     // Credentials) so a direct ?page=credentials load lands on that subtab.
     if (page === "credentials" || page === "environment") {
@@ -6593,7 +7014,11 @@ const PAGE_RENDERERS = {
   deploying: deployingPage
 };
 
-async function preferredPortForInstance(instanceId) {
+function isCanvasPage(page: string): page is keyof typeof PAGE_RENDERERS {
+  return Object.hasOwn(PAGE_RENDERERS, page);
+}
+
+async function preferredPortForInstance(instanceId: string): Promise<number> {
   // Namespace the deterministic port by the Copilot session. Every session is
   // told to open the canvas with the same instanceId ("radius-panel"), so
   // hashing instanceId alone makes all concurrent sessions resolve to one
@@ -6615,9 +7040,9 @@ async function preferredPortForInstance(instanceId) {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server, port) {
+function listenOn(server: HttpServer, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const onError = (err) => {
+    const onError = (err: Error) => {
       server.removeListener("listening", onListening);
       reject(err);
     };
@@ -6631,7 +7056,10 @@ function listenOn(server, port) {
   });
 }
 
-async function startServer(instanceId, page = DEFAULT_CANVAS_PAGE) {
+async function startServer(
+  instanceId: string,
+  page = DEFAULT_CANVAS_PAGE
+): Promise<CanvasServerEntry> {
   const handler = createRequestHandler(instanceId);
   // Restore the user's explicitly chosen GitHub account (if any) before priming
   // so the very first strategy resolution honors it. This is what makes the
@@ -6652,12 +7080,14 @@ async function startServer(instanceId, page = DEFAULT_CANVAS_PAGE) {
     await listenOn(server, preferred);
     port = preferred;
   } catch {
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve)
+    );
     const address = server.address();
     port = typeof address === "object" && address ? address.port : 0;
   }
   const baseUrl = `http://127.0.0.1:${port}`;
-  const entry = {
+  const entry: CanvasServerEntry = {
     server,
     baseUrl,
     url: `${baseUrl}/?page=${page}`,
@@ -6668,7 +7098,10 @@ async function startServer(instanceId, page = DEFAULT_CANVAS_PAGE) {
   return entry;
 }
 
-export async function getOrCreateServer(instanceId, page) {
+export async function getOrCreateServer(
+  instanceId: string,
+  page?: string
+): Promise<CanvasServerEntry> {
   let entry = servers.get(instanceId);
   if (entry) {
     if (page && entry.page !== page) {

@@ -267,10 +267,10 @@ function radiusPopulateApplications(repo, selectId) {
 
 export const CLIENT_GRAPH_JS = `
 // ─── Shared Graph Renderer (React Flow) ──────────────────────────────────────
-// The graph libraries are loaded from a CDN (see vendor.mjs): React, ReactDOM,
+// The graph libraries are loaded from a CDN (see vendor.ts): React, ReactDOM,
 // React Flow (UMD global window.ReactFlow) and dagre. React Flow renders the
 // application graph (modeled / planned / deployed / diff) as pixel-exact
-// .rad-node cards (styled in pages.mjs); dagre computes the top-to-bottom
+// .rad-node cards (styled in pages.ts); dagre computes the top-to-bottom
 // hierarchical layout.
 window.__radRoots = window.__radRoots || {}; // containerId → ReactDOM root
 
@@ -572,7 +572,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
     var container = document.getElementById(containerId);
     if (!container) return null;
 
-    // The graph libraries are loaded from a CDN (see vendor.mjs): React,
+    // The graph libraries are loaded from a CDN (see vendor.ts): React,
     // ReactDOM and React Flow. If that fetch failed (offline / blocked network)
     // any of these globals is undefined — surface a recoverable message instead
     // of throwing and breaking the whole panel.

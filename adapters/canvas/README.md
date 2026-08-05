@@ -6,17 +6,17 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 
 ## Modules
 
-| File           | Responsibility                                                        |
-| -------------- | --------------------------------------------------------------------- |
-| `extension.mjs`| SDK entry: `joinSession()` canvas + tool wiring, process lifecycle.   |
-| `server.mjs`   | Loopback HTTP host: request handler, page router, server lifecycle.   |
-| `pages.mjs`    | HTML page renderers.                                                   |
-| `client.mjs`   | Browser-side JS injected into pages as string constants.              |
-| `vendor.mjs`   | CDN/vendor script caching.                                            |
-| `deploy.mjs`   | Deploy monitoring + log parsing.                                      |
-| `infra.mjs`    | OIDC / workflow / portal wrappers over the core.                     |
-| `gh.mjs`       | Shell + GitHub API port primitives.                                  |
-| `shared.mjs`   | `escapeHtml` + shared credential state.                              |
+| File           | Responsibility                                                      |
+|----------------|---------------------------------------------------------------------|
+| `extension.ts` | SDK entry: `joinSession()` canvas + tool wiring, process lifecycle. |
+| `server.mjs`   | Loopback HTTP host: request handler, page router, server lifecycle. |
+| `pages.mjs`    | HTML page renderers.                                                |
+| `client.mjs`   | Browser-side JS injected into pages as string constants.            |
+| `vendor.mjs`   | CDN/vendor script caching.                                          |
+| `deploy.mjs`   | Deploy monitoring + log parsing.                                    |
+| `infra.mjs`    | OIDC / workflow / portal wrappers over the core.                    |
+| `gh.mjs`       | Shell + GitHub API port primitives.                                 |
+| `shared.mjs`   | `escapeHtml` + shared credential state.                             |
 
 ## Build
 
