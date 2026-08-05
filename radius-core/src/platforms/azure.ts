@@ -2,7 +2,10 @@ import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
 import { buildEnvironmentSuffix } from "./oidc-subject.js";
 
 const AZURE_PORTAL_BASE = "https://portal.azure.com/#";
-function buildResourceGroupResourceListUrl(subscriptionId: string, resourceGroup: string): string {
+function buildResourceGroupResourceListUrl(
+  subscriptionId: string,
+  resourceGroup: string
+): string {
   return `${AZURE_PORTAL_BASE}@/resource/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources`;
 }
 
@@ -49,7 +52,9 @@ function isKubernetesResourceType(resourceType: string): boolean {
   const t = (resourceType || "").trim();
   if (!t) return false;
 
-  return /^(apps|core|batch|autoscaling|networking\.k8s\.io|storage\.k8s\.io|rbac\.authorization\.k8s\.io|apiextensions\.k8s\.io)\//i.test(t);
+  return /^(apps|core|batch|autoscaling|networking\.k8s\.io|storage\.k8s\.io|rbac\.authorization\.k8s\.io|apiextensions\.k8s\.io)\//i.test(
+    t
+  );
 }
 
 export const azure: ComputePlatform = {
@@ -107,16 +112,24 @@ az role assignment create \\
   --assignee ${d.clientId || "<CLIENT_ID>"} \\
   --role "Contributor" \\
   --scope "/subscriptions/${d.subscriptionId || "<SUBSCRIPTION_ID>"}"
-`,
+`
     };
   },
 
   environmentSecrets(data: any) {
     const d = data || {};
     return [
-      { kind: "variable" as const, name: "AZURE_SUBSCRIPTION_ID", value: d.subscriptionId },
-      { kind: "variable" as const, name: "AZURE_RESOURCE_GROUP", value: d.resourceGroup },
-      { kind: "variable" as const, name: "AZURE_LOCATION", value: d.location },
+      {
+        kind: "variable" as const,
+        name: "AZURE_SUBSCRIPTION_ID",
+        value: d.subscriptionId
+      },
+      {
+        kind: "variable" as const,
+        name: "AZURE_RESOURCE_GROUP",
+        value: d.resourceGroup
+      },
+      { kind: "variable" as const, name: "AZURE_LOCATION", value: d.location }
     ];
   },
 
@@ -147,5 +160,5 @@ az role assignment create \\
     }
 
     return buildResourceGroupResourceListUrl(subscriptionId, resourceGroup);
-  },
+  }
 };

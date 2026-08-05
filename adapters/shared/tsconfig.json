@@ -1,18 +1,8 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": ["ES2022"],
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
     "allowJs": true,
-    "checkJs": false,
-    "declaration": false,
-    "noEmit": true,
-    "types": ["node"]
+    "checkJs": false
   },
   "include": ["src/**/*.ts", "src/**/*.mjs"],
   "exclude": ["node_modules"]

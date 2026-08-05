@@ -9,7 +9,8 @@ import { RADIUS_REF } from "./deploy.js";
 // RADIUS_REF ("main") and delete this constant. It can be overridden via the
 // RADIUS_DELETE_REF env var (e.g. pin to a commit SHA) so it can be updated
 // without releasing a new core package if the PR branch moves.
-export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
+export const DELETE_RADIUS_REF =
+  process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
 
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
@@ -37,27 +38,30 @@ export type DeleteWorkflowFiles = Record<string, string>;
  */
 export function generateDeleteWorkflow(
   env: string,
-  templates: DeleteWorkflowFiles,
+  templates: DeleteWorkflowFiles
 ): DeleteWorkflowFiles {
   const pick = (file: string): string => {
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`,
+        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`
       );
     }
     return body;
   };
   return {
-    [DELETE_APP_DISPATCHER_FILE]: fillTemplate(pick(DELETE_APP_DISPATCHER_FILE), { ENV: env }),
+    [DELETE_APP_DISPATCHER_FILE]: fillTemplate(
+      pick(DELETE_APP_DISPATCHER_FILE),
+      { ENV: env }
+    ),
     [DELETE_AZURE_FILE]: fillTemplate(pick(DELETE_AZURE_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF,
+      RADIUS_REF: DELETE_RADIUS_REF
     }),
     [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF,
-    }),
+      RADIUS_REF: DELETE_RADIUS_REF
+    })
   };
 }
 

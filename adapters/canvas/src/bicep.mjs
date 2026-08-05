@@ -35,7 +35,7 @@ export const WORKFLOW_MANAGED_PARAMS = new Set([
   "application",
   "image",
   "registryUsername",
-  "registryPassword",
+  "registryPassword"
 ]);
 
 // Parse `param` declarations from Bicep source. Returns one entry per parameter:
@@ -62,7 +62,7 @@ export function parseBicepParams(source) {
     }
     if (line.startsWith("@")) continue; // other decorators: keep pending state
     const m = line.match(
-      /^param\s+([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_.\[\]?]+)\s*(?:=\s*([\s\S]+))?$/,
+      /^param\s+([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_.\[\]?]+)\s*(?:=\s*([\s\S]+))?$/
     );
     if (m) {
       const [, name, type, def] = m;
@@ -72,7 +72,7 @@ export function parseBicepParams(source) {
         secure,
         hasDefault: def !== undefined,
         default: def !== undefined ? def.trim() : null,
-        description,
+        description
       });
       secure = false;
       description = "";
@@ -89,7 +89,7 @@ export function parseBicepParams(source) {
 // workflow does not manage itself.
 export function appParams(source) {
   return parseBicepParams(source).filter(
-    (p) => !WORKFLOW_MANAGED_PARAMS.has(p.name),
+    (p) => !WORKFLOW_MANAGED_PARAMS.has(p.name)
   );
 }
 
@@ -109,7 +109,7 @@ export function autogenValue(type) {
 // are inlined into the `rad deploy` command string the extension builds.
 export function partitionParams(params, resolved) {
   const secureNames = new Set(
-    params.filter((p) => p.secure).map((p) => p.name),
+    params.filter((p) => p.secure).map((p) => p.name)
   );
   const secret = {};
   const pub = {};
@@ -135,7 +135,9 @@ export function buildDeployRadCommand(appFile, environment, publicParams = {}) {
 export function buildAppGraphRadCommand(appName) {
   const safe = String(appName || "").trim();
   if (!safe || /[\s"'\\]/.test(safe)) {
-    throw new Error(`Invalid application name for rad command: ${JSON.stringify(safe)}`);
+    throw new Error(
+      `Invalid application name for rad command: ${JSON.stringify(safe)}`
+    );
   }
   return `app graph --application ${safe} --preview --include-icons`;
 }

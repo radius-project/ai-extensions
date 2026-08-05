@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildOidcSubject,
   buildEnvironmentSuffix,
-  buildFederatedCredentialName,
+  buildFederatedCredentialName
 } from "./oidc-subject.js";
 
 describe("buildOidcSubject", () => {
@@ -10,7 +10,7 @@ describe("buildOidcSubject", () => {
     repoFullName: "octo-org/octo-repo",
     ownerId: 111,
     repoId: 222,
-    suffix: "environment:production",
+    suffix: "environment:production"
   };
 
   // ─── default (use_default = true) ────────────────────────────────────────────
@@ -19,7 +19,7 @@ describe("buildOidcSubject", () => {
     it("builds the mutable default format", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: true },
+        subjectConfig: { useDefault: true }
       });
       expect(subject).toBe("repo:octo-org/octo-repo:environment:production");
     });
@@ -37,10 +37,10 @@ describe("buildOidcSubject", () => {
     it("builds the immutable default format with numeric ids", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: true, useImmutableSubject: true },
+        subjectConfig: { useDefault: true, useImmutableSubject: true }
       });
       expect(subject).toBe(
-        "repo:octo-org@111/octo-repo@222:environment:production",
+        "repo:octo-org@111/octo-repo@222:environment:production"
       );
     });
 
@@ -50,11 +50,11 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: true,
           useImmutableSubject: true,
-          subClaimPrefix: "repo:octo-org@999/octo-repo@888",
-        },
+          subClaimPrefix: "repo:octo-org@999/octo-repo@888"
+        }
       });
       expect(subject).toBe(
-        "repo:octo-org@999/octo-repo@888:environment:production",
+        "repo:octo-org@999/octo-repo@888:environment:production"
       );
     });
 
@@ -64,7 +64,7 @@ describe("buildOidcSubject", () => {
         ownerId: "111",
         repoId: "222",
         suffix: "environment:dev",
-        subjectConfig: { useDefault: true, useImmutableSubject: true },
+        subjectConfig: { useDefault: true, useImmutableSubject: true }
       });
       expect(subject).toBe("repo:octo-org@111/octo-repo@222:environment:dev");
     });
@@ -75,8 +75,8 @@ describe("buildOidcSubject", () => {
           repoFullName: "octo-org/octo-repo",
           repoId: 222,
           suffix: "environment:production",
-          subjectConfig: { useDefault: true, useImmutableSubject: true },
-        }),
+          subjectConfig: { useDefault: true, useImmutableSubject: true }
+        })
       ).toThrow(/numeric owner id/);
     });
 
@@ -86,8 +86,8 @@ describe("buildOidcSubject", () => {
           repoFullName: "octo-org/octo-repo",
           ownerId: 111,
           suffix: "environment:production",
-          subjectConfig: { useDefault: true, useImmutableSubject: true },
-        }),
+          subjectConfig: { useDefault: true, useImmutableSubject: true }
+        })
       ).toThrow(/numeric repository id/);
     });
   });
@@ -101,8 +101,8 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: false,
           useImmutableSubject: false,
-          includeClaimKeys: ["repository"],
-        },
+          includeClaimKeys: ["repository"]
+        }
       });
       expect(subject).toBe("repository:octo-org/octo-repo");
     });
@@ -113,8 +113,8 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: false,
           useImmutableSubject: true,
-          includeClaimKeys: ["repository"],
-        },
+          includeClaimKeys: ["repository"]
+        }
       });
       expect(subject).toBe("repository:octo-org@111/octo-repo@222");
     });
@@ -126,8 +126,8 @@ describe("buildOidcSubject", () => {
           useDefault: false,
           useImmutableSubject: true,
           subClaimPrefix: "repo:octo-org@5/octo-repo@6",
-          includeClaimKeys: ["repository"],
-        },
+          includeClaimKeys: ["repository"]
+        }
       });
       expect(subject).toBe("repository:octo-org@5/octo-repo@6");
     });
@@ -136,15 +136,18 @@ describe("buildOidcSubject", () => {
       expect(() =>
         buildOidcSubject({
           ...base,
-          subjectConfig: { useDefault: false, includeClaimKeys: ["repository"] },
-        }),
+          subjectConfig: { useDefault: false, includeClaimKeys: ["repository"] }
+        })
       ).toThrow(/immutable/);
     });
 
     it("maps repository_id to the numeric repo id", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: false, includeClaimKeys: ["repository_id"] },
+        subjectConfig: {
+          useDefault: false,
+          includeClaimKeys: ["repository_id"]
+        }
       });
       expect(subject).toBe("repository_id:222");
     });
@@ -154,8 +157,8 @@ describe("buildOidcSubject", () => {
         ...base,
         subjectConfig: {
           useDefault: false,
-          includeClaimKeys: ["repository_owner_id"],
-        },
+          includeClaimKeys: ["repository_owner_id"]
+        }
       });
       expect(subject).toBe("repository_owner_id:111");
     });
@@ -165,8 +168,8 @@ describe("buildOidcSubject", () => {
         ...base,
         subjectConfig: {
           useDefault: false,
-          includeClaimKeys: ["repository_owner"],
-        },
+          includeClaimKeys: ["repository_owner"]
+        }
       });
       expect(subject).toBe("repository_owner:octo-org");
     });
@@ -174,7 +177,7 @@ describe("buildOidcSubject", () => {
     it("maps the context claim to the suffix", () => {
       const subject = buildOidcSubject({
         ...base,
-        subjectConfig: { useDefault: false, includeClaimKeys: ["context"] },
+        subjectConfig: { useDefault: false, includeClaimKeys: ["context"] }
       });
       expect(subject).toBe("environment:production");
     });
@@ -183,7 +186,7 @@ describe("buildOidcSubject", () => {
       const subject = buildOidcSubject({
         ...base,
         suffix: buildEnvironmentSuffix("dev"),
-        subjectConfig: { useDefault: false, includeClaimKeys: ["environment"] },
+        subjectConfig: { useDefault: false, includeClaimKeys: ["environment"] }
       });
       expect(subject).toBe("environment:dev");
     });
@@ -194,8 +197,8 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: false,
           useImmutableSubject: false,
-          includeClaimKeys: ["repo"],
-        },
+          includeClaimKeys: ["repo"]
+        }
       });
       expect(subject).toBe("repo:octo-org/octo-repo");
     });
@@ -206,8 +209,8 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: false,
           useImmutableSubject: true,
-          includeClaimKeys: ["repo"],
-        },
+          includeClaimKeys: ["repo"]
+        }
       });
       expect(subject).toBe("repo:octo-org@111/octo-repo@222");
     });
@@ -218,11 +221,11 @@ describe("buildOidcSubject", () => {
         subjectConfig: {
           useDefault: false,
           useImmutableSubject: false,
-          includeClaimKeys: ["repository", "repository_id", "context"],
-        },
+          includeClaimKeys: ["repository", "repository_id", "context"]
+        }
       });
       expect(subject).toBe(
-        "repository:octo-org/octo-repo:repository_id:222:environment:production",
+        "repository:octo-org/octo-repo:repository_id:222:environment:production"
       );
     });
 
@@ -234,12 +237,10 @@ describe("buildOidcSubject", () => {
         suffix: "ref:refs/heads/main",
         subjectConfig: {
           useDefault: false,
-          includeClaimKeys: ["repository_owner_id", "context"],
-        },
+          includeClaimKeys: ["repository_owner_id", "context"]
+        }
       });
-      expect(subject).toBe(
-        "repository_owner_id:111:ref:refs/heads/main",
-      );
+      expect(subject).toBe("repository_owner_id:111:ref:refs/heads/main");
     });
 
     it("throws with the key name and actionable recourse on an unknown claim key", () => {
@@ -249,9 +250,9 @@ describe("buildOidcSubject", () => {
           subjectConfig: {
             useDefault: false,
             useImmutableSubject: false,
-            includeClaimKeys: ["repository", "job_workflow_ref"],
-          },
-        }),
+            includeClaimKeys: ["repository", "job_workflow_ref"]
+          }
+        })
       ).toThrow(/job_workflow_ref/);
       // Message names the org-level customization and points at the follow-up.
       expect(() =>
@@ -260,9 +261,9 @@ describe("buildOidcSubject", () => {
           subjectConfig: {
             useDefault: false,
             useImmutableSubject: false,
-            includeClaimKeys: ["repository", "job_workflow_ref"],
-          },
-        }),
+            includeClaimKeys: ["repository", "job_workflow_ref"]
+          }
+        })
       ).toThrow(/customize the subject claims[\s\S]*issues\/185/);
     });
 
@@ -274,8 +275,12 @@ describe("buildOidcSubject", () => {
           subjectConfig: {
             useDefault: false,
             useImmutableSubject: false,
-            includeClaimKeys: ["actor", "job_workflow_ref", "runner_environment"],
-          },
+            includeClaimKeys: [
+              "actor",
+              "job_workflow_ref",
+              "runner_environment"
+            ]
+          }
         });
       } catch (e) {
         message = (e as Error).message;
@@ -289,8 +294,8 @@ describe("buildOidcSubject", () => {
       expect(() =>
         buildOidcSubject({
           ...base,
-          subjectConfig: { useDefault: false, includeClaimKeys: [] },
-        }),
+          subjectConfig: { useDefault: false, includeClaimKeys: [] }
+        })
       ).toThrow(/no claim keys/);
     });
 
@@ -301,9 +306,9 @@ describe("buildOidcSubject", () => {
           suffix: "environment:production",
           subjectConfig: {
             useDefault: false,
-            includeClaimKeys: ["repository_id"],
-          },
-        }),
+            includeClaimKeys: ["repository_id"]
+          }
+        })
       ).toThrow(/numeric repository id/);
     });
 
@@ -314,9 +319,9 @@ describe("buildOidcSubject", () => {
           suffix: "environment:production",
           subjectConfig: {
             useDefault: false,
-            includeClaimKeys: ["repository_owner_id"],
-          },
-        }),
+            includeClaimKeys: ["repository_owner_id"]
+          }
+        })
       ).toThrow(/numeric owner id/);
     });
   });
@@ -326,19 +331,19 @@ describe("buildOidcSubject", () => {
   describe("repoFullName validation", () => {
     it("throws for a non owner/repo value", () => {
       expect(() =>
-        buildOidcSubject({ ...base, repoFullName: "not-a-slug" }),
+        buildOidcSubject({ ...base, repoFullName: "not-a-slug" })
       ).toThrow(/owner\/repo/);
     });
 
     it("throws for an empty repo full name", () => {
       expect(() => buildOidcSubject({ ...base, repoFullName: "" })).toThrow(
-        /owner\/repo/,
+        /owner\/repo/
       );
     });
 
     it("throws for a three-segment path", () => {
       expect(() =>
-        buildOidcSubject({ ...base, repoFullName: "a/b/c" }),
+        buildOidcSubject({ ...base, repoFullName: "a/b/c" })
       ).toThrow(/owner\/repo/);
     });
   });
@@ -363,8 +368,8 @@ describe("buildFederatedCredentialName", () => {
     expect(
       buildFederatedCredentialName({
         repoFullName: "octo-org/octo-repo",
-        envName: "production",
-      }),
+        envName: "production"
+      })
     ).toBe("github-octo-org-octo-repo-production");
   });
 
@@ -373,8 +378,8 @@ describe("buildFederatedCredentialName", () => {
       buildFederatedCredentialName({
         repoFullName: "octo-org/octo-repo",
         envName: "dev",
-        variant: "immutable",
-      }),
+        variant: "immutable"
+      })
     ).toBe("github-octo-org-octo-repo-dev-immutable");
   });
 
@@ -382,8 +387,8 @@ describe("buildFederatedCredentialName", () => {
     expect(
       buildFederatedCredentialName({
         repoFullName: "octo-org/octo-repo",
-        envName: "prod:west",
-      }),
+        envName: "prod:west"
+      })
     ).toBe("github-octo-org-octo-repo-prod-west");
   });
 
@@ -391,7 +396,7 @@ describe("buildFederatedCredentialName", () => {
     const name = buildFederatedCredentialName({
       repoFullName: "octo-org/octo-repo",
       envName: "e".repeat(200),
-      variant: "immutable",
+      variant: "immutable"
     });
     expect(name.length).toBeLessThanOrEqual(120);
     expect(name.endsWith("-")).toBe(false);
@@ -400,10 +405,16 @@ describe("buildFederatedCredentialName", () => {
   it("keeps the mutable/immutable pair distinct and variant-terminated under truncation", () => {
     const common = {
       repoFullName: "octo-org/octo-repo",
-      envName: "e".repeat(200),
+      envName: "e".repeat(200)
     };
-    const mutable = buildFederatedCredentialName({ ...common, variant: "mutable" });
-    const immutable = buildFederatedCredentialName({ ...common, variant: "immutable" });
+    const mutable = buildFederatedCredentialName({
+      ...common,
+      variant: "mutable"
+    });
+    const immutable = buildFederatedCredentialName({
+      ...common,
+      variant: "immutable"
+    });
 
     // Distinct — the collision bug produced identical truncated names.
     expect(mutable).not.toBe(immutable);
@@ -424,10 +435,16 @@ describe("buildFederatedCredentialName", () => {
   it("stays distinct with a long repo name plus a long env", () => {
     const common = {
       repoFullName: `octo-org/${"r".repeat(100)}`,
-      envName: "e".repeat(50),
+      envName: "e".repeat(50)
     };
-    const mutable = buildFederatedCredentialName({ ...common, variant: "mutable" });
-    const immutable = buildFederatedCredentialName({ ...common, variant: "immutable" });
+    const mutable = buildFederatedCredentialName({
+      ...common,
+      variant: "mutable"
+    });
+    const immutable = buildFederatedCredentialName({
+      ...common,
+      variant: "immutable"
+    });
     expect(mutable).not.toBe(immutable);
     expect(mutable.length).toBeLessThanOrEqual(120);
     expect(immutable.length).toBeLessThanOrEqual(120);

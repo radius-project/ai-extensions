@@ -21,14 +21,18 @@
 // re-attached to the (still-present) source as synthetic "removed" connections
 // so the diff view can draw them.
 
-export function computeGraphDiff(baseResources: any[], headResources: any[]): any[] {
+export function computeGraphDiff(
+  baseResources: any[],
+  headResources: any[]
+): any[] {
   const base = baseResources || [];
   const head = headResources || [];
   const keyOf = (r: any) => r.id || r.name || "";
   const isOutbound = (c: any) => (c?.direction || "Outbound") === "Outbound";
   // Directed edge identity: (source node key, target key). A NUL separator keeps
   // ids that themselves contain "/" from colliding.
-  const connKey = (src: string, c: any) => src + "\u0000" + (c?.id || c?.name || "");
+  const connKey = (src: string, c: any) =>
+    src + "\u0000" + (c?.id || c?.name || "");
 
   // Outbound edge sets for each side; only Outbound connections render as edges,
   // so only they take part in the connection-level diff.
@@ -36,21 +40,30 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
   const headEdges = new Set<string>();
   for (const r of base) {
     const src = keyOf(r);
-    for (const c of r.connections || []) if (isOutbound(c)) baseEdges.add(connKey(src, c));
+    for (const c of r.connections || [])
+      if (isOutbound(c)) baseEdges.add(connKey(src, c));
   }
   for (const r of head) {
     const src = keyOf(r);
-    for (const c of r.connections || []) if (isOutbound(c)) headEdges.add(connKey(src, c));
+    for (const c of r.connections || [])
+      if (isOutbound(c)) headEdges.add(connKey(src, c));
   }
 
   // Return a fresh connections array with each Outbound connection tagged by its
   // own diff status. `forRemovedNode` short-circuits to "removed" because every
   // edge leaving a node that no longer exists on head is, by definition, removed.
   // Non-Outbound connections are cloned through untouched (they never render).
-  const annotateConnections = (conns: any[], src: string, forRemovedNode: boolean) =>
+  const annotateConnections = (
+    conns: any[],
+    src: string,
+    forRemovedNode: boolean
+  ) =>
     (conns || []).map((c) => {
       if (!isOutbound(c)) return { ...c };
-      const status = forRemovedNode ? "removed" : baseEdges.has(connKey(src, c)) ? "unchanged" : "added";
+      const status =
+        forRemovedNode ? "removed"
+        : baseEdges.has(connKey(src, c)) ? "unchanged"
+        : "added";
       return { ...c, diffStatus: status };
     });
 
@@ -66,9 +79,23 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
     let entry: any;
     if (baseMap.has(src)) {
       const b = baseMap.get(src);
-      const baseComp = JSON.stringify({ name: b.name, type: b.type, connections: b.connections, diffHash: b.diffHash });
-      const headComp = JSON.stringify({ name: r.name, type: r.type, connections: r.connections, diffHash: r.diffHash });
-      entry = { ...r, connections, diffStatus: baseComp !== headComp ? "modified" : "unchanged" };
+      const baseComp = JSON.stringify({
+        name: b.name,
+        type: b.type,
+        connections: b.connections,
+        diffHash: b.diffHash
+      });
+      const headComp = JSON.stringify({
+        name: r.name,
+        type: r.type,
+        connections: r.connections,
+        diffHash: r.diffHash
+      });
+      entry = {
+        ...r,
+        connections,
+        diffStatus: baseComp !== headComp ? "modified" : "unchanged"
+      };
     } else {
       entry = { ...r, connections, diffStatus: "added" };
     }
@@ -78,7 +105,11 @@ export function computeGraphDiff(baseResources: any[], headResources: any[]): an
   for (const r of base) {
     const src = keyOf(r);
     if (!headIds.has(src)) {
-      diffResources.push({ ...r, connections: annotateConnections(r.connections, src, true), diffStatus: "removed" });
+      diffResources.push({
+        ...r,
+        connections: annotateConnections(r.connections, src, true),
+        diffStatus: "removed"
+      });
     }
   }
 

@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { GitHub } from "../ports/index.js";
-import {
-  resolveRecipeOutputs,
-  fetchRecipePack,
-} from "./recipe-resolver.js";
+import { resolveRecipeOutputs, fetchRecipePack } from "./recipe-resolver.js";
 import { recipePackContentPath } from "./recipe-pack.js";
 
 interface FakeConfig {
@@ -22,7 +19,7 @@ function fakeGitHub(cfg: FakeConfig = {}): GitHub {
     },
     async treePaths() {
       return [];
-    },
+    }
   };
 }
 
@@ -68,26 +65,38 @@ describe("fetchRecipePack", () => {
 
   it("parses the pack and derives one concrete resource per entry", async () => {
     const gh = fakeGitHub({
-      content: { [recipePackContentPath("azure")]: AZURE_PACK },
+      content: { [recipePackContentPath("azure")]: AZURE_PACK }
     });
     const recipes = await fetchRecipePack(gh, "azure");
     expect(recipes).toHaveLength(3);
 
-    const mysql = recipes.find(r => r.resourceType === "Radius.Data/mySqlDatabases");
+    const mysql = recipes.find(
+      (r) => r.resourceType === "Radius.Data/mySqlDatabases"
+    );
     expect(mysql?.name).toBe("mySqlDatabases");
     expect(mysql?.templateKind).toBe("bicep");
-    expect(mysql?.templatePath).toBe("mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3");
+    expect(mysql?.templatePath).toBe(
+      "mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3"
+    );
     // AVM module maps to its ARM resource type.
     expect(mysql?.concreteResources).toHaveLength(1);
-    expect(mysql?.concreteResources[0].type).toBe("Microsoft.DBforMySQL/flexibleServers");
+    expect(mysql?.concreteResources[0].type).toBe(
+      "Microsoft.DBforMySQL/flexibleServers"
+    );
     expect(mysql?.concreteResources[0].provider).toBe("azure");
 
-    const containers = recipes.find(r => r.resourceType === "Radius.Compute/containers");
+    const containers = recipes.find(
+      (r) => r.resourceType === "Radius.Compute/containers"
+    );
     // On the Azure pack a container materializes onto the AKS managed cluster.
-    expect(containers?.concreteResources[0].type).toBe("Microsoft.ContainerService/managedClusters");
+    expect(containers?.concreteResources[0].type).toBe(
+      "Microsoft.ContainerService/managedClusters"
+    );
     expect(containers?.concreteResources[0].provider).toBe("azure");
 
-    const secrets = recipes.find(r => r.resourceType === "Radius.Security/secrets");
+    const secrets = recipes.find(
+      (r) => r.resourceType === "Radius.Security/secrets"
+    );
     expect(secrets?.concreteResources[0].type).toBe("core/Secret");
   });
 
@@ -106,9 +115,11 @@ resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
 }
 `;
     // Both providers resolve to recipe-packs/kubernetes/default-recipepack.bicep.
-    expect(recipePackContentPath("aws")).toBe(recipePackContentPath("kubernetes"));
+    expect(recipePackContentPath("aws")).toBe(
+      recipePackContentPath("kubernetes")
+    );
     const gh = fakeGitHub({
-      content: { [recipePackContentPath("aws")]: KUBE_PACK },
+      content: { [recipePackContentPath("aws")]: KUBE_PACK }
     });
     const recipes = await fetchRecipePack(gh, "aws");
     expect(recipes).toHaveLength(1);
@@ -130,7 +141,7 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
 }
 `;
     const gh = fakeGitHub({
-      content: { [recipePackContentPath("azure")]: UNKNOWN_PACK },
+      content: { [recipePackContentPath("azure")]: UNKNOWN_PACK }
     });
     const recipes = await fetchRecipePack(gh, "azure");
     expect(recipes).toHaveLength(1);
@@ -148,12 +159,24 @@ describe("resolveRecipeOutputs", () => {
         templateKind: "bicep",
         templatePath: "ghcr.io/...",
         concreteResources: [
-          { name: "service", type: "core/Service", provider: "kubernetes", displayType: "Service" },
-        ],
-      },
+          {
+            name: "service",
+            type: "core/Service",
+            provider: "kubernetes",
+            displayType: "Service"
+          }
+        ]
+      }
     ];
-    const appResources = [{ name: "api", type: "Radius.Compute/containers@2025-08-01-preview" }];
-    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    const appResources = [
+      { name: "api", type: "Radius.Compute/containers@2025-08-01-preview" }
+    ];
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      appResources,
+      recipes,
+      "azure"
+    );
     expect(resolved[0].recipe.name).toBe("containers");
     expect(resolved[0].outputResources[0].type).toBe("core/Service");
   });
@@ -167,12 +190,24 @@ describe("resolveRecipeOutputs", () => {
         templateKind: "bicep",
         templatePath: "ghcr.io/...",
         concreteResources: [
-          { name: "deployment", type: "apps/Deployment", provider: "kubernetes", displayType: "Deployment" },
-        ],
-      },
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
+          }
+        ]
+      }
     ];
-    const appResources = [{ name: "api", type: "Applications.Core/containers" }];
-    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    const appResources = [
+      { name: "api", type: "Applications.Core/containers" }
+    ];
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      appResources,
+      recipes,
+      "azure"
+    );
     // K8s Deployment nodes get annotated with the managed cluster service name.
     expect(resolved[0].outputResources[0].displayType).toBe("Deployment (AKS)");
   });
@@ -186,12 +221,24 @@ describe("resolveRecipeOutputs", () => {
         templateKind: "bicep",
         templatePath: "mcr.microsoft.com/bicep/avm/res/sql/server:0.21.4",
         concreteResources: [
-          { name: "server", type: "Microsoft.Sql/servers", provider: "azure", displayType: "SQL Server" },
-        ],
-      },
+          {
+            name: "server",
+            type: "Microsoft.Sql/servers",
+            provider: "azure",
+            displayType: "SQL Server"
+          }
+        ]
+      }
     ];
-    const appResources = [{ name: "db", type: "Applications.Datastores/sqlDatabases" }];
-    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    const appResources = [
+      { name: "db", type: "Applications.Datastores/sqlDatabases" }
+    ];
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      appResources,
+      recipes,
+      "azure"
+    );
     expect(resolved[0].recipe?.name).toBe("sqlServerDatabases");
     expect(resolved[0].outputResources[0].type).toBe("Microsoft.Sql/servers");
   });
@@ -203,21 +250,38 @@ describe("resolveRecipeOutputs", () => {
         name: "rabbitMQ",
         resourceType: "Radius.Messaging/rabbitMQ",
         templateKind: "bicep",
-        templatePath: "mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2",
+        templatePath:
+          "mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2",
         concreteResources: [
-          { name: "namespace", type: "Microsoft.ServiceBus/namespaces", provider: "azure", displayType: "Service Bus" },
-        ],
-      },
+          {
+            name: "namespace",
+            type: "Microsoft.ServiceBus/namespaces",
+            provider: "azure",
+            displayType: "Service Bus"
+          }
+        ]
+      }
     ];
-    const appResources = [{ name: "queue", type: "Applications.Messaging/rabbitMQQueues" }];
-    const resolved = await resolveRecipeOutputs(gh, appResources, recipes, "azure");
+    const appResources = [
+      { name: "queue", type: "Applications.Messaging/rabbitMQQueues" }
+    ];
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      appResources,
+      recipes,
+      "azure"
+    );
     expect(resolved[0].recipe?.name).toBe("rabbitMQ");
-    expect(resolved[0].outputResources[0].type).toBe("Microsoft.ServiceBus/namespaces");
+    expect(resolved[0].outputResources[0].type).toBe(
+      "Microsoft.ServiceBus/namespaces"
+    );
   });
 
   it("produces no outputs when no recipe matches", async () => {
     const gh = fakeGitHub();
-    const appResources = [{ name: "cache", type: "Radius.Data/redisCaches@2025-08-01-preview" }];
+    const appResources = [
+      { name: "cache", type: "Radius.Data/redisCaches@2025-08-01-preview" }
+    ];
     const resolved = await resolveRecipeOutputs(gh, appResources, [], "aws");
     // No matching recipe -> nothing is fabricated.
     expect(resolved[0].recipe).toBeNull();

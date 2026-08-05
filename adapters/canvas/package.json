@@ -14,7 +14,8 @@
     "@radius-project/shared": "workspace:*"
   },
   "devDependencies": {
-    "vitest": "^4.1.10",
-    "@vitest/coverage-v8": "^4.1.10"
+    "@github/copilot-sdk": "1.0.8",
+    "@vitest/coverage-v8": "^4.1.10",
+    "vitest": "^4.1.10"
   }
 }

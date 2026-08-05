@@ -12,7 +12,7 @@ import {
   deriveConcreteResource,
   recipePackPathForProvider,
   RECIPE_PACK_REPO,
-  RECIPE_PACK_REF,
+  RECIPE_PACK_REF
 } from "./recipe-pack.js";
 
 const LIVE = !!process.env.RUN_LIVE_PACK_TESTS;
@@ -20,31 +20,35 @@ const LIVE = !!process.env.RUN_LIVE_PACK_TESTS;
 async function fetchLivePack(provider: string): Promise<string> {
   const url = `https://raw.githubusercontent.com/${RECIPE_PACK_REPO}/${RECIPE_PACK_REF}/${recipePackPathForProvider(provider)}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
+  if (!res.ok)
+    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
   return res.text();
 }
 
-describe.skipIf(!LIVE)("live recipe packs (opt-in: set RUN_LIVE_PACK_TESTS)", () => {
-  it.each([{ provider: "azure" }, { provider: "kubernetes" }])(
-    "maps every entry in the current $provider pack",
-    async ({ provider }) => {
-      const entries = parseRecipePack(await fetchLivePack(provider));
+describe.skipIf(!LIVE)(
+  "live recipe packs (opt-in: set RUN_LIVE_PACK_TESTS)",
+  () => {
+    it.each([{ provider: "azure" }, { provider: "kubernetes" }])(
+      "maps every entry in the current $provider pack",
+      async ({ provider }) => {
+        const entries = parseRecipePack(await fetchLivePack(provider));
 
-      // Sanity: the parser must find entries in a real pack.
-      expect(entries.length).toBeGreaterThan(0);
+        // Sanity: the parser must find entries in a real pack.
+        expect(entries.length).toBeGreaterThan(0);
 
-      const unresolved = entries
-        .filter((e) => deriveConcreteResource(e.source, provider) === null)
-        .map((e) => `${e.resourceType} (${e.source})`);
+        const unresolved = entries
+          .filter((e) => deriveConcreteResource(e.source, provider) === null)
+          .map((e) => `${e.resourceType} (${e.source})`);
 
-      // A non-empty list means upstream added or changed a recipe source that the
-      // curated map does not cover — update SOURCE_CONCRETE_MAP (and the committed
-      // fixtures) to match.
-      expect(
-        unresolved,
-        `${provider}: ${entries.length} entries, ${unresolved.length} unmapped: ${unresolved.join(", ")}`,
-      ).toEqual([]);
-    },
-    30_000,
-  );
-});
+        // A non-empty list means upstream added or changed a recipe source that the
+        // curated map does not cover — update SOURCE_CONCRETE_MAP (and the committed
+        // fixtures) to match.
+        expect(
+          unresolved,
+          `${provider}: ${entries.length} entries, ${unresolved.length} unmapped: ${unresolved.join(", ")}`
+        ).toEqual([]);
+      },
+      30_000
+    );
+  }
+);

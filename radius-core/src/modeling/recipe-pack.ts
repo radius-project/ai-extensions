@@ -21,7 +21,7 @@ export const RECIPE_PACK_REF = "main";
 const PROVIDER_PACK_PATH: Record<string, string> = {
   azure: "recipe-packs/azure/aks-recipepack.bicep",
   aws: "recipe-packs/kubernetes/default-recipepack.bicep",
-  kubernetes: "recipe-packs/kubernetes/default-recipepack.bicep",
+  kubernetes: "recipe-packs/kubernetes/default-recipepack.bicep"
 };
 
 export function recipePackPathForProvider(provider: string): string {
@@ -56,26 +56,97 @@ export interface RecipePackEntry {
 // supporting Secret/Service/etc. a recipe also creates are not modeled here).
 // Keys are the source with the registry prefix and version tag stripped — see
 // normalizeRecipeSource.
-const SOURCE_CONCRETE_MAP: Record<string, { type: string; displayType: string; provider: string }> = {
+const SOURCE_CONCRETE_MAP: Record<
+  string,
+  { type: string; displayType: string; provider: string }
+> = {
   // Azure Verified Modules (avm/res/<service>/<resource>) → ARM types.
-  "avm/res/cache/redis-enterprise": { type: "Microsoft.Cache/redisEnterprise", displayType: "Azure Cache for Redis Enterprise", provider: "azure" },
-  "avm/res/cognitive-services/account": { type: "Microsoft.CognitiveServices/accounts", displayType: "Azure AI Services", provider: "azure" },
-  "avm/res/search/search-service": { type: "Microsoft.Search/searchServices", displayType: "Azure AI Search", provider: "azure" },
-  "avm/res/document-db/database-account": { type: "Microsoft.DocumentDB/databaseAccounts", displayType: "Azure Cosmos DB", provider: "azure" },
-  "avm/res/db-for-my-sql/flexible-server": { type: "Microsoft.DBforMySQL/flexibleServers", displayType: "Azure Database for MySQL", provider: "azure" },
-  "avm/res/db-for-postgre-sql/flexible-server": { type: "Microsoft.DBforPostgreSQL/flexibleServers", displayType: "Azure Database for PostgreSQL", provider: "azure" },
-  "avm/res/sql/server": { type: "Microsoft.Sql/servers", displayType: "Azure SQL Server", provider: "azure" },
-  "avm/res/service-bus/namespace": { type: "Microsoft.ServiceBus/namespaces", displayType: "Azure Service Bus", provider: "azure" },
-  "avm/res/event-hub/namespace": { type: "Microsoft.EventHub/namespaces", displayType: "Azure Event Hubs", provider: "azure" },
-  "avm/res/storage/storage-account": { type: "Microsoft.Storage/storageAccounts", displayType: "Azure Storage Account", provider: "azure" },
+  "avm/res/cache/redis-enterprise": {
+    type: "Microsoft.Cache/redisEnterprise",
+    displayType: "Azure Cache for Redis Enterprise",
+    provider: "azure"
+  },
+  "avm/res/cognitive-services/account": {
+    type: "Microsoft.CognitiveServices/accounts",
+    displayType: "Azure AI Services",
+    provider: "azure"
+  },
+  "avm/res/search/search-service": {
+    type: "Microsoft.Search/searchServices",
+    displayType: "Azure AI Search",
+    provider: "azure"
+  },
+  "avm/res/document-db/database-account": {
+    type: "Microsoft.DocumentDB/databaseAccounts",
+    displayType: "Azure Cosmos DB",
+    provider: "azure"
+  },
+  "avm/res/db-for-my-sql/flexible-server": {
+    type: "Microsoft.DBforMySQL/flexibleServers",
+    displayType: "Azure Database for MySQL",
+    provider: "azure"
+  },
+  "avm/res/db-for-postgre-sql/flexible-server": {
+    type: "Microsoft.DBforPostgreSQL/flexibleServers",
+    displayType: "Azure Database for PostgreSQL",
+    provider: "azure"
+  },
+  "avm/res/sql/server": {
+    type: "Microsoft.Sql/servers",
+    displayType: "Azure SQL Server",
+    provider: "azure"
+  },
+  "avm/res/service-bus/namespace": {
+    type: "Microsoft.ServiceBus/namespaces",
+    displayType: "Azure Service Bus",
+    provider: "azure"
+  },
+  "avm/res/event-hub/namespace": {
+    type: "Microsoft.EventHub/namespaces",
+    displayType: "Azure Event Hubs",
+    provider: "azure"
+  },
+  "avm/res/storage/storage-account": {
+    type: "Microsoft.Storage/storageAccounts",
+    displayType: "Azure Storage Account",
+    provider: "azure"
+  },
   // Kubernetes recipes (ghcr.io/radius-project/kube-recipes/<name>) → primary K8s object.
-  "kube-recipes/containers": { type: "apps/Deployment", displayType: "Deployment", provider: "kubernetes" },
-  "kube-recipes/mysqldatabases": { type: "apps/Deployment", displayType: "Deployment", provider: "kubernetes" },
-  "kube-recipes/rediscaches": { type: "apps/Deployment", displayType: "Deployment", provider: "kubernetes" },
-  "kube-recipes/persistentvolumes": { type: "core/PersistentVolumeClaim", displayType: "PersistentVolumeClaim", provider: "kubernetes" },
-  "kube-recipes/secrets": { type: "core/Secret", displayType: "Secret", provider: "kubernetes" },
-  "kube-recipes/routes": { type: "gateway.networking.k8s.io/HTTPRoute", displayType: "HTTPRoute", provider: "kubernetes" },
-  "kube-recipes/containerimages": { type: "batch/Job", displayType: "Image Build Job", provider: "kubernetes" },
+  "kube-recipes/containers": {
+    type: "apps/Deployment",
+    displayType: "Deployment",
+    provider: "kubernetes"
+  },
+  "kube-recipes/mysqldatabases": {
+    type: "apps/Deployment",
+    displayType: "Deployment",
+    provider: "kubernetes"
+  },
+  "kube-recipes/rediscaches": {
+    type: "apps/Deployment",
+    displayType: "Deployment",
+    provider: "kubernetes"
+  },
+  "kube-recipes/persistentvolumes": {
+    type: "core/PersistentVolumeClaim",
+    displayType: "PersistentVolumeClaim",
+    provider: "kubernetes"
+  },
+  "kube-recipes/secrets": {
+    type: "core/Secret",
+    displayType: "Secret",
+    provider: "kubernetes"
+  },
+  "kube-recipes/routes": {
+    type: "gateway.networking.k8s.io/HTTPRoute",
+    displayType: "HTTPRoute",
+    provider: "kubernetes"
+  },
+  "kube-recipes/containerimages": {
+    type: "batch/Job",
+    displayType: "Image Build Job",
+    provider: "kubernetes"
+  }
 };
 
 // Provider-scoped overrides that win over SOURCE_CONCRETE_MAP for a shared source.
@@ -85,10 +156,17 @@ const SOURCE_CONCRETE_MAP: Record<string, { type: string; displayType: string; p
 // concrete Azure resource is the cluster — not the plain Kubernetes Deployment the
 // same recipe emits on a Kubernetes environment. Keys are normalized sources (see
 // normalizeRecipeSource); only entries that genuinely differ per provider go here.
-const PROVIDER_SOURCE_OVERRIDE: Record<string, Record<string, { type: string; displayType: string; provider: string }>> = {
+const PROVIDER_SOURCE_OVERRIDE: Record<
+  string,
+  Record<string, { type: string; displayType: string; provider: string }>
+> = {
   azure: {
-    "kube-recipes/containers": { type: "Microsoft.ContainerService/managedClusters", displayType: "Azure Kubernetes Service", provider: "azure" },
-  },
+    "kube-recipes/containers": {
+      type: "Microsoft.ContainerService/managedClusters",
+      displayType: "Azure Kubernetes Service",
+      provider: "azure"
+    }
+  }
 };
 
 // Normalize a recipe `source` OCI reference to its lookup key: strip the registry
@@ -116,19 +194,27 @@ export function normalizeRecipeSource(source: string): string {
 // the source is unrecognized (unknown recipes yield no fabricated output). The
 // optional provider selects a provider-scoped override for sources that
 // materialize differently per environment (see PROVIDER_SOURCE_OVERRIDE).
-export function deriveConcreteResource(source: string, provider?: string): ConcreteResource | null {
+export function deriveConcreteResource(
+  source: string,
+  provider?: string
+): ConcreteResource | null {
   const key = normalizeRecipeSource(source);
-  const hit = (provider && PROVIDER_SOURCE_OVERRIDE[provider]?.[key]) || SOURCE_CONCRETE_MAP[key];
+  const hit =
+    (provider && PROVIDER_SOURCE_OVERRIDE[provider]?.[key]) ||
+    SOURCE_CONCRETE_MAP[key];
   if (!hit) return null;
   const leaf = hit.type.split("/").pop() || hit.type;
-  const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) => m.toLowerCase());
-  const name = withLowerInitialism.charAt(0).toLowerCase() + withLowerInitialism.slice(1);
+  const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) =>
+    m.toLowerCase()
+  );
+  const name =
+    withLowerInitialism.charAt(0).toLowerCase() + withLowerInitialism.slice(1);
   return {
     name,
     type: hit.type,
     displayType: hit.displayType,
     provider: hit.provider,
-    apiVersion: "",
+    apiVersion: ""
   };
 }
 

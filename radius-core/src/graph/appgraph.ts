@@ -25,27 +25,31 @@ const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 export function applicationGraphToResources(
   appGraph: any,
   definitionFile = ".radius/app.bicep",
-  definitionContent = "",
+  definitionContent = ""
 ): any[] {
   const icons =
-    !Array.isArray(appGraph) &&
-    appGraph &&
-    appGraph.icons &&
-    typeof appGraph.icons === "object" &&
-    !Array.isArray(appGraph.icons)
-      ? appGraph.icons
-      : {};
+    (
+      !Array.isArray(appGraph) &&
+      appGraph &&
+      appGraph.icons &&
+      typeof appGraph.icons === "object" &&
+      !Array.isArray(appGraph.icons)
+    ) ?
+      appGraph.icons
+    : {};
 
   const resolveIcon = (resource: any): string => {
-    if (typeof resource?.icon === "string" && resource.icon) return resource.icon;
+    if (typeof resource?.icon === "string" && resource.icon)
+      return resource.icon;
     const hash = resource?.iconHash;
-    return typeof hash === "string" && typeof icons[hash] === "string" ? icons[hash] : "";
+    return typeof hash === "string" && typeof icons[hash] === "string" ?
+        icons[hash]
+      : "";
   };
-  const raw = Array.isArray(appGraph)
-    ? appGraph
-    : appGraph && Array.isArray(appGraph.resources)
-      ? appGraph.resources
-      : [];
+  const raw =
+    Array.isArray(appGraph) ? appGraph
+    : appGraph && Array.isArray(appGraph.resources) ? appGraph.resources
+    : [];
   const definitionLines = findResourceDefinitionLines(definitionContent);
 
   const resources: any[] = [];
@@ -59,7 +63,7 @@ export function applicationGraphToResources(
     // connection list is sorted deterministically inside addInboundConnections,
     // so the shape is stable regardless of rad's edge ordering.
     const connections: any[] = [];
-    for (const c of (Array.isArray(r.connections) ? r.connections : [])) {
+    for (const c of Array.isArray(r.connections) ? r.connections : []) {
       if (!c || !c.id) continue;
       if ((c.direction || "Outbound") !== "Outbound") continue;
       connections.push({ id: c.id, direction: "Outbound" });
@@ -71,31 +75,34 @@ export function applicationGraphToResources(
       type,
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
-      outputResources: Array.isArray(r.outputResources)
-        ? r.outputResources.map((output: any) => ({
+      outputResources:
+        Array.isArray(r.outputResources) ?
+          r.outputResources.map((output: any) => ({
             ...output,
-            icon: resolveIcon(output),
+            icon: resolveIcon(output)
           }))
         : [],
       diffHash: validateDiffHash(r.diffHash, r.name || id),
       definitionFile,
       definitionLine:
-        typeof r.definitionLine === "number" && r.definitionLine > 0
-          ? r.definitionLine
-          : definitionLines.get(r.name) ??
-            definitionLines.get(id.split("/").pop() || "") ??
-            0,
+        typeof r.definitionLine === "number" && r.definitionLine > 0 ?
+          r.definitionLine
+        : (definitionLines.get(r.name) ??
+          definitionLines.get(id.split("/").pop() || "") ??
+          0),
       // Newer `rad app graph` emits the authored codeReference under the
       // resource's `properties`; older output placed it at the top level. Prefer
       // the new location and fall back to the legacy one — otherwise the canvas
       // source links silently disappear even though app.bicep and app-graph.json
       // carry them.
       codeReference:
-        (r.properties && typeof r.properties.codeReference === "string" && r.properties.codeReference) ||
+        (r.properties &&
+          typeof r.properties.codeReference === "string" &&
+          r.properties.codeReference) ||
         (typeof r.codeReference === "string" && r.codeReference) ||
         "",
       iconHash: r.iconHash || "",
-      icon: resolveIcon(r),
+      icon: resolveIcon(r)
     });
   }
 
@@ -109,7 +116,9 @@ export function applicationGraphToResources(
  * source locations, so this keeps app-definition links anchored to the resource
  * declaration without coupling the graph model to a Bicep parser.
  */
-export function findResourceDefinitionLines(content: string): Map<string, number> {
+export function findResourceDefinitionLines(
+  content: string
+): Map<string, number> {
   const result = new Map<string, number>();
   if (!content) return result;
 
@@ -140,13 +149,13 @@ export function findResourceDefinitionLines(content: string): Map<string, number
       foundBody ||= depth > 0 || structuralLine.includes("{");
 
       const nameMatch =
-        depthBeforeLine === 1
-          ? lines[index].match(/^\s*name\s*:\s*['"]([^'"]+)['"]/)
-          : depthBeforeLine === 0
-            ? lines[index]
-                .replace(/\/\/.*$/, "")
-                .match(/\{[^}]*\bname\s*:\s*['"]([^'"]+)['"]/)
-            : null;
+        depthBeforeLine === 1 ?
+          lines[index].match(/^\s*name\s*:\s*['"]([^'"]+)['"]/)
+        : depthBeforeLine === 0 ?
+          lines[index]
+            .replace(/\/\/.*$/, "")
+            .match(/\{[^}]*\bname\s*:\s*['"]([^'"]+)['"]/)
+        : null;
       if (nameMatch && !result.has(nameMatch[1])) {
         result.set(nameMatch[1], lineNumber);
       }
@@ -170,6 +179,6 @@ function validateDiffHash(hash: unknown, resourceName: string): string {
   }
   throw new Error(
     `Resource "${resourceName}" is missing a valid diffHash (expected "sha256:" followed by 64 lowercase hexadecimal characters from rad CLI output). ` +
-    `Ensure you are using a compatible version of the rad CLI that includes diff hashes in its graph output.`,
+      `Ensure you are using a compatible version of the rad CLI that includes diff hashes in its graph output.`
   );
 }

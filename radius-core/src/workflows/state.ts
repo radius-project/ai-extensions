@@ -34,7 +34,7 @@ function registrySuffix(value: string): string {
  */
 export function stateRegistryForEnvironment(
   targetRepository: string,
-  environment: string,
+  environment: string
 ): string {
   const repositoryParts = targetRepository.trim().split("/");
   if (
@@ -42,7 +42,7 @@ export function stateRegistryForEnvironment(
     repositoryParts.some((part) => !part.trim())
   ) {
     throw new Error(
-      `Invalid repository "${targetRepository}": expected owner/repo.`,
+      `Invalid repository "${targetRepository}": expected owner/repo.`
     );
   }
 
@@ -52,25 +52,18 @@ export function stateRegistryForEnvironment(
   }
 
   const owner = slug(repositoryParts[0], MAX_OWNER_LENGTH);
-  const repository = slug(
-    repositoryParts[1],
-    MAX_REPOSITORY_SLUG_LENGTH,
-  );
-  const environmentSlug = slug(
-    environmentName,
-    MAX_ENVIRONMENT_SLUG_LENGTH,
-  );
+  const repository = slug(repositoryParts[1], MAX_REPOSITORY_SLUG_LENGTH);
+  const environmentSlug = slug(environmentName, MAX_ENVIRONMENT_SLUG_LENGTH);
   if (!owner || !repository || !environmentSlug) {
     throw new Error(
-      "Repository and environment names must contain an ASCII letter or number to configure GHCR state storage.",
+      "Repository and environment names must contain an ASCII letter or number to configure GHCR state storage."
     );
   }
 
   const identity =
     `${repositoryParts[0].toLowerCase()}/${repositoryParts[1].toLowerCase()}` +
     `\0${environmentName.toLowerCase()}`;
-  const packageName =
-    `${repository}-radius-state-${environmentSlug}-${registrySuffix(identity)}`;
+  const packageName = `${repository}-radius-state-${environmentSlug}-${registrySuffix(identity)}`;
 
   return `${GHCR_HOST}/${owner}/${packageName}`;
 }

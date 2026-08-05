@@ -6,7 +6,7 @@ import {
   deriveConcreteResource,
   normalizeRecipeSource,
   recipePackPathForProvider,
-  recipePackContentPath,
+  recipePackContentPath
 } from "./recipe-pack.js";
 
 // Read a committed recipe-pack snapshot from ./testdata. These are verbatim
@@ -17,31 +17,44 @@ import {
 // To refresh: re-download each file's raw contents over the pinned ref and
 // overwrite it here, then update the expected tables below if entries changed.
 const readFixture = (name: string): string =>
-  readFileSync(fileURLToPath(new URL(`./testdata/${name}`, import.meta.url)), "utf8");
+  readFileSync(
+    fileURLToPath(new URL(`./testdata/${name}`, import.meta.url)),
+    "utf8"
+  );
 
 describe("normalizeRecipeSource", () => {
   it("strips the registry host and version tag from an AVM source", () => {
     expect(
-      normalizeRecipeSource("mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1"),
+      normalizeRecipeSource(
+        "mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1"
+      )
     ).toBe("avm/res/cache/redis-enterprise");
   });
 
   it("strips the registry host and tag from a kube-recipes source", () => {
     expect(
-      normalizeRecipeSource("ghcr.io/radius-project/kube-recipes/containers:latest"),
+      normalizeRecipeSource(
+        "ghcr.io/radius-project/kube-recipes/containers:latest"
+      )
     ).toBe("kube-recipes/containers");
   });
 
   it("handles a source with no version tag", () => {
-    expect(normalizeRecipeSource("avm/res/sql/server")).toBe("avm/res/sql/server");
+    expect(normalizeRecipeSource("avm/res/sql/server")).toBe(
+      "avm/res/sql/server"
+    );
   });
 
   it("strips an OCI digest before normalizing", () => {
     expect(
-      normalizeRecipeSource("mcr.microsoft.com/bicep/avm/res/sql/server:0.1.0@sha256:abc123"),
+      normalizeRecipeSource(
+        "mcr.microsoft.com/bicep/avm/res/sql/server:0.1.0@sha256:abc123"
+      )
     ).toBe("avm/res/sql/server");
     expect(
-      normalizeRecipeSource("mcr.microsoft.com/bicep/avm/res/sql/server@sha256:abc123"),
+      normalizeRecipeSource(
+        "mcr.microsoft.com/bicep/avm/res/sql/server@sha256:abc123"
+      )
     ).toBe("avm/res/sql/server");
   });
 
@@ -52,21 +65,35 @@ describe("normalizeRecipeSource", () => {
 
 describe("deriveConcreteResource", () => {
   it("maps an Azure Verified Module to its ARM resource type", () => {
-    const c = deriveConcreteResource("mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3");
+    const c = deriveConcreteResource(
+      "mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3"
+    );
     expect(c?.type).toBe("Microsoft.DBforMySQL/flexibleServers");
     expect(c?.provider).toBe("azure");
     expect(c?.name).toBe("flexibleServers");
   });
 
   it("maps a kube-recipe to its primary Kubernetes object", () => {
-    expect(deriveConcreteResource("ghcr.io/radius-project/kube-recipes/mysqldatabases:latest")?.type)
-      .toBe("apps/Deployment");
-    expect(deriveConcreteResource("ghcr.io/radius-project/kube-recipes/secrets:latest")?.type)
-      .toBe("core/Secret");
-    expect(deriveConcreteResource("ghcr.io/radius-project/kube-recipes/persistentvolumes:latest")?.type)
-      .toBe("core/PersistentVolumeClaim");
-    expect(deriveConcreteResource("ghcr.io/radius-project/kube-recipes/routes:latest")?.type)
-      .toBe("gateway.networking.k8s.io/HTTPRoute");
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/kube-recipes/mysqldatabases:latest"
+      )?.type
+    ).toBe("apps/Deployment");
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/kube-recipes/secrets:latest"
+      )?.type
+    ).toBe("core/Secret");
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/kube-recipes/persistentvolumes:latest"
+      )?.type
+    ).toBe("core/PersistentVolumeClaim");
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/kube-recipes/routes:latest"
+      )?.type
+    ).toBe("gateway.networking.k8s.io/HTTPRoute");
   });
 
   it("returns null for an unrecognized source", () => {
@@ -78,30 +105,42 @@ describe("deriveConcreteResource", () => {
     // concrete Azure resource is the cluster — not the Deployment the shared
     // kube-recipes/containers recipe emits on a plain Kubernetes environment.
     const src = "ghcr.io/radius-project/kube-recipes/containers:latest";
-    expect(deriveConcreteResource(src, "azure")?.type).toBe("Microsoft.ContainerService/managedClusters");
+    expect(deriveConcreteResource(src, "azure")?.type).toBe(
+      "Microsoft.ContainerService/managedClusters"
+    );
     // The same source stays a Kubernetes Deployment off Azure and with no provider.
-    expect(deriveConcreteResource(src, "kubernetes")?.type).toBe("apps/Deployment");
+    expect(deriveConcreteResource(src, "kubernetes")?.type).toBe(
+      "apps/Deployment"
+    );
     expect(deriveConcreteResource(src)?.type).toBe("apps/Deployment");
   });
 });
 
 describe("recipePackPathForProvider", () => {
   it("selects the azure pack for the azure provider", () => {
-    expect(recipePackPathForProvider("azure")).toBe("recipe-packs/azure/aks-recipepack.bicep");
+    expect(recipePackPathForProvider("azure")).toBe(
+      "recipe-packs/azure/aks-recipepack.bicep"
+    );
   });
 
   it("selects the kubernetes default pack for aws and kubernetes", () => {
-    expect(recipePackPathForProvider("aws")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
-    expect(recipePackPathForProvider("kubernetes")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
+    expect(recipePackPathForProvider("aws")).toBe(
+      "recipe-packs/kubernetes/default-recipepack.bicep"
+    );
+    expect(recipePackPathForProvider("kubernetes")).toBe(
+      "recipe-packs/kubernetes/default-recipepack.bicep"
+    );
   });
 
   it("falls back to the kubernetes default pack for an unknown provider", () => {
-    expect(recipePackPathForProvider("gcp")).toBe("recipe-packs/kubernetes/default-recipepack.bicep");
+    expect(recipePackPathForProvider("gcp")).toBe(
+      "recipe-packs/kubernetes/default-recipepack.bicep"
+    );
   });
 
   it("builds a contents API path pinned to the main ref", () => {
     expect(recipePackContentPath("azure")).toBe(
-      "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep?ref=main",
+      "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep?ref=main"
     );
   });
 });
@@ -138,10 +177,12 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     expect(entries[0]).toEqual({
       resourceType: "Radius.Data/mySqlDatabases",
       kind: "bicep",
-      source: "ghcr.io/radius-project/kube-recipes/mysqldatabases:latest",
+      source: "ghcr.io/radius-project/kube-recipes/mysqldatabases:latest"
     });
     expect(entries[1].resourceType).toBe("Radius.Compute/routes");
-    expect(entries[1].source).toBe("ghcr.io/radius-project/kube-recipes/routes:latest");
+    expect(entries[1].source).toBe(
+      "ghcr.io/radius-project/kube-recipes/routes:latest"
+    );
   });
 
   it("captures the top-level kind/source even when parameters contain nested kind keys", () => {
@@ -168,7 +209,9 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     const entries = parseRecipePack(pack);
     expect(entries).toHaveLength(1);
     expect(entries[0].kind).toBe("bicep");
-    expect(entries[0].source).toBe("mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1");
+    expect(entries[0].source).toBe(
+      "mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1"
+    );
   });
 
   it("skips an entry that declares no source", () => {
@@ -199,7 +242,9 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     const entries = parseRecipePack(pack);
     expect(entries).toHaveLength(1);
     expect(entries[0].resourceType).toBe("Radius.Compute/containers");
-    expect(entries[0].source).toBe("ghcr.io/radius-project/kube-recipes/containers:latest");
+    expect(entries[0].source).toBe(
+      "ghcr.io/radius-project/kube-recipes/containers:latest"
+    );
   });
 
   it("reads kind/source even when source precedes kind around a parameters block", () => {
@@ -221,7 +266,9 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
     const entries = parseRecipePack(pack);
     expect(entries).toHaveLength(1);
     expect(entries[0].kind).toBe("bicep");
-    expect(entries[0].source).toBe("mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1");
+    expect(entries[0].source).toBe(
+      "mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1"
+    );
   });
 });
 
@@ -238,7 +285,8 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.AI/search": "Microsoft.Search/searchServices",
     "Radius.Data/mongoDatabases": "Microsoft.DocumentDB/databaseAccounts",
     "Radius.Data/mySqlDatabases": "Microsoft.DBforMySQL/flexibleServers",
-    "Radius.Data/postgreSqlDatabases": "Microsoft.DBforPostgreSQL/flexibleServers",
+    "Radius.Data/postgreSqlDatabases":
+      "Microsoft.DBforPostgreSQL/flexibleServers",
     "Radius.Data/sqlServerDatabases": "Microsoft.Sql/servers",
     "Radius.Messaging/rabbitMQ": "Microsoft.ServiceBus/namespaces",
     "Radius.Messaging/kafka": "Microsoft.EventHub/namespaces",
@@ -247,7 +295,7 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Compute/persistentVolumes": "core/PersistentVolumeClaim",
     "Radius.Security/secrets": "core/Secret",
     "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
-    "Radius.Compute/containerImages": "batch/Job",
+    "Radius.Compute/containerImages": "batch/Job"
   };
 
   const KUBE_EXPECTED: Record<string, string> = {
@@ -256,28 +304,46 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
     "Radius.Security/secrets": "core/Secret",
     "Radius.Data/mySqlDatabases": "apps/Deployment",
-    "Radius.Data/redisCaches": "apps/Deployment",
+    "Radius.Data/redisCaches": "apps/Deployment"
   };
 
   it.each([
-    { provider: "azure", fixture: "aks-recipepack.bicep", expected: AZURE_EXPECTED },
-    { provider: "kubernetes", fixture: "default-recipepack.bicep", expected: KUBE_EXPECTED },
-  ])("resolves every entry in the $provider pack to a concrete resource", ({ provider, fixture, expected }) => {
-    const entries = parseRecipePack(readFixture(fixture));
-
-    // Every entry the pack declares must derive a concrete resource: an
-    // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
-    const unresolved = entries
-      .filter((e) => deriveConcreteResource(e.source, provider) === null)
-      .map((e) => `${e.resourceType} (${e.source})`);
-    expect(unresolved, `unmapped recipe sources: ${unresolved.join(", ")}`).toEqual([]);
-
-    // The parsed set must match the expected resource types exactly (no drift).
-    expect(entries.map((e) => e.resourceType).sort()).toEqual(Object.keys(expected).sort());
-
-    // Each entry must derive the specific expected concrete type for this provider.
-    for (const entry of entries) {
-      expect(deriveConcreteResource(entry.source, provider)?.type).toBe(expected[entry.resourceType]);
+    {
+      provider: "azure",
+      fixture: "aks-recipepack.bicep",
+      expected: AZURE_EXPECTED
+    },
+    {
+      provider: "kubernetes",
+      fixture: "default-recipepack.bicep",
+      expected: KUBE_EXPECTED
     }
-  });
+  ])(
+    "resolves every entry in the $provider pack to a concrete resource",
+    ({ provider, fixture, expected }) => {
+      const entries = parseRecipePack(readFixture(fixture));
+
+      // Every entry the pack declares must derive a concrete resource: an
+      // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
+      const unresolved = entries
+        .filter((e) => deriveConcreteResource(e.source, provider) === null)
+        .map((e) => `${e.resourceType} (${e.source})`);
+      expect(
+        unresolved,
+        `unmapped recipe sources: ${unresolved.join(", ")}`
+      ).toEqual([]);
+
+      // The parsed set must match the expected resource types exactly (no drift).
+      expect(entries.map((e) => e.resourceType).sort()).toEqual(
+        Object.keys(expected).sort()
+      );
+
+      // Each entry must derive the specific expected concrete type for this provider.
+      for (const entry of entries) {
+        expect(deriveConcreteResource(entry.source, provider)?.type).toBe(
+          expected[entry.resourceType]
+        );
+      }
+    }
+  );
 });

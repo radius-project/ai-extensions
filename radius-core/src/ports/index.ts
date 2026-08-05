@@ -15,7 +15,11 @@ export interface ShellResult {
 /** Runs external CLIs (gh, az, aws, kubectl, rad). The only port that spawns. */
 export interface Shell {
   /** Run argv with a timeout; resolves with captured output and exit code. */
-  run(command: string, args: string[], opts?: { timeoutMs?: number }): Promise<ShellResult>;
+  run(
+    command: string,
+    args: string[],
+    opts?: { timeoutMs?: number }
+  ): Promise<ShellResult>;
 }
 
 /**

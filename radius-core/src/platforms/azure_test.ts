@@ -28,7 +28,6 @@ describe("azure platform", () => {
     it("supports portalUrl", () => {
       expect(azure.supports.portalUrl).toBe(true);
     });
-
   });
 
   // ─── generateOidc ────────────────────────────────────────────────────────────
@@ -38,7 +37,7 @@ describe("azure platform", () => {
       const result = azure.generateOidc({
         tenantId: "tenant-123",
         subscriptionId: "sub-456",
-        clientId: "client-789",
+        clientId: "client-789"
       });
       expect(result.message).toBe("Azure OIDC configuration generated");
       expect(result.output).toContain("tenant-123");
@@ -60,7 +59,11 @@ describe("azure platform", () => {
     });
 
     it("handles undefined data fields gracefully", () => {
-      const result = azure.generateOidc({ tenantId: undefined, subscriptionId: undefined, clientId: undefined });
+      const result = azure.generateOidc({
+        tenantId: undefined,
+        subscriptionId: undefined,
+        clientId: undefined
+      });
       expect(result.message).toBe("Azure OIDC configuration generated");
       expect(result.output).toContain('--body ""');
     });
@@ -90,17 +93,17 @@ describe("azure platform", () => {
     it("uses the provided repo full name and environment in the subject", () => {
       const result = azure.generateOidc({
         repoFullName: "octo-org/octo-repo",
-        environment: "staging",
+        environment: "staging"
       });
       expect(result.output).toContain(
-        '"subject": "repo:octo-org/octo-repo:environment:staging"',
+        '"subject": "repo:octo-org/octo-repo:environment:staging"'
       );
     });
 
     it("falls back to OWNER/REPO and production in the subject", () => {
       const result = azure.generateOidc({});
       expect(result.output).toContain(
-        '"subject": "repo:OWNER/REPO:environment:production"',
+        '"subject": "repo:OWNER/REPO:environment:production"'
       );
     });
   });
@@ -112,12 +115,24 @@ describe("azure platform", () => {
       const secrets = azure.environmentSecrets({
         subscriptionId: "sub-123",
         resourceGroup: "rg-test",
-        location: "westus2",
+        location: "westus2"
       });
       expect(secrets).toHaveLength(3);
-      expect(secrets[0]).toEqual({ kind: "variable", name: "AZURE_SUBSCRIPTION_ID", value: "sub-123" });
-      expect(secrets[1]).toEqual({ kind: "variable", name: "AZURE_RESOURCE_GROUP", value: "rg-test" });
-      expect(secrets[2]).toEqual({ kind: "variable", name: "AZURE_LOCATION", value: "westus2" });
+      expect(secrets[0]).toEqual({
+        kind: "variable",
+        name: "AZURE_SUBSCRIPTION_ID",
+        value: "sub-123"
+      });
+      expect(secrets[1]).toEqual({
+        kind: "variable",
+        name: "AZURE_RESOURCE_GROUP",
+        value: "rg-test"
+      });
+      expect(secrets[2]).toEqual({
+        kind: "variable",
+        name: "AZURE_LOCATION",
+        value: "westus2"
+      });
     });
 
     it("returns undefined values when data fields are missing", () => {
@@ -135,7 +150,11 @@ describe("azure platform", () => {
     });
 
     it("all entries have kind 'variable'", () => {
-      const secrets = azure.environmentSecrets({ subscriptionId: "s", resourceGroup: "r", location: "l" });
+      const secrets = azure.environmentSecrets({
+        subscriptionId: "s",
+        resourceGroup: "r",
+        location: "l"
+      });
       for (const s of secrets) {
         expect(s.kind).toBe("variable");
       }
@@ -149,7 +168,7 @@ describe("azure platform", () => {
       subscriptionId: "11111111-2222-3333-4444-555555555555",
       resourceGroup: "radius-rg",
       region: "eastus",
-      clusterName: "radius-aks",
+      clusterName: "radius-aks"
     };
 
     const rgUrl =
@@ -162,7 +181,7 @@ describe("azure platform", () => {
         "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/radius-rg/providers/Microsoft.DBforMySQL/flexibleServers/radius-mysql/databases/appdb";
       const url = azure.portalUrl(id, ctx);
       expect(url).toBe(
-        "https://portal.azure.com/#@/resource/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/radius-rg/providers/Microsoft.DBforMySQL/flexibleServers/radius-mysql/databases/appdb/overview",
+        "https://portal.azure.com/#@/resource/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/radius-rg/providers/Microsoft.DBforMySQL/flexibleServers/radius-mysql/databases/appdb/overview"
       );
     });
 
@@ -207,7 +226,10 @@ describe("azure platform", () => {
     });
 
     it("handles Microsoft.* type with nested subtypes", () => {
-      const url = azure.portalUrl("Microsoft.Network/virtualNetworks/subnets", ctx);
+      const url = azure.portalUrl(
+        "Microsoft.Network/virtualNetworks/subnets",
+        ctx
+      );
       expect(url).toBe(rgUrl);
     });
 
@@ -220,7 +242,10 @@ describe("azure platform", () => {
     });
 
     it("handles ARM ID with spaces via normalizeArmResourceId", () => {
-      const url = azure.portalUrl("  /subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/sites/mysite  ", ctx);
+      const url = azure.portalUrl(
+        "  /subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/sites/mysite  ",
+        ctx
+      );
       expect(url).toContain("/overview");
     });
 
@@ -262,7 +287,10 @@ describe("azure platform", () => {
     });
 
     it("links kubernetes 'apiextensions.k8s.io/' resources to the AKS cluster", () => {
-      const url = azure.portalUrl("apiextensions.k8s.io/CustomResourceDefinition", ctx);
+      const url = azure.portalUrl(
+        "apiextensions.k8s.io/CustomResourceDefinition",
+        ctx
+      );
       expect(url).toContain("managedClusters/radius-aks/overview");
     });
 
@@ -314,7 +342,10 @@ describe("azure platform", () => {
     // --- Edge cases for normalizeArmResourceId ---
 
     it("does not treat a path without /subscriptions/ prefix as an ARM ID", () => {
-      const url = azure.portalUrl("/resourceGroups/rg/providers/Microsoft.Cache/redis/myredis", ctx);
+      const url = azure.portalUrl(
+        "/resourceGroups/rg/providers/Microsoft.Cache/redis/myredis",
+        ctx
+      );
       // This won't match normalizeArmResourceId, won't match normalizeAzureResourceType, isn't kubernetes
       expect(url).toBe(rgUrl);
     });
@@ -341,7 +372,8 @@ describe("azure platform", () => {
     });
 
     it("handles ARM ID with provider but only one segment after", () => {
-      const id = "/subscriptions/sub-id/resourceGroups/rg/providers/Microsoft.Web";
+      const id =
+        "/subscriptions/sub-id/resourceGroups/rg/providers/Microsoft.Web";
       const url = azure.portalUrl(id, ctx);
       expect(url).toContain("/overview");
     });
@@ -358,15 +390,21 @@ describe("azure platform", () => {
     });
 
     it("does not crash with special characters in resource type", () => {
-      expect(() => azure.portalUrl("Microsoft.Cache/redis!@#$%^&*()", ctx)).not.toThrow();
+      expect(() =>
+        azure.portalUrl("Microsoft.Cache/redis!@#$%^&*()", ctx)
+      ).not.toThrow();
     });
 
     it("does not crash with unicode characters in resource type", () => {
-      expect(() => azure.portalUrl("Microsoft.Cache/redis/名前", ctx)).not.toThrow();
+      expect(() =>
+        azure.portalUrl("Microsoft.Cache/redis/名前", ctx)
+      ).not.toThrow();
     });
 
     it("does not crash with newlines in resource type", () => {
-      expect(() => azure.portalUrl("Microsoft.Cache\n/redis", ctx)).not.toThrow();
+      expect(() =>
+        azure.portalUrl("Microsoft.Cache\n/redis", ctx)
+      ).not.toThrow();
     });
   });
 
@@ -374,39 +412,69 @@ describe("azure platform", () => {
 
   describe("error conditions", () => {
     it("generateOidc does not crash with numeric data values", () => {
-      const result = azure.generateOidc({ tenantId: 12345, subscriptionId: 67890, clientId: 0 });
+      const result = azure.generateOidc({
+        tenantId: 12345,
+        subscriptionId: 67890,
+        clientId: 0
+      });
       expect(result.message).toBe("Azure OIDC configuration generated");
       expect(result.output).toContain("12345");
     });
 
     it("generateOidc does not crash with boolean data values", () => {
-      expect(() => azure.generateOidc({ tenantId: true, subscriptionId: false })).not.toThrow();
+      expect(() =>
+        azure.generateOidc({ tenantId: true, subscriptionId: false })
+      ).not.toThrow();
     });
 
     it("environmentSecrets does not crash with numeric values", () => {
-      const secrets = azure.environmentSecrets({ subscriptionId: 123, resourceGroup: 456, location: 789 });
+      const secrets = azure.environmentSecrets({
+        subscriptionId: 123,
+        resourceGroup: 456,
+        location: 789
+      });
       expect(secrets).toHaveLength(3);
       expect(secrets[0].value).toBe(123);
     });
 
     it("environmentSecrets does not crash with empty string values", () => {
-      const secrets = azure.environmentSecrets({ subscriptionId: "", resourceGroup: "", location: "" });
+      const secrets = azure.environmentSecrets({
+        subscriptionId: "",
+        resourceGroup: "",
+        location: ""
+      });
       expect(secrets).toHaveLength(3);
     });
 
     it("portalUrl does not crash with missing context fields", () => {
-      const minCtx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
+      const minCtx = {
+        subscriptionId: "sub",
+        resourceGroup: "rg",
+        region: "eastus"
+      };
       expect(() => azure.portalUrl("apps/Deployment", minCtx)).not.toThrow();
     });
 
     it("portalUrl does not crash with null resourceType", () => {
-      const ctx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
-      expect(() => azure.portalUrl(null as unknown as string, ctx)).not.toThrow();
+      const ctx = {
+        subscriptionId: "sub",
+        resourceGroup: "rg",
+        region: "eastus"
+      };
+      expect(() =>
+        azure.portalUrl(null as unknown as string, ctx)
+      ).not.toThrow();
     });
 
     it("portalUrl does not crash with undefined resourceType", () => {
-      const ctx = { subscriptionId: "sub", resourceGroup: "rg", region: "eastus" };
-      expect(() => azure.portalUrl(undefined as unknown as string, ctx)).not.toThrow();
+      const ctx = {
+        subscriptionId: "sub",
+        resourceGroup: "rg",
+        region: "eastus"
+      };
+      expect(() =>
+        azure.portalUrl(undefined as unknown as string, ctx)
+      ).not.toThrow();
     });
   });
 });

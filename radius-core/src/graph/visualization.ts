@@ -33,7 +33,7 @@ const SECRET_TYPE = "radius.security/secrets";
 // as `app/radius-ghcr-registry-creds`.
 const REGISTRY_CREDS_NAMES = new Set([
   "radius-ghcr-registry-creds",
-  "ghcr-registry-creds",
+  "ghcr-registry-creds"
 ]);
 
 function normalizedType(resource: any): string {
@@ -75,7 +75,7 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
   if (!Array.isArray(resources)) return [];
 
   const containerImages = resources.filter(
-    (resource) => resource && isContainerImage(resource),
+    (resource) => resource && isContainerImage(resource)
   );
   if (containerImages.length === 0) return resources;
 
@@ -88,7 +88,7 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
 
   const connectionReferences = (
     connection: any,
-    endpoints: Set<string>,
+    endpoints: Set<string>
   ): boolean =>
     !!connection &&
     ((connection.id != null && endpoints.has(connection.id)) ||
@@ -105,7 +105,7 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
     if (
       Array.isArray(resource.connections) &&
       resource.connections.some((connection: any) =>
-        connectionReferences(connection, imageEndpoints),
+        connectionReferences(connection, imageEndpoints)
       )
     ) {
       return true;
@@ -116,8 +116,8 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
       (image) =>
         Array.isArray(image.connections) &&
         image.connections.some((connection: any) =>
-          connectionReferences(connection, secretEndpoints),
-        ),
+          connectionReferences(connection, secretEndpoints)
+        )
     );
   };
 
@@ -155,8 +155,8 @@ export function filterGraphVisualizationResources(resources: any[]): any[] {
       result.push({
         ...resource,
         connections: resource.connections.filter(
-          (c: any) => !referencesRemoved(c),
-        ),
+          (c: any) => !referencesRemoved(c)
+        )
       });
     } else {
       result.push(resource);

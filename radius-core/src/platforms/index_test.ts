@@ -48,7 +48,7 @@ describe("generatePortalUrl", () => {
   it("returns an azure portal URL for a full ARM resource ID", () => {
     const state = {
       oidcAzure: { subscriptionId: "sub-123" },
-      deployParams: { resourceGroup: "my-rg" },
+      deployParams: { resourceGroup: "my-rg" }
     };
     const armId =
       "/subscriptions/sub-123/resourceGroups/my-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/mydb";
@@ -62,7 +62,7 @@ describe("generatePortalUrl", () => {
 
   it("returns an aws console URL for a known aws resource type", () => {
     const state = {
-      oidcAws: { region: "eu-west-1" },
+      oidcAws: { region: "eu-west-1" }
     };
     const url = generatePortalUrl("aws_db_instance", "aws", state);
     expect(url).toContain("eu-west-1.console.aws.amazon.com");
@@ -109,7 +109,11 @@ describe("generatePortalUrl", () => {
   });
 
   it("handles state with null nested objects", () => {
-    const state = { oidcAzure: null, deployParams: null, azureResourceGroup: null };
+    const state = {
+      oidcAzure: null,
+      deployParams: null,
+      azureResourceGroup: null
+    };
     const url = generatePortalUrl("DBforPostgreSQL", "azure", state);
     expect(url).toContain("00000000-0000-0000-0000-000000000000");
     expect(url).toContain("radius-rg");
@@ -118,7 +122,7 @@ describe("generatePortalUrl", () => {
   it("handles state with empty string values (uses defaults via falsy check)", () => {
     const state = {
       oidcAzure: { subscriptionId: "" },
-      deployParams: { resourceGroup: "" },
+      deployParams: { resourceGroup: "" }
     };
     const url = generatePortalUrl("DBforPostgreSQL", "azure", state);
     expect(url).toContain("00000000-0000-0000-0000-000000000000");
@@ -160,7 +164,7 @@ describe("generatePortalUrl", () => {
     const state = {
       oidcAzure: { subscriptionId: "sub-k8s" },
       deployParams: { resourceGroup: "k8s-rg" },
-      radiusK8sCluster: "my-aks-cluster",
+      radiusK8sCluster: "my-aks-cluster"
     };
     const url = generatePortalUrl("apps/Deployment", "azure", state);
     expect(url).toContain("managedClusters/my-aks-cluster");
@@ -171,13 +175,15 @@ describe("generatePortalUrl", () => {
   it("prefers deployParams.cluster when present (azure kubernetes types)", () => {
     const url = generatePortalUrl("apps/Deployment", "azure", {
       deployParams: { cluster: "dp-aks" },
-      radiusK8sCluster: "radius-aks",
+      radiusK8sCluster: "radius-aks"
     });
     expect(url).toContain("managedClusters/dp-aks");
   });
 
   it("uses k8sCluster as a legacy fallback (azure kubernetes types)", () => {
-    const url = generatePortalUrl("apps/Deployment", "azure", { k8sCluster: "legacy-aks" });
+    const url = generatePortalUrl("apps/Deployment", "azure", {
+      k8sCluster: "legacy-aks"
+    });
     expect(url).toContain("managedClusters/legacy-aks");
   });
 

@@ -15,7 +15,7 @@ import {
   decideAppSelection,
   parseServedReposFromSubjects,
   validateAppRegistrationName,
-  formatServesReposLabel,
+  formatServesReposLabel
 } from "./azure-oidc.mjs";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
@@ -25,7 +25,12 @@ function makeRunner(map) {
   return vi.fn(async (apiPath) => {
     if (typeof map[apiPath] === "function") return map[apiPath]();
     if (map[apiPath]) return map[apiPath];
-    return { ok: false, status: 404, json: null, stderr: "Not Found (HTTP 404)" };
+    return {
+      ok: false,
+      status: 404,
+      json: null,
+      stderr: "Not Found (HTTP 404)"
+    };
   });
 }
 
@@ -33,7 +38,7 @@ const REPO_OK = {
   ok: true,
   status: 200,
   json: { full_name: "octo-org/octo-repo", id: 222, owner: { id: 111 } },
-  stderr: "",
+  stderr: ""
 };
 
 describe("validators", () => {
@@ -100,15 +105,24 @@ describe("buildAppCreateArgs", () => {
   it("omits SMR when not provided", () => {
     const args = buildAppCreateArgs({ appName: "radius-deploy-o-r" });
     expect(args).toEqual([
-      "ad", "app", "create",
-      "--display-name", "radius-deploy-o-r",
-      "--query", "appId", "-o", "tsv",
+      "ad",
+      "app",
+      "create",
+      "--display-name",
+      "radius-deploy-o-r",
+      "--query",
+      "appId",
+      "-o",
+      "tsv"
     ]);
     expect(args).not.toContain("--service-management-reference");
   });
 
   it("appends the SMR flag when provided", () => {
-    const args = buildAppCreateArgs({ appName: "x", serviceManagementReference: UUID });
+    const args = buildAppCreateArgs({
+      appName: "x",
+      serviceManagementReference: UUID
+    });
     const i = args.indexOf("--service-management-reference");
     expect(i).toBeGreaterThan(-1);
     expect(args[i + 1]).toBe(UUID);
@@ -117,13 +131,25 @@ describe("buildAppCreateArgs", () => {
 
 describe("isServiceManagementReferenceError", () => {
   it("detects the known error identifiers case-insensitively", () => {
-    expect(isServiceManagementReferenceError("ServiceManagementReference field is required")).toBe(true);
-    expect(isServiceManagementReferenceError("error: SERVICETREENULLVALUEPROVIDED")).toBe(true);
-    expect(isServiceManagementReferenceError("ServiceTreeInvalid: bad guid")).toBe(true);
+    expect(
+      isServiceManagementReferenceError(
+        "ServiceManagementReference field is required"
+      )
+    ).toBe(true);
+    expect(
+      isServiceManagementReferenceError("error: SERVICETREENULLVALUEPROVIDED")
+    ).toBe(true);
+    expect(
+      isServiceManagementReferenceError("ServiceTreeInvalid: bad guid")
+    ).toBe(true);
   });
 
   it("returns false for unrelated errors", () => {
-    expect(isServiceManagementReferenceError("Insufficient privileges to complete the operation")).toBe(false);
+    expect(
+      isServiceManagementReferenceError(
+        "Insufficient privileges to complete the operation"
+      )
+    ).toBe(false);
     expect(isServiceManagementReferenceError("")).toBe(false);
   });
 });
@@ -142,14 +168,18 @@ describe("fetchGitHubJson retry", () => {
   });
 
   it("retries on 429 up to the cap then returns the last failure", async () => {
-    const runner = vi.fn().mockResolvedValue({ ok: false, status: 429, stderr: "rate" });
+    const runner = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 429, stderr: "rate" });
     const res = await fetchGitHubJson(runner, "/x", { retries: 3, ...noSleep });
     expect(res.ok).toBe(false);
     expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry a 404", async () => {
-    const runner = vi.fn().mockResolvedValue({ ok: false, status: 404, stderr: "nf" });
+    const runner = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 404, stderr: "nf" });
     const res = await fetchGitHubJson(runner, "/x", noSleep);
     expect(res.status).toBe(404);
     expect(runner).toHaveBeenCalledTimes(1);
@@ -173,33 +203,55 @@ describe("resolveOidcSubject", () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: false, status: 404, json: null, stderr: "Not Found (HTTP 404)",
-      },
+        ok: false,
+        status: 404,
+        json: null,
+        stderr: "Not Found (HTTP 404)"
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" },
-      runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
     expect(res.federatedCredentials).toHaveLength(2);
-    const bySubject = Object.fromEntries(res.federatedCredentials.map((f) => [f.name, f.subject]));
-    expect(bySubject["github-octo-org-octo-repo-dev-mutable"]).toBe("repo:octo-org/octo-repo:environment:dev");
-    expect(bySubject["github-octo-org-octo-repo-dev-immutable"]).toBe("repo:octo-org@111/octo-repo@222:environment:dev");
+    const bySubject = Object.fromEntries(
+      res.federatedCredentials.map((f) => [f.name, f.subject])
+    );
+    expect(bySubject["github-octo-org-octo-repo-dev-mutable"]).toBe(
+      "repo:octo-org/octo-repo:environment:dev"
+    );
+    expect(bySubject["github-octo-org-octo-repo-dev-immutable"]).toBe(
+      "repo:octo-org@111/octo-repo@222:environment:dev"
+    );
   });
 
   it("still creates both default forms even when the API says use_immutable_subject=false", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200, json: { use_default: true, use_immutable_subject: false },
-      },
+        ok: true,
+        status: 200,
+        json: { use_default: true, use_immutable_subject: false }
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "prod", suffix: "environment:prod" }, runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
     );
     const subjects = res.federatedCredentials.map((f) => f.subject).sort();
     expect(subjects).toEqual([
       "repo:octo-org/octo-repo:environment:prod",
-      "repo:octo-org@111/octo-repo@222:environment:prod",
+      "repo:octo-org@111/octo-repo@222:environment:prod"
     ]);
   });
 
@@ -207,82 +259,147 @@ describe("resolveOidcSubject", () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200,
-        json: { use_default: false, use_immutable_subject: false, include_claim_keys: ["repository", "repository_id", "context"] },
-      },
+        ok: true,
+        status: 200,
+        json: {
+          use_default: false,
+          use_immutable_subject: false,
+          include_claim_keys: ["repository", "repository_id", "context"]
+        }
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
     expect(res.federatedCredentials).toHaveLength(1);
-    expect(res.federatedCredentials[0].subject).toBe("repository:octo-org/octo-repo:repository_id:222:environment:dev");
-    expect(res.federatedCredentials[0].name).toBe("github-octo-org-octo-repo-dev");
+    expect(res.federatedCredentials[0].subject).toBe(
+      "repository:octo-org/octo-repo:repository_id:222:environment:dev"
+    );
+    expect(res.federatedCredentials[0].name).toBe(
+      "github-octo-org-octo-repo-dev"
+    );
   });
 
   it("builds the immutable form for a custom repository key when immutable", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200,
+        ok: true,
+        status: 200,
         json: {
           use_default: false,
           use_immutable_subject: true,
-          include_claim_keys: ["repository", "context"],
-        },
-      },
+          include_claim_keys: ["repository", "context"]
+        }
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
-    expect(res.federatedCredentials[0].subject).toBe("repository:octo-org@111/octo-repo@222:environment:dev");
+    expect(res.federatedCredentials[0].subject).toBe(
+      "repository:octo-org@111/octo-repo@222:environment:dev"
+    );
   });
 
   it("prefers sub_claim_prefix for a custom immutable repository key", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200,
+        ok: true,
+        status: 200,
         json: {
           use_default: false,
           include_claim_keys: ["repository"],
-          sub_claim_prefix: "repo:octo-org@9/octo-repo@8",
-        },
-      },
+          sub_claim_prefix: "repo:octo-org@9/octo-repo@8"
+        }
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
-    expect(res.federatedCredentials[0].subject).toBe("repository:octo-org@9/octo-repo@8");
+    expect(res.federatedCredentials[0].subject).toBe(
+      "repository:octo-org@9/octo-repo@8"
+    );
   });
 
   it("uses the canonical full_name from the API, not the user casing", async () => {
     const runner = makeRunner({
       "/repos/Octo-Org/Octo-Repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: false, status: 404, json: null, stderr: "Not Found (HTTP 404)",
-      },
+        ok: false,
+        status: 404,
+        json: null,
+        stderr: "Not Found (HTTP 404)"
+      }
     });
     const res = await resolveOidcSubject(
-      { targetRepo: "Octo-Org/Octo-Repo", envName: "dev", suffix: "environment:dev" }, runner, opts,
+      {
+        targetRepo: "Octo-Org/Octo-Repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
     expect(res.fullName).toBe("octo-org/octo-repo");
-    expect(res.federatedCredentials.every((f) => f.subject.includes("octo-org/octo-repo") || f.subject.includes("octo-org@111"))).toBe(true);
+    expect(
+      res.federatedCredentials.every(
+        (f) =>
+          f.subject.includes("octo-org/octo-repo") ||
+          f.subject.includes("octo-org@111")
+      )
+    ).toBe(true);
   });
 
   it("throws on an invalid repo slug before any network call", async () => {
     const runner = vi.fn();
     await expect(
-      resolveOidcSubject({ targetRepo: "bad", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        { targetRepo: "bad", envName: "dev", suffix: "environment:dev" },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/owner\/repo/);
     expect(runner).not.toHaveBeenCalled();
   });
 
   it("fails when the repo itself cannot be read (no silent default)", async () => {
     const runner = makeRunner({
-      "/repos/octo-org/octo-repo": { ok: false, status: 403, json: null, stderr: "Forbidden (HTTP 403)" },
+      "/repos/octo-org/octo-repo": {
+        ok: false,
+        status: 403,
+        json: null,
+        stderr: "Forbidden (HTTP 403)"
+      }
     });
     await expect(
-      resolveOidcSubject({ targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/Could not read repository/);
   });
 
@@ -290,11 +407,22 @@ describe("resolveOidcSubject", () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: false, status: 403, json: null, stderr: "Forbidden (HTTP 403)",
-      },
+        ok: false,
+        status: 403,
+        json: null,
+        stderr: "Forbidden (HTTP 403)"
+      }
     });
     await expect(
-      resolveOidcSubject({ targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/customization/i);
   });
 
@@ -302,22 +430,42 @@ describe("resolveOidcSubject", () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200, json: { include_claim_keys: ["repository"] },
-      },
+        ok: true,
+        status: 200,
+        json: { include_claim_keys: ["repository"] }
+      }
     });
     await expect(
-      resolveOidcSubject({ targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/use_default/);
   });
 
   it("fails closed when the repo returns non-positive numeric ids", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": {
-        ok: true, status: 200, json: { full_name: "octo-org/octo-repo", id: 0, owner: { id: 111 } },
-      },
+        ok: true,
+        status: 200,
+        json: { full_name: "octo-org/octo-repo", id: 0, owner: { id: 111 } }
+      }
     });
     await expect(
-      resolveOidcSubject({ targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/reliable OIDC subject/);
   });
 
@@ -325,12 +473,21 @@ describe("resolveOidcSubject", () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
       "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-        ok: true, status: 200,
-        json: { use_default: false, include_claim_keys: ["job_workflow_ref"] },
-      },
+        ok: true,
+        status: 200,
+        json: { use_default: false, include_claim_keys: ["job_workflow_ref"] }
+      }
     });
     await expect(
-      resolveOidcSubject({ targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts),
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        runner,
+        opts
+      )
     ).rejects.toThrow(/job_workflow_ref/);
   });
 
@@ -339,20 +496,33 @@ describe("resolveOidcSubject", () => {
     const runner = vi.fn(async (p) => {
       calls.push(p);
       if (p === "/repos/octo-org/octo-repo") return REPO_OK;
-      return { ok: false, status: 404, json: null, stderr: "Not Found (HTTP 404)" };
+      return {
+        ok: false,
+        status: 404,
+        json: null,
+        stderr: "Not Found (HTTP 404)"
+      };
     });
     await resolveOidcSubject(
-      { targetRepo: "octo-org/octo-repo", envName: "dev", suffix: "environment:dev" }, runner, opts,
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
     );
     expect(calls[0]).toBe("/repos/octo-org/octo-repo");
-    expect(calls[1]).toBe("/repos/octo-org/octo-repo/actions/oidc/customization/sub");
+    expect(calls[1]).toBe(
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub"
+    );
   });
 });
 
 describe("selectMissingFederatedCredentials", () => {
   const desired = [
     { name: "a-mutable", subject: "repo:o/r:environment:dev" },
-    { name: "a-immutable", subject: "repo:o@1/r@2:environment:dev" },
+    { name: "a-immutable", subject: "repo:o@1/r@2:environment:dev" }
   ];
 
   it("returns all when none exist", () => {
@@ -360,56 +530,82 @@ describe("selectMissingFederatedCredentials", () => {
   });
 
   it("skips subjects that already exist (match by subject, not name)", () => {
-    const out = selectMissingFederatedCredentials(desired, ["repo:o/r:environment:dev"]);
+    const out = selectMissingFederatedCredentials(desired, [
+      "repo:o/r:environment:dev"
+    ]);
     expect(out).toEqual([desired[1]]);
   });
 
   it("returns empty when all subjects exist", () => {
     const out = selectMissingFederatedCredentials(desired, [
       "  repo:o/r:environment:dev  ",
-      "repo:o@1/r@2:environment:dev",
+      "repo:o@1/r@2:environment:dev"
     ]);
     expect(out).toEqual([]);
   });
 
   it("ignores non-string existing entries", () => {
-    const out = selectMissingFederatedCredentials(desired, [null, 42, "repo:o/r:environment:dev"]);
+    const out = selectMissingFederatedCredentials(desired, [
+      null,
+      42,
+      "repo:o/r:environment:dev"
+    ]);
     expect(out).toEqual([desired[1]]);
   });
 });
 
 describe("decideExistingClientId", () => {
   it("falls through when clientId is empty", () => {
-    expect(decideExistingClientId({ clientId: "", showStatus: "found", owned: true })).toEqual({ action: "fallthrough" });
+    expect(
+      decideExistingClientId({ clientId: "", showStatus: "found", owned: true })
+    ).toEqual({ action: "fallthrough" });
     expect(decideExistingClientId({})).toEqual({ action: "fallthrough" });
   });
 
   it("reuses when the wired app exists and is owned", () => {
-    expect(decideExistingClientId({ clientId: "abc", showStatus: "found", owned: true })).toEqual({ action: "reuse" });
+    expect(
+      decideExistingClientId({
+        clientId: "abc",
+        showStatus: "found",
+        owned: true
+      })
+    ).toEqual({ action: "reuse" });
   });
 
   it("errors client-id-not-owned when it exists but is not owned", () => {
-    expect(decideExistingClientId({ clientId: "abc", showStatus: "found", owned: false })).toEqual({
+    expect(
+      decideExistingClientId({
+        clientId: "abc",
+        showStatus: "found",
+        owned: false
+      })
+    ).toEqual({
       action: "error",
-      code: "client-id-not-owned",
+      code: "client-id-not-owned"
     });
   });
 
   it("falls through when the wired app is not found (stale variable)", () => {
-    expect(decideExistingClientId({ clientId: "abc", showStatus: "not-found" })).toEqual({ action: "fallthrough" });
+    expect(
+      decideExistingClientId({ clientId: "abc", showStatus: "not-found" })
+    ).toEqual({ action: "fallthrough" });
   });
 
   it("is fatal client-id-lookup-failed on a real lookup failure", () => {
-    expect(decideExistingClientId({ clientId: "abc", showStatus: "lookup-failed" })).toEqual({
+    expect(
+      decideExistingClientId({ clientId: "abc", showStatus: "lookup-failed" })
+    ).toEqual({
       action: "fatal",
-      code: "client-id-lookup-failed",
+      code: "client-id-lookup-failed"
     });
   });
 
   it("treats an unknown status conservatively as a fatal lookup failure", () => {
-    expect(decideExistingClientId({ clientId: "abc", showStatus: "weird" })).toEqual({
+    expect(
+      decideExistingClientId({ clientId: "abc", showStatus: "weird" })
+    ).toEqual({
       action: "fatal",
-      code: "client-id-lookup-failed",
+      code: "client-id-lookup-failed"
     });
   });
 });
@@ -419,13 +615,17 @@ describe("isAzResourceNotFound", () => {
   it("matches the canonical Graph resource-not-found phrase", () => {
     expect(
       isAzResourceNotFound(
-        "Resource '00000000-0000-0000-0000-000000000000' does not exist or one of its queried reference-property objects are not present.",
-      ),
+        "Resource '00000000-0000-0000-0000-000000000000' does not exist or one of its queried reference-property objects are not present."
+      )
     ).toBe(true);
   });
 
   it("matches the Request_ResourceNotFound error code", () => {
-    expect(isAzResourceNotFound("(Request_ResourceNotFound) The resource could not be located.")).toBe(true);
+    expect(
+      isAzResourceNotFound(
+        "(Request_ResourceNotFound) The resource could not be located."
+      )
+    ).toBe(true);
   });
 
   // FALSE → 'lookup-failed' → decideExistingClientId → fatal client-id-lookup-failed.
@@ -434,40 +634,56 @@ describe("isAzResourceNotFound", () => {
   it("does NOT match AADSTS auth failures (must fail closed)", () => {
     expect(
       isAzResourceNotFound(
-        "AADSTS500011: The resource principal named api://foo was not found in the tenant named Contoso.",
-      ),
+        "AADSTS500011: The resource principal named api://foo was not found in the tenant named Contoso."
+      )
     ).toBe(false);
   });
 
   it("does NOT match MSAL/token-cache 'not found' messages", () => {
-    expect(isAzResourceNotFound("No token found in cache. Interactive authentication is required.")).toBe(false);
-    expect(isAzResourceNotFound("Token was not found in the cache")).toBe(false);
+    expect(
+      isAzResourceNotFound(
+        "No token found in cache. Interactive authentication is required."
+      )
+    ).toBe(false);
+    expect(isAzResourceNotFound("Token was not found in the cache")).toBe(
+      false
+    );
   });
 
   it("does NOT match throttling / 429 messages", () => {
-    expect(isAzResourceNotFound("TooManyRequests: Request was throttled (HTTP 429). Retry after 30s.")).toBe(false);
+    expect(
+      isAzResourceNotFound(
+        "TooManyRequests: Request was throttled (HTTP 429). Retry after 30s."
+      )
+    ).toBe(false);
   });
 
   it("does NOT match Conditional Access / interactive-auth-required messages", () => {
     expect(
       isAzResourceNotFound(
-        "AADSTS53003: Access has been blocked by Conditional Access policies. Interactive authentication is needed.",
-      ),
+        "AADSTS53003: Access has been blocked by Conditional Access policies. Interactive authentication is needed."
+      )
     ).toBe(false);
   });
 
   it("does NOT match a malformed-guid error", () => {
-    expect(isAzResourceNotFound("The value 'not-a-guid' is not a valid GUID.")).toBe(false);
+    expect(
+      isAzResourceNotFound("The value 'not-a-guid' is not a valid GUID.")
+    ).toBe(false);
   });
 
   it("does NOT match bare 'not found' / 'was not found' / 'does not exist'", () => {
     expect(isAzResourceNotFound("Not Found (HTTP 404)")).toBe(false);
-    expect(isAzResourceNotFound("The application was not found in the directory")).toBe(false);
+    expect(
+      isAzResourceNotFound("The application was not found in the directory")
+    ).toBe(false);
     expect(isAzResourceNotFound("Resource does not exist")).toBe(false);
   });
 
   it("does not match unrelated / empty input", () => {
-    expect(isAzResourceNotFound("AADSTS500011: insufficient privileges")).toBe(false);
+    expect(isAzResourceNotFound("AADSTS500011: insufficient privileges")).toBe(
+      false
+    );
     expect(isAzResourceNotFound("")).toBe(false);
     expect(isAzResourceNotFound(undefined)).toBe(false);
   });
@@ -476,49 +692,92 @@ describe("isAzResourceNotFound", () => {
 describe("discoverStatusText", () => {
   it("azure: summarizes counts on success", () => {
     expect(
-      discoverStatusText({ clusters: [1, 2], resourceGroups: [1] }, "azure"),
+      discoverStatusText({ clusters: [1, 2], resourceGroups: [1] }, "azure")
     ).toBe("Found 2 cluster(s), 1 resource group(s)");
   });
 
   it("azure: prefers the resourceGroups error over a clusters error", () => {
     expect(
-      discoverStatusText({ clusters: [], resourceGroups: [], errors: { clusters: "aks boom", resourceGroups: "rg boom" } }, "azure"),
+      discoverStatusText(
+        {
+          clusters: [],
+          resourceGroups: [],
+          errors: { clusters: "aks boom", resourceGroups: "rg boom" }
+        },
+        "azure"
+      )
     ).toBe("Discovery failed: rg boom");
   });
 
   it("azure: surfaces a clusters error when only that failed", () => {
     expect(
-      discoverStatusText({ clusters: [], resourceGroups: [{}], errors: { clusters: "token not acquirable" } }, "azure"),
+      discoverStatusText(
+        {
+          clusters: [],
+          resourceGroups: [{}],
+          errors: { clusters: "token not acquirable" }
+        },
+        "azure"
+      )
     ).toBe("Discovery failed: token not acquirable");
   });
 
   it("azure: top-level error wins", () => {
-    expect(discoverStatusText({ error: "outer fail", errors: { resourceGroups: "inner" } }, "azure")).toBe(
-      "Discovery failed: outer fail",
-    );
+    expect(
+      discoverStatusText(
+        { error: "outer fail", errors: { resourceGroups: "inner" } },
+        "azure"
+      )
+    ).toBe("Discovery failed: outer fail");
   });
 
   it("aws: summarizes counts on success", () => {
-    expect(discoverStatusText({ clusters: [1], vpcs: [1, 2, 3] }, "aws")).toBe("Found 1 cluster(s), 3 VPC(s)");
+    expect(discoverStatusText({ clusters: [1], vpcs: [1, 2, 3] }, "aws")).toBe(
+      "Found 1 cluster(s), 3 VPC(s)"
+    );
   });
 
   it("aws: prefers the vpcs error", () => {
     expect(
-      discoverStatusText({ clusters: [], vpcs: [], subnets: [], errors: { clusters: "eks boom", vpcs: "vpc boom", subnets: "subnet boom" } }, "aws"),
+      discoverStatusText(
+        {
+          clusters: [],
+          vpcs: [],
+          subnets: [],
+          errors: {
+            clusters: "eks boom",
+            vpcs: "vpc boom",
+            subnets: "subnet boom"
+          }
+        },
+        "aws"
+      )
     ).toBe("Discovery failed: vpc boom");
   });
 
   it("defaults to azure summary with empty input", () => {
-    expect(discoverStatusText()).toBe("Found 0 cluster(s), 0 resource group(s)");
+    expect(discoverStatusText()).toBe(
+      "Found 0 cluster(s), 0 resource group(s)"
+    );
   });
 });
 
 describe("decideAppSelection", () => {
-  const A = { appId: "aaa", displayName: "radius-deploy-o-r", createdDateTime: "2020-01-01T00:00:00Z" };
-  const B = { appId: "bbb", displayName: "radius-deploy-o-r", createdDateTime: "2022-01-01T00:00:00Z" };
+  const A = {
+    appId: "aaa",
+    displayName: "radius-deploy-o-r",
+    createdDateTime: "2020-01-01T00:00:00Z"
+  };
+  const B = {
+    appId: "bbb",
+    displayName: "radius-deploy-o-r",
+    createdDateTime: "2022-01-01T00:00:00Z"
+  };
 
   it("creates when there are no matches at all", () => {
-    expect(decideAppSelection({ ownedMatches: [], hasUnownedMatch: false })).toEqual({ action: "create" });
+    expect(
+      decideAppSelection({ ownedMatches: [], hasUnownedMatch: false })
+    ).toEqual({ action: "create" });
   });
 
   it("errors app-registration-not-owned when the only match is unowned", () => {
@@ -528,7 +787,11 @@ describe("decideAppSelection", () => {
   });
 
   it("reuses the single owned match", () => {
-    expect(decideAppSelection({ ownedMatches: [A] })).toMatchObject({ action: "reuse", appId: "aaa", duplicates: false });
+    expect(decideAppSelection({ ownedMatches: [A] })).toMatchObject({
+      action: "reuse",
+      appId: "aaa",
+      duplicates: false
+    });
   });
 
   it("returns needs-selection with the oldest as default when >1 owned and no choice", () => {
@@ -540,17 +803,24 @@ describe("decideAppSelection", () => {
   });
 
   it("needs-selection default prefers the wired existingClientId among owned", () => {
-    const r = decideAppSelection({ ownedMatches: [B, A], existingClientId: "BBB" });
+    const r = decideAppSelection({
+      ownedMatches: [B, A],
+      existingClientId: "BBB"
+    });
     expect(r.action).toBe("needs-selection");
     expect(r.defaultAppId).toBe("bbb");
   });
 
   it("createNew short-circuits to create even with owned matches", () => {
-    expect(decideAppSelection({ ownedMatches: [A, B], createNew: true })).toEqual({ action: "create" });
+    expect(
+      decideAppSelection({ ownedMatches: [A, B], createNew: true })
+    ).toEqual({ action: "create" });
   });
 
   it("reuses an explicitAppId that is among the owned candidates", () => {
-    expect(decideAppSelection({ ownedMatches: [A, B], explicitAppId: "bbb" })).toEqual({ action: "reuse", appId: "bbb" });
+    expect(
+      decideAppSelection({ ownedMatches: [A, B], explicitAppId: "bbb" })
+    ).toEqual({ action: "reuse", appId: "bbb" });
   });
 
   it("errors when explicitAppId is not among the owned candidates", () => {
@@ -560,7 +830,13 @@ describe("decideAppSelection", () => {
   });
 
   it("explicitAppId takes precedence over createNew", () => {
-    expect(decideAppSelection({ ownedMatches: [A], explicitAppId: "aaa", createNew: true })).toEqual({ action: "reuse", appId: "aaa" });
+    expect(
+      decideAppSelection({
+        ownedMatches: [A],
+        explicitAppId: "aaa",
+        createNew: true
+      })
+    ).toEqual({ action: "reuse", appId: "aaa" });
   });
 });
 
@@ -569,20 +845,22 @@ describe("parseServedReposFromSubjects", () => {
     const out = parseServedReposFromSubjects([
       "repo:octo/api:ref:refs/heads/main",
       "repo:octo/api:environment:prod",
-      "repo:octo/web:pull_request",
+      "repo:octo/web:pull_request"
     ]);
     expect(out).toEqual(["octo/api", "octo/web"]);
   });
 
   it("strips the immutable @id suffixes", () => {
-    const out = parseServedReposFromSubjects(["repo:octo@123/api@456:environment:prod"]);
+    const out = parseServedReposFromSubjects([
+      "repo:octo@123/api@456:environment:prod"
+    ]);
     expect(out).toEqual(["octo/api"]);
   });
 
   it("accepts the customized 'repository:' subject prefix (mutable and immutable)", () => {
     const out = parseServedReposFromSubjects([
       "repository:octo/api:environment:prod",
-      "repository:octo@123/web@456:ref:refs/heads/main",
+      "repository:octo@123/web@456:ref:refs/heads/main"
     ]);
     expect(out).toEqual(["octo/api", "octo/web"]);
   });
@@ -590,13 +868,20 @@ describe("parseServedReposFromSubjects", () => {
   it("does not treat repository_id/repository_owner claim keys as a repo slug", () => {
     const out = parseServedReposFromSubjects([
       "repository_id:456789:ref:refs/heads/main",
-      "repository_owner:octo:environment:prod",
+      "repository_owner:octo:environment:prod"
     ]);
     expect(out).toEqual([]);
   });
 
   it("ignores malformed / non-string entries", () => {
-    const out = parseServedReposFromSubjects([null, 42, "not-a-subject", "repo:onlyowner", "repo:a/b/c:x", "repo:good/repo:ref:x"]);
+    const out = parseServedReposFromSubjects([
+      null,
+      42,
+      "not-a-subject",
+      "repo:onlyowner",
+      "repo:a/b/c:x",
+      "repo:good/repo:ref:x"
+    ]);
     expect(out).toEqual(["good/repo"]);
   });
 
@@ -615,22 +900,31 @@ describe("formatServesReposLabel", () => {
 
   it("lists up to three repos inline", () => {
     expect(formatServesReposLabel(["a/b"])).toBe("Serves: a/b");
-    expect(formatServesReposLabel(["a/b", "c/d", "e/f"])).toBe("Serves: a/b, c/d, e/f");
+    expect(formatServesReposLabel(["a/b", "c/d", "e/f"])).toBe(
+      "Serves: a/b, c/d, e/f"
+    );
   });
 
   it("truncates with a +N more suffix past three", () => {
-    expect(formatServesReposLabel(["a/b", "c/d", "e/f", "g/h", "i/j"]))
-      .toBe("Serves: a/b, c/d, e/f +2 more");
+    expect(formatServesReposLabel(["a/b", "c/d", "e/f", "g/h", "i/j"])).toBe(
+      "Serves: a/b, c/d, e/f +2 more"
+    );
   });
 });
 
 describe("validateAppRegistrationName", () => {
   it("accepts a normal derived name and trims", () => {
-    expect(validateAppRegistrationName("  radius-deploy-octo-api  ")).toEqual({ ok: true, name: "radius-deploy-octo-api" });
+    expect(validateAppRegistrationName("  radius-deploy-octo-api  ")).toEqual({
+      ok: true,
+      name: "radius-deploy-octo-api"
+    });
   });
 
   it("accepts allowed punctuation and spaces", () => {
-    expect(validateAppRegistrationName("My App (deploy) _v1.2-3")).toEqual({ ok: true, name: "My App (deploy) _v1.2-3" });
+    expect(validateAppRegistrationName("My App (deploy) _v1.2-3")).toEqual({
+      ok: true,
+      name: "My App (deploy) _v1.2-3"
+    });
   });
 
   it("rejects empty / whitespace-only", () => {
@@ -670,6 +964,9 @@ describe("validateAppRegistrationName", () => {
   });
 
   it("accepts a normal derived radius-deploy name", () => {
-    expect(validateAppRegistrationName("radius-deploy-octo-app")).toEqual({ ok: true, name: "radius-deploy-octo-app" });
+    expect(validateAppRegistrationName("radius-deploy-octo-app")).toEqual({
+      ok: true,
+      name: "radius-deploy-octo-app"
+    });
   });
 });
