@@ -501,7 +501,10 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
   it("treats a pull-request setup as action required without polling and only links GitHub URLs", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
     const actionRequiredStart = html.indexOf("if (envResult.pullRequestUrl)");
-    const pollStart = html.indexOf("function pollVerify()", actionRequiredStart);
+    const pollStart = html.indexOf(
+      "function pollVerify()",
+      actionRequiredStart
+    );
     const actionRequiredPath = html.slice(actionRequiredStart, pollStart);
 
     expect(html).toContain('id="env-action-banner"');
