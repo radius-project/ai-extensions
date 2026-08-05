@@ -498,6 +498,27 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain('id="env-warning-banner"');
   });
 
+  it("treats a pull-request setup as action required without polling and only links GitHub URLs", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    const actionRequiredStart = html.indexOf("if (envResult.pullRequestUrl)");
+    const pollStart = html.indexOf("function pollVerify()", actionRequiredStart);
+    const actionRequiredPath = html.slice(actionRequiredStart, pollStart);
+
+    expect(html).toContain('id="env-action-banner"');
+    expect(actionRequiredStart).toBeGreaterThan(-1);
+    expect(actionRequiredPath).toContain(
+      "showEnvActionRequired(provider, env, envResult.pullRequestUrl)"
+    );
+    expect(actionRequiredPath).toMatch(/loadEnvTable\(\);\s+return;/);
+    expect(actionRequiredPath).not.toContain("/api/verify-status");
+    expect(html).toContain(
+      "pullRequestUrl.indexOf('https://github.com/') === 0"
+    );
+    expect(html).toContain(
+      'href="' + "' + escapeHtmlClient(pullRequestUrl) + '" + '"'
+    );
+  });
+
   it("links the Azure RG and cluster dropdowns and sorts discovered resources (Nicole regression)", () => {
     // Regression: the cluster dropdown listed every AKS cluster regardless of
     // the selected resource group, the two dropdowns were not linked RG->cluster,
