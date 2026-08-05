@@ -4468,13 +4468,6 @@ function createRequestHandler(instanceId: string) {
           );
           return;
         }
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
         const state = entry.state;
         const branch = data.branch || defaultBranchForState(state);
         const requestGeneration =
