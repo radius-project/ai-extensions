@@ -29,7 +29,7 @@ import {
   parseRepoFromRemote,
   toSafeRepoRelPath,
   workspaceFileExists
-} from "./workspace.mjs";
+} from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
 import {
   selectDeployEntry,
@@ -37,7 +37,7 @@ import {
   validateDeployPayload,
   validateDeployAttempt,
   summarizeDeployStatus
-} from "./deploy-tools.mjs";
+} from "./deploy-tools.js";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
 import {
   servers,
@@ -54,7 +54,7 @@ import {
   prepareSourceRefResources,
   setSourceRefResources,
   updateSourceRefs
-} from "./source-refs.mjs";
+} from "./source-refs.js";
 import {
   evaluateAppBicepHook,
   GRAPH_PAGES,
@@ -63,14 +63,14 @@ import {
   deployRepairHandoffPrompt
 } from "./hooks.mjs";
 import { radiusAppBicepSkill } from "./skill.mjs";
-import { reloadCanvasInstance } from "./canvas-lifecycle.mjs";
-import { renderPrDiffMarkdown } from "./pr-diff-markdown.mjs";
+import { reloadCanvasInstance } from "./canvas-lifecycle.js";
+import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.mjs";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
-} from "./publish-targets.mjs";
+} from "./publish-targets.js";
 
 async function workspaceState() {
   const workspace = await detectWorkspaceContext(session);

@@ -24,7 +24,7 @@ export const DEFAULT_CANVAS_PAGE = "graph";
 import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
-} from "./deploy-diagnostics.mjs";
+} from "./deploy-diagnostics.js";
 
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
 // skill owns the full authoring workflow (namespaces, types, structure, and
@@ -180,7 +180,7 @@ export function appBicepHandoffPrompt(repo, page = "graph", branches = []) {
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
 export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
-export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.mjs";
+export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.js";
 
 // Prompt injected as a new user turn (via session.send) when a deploy started
 // from the canvas Deploy button fails. That path dispatches the workflow

@@ -8,13 +8,15 @@
 // diffStatus so added/removed edges — including a removed edge between two
 // still-present nodes — are drawn and colored distinctly.
 
-const STATUS_STYLE = {
+import type { CanvasGraphResource } from "./shared.js";
+
+const STATUS_STYLE: Readonly<Record<string, string>> = {
   added: ":::added",
   removed: ":::removed",
   modified: ":::modified",
   unchanged: ":::unchanged"
 };
-const STATUS_ICON = {
+const STATUS_ICON: Readonly<Record<string, string>> = {
   added: "🟢",
   removed: "🔴",
   modified: "🟡",
@@ -27,9 +29,11 @@ const STATUS_ICON = {
 // last-path-segment id would collide, merging the two nodes and deduping one of
 // the (added/removed) edges pointing at them out of existence. Disambiguate any
 // collision with a numeric suffix.
-function buildIdMap(diffResources) {
-  const idMap = new Map();
-  const usedIds = new Set();
+function buildIdMap(
+  diffResources: readonly CanvasGraphResource[]
+): Map<string, string> {
+  const idMap = new Map<string, string>();
+  const usedIds = new Set<string>();
   for (let i = 0; i < diffResources.length; i++) {
     const r = diffResources[i];
     const fullId = r.id || r.name || `node${i}`;
@@ -47,7 +51,9 @@ function buildIdMap(diffResources) {
   return idMap;
 }
 
-export function renderDiffMermaid(diffResources) {
+export function renderDiffMermaid(
+  diffResources: readonly CanvasGraphResource[]
+): string {
   const idMap = buildIdMap(diffResources);
 
   let mermaid = "graph TD\n";
@@ -63,10 +69,11 @@ export function renderDiffMermaid(diffResources) {
   for (const r of diffResources) {
     const fullId = r.id || r.name || "node";
     const safeId = idMap.get(fullId) || fullId.replace(/[^a-zA-Z0-9]/g, "_");
-    const icon = STATUS_ICON[r.diffStatus] || "";
+    const status = r.diffStatus || "";
+    const icon = STATUS_ICON[status] || "";
     const typeLabel = ((r.type || "").split("/").pop() || "").split("@")[0];
     const label = `${icon} ${r.name || r.id}\\n${typeLabel}`.trim();
-    mermaid += `    ${safeId}["${label}"]${STATUS_STYLE[r.diffStatus] || ""}\n`;
+    mermaid += `    ${safeId}["${label}"]${STATUS_STYLE[status] || ""}\n`;
   }
 
   // Add edges from connections (match by conn.id which is the full resource
@@ -74,8 +81,8 @@ export function renderDiffMermaid(diffResources) {
   // removed edges are colored the way the canvas draws them; a removed edge
   // between two still-present nodes is carried as a synthetic "removed"
   // connection by computeGraphDiff, so it appears here too.
-  const edgeSeen = new Set();
-  const edgeStatuses = [];
+  const edgeSeen = new Set<string>();
+  const edgeStatuses: string[] = [];
   for (const r of diffResources) {
     if (!r.connections || r.connections.length === 0) continue;
     const srcFullId = r.id || r.name || "";
@@ -108,7 +115,11 @@ export function renderDiffMermaid(diffResources) {
   return mermaid;
 }
 
-export function renderPrDiffMarkdown(diffResources, baseBranch, headBranch) {
+export function renderPrDiffMarkdown(
+  diffResources: readonly CanvasGraphResource[] | null | undefined,
+  baseBranch: string,
+  headBranch: string
+): string {
   const resources = diffResources || [];
   const added = resources.filter((r) => r.diffStatus === "added").length;
   const removed = resources.filter((r) => r.diffStatus === "removed").length;

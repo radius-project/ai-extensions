@@ -9,7 +9,7 @@ import {
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { workspaceRadArtifactsDir } from "./workspace.mjs";
+import { workspaceRadArtifactsDir } from "./workspace.js";
 
 function isOciExtensionRef(ref) {
   return /^(br|oci):/i.test(ref);

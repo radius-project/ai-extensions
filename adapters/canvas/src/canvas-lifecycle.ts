@@ -5,7 +5,31 @@
 // (which would otherwise fall back to its default page). Never throws: the
 // caller's real work is already done, so a reload/plumbing failure must not fail
 // the operation — it is logged best-effort and swallowed.
-export async function reloadCanvasInstance(session, context, input) {
+export interface CanvasInstanceContext {
+  extensionId: string;
+  canvasId: string;
+  instanceId: string;
+}
+
+export interface CanvasReloadSession {
+  rpc: {
+    canvas: {
+      open(options: {
+        extensionId: string;
+        canvasId: string;
+        instanceId: string;
+        input?: unknown;
+      }): Promise<unknown>;
+    };
+  };
+  log?: (message: string, options: { level: "warning" }) => void;
+}
+
+export async function reloadCanvasInstance(
+  session: CanvasReloadSession,
+  context: CanvasInstanceContext,
+  input?: unknown
+): Promise<unknown> {
   try {
     return await session.rpc.canvas.open({
       extensionId: context.extensionId,
@@ -13,10 +37,10 @@ export async function reloadCanvasInstance(session, context, input) {
       instanceId: context.instanceId,
       ...(input ? { input } : {})
     });
-  } catch (e) {
+  } catch (error: unknown) {
     try {
       session?.log?.(
-        `Radius: could not reload canvas ${context.instanceId}: ${e && e.message ? e.message : e}`,
+        `Radius: could not reload canvas ${context.instanceId}: ${error instanceof Error ? error.message : String(error)}`,
         { level: "warning" }
       );
     } catch {

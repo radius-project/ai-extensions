@@ -1,14 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
-import {
-  renderPrDiffMarkdown,
-  renderDiffMermaid
-} from "./pr-diff-markdown.mjs";
+import { renderPrDiffMarkdown, renderDiffMermaid } from "./pr-diff-markdown.js";
+import type { CanvasGraphResource } from "./shared.js";
 
 // Resource/connection fixture helpers. Ids are full resource paths (the Mermaid
 // node id is derived from the last "/" segment), matching what the graph builder
 // emits.
-const container = (id, connTargets = []) => ({
+const container = (
+  id: string,
+  connTargets: readonly string[] = []
+): CanvasGraphResource => ({
   id,
   name: id.split("/").pop(),
   type: "Applications.Core/containers@2023-10-01-preview",
@@ -18,7 +19,7 @@ const container = (id, connTargets = []) => ({
     direction: "Outbound"
   }))
 });
-const datastore = (id, kind) => ({
+const datastore = (id: string, kind: string): CanvasGraphResource => ({
   id,
   name: id.split("/").pop(),
   type: `Applications.Datastores/${kind}@2023-10-01-preview`,
@@ -111,6 +112,7 @@ describe("renderPrDiffMarkdown", () => {
     const dotted = md.match(/^ {4}api -\.-> (\w+)$/m);
     expect(solid).not.toBeNull();
     expect(dotted).not.toBeNull();
+    if (!solid || !dotted) throw new Error("expected both diff edges");
     expect(solid[1]).not.toBe(dotted[1]);
 
     // Distinct link styles: one green (added), one red (removed).

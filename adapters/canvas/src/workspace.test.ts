@@ -10,7 +10,7 @@ import {
   isWorkspaceSelection,
   resolveSessionId,
   workspaceFileExists
-} from "./workspace.mjs";
+} from "./workspace.js";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must
@@ -24,14 +24,14 @@ describe("resolveWorktreePath", () => {
     const session = { workspacePath: STATE_DIR };
     const metadata = { git_root: WORKTREE, cwd: WORKTREE };
     // Only the real worktree is inside a git work tree.
-    const probe = async (p) => p === WORKTREE;
+    const probe = async (p: string) => p === WORKTREE;
     expect(await resolveWorktreePath(session, metadata, probe)).toBe(WORKTREE);
   });
 
   it("never selects the session-state dir even when it is the only truthy session field", async () => {
     const session = { workspacePath: STATE_DIR };
     const metadata = { cwd: WORKTREE };
-    const probe = async (p) => p === WORKTREE;
+    const probe = async (p: string) => p === WORKTREE;
     const resolved = await resolveWorktreePath(session, metadata, probe);
     expect(resolved).toBe(WORKTREE);
     expect(resolved).not.toBe(STATE_DIR);
@@ -39,7 +39,7 @@ describe("resolveWorktreePath", () => {
 
   it("falls back to session fields when no workspace.yaml metadata exists", async () => {
     const session = { cwd: WORKTREE };
-    const probe = async (p) => p === WORKTREE;
+    const probe = async (p: string) => p === WORKTREE;
     expect(await resolveWorktreePath(session, {}, probe)).toBe(WORKTREE);
   });
 
@@ -182,13 +182,13 @@ describe("resolveSessionId", () => {
   const HOME = "C:/Users/dev";
   const REAL_ID = "e40edfce-64f9-4717-8296-96fea82c4760";
   const TRACEPARENT = "00-29c84416000000000000000000000000-0000000000000000-00";
-  const yamlFor = (id) =>
+  const yamlFor = (id: string) =>
     `${HOME}/.copilot/session-state/${id}/workspace.yaml`.replace(
       /\//g,
       path.sep
     );
 
-  const existsFor = (validId) => async (candidate) =>
+  const existsFor = (validId: string) => async (candidate: string) =>
     path.normalize(candidate) === path.normalize(yamlFor(validId));
 
   it("skips a traceparent COPILOT_AGENT_SESSION_ID and uses SESSION_ID when its workspace.yaml exists", async () => {

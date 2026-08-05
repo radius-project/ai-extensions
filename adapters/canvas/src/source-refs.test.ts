@@ -3,14 +3,25 @@ import {
   getSourceRefResources,
   prepareSourceRefResources,
   setSourceRefResources,
-  updateSourceRefs
-} from "./source-refs.mjs";
+  updateSourceRefs,
+  type SourceRefEntry
+} from "./source-refs.js";
+import type { CanvasGraphResource } from "./shared.js";
 
-function entry(page = "graph") {
+function entry(page = "graph"): SourceRefEntry {
   return { page, state: {} };
 }
 
 describe("source-code reference state", () => {
+  it("rejects unknown graph views", () => {
+    expect(() =>
+      prepareSourceRefResources(entry(), "unknown", {
+        repo: "acme/app",
+        branch: "main"
+      })
+    ).toThrow("Unknown graph view");
+  });
+
   it("uses the active graph view instead of a stale modeled graph", () => {
     const state = entry("planned");
     setSourceRefResources(
@@ -35,7 +46,7 @@ describe("source-code reference state", () => {
 
     const result = getSourceRefResources(state);
 
-    expect(result.context.repo).toBe("acme/current");
+    expect(result.context?.repo).toBe("acme/current");
     expect(result.resources.map((resource) => resource.id)).toEqual([
       "current"
     ]);
@@ -47,7 +58,7 @@ describe("source-code reference state", () => {
       repo: "acme/app",
       branch: "old"
     });
-    const oldToken = getSourceRefResources(state, "graph").context.token;
+    const oldToken = getSourceRefResources(state, "graph").context?.token || "";
     expect(
       updateSourceRefs(state, oldToken, [
         { id: "db", codeReference: "src/old-db.js" }
@@ -113,7 +124,7 @@ describe("source-code reference state", () => {
 
   it("matches by stable resource ID when names and types collide", () => {
     const state = entry();
-    const resources = [
+    const resources: CanvasGraphResource[] = [
       { id: "apps/a/db", name: "db", type: "Radius.Data/sqlDatabases" },
       { id: "apps/b/db", name: "db", type: "Radius.Data/sqlDatabases" }
     ];
@@ -121,7 +132,7 @@ describe("source-code reference state", () => {
       repo: "acme/app",
       branch: "main"
     });
-    const token = getSourceRefResources(state, "graph").context.token;
+    const token = getSourceRefResources(state, "graph").context?.token || "";
 
     const result = updateSourceRefs(state, token, [
       { id: "apps/b/db", codeReference: "services/b/db.ts#L10" }
@@ -141,7 +152,7 @@ describe("source-code reference state", () => {
       [{ id: "existing", codeReference: "src/existing.ts" }, { id: "ready" }],
       context
     );
-    const token = getSourceRefResources(state, "graph").context.token;
+    const token = getSourceRefResources(state, "graph").context?.token || "";
 
     const result = updateSourceRefs(state, token, [
       { id: "existing", codeReference: "src/replacement.ts" },
@@ -151,7 +162,7 @@ describe("source-code reference state", () => {
 
     expect(result).toMatchObject({ updated: 1, queued: 1, skipped: 1 });
 
-    const rebuilt = [{ id: "later" }];
+    const rebuilt: CanvasGraphResource[] = [{ id: "later" }];
     setSourceRefResources(state, "graph", rebuilt, context);
     expect(rebuilt[0].codeReference).toBe("src/later.ts");
     expect(state.state.pendingSourceRefs).toEqual([]);

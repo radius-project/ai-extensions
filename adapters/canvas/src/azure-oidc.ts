@@ -14,6 +14,79 @@ import {
   buildOidcSubject,
   buildFederatedCredentialName
 } from "@radius-project/core";
+import type { OidcSubjectConfig } from "@radius-project/core";
+
+export interface OidcError extends Error {
+  code: string;
+}
+
+export interface OwnedAppRegistration {
+  appId: string;
+  displayName?: string;
+  createdDateTime?: string;
+}
+
+export interface AppSelectionInput {
+  ownedMatches?: readonly OwnedAppRegistration[];
+  hasUnownedMatch?: boolean;
+  existingClientId?: string;
+  explicitAppId?: string;
+  createNew?: boolean;
+}
+
+export interface FederatedCredential {
+  name: string;
+  subject: string;
+}
+
+export interface DiscoveryData {
+  clusters?: unknown[];
+  resourceGroups?: unknown[];
+  vpcs?: unknown[];
+  subnets?: unknown[];
+  error?: string;
+  errors?: Record<string, string>;
+}
+
+export interface GitHubJsonPayload {
+  [key: string]: unknown;
+  full_name?: string;
+  id?: number;
+  owner?: { id?: number };
+  use_default?: boolean;
+  include_claim_keys?: string[];
+  use_immutable_subject?: boolean;
+  sub_claim_prefix?: string;
+}
+
+export interface GitHubJsonResponse {
+  ok: boolean;
+  status?: number | null;
+  json?: GitHubJsonPayload | null;
+  stderr?: string;
+}
+
+export type GitHubJsonRunner = (apiPath: string) => Promise<GitHubJsonResponse>;
+
+export interface FetchGitHubJsonOptions {
+  retries?: number;
+  baseDelayMs?: number;
+  sleepFn?: (milliseconds: number) => Promise<unknown>;
+}
+
+export interface ResolveOidcSubjectInput {
+  targetRepo: string;
+  envName: string;
+  suffix: string;
+}
+
+export interface ResolveOidcSubjectResult {
+  federatedCredentials: FederatedCredential[];
+  fullName: string;
+  ownerId: number;
+  repoId: number;
+  subjectConfig: OidcSubjectConfig;
+}
 
 // owner/repo using GitHub's real charset — an owner is 1-39 chars starting
 // alphanumeric with internal hyphens; a repo is 1-100 of [A-Za-z0-9._-]. This
@@ -39,34 +112,35 @@ export const RESOURCE_GROUP_NAME_RE =
 // upgrades.
 export const GITHUB_API_VERSION = "2022-11-28";
 
-export function isUuid(value) {
+export function isUuid(value: unknown): boolean {
   return typeof value === "string" && UUID_RE.test(value.trim());
 }
 
-export function isValidRepoSlug(value) {
+export function isValidRepoSlug(value: unknown): boolean {
   return typeof value === "string" && REPO_SLUG_RE.test(value.trim());
 }
 
-export function isAksClusterName(value) {
+export function isAksClusterName(value: unknown): boolean {
   return typeof value === "string" && AKS_CLUSTER_NAME_RE.test(value.trim());
 }
 
-export function isResourceGroupName(value) {
+export function isResourceGroupName(value: unknown): boolean {
   return typeof value === "string" && RESOURCE_GROUP_NAME_RE.test(value.trim());
 }
 
 /** Attach a machine-readable `code` to an Error for the JSON error response. */
-export function oidcError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
+export function oidcError(code: string, message: string): OidcError {
+  return Object.assign(new Error(message), { code });
 }
 
 /** Build the argv for `az ad app create`, adding SMR only when supplied. */
 export function buildAppCreateArgs({
   appName,
   serviceManagementReference
-} = {}) {
+}: {
+  appName?: string;
+  serviceManagementReference?: string;
+} = {}): Array<string | undefined> {
   const args = [
     "ad",
     "app",
@@ -110,11 +184,19 @@ export function decideAppSelection({
   existingClientId,
   explicitAppId,
   createNew = false
-} = {}) {
+}: AppSelectionInput = {}): {
+  action: "reuse" | "create" | "error" | "needs-selection";
+  appId?: string;
+  code?: string;
+  reason?: string;
+  duplicates?: boolean;
+  candidates?: OwnedAppRegistration[];
+  defaultAppId?: string;
+} {
   const owned = (Array.isArray(ownedMatches) ? ownedMatches : []).filter(
     (m) => m && m.appId
   );
-  const norm = (v) =>
+  const norm = (v: unknown) =>
     String(v || "")
       .trim()
       .toLowerCase();
@@ -207,8 +289,10 @@ export function decideAppSelection({
  * @param {Iterable<string>} subjects
  * @returns {string[]} sorted unique `owner/repo` values
  */
-export function parseServedReposFromSubjects(subjects) {
-  const repos = new Set();
+export function parseServedReposFromSubjects(
+  subjects: Iterable<unknown> = []
+): string[] {
+  const repos = new Set<string>();
   for (const s of Array.from(subjects || [])) {
     if (typeof s !== "string") continue;
     const m = /^(?:repo|repository):([^:]+)/.exec(s.trim());
@@ -227,13 +311,15 @@ export function parseServedReposFromSubjects(subjects) {
 /**
  * Short human label summarizing the repos an App Registration already serves,
  * for the identity-picker rows. Pure and self-contained so it can be serialized
- * into the browser bundle via .toString() (see pages.mjs) — the client runs this
+ * into the browser bundle via .toString() (see pages.ts) — the client runs this
  * exact function rather than a hand-copied twin.
  *
  * @param {string[]} list
  * @returns {string}
  */
-export function formatServesReposLabel(list) {
+export function formatServesReposLabel(
+  list: readonly string[] | null | undefined
+): string {
   if (!Array.isArray(list) || list.length === 0) return "";
   if (list.length <= 3) return "Serves: " + list.join(", ");
   return (
@@ -255,7 +341,9 @@ const APP_NAME_ALLOWED_RE = /^[A-Za-z0-9 ._()-]+$/;
  * @param {string} name
  * @returns {{ok:true, name:string} | {ok:false, reason:string}}
  */
-export function validateAppRegistrationName(name) {
+export function validateAppRegistrationName(
+  name: unknown
+): { ok: true; name: string } | { ok: false; reason: string } {
   if (typeof name !== "string")
     return { ok: false, reason: "Application name must be a string." };
   const trimmed = name.trim();
@@ -292,9 +380,9 @@ export function validateAppRegistrationName(name) {
  * @returns {{name:string,subject:string}[]}
  */
 export function selectMissingFederatedCredentials(
-  desired = [],
-  existingSubjects = []
-) {
+  desired: readonly FederatedCredential[] = [],
+  existingSubjects: Iterable<unknown> = []
+): FederatedCredential[] {
   const have = new Set(
     Array.from(existingSubjects || [])
       .filter((s) => typeof s === "string")
@@ -312,13 +400,16 @@ export function selectMissingFederatedCredentials(
  * e.g. an ARM token not yet silently acquirable on Corpnet — surfaces as
  * "Discovery failed: <stderr>" rather than a misleading "Found 0 …". Pure and
  * self-contained so it is serialized into the browser bundle via .toString()
- * (see pages.mjs `discoverResources`) — the client runs this exact function.
+ * (see pages.ts `discoverResources`) — the client runs this exact function.
  *
- * @param {{clusters?:any[], resourceGroups?:any[], vpcs?:any[], subnets?:any[], error?:string, errors?:Record<string,string>}} data
+ * @param {{clusters?:unknown[], resourceGroups?:unknown[], vpcs?:unknown[], subnets?:unknown[], error?:string, errors?:Record<string,string>}} data
  * @param {'azure'|'aws'} provider
  * @returns {string}
  */
-export function discoverStatusText(data = {}, provider = "azure") {
+export function discoverStatusText(
+  data: DiscoveryData = {},
+  provider: "azure" | "aws" = "azure"
+): string {
   const errs = data.errors || {};
   if (provider === "aws") {
     const errMsg =
@@ -350,7 +441,7 @@ const AZ_NOT_FOUND_RE =
  * @param {string} stderr
  * @returns {boolean}
  */
-export function isAzResourceNotFound(stderr) {
+export function isAzResourceNotFound(stderr: unknown): boolean {
   return AZ_NOT_FOUND_RE.test(String(stderr || ""));
 }
 
@@ -372,7 +463,14 @@ export function decideExistingClientId({
   clientId,
   showStatus,
   owned = false
-} = {}) {
+}: {
+  clientId?: string;
+  showStatus?: string;
+  owned?: boolean;
+} = {}): {
+  action: "reuse" | "error" | "fallthrough" | "fatal";
+  code?: string;
+} {
   if (!clientId || !String(clientId).trim()) return { action: "fallthrough" };
   if (showStatus === "not-found") return { action: "fallthrough" };
   if (showStatus === "lookup-failed")
@@ -395,14 +493,15 @@ export const SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS = [
   "servicetreeinvalid"
 ];
 
-export function isServiceManagementReferenceError(stderr) {
-  const s = (stderr || "").toLowerCase();
+export function isServiceManagementReferenceError(stderr: unknown): boolean {
+  const s = String(stderr || "").toLowerCase();
   return SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS.some((id) => s.includes(id));
 }
 
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
-function statusText(res) {
+function statusText(res: GitHubJsonResponse | undefined): string {
   if (res && res.status != null) return `HTTP ${res.status}`;
   return (res && res.stderr) || "request failed";
 }
@@ -414,11 +513,15 @@ function statusText(res) {
  * `runner(apiPath)` must resolve `{ ok, status, json, stderr }` and never reject.
  */
 export async function fetchGitHubJson(
-  runner,
-  apiPath,
-  { retries = 3, baseDelayMs = 300, sleepFn = defaultSleep } = {}
-) {
-  let last;
+  runner: GitHubJsonRunner,
+  apiPath: string,
+  {
+    retries = 3,
+    baseDelayMs = 300,
+    sleepFn = defaultSleep
+  }: FetchGitHubJsonOptions = {}
+): Promise<GitHubJsonResponse | undefined> {
+  let last: GitHubJsonResponse | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     last = await runner(apiPath);
     const status = last?.status;
@@ -456,10 +559,10 @@ export async function fetchGitHubJson(
  * @returns {Promise<{federatedCredentials:{name:string,subject:string}[], fullName:string, ownerId:number, repoId:number, subjectConfig:object}>}
  */
 export async function resolveOidcSubject(
-  { targetRepo, envName, suffix },
-  runner,
-  opts = {}
-) {
+  { targetRepo, envName, suffix }: ResolveOidcSubjectInput,
+  runner: GitHubJsonRunner,
+  opts: FetchGitHubJsonOptions = {}
+): Promise<ResolveOidcSubjectResult> {
   if (!isValidRepoSlug(targetRepo)) {
     throw oidcError(
       "invalid-repo",
@@ -478,8 +581,8 @@ export async function resolveOidcSubject(
   }
   const repo = repoRes.json || {};
   const fullName = repo.full_name;
-  const ownerId = repo.owner?.id;
-  const repoId = repo.id;
+  const ownerId = Number(repo.owner?.id);
+  const repoId = Number(repo.id);
   if (
     !fullName ||
     !Number.isFinite(Number(ownerId)) ||
@@ -505,7 +608,7 @@ export async function resolveOidcSubject(
     `/repos/${fullName}/actions/oidc/customization/sub`,
     opts
   );
-  let subjectConfig;
+  let subjectConfig: OidcSubjectConfig;
   if (custRes?.ok) {
     const c = custRes.json || {};
     if (typeof c.use_default !== "boolean") {
@@ -542,7 +645,7 @@ export async function resolveOidcSubject(
   }
 
   const commonInput = { repoFullName: fullName, ownerId, repoId, suffix };
-  const federatedCredentials = [];
+  const federatedCredentials: FederatedCredential[] = [];
 
   if (subjectConfig.useDefault) {
     // Emit BOTH default forms so whichever GitHub actually mints matches. This
