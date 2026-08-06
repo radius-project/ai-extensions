@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
 ---
-name: Publish plugin
+name: Publish
 
 # Publishes the radius plugin to a generated `releases/edge` branch so installs
 # get the whole plugin — skills, plugin.json, and the compiled canvas bundle —
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Build and publish to releases/edge branch
+    name: Build and publish to edge
     runs-on: ubuntu-latest
     permissions:
       contents: write
