@@ -1,7 +1,5 @@
 ---
-"@radius-project/core": patch
-"@radius-project/shared": patch
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Anchor "View app definition" links to the resource's line in `app.bicep` and default the planned-graph branch selector to the current branch:

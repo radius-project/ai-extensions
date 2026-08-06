@@ -63,8 +63,8 @@ This is the most critical step. **Do not generate diagrams from memory or assump
 - **Respect the core boundary**: `packages/core` must not depend on an adapter, the Copilot SDK, HTTP, or the DOM. Anything touching the outside world goes through a **port**. When documenting a flow, show where it crosses that boundary.
 - **Find port implementations**: A port is defined in `packages/core` and implemented in an adapter (`packages/adapter-canvas`, `packages/adapter-shared`). Search for the port name across `packages/adapter-*` to find its concrete implementation.
 - **Follow canvas registration**: Start at `packages/adapter-canvas/src/extension.ts` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages.ts`), the server (`server.ts`), and actions are wired.
-- **Understand packaging**: `packages/adapter-canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into a single `plugins/radius/extension.mjs`. Note what is source vs. generated when documenting the build.
-- **Read test files**: `*_test.ts` and `*.test.ts` files (for example, `appgraph_test.ts`, `rad.test.ts`) reveal expected behavior and interaction patterns.
+- **Understand packaging**: `packages/adapter-canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into `plugins/radius/dist/extension.mjs`, then assembles the rest of the plugin around it. Note what is source vs. generated when documenting the build.
+- **Read test files**: `*.test.ts` files (for example, `appgraph.test.ts`, `rad.test.ts`) reveal expected behavior and interaction patterns.
 
 ### Step 3: Generate the Diagram
 
@@ -120,8 +120,8 @@ This is a [pnpm](https://pnpm.io/) workspace monorepo written in TypeScript and 
 | Core              | `packages/core/`                    | UI-agnostic product logic: modeling, application graph, platform, and workflow generation, exposed through ports. |
 | Canvas adapter    | `packages/adapter-canvas/`          | Wires the core into the GitHub Copilot app as the `radius` canvas extension (pages, server, actions).             |
 | Shared adapter    | `packages/adapter-shared/`          | Shared adapter utilities (for example, `rad` CLI invocation) used across surfaces.                                |
-| Plugin            | `plugins/radius/`                   | The published Copilot plugin: `plugin.json` manifest, `skills/`, and the built `extension.mjs` canvas.            |
-| Build / packaging | `packages/adapter-canvas/build.mjs` | esbuild step that bundles the adapter + core into `plugins/radius/extension.mjs`.                                 |
+| Plugin            | `plugins/radius/`                   | The Copilot plugin source: `plugin.json` manifest and `skills/`; assembled with the built canvas into `dist/`.    |
+| Build / packaging | `packages/adapter-canvas/build.mjs` | esbuild step that bundles the adapter + core and assembles `plugins/radius/dist/`.                                |
 
 ### Key Modules in the Canvas Adapter
 

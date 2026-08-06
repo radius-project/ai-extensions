@@ -35,6 +35,7 @@ updates:
     directories:
       - "/"
       - "/packages/*"
+      - "/plugins/*"
     schedule:
       interval: weekly
     cooldown:

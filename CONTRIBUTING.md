@@ -33,11 +33,13 @@ fixes, features) as long as they follow a few guidelines:
 This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 `@radius-project` scope.
 
-| Path                       | npm name                 | Responsibility                                                                  |
-|----------------------------|--------------------------|---------------------------------------------------------------------------------|
-| `packages/core/`           | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
-| `packages/adapter-shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
-| `packages/adapter-canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+| Path                       | npm name                         | Responsibility                                                                  |
+|----------------------------|----------------------------------|---------------------------------------------------------------------------------|
+| `packages/core/`           | `@radius-project/core`           | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
+| `packages/adapter-shared/` | `@radius-project/adapter-shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
+| `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+
+The `adapter-` directory prefix is deliberate: it marks a package as an adapter at a glance and is what the core boundary lint rule in [`eslint.config.mjs`](./eslint.config.mjs) matches on to reject relative imports that escape into an adapter. The npm names stay unprefixed, so a directory name and its npm name differ by that prefix.
 
 ### The dependency rule
 
@@ -65,7 +67,7 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/dist/
 ```
 
 Other useful scripts:
@@ -93,7 +95,7 @@ pnpm coverage          # run every project with unified V8 coverage
 Run a single test file:
 
 ```bash
-pnpm test -- packages/core/src/graph/diff_test.ts
+pnpm test -- packages/core/src/graph/diff.test.ts
 ```
 
 ## Before you open a pull request

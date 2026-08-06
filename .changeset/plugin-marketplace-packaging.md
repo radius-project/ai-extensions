@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": minor
-"@radius-project/canvas": minor
+"radius": minor
 ---
 
 Package the repo as a GitHub Copilot CLI plugin marketplace. Add

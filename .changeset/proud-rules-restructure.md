@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": minor
-"@radius-project/canvas": minor
+"radius": minor
 ---
 
 Restructure as a pnpm monorepo: move packages under the `@radius-project` org

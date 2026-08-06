@@ -1,4 +1,4 @@
-// @radius-project/shared — Node-runtime helpers shared across Radius adapters.
+// @radius-project/adapter-shared — Node-runtime helpers shared across Radius adapters.
 //
 // This package holds impure, Node-only product logic that the pure
 // `@radius-project/core` package intentionally excludes (it declares "No SDK /
