@@ -725,6 +725,24 @@ describe("deployingPage — Deployments landing", () => {
     // refreshes the list so the real GitHub record replaces the synthetic row.
     expect(html).toContain("loadDeployments(true, true);");
   });
+
+  it("applies the same quiet in-flight polling to the Delete Deployment flow", () => {
+    const html = deployingPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    // The delete poll keeps the row showing "Deleting…" via a quiet refresh, so
+    // the table no longer flashes a loading placeholder every ~4s during a
+    // delete (matching the deploy flow's in-flight polling).
+    expect(html).toContain('loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)');
+    // The initial optimistic "deleting" refresh is also quiet so the existing
+    // row flips in place without a flash.
+    expect(html).toContain("OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';");
+    // A synthetic row is only created for a not-yet-recorded op (deploy's
+    // "pending"), never for "deleting" — a delete acts on an existing record, so
+    // once it's gone there must be no phantom "Deleting…" row.
+    expect(html).toContain("if (present[k] || OP_STATUS[k] === 'deleting') return;");
+  });
 });
 
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {

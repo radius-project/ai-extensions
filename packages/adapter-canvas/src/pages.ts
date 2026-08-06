@@ -4662,16 +4662,19 @@ function loadDeployments(fresh, quiet) {
             if (d && d.error) { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
             var deps = (d && d.deployments) || [];
             // Surface just-started operations GitHub hasn't recorded yet. A
-            // deployment record isn't created until the deploy/delete job starts,
-            // so an optimistic OP_STATUS entry with no matching server row is
-            // rendered as a synthetic row (e.g. "Pending"). Without this, a brand-
-            // new deployment to an app+env with no prior record would stay invisible
-            // until the run reached a terminal state or Refresh was clicked.
+            // deployment record isn't created until the deploy job starts, so an
+            // optimistic "pending" OP_STATUS entry with no matching server row is
+            // rendered as a synthetic row. Without this, a brand-new deployment to
+            // an app+env with no prior record would stay invisible until the run
+            // reached a terminal state or Refresh was clicked. "deleting" is
+            // deliberately excluded: a delete always acts on an existing row, so
+            // its record is recolored in place; once the record is gone the delete
+            // is done, and a synthetic "Deleting…" row would be a phantom.
             var present = {};
             deps.forEach(function(dep) { present[opKey(dep.app, dep.environment)] = true; });
             var synthetic = [];
             Object.keys(OP_STATUS).forEach(function(k) {
-                if (present[k]) return;
+                if (present[k] || OP_STATUS[k] === 'deleting') return;
                 var parts = k.split('\\u0000');
                 if (parts.length !== 2 || !parts[0] || !parts[1]) return;
                 synthetic.push({ app: parts[0], environment: parts[1], status: OP_STATUS[k], runUrl: '' });
@@ -4795,9 +4798,11 @@ function runDelete() {
         .then(function(res) {
             if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
             // Optimistically show "Deleting…" right away (the delete run's
-            // deployment record doesn't exist yet), and keep it until the row clears.
+            // deployment record doesn't exist yet), and keep it until the row
+            // clears. Refresh quietly so the existing row flips to "Deleting…"
+            // in place instead of flashing the table to a loading placeholder.
             OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
-            loadDeployments(true);
+            loadDeployments(true, true);
             pollDeleteCompletion(dep.app, dep.environment, 0);
         })
         .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
@@ -4805,12 +4810,13 @@ function runDelete() {
 
 // Poll the deployments listing until the target app/env is gone (a successful
 // delete removes it), then show the green success banner. Refreshes the table
-// each cycle so the "Deleting…" status stays visible. Bounded so a stuck or
-// failed delete never polls forever — on timeout the override is cleared and the
-// row reverts to its real status (a failed delete falls back to its deploy
-// record, so the deployment remains visible).
+// quietly each cycle so the "Deleting…" status stays visible without flashing a
+// loading placeholder (matching the deploy flow's in-flight polling). Bounded so
+// a stuck or failed delete never polls forever — on timeout the override is
+// cleared and the row reverts to its real status (a failed delete falls back to
+// its deploy record, so the deployment remains visible).
 function pollDeleteCompletion(app, env, tries) {
-    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true); return; } // ~3 min at 4s
+    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true, true); return; } // ~3 min at 4s
     setTimeout(function() {
         fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + '&fresh=1')
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
@@ -4827,11 +4833,11 @@ function pollDeleteCompletion(app, env, tries) {
                 var stillThere = d.deployments.some(function(x) { return x.app === app && x.environment === env; });
                 if (!stillThere) {
                     delete OP_STATUS[opKey(app, env)];
-                    loadDeployments(true);
+                    loadDeployments(true, true);
                     showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong> has been successfully deleted.', true);
                     return;
                 }
-                loadDeployments(true); // keep the row showing "Deleting…"
+                loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)
                 pollDeleteCompletion(app, env, tries + 1);
             })
             .catch(function() { pollDeleteCompletion(app, env, tries + 1); });
