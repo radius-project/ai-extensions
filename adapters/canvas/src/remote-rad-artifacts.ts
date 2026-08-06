@@ -39,7 +39,7 @@ interface RemoteArtifactSelection {
 
 type ArtifactSelection = LocalArtifactSelection | RemoteArtifactSelection;
 
-interface ArtifactSelectionForBranchInput {
+interface ComputedArtifactSelection {
   isLocal: boolean;
   state?: CanvasState;
   github: GitHubArtifactReader;
@@ -47,30 +47,6 @@ interface ArtifactSelectionForBranchInput {
   branch: string;
   bicepRepoPath: string;
   log?: (message: string) => void;
-}
-
-export function artifactSelectionForBranch(
-  input: ArtifactSelectionForBranchInput
-): ArtifactSelection {
-  if (input.isLocal) {
-    if (!input.state) {
-      throw new Error("Local artifact selection requires canvas state.");
-    }
-    return {
-      isLocal: true,
-      state: input.state,
-      bicepRepoPath: input.bicepRepoPath
-    };
-  }
-  return {
-    isLocal: false,
-    state: input.state,
-    github: input.github,
-    repo: input.repo,
-    branch: input.branch,
-    bicepRepoPath: input.bicepRepoPath,
-    log: input.log
-  };
 }
 
 function errorMessage(error: unknown): string {
@@ -264,10 +240,22 @@ export async function stageRemoteRadArtifacts(
  * removed after the compile. Returns { dir, remote }, where `remote` is true
  * when `dir` is a staged temp dir to clean up (pass as `cleanupRadArtifactsDir`).
  */
+export function radArtifactsDirForSelection(
+  selection: LocalArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
+export function radArtifactsDirForSelection(
+  selection: RemoteArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
+export function radArtifactsDirForSelection(
+  selection: ComputedArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
 export async function radArtifactsDirForSelection(
-  selection: ArtifactSelection
+  selection: ArtifactSelection | ComputedArtifactSelection
 ): Promise<{ dir: string; remote: boolean }> {
   if (selection.isLocal) {
+    if (!selection.state) {
+      throw new Error("Local artifact selection requires canvas state.");
+    }
     return {
       dir: workspaceRadArtifactsDir(selection.state, selection.bicepRepoPath),
       remote: false

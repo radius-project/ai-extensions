@@ -97,7 +97,6 @@ import {
 } from "./workspace.js";
 import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import {
-  artifactSelectionForBranch,
   radArtifactsDirForSelection,
   radArtifactsFingerprint
 } from "./remote-rad-artifacts.js";
@@ -4253,17 +4252,15 @@ function createRequestHandler(instanceId: string) {
             workspaceGraphJsonPath(entry.state, selection.bicepPath)
           : "";
         const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection(
-            artifactSelectionForBranch({
-              isLocal: !!(entry && selection.fromWorkspace),
-              state: entry?.state,
-              github,
-              repo,
-              branch,
-              bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-              log: sendProgress
-            })
-          );
+          await radArtifactsDirForSelection({
+            isLocal: !!(entry && selection.fromWorkspace),
+            state: entry?.state,
+            github,
+            repo,
+            branch,
+            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+            log: sendProgress
+          });
         const resources = canvasGraphResources(
           await buildGraphViaRad(
             content,
@@ -4523,17 +4520,15 @@ function createRequestHandler(instanceId: string) {
             workspaceGraphJsonPath(entry.state, selection.bicepPath)
           : "";
         const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection(
-            artifactSelectionForBranch({
-              isLocal: !!(entry && selection.fromWorkspace),
-              state: entry?.state,
-              github,
-              repo,
-              branch,
-              bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-              log: addProgress
-            })
-          );
+          await radArtifactsDirForSelection({
+            isLocal: !!(entry && selection.fromWorkspace),
+            state: entry?.state,
+            github,
+            repo,
+            branch,
+            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+            log: addProgress
+          });
         const definitionHash = graphDefinitionHash(
           content,
           radArtifactsFingerprint(radArtifactsDir)
@@ -5325,17 +5320,15 @@ function createRequestHandler(instanceId: string) {
         addProgress("Found app.bicep — parsing resources...");
 
         const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection(
-            artifactSelectionForBranch({
-              isLocal: !!(entry && selection.fromWorkspace),
-              state: entry?.state,
-              github,
-              repo,
-              branch,
-              bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-              log: addProgress
-            })
-          );
+          await radArtifactsDirForSelection({
+            isLocal: !!(entry && selection.fromWorkspace),
+            state: entry?.state,
+            github,
+            repo,
+            branch,
+            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+            log: addProgress
+          });
         const resources = canvasGraphResources(
           await buildGraphViaRad(
             content,
@@ -5545,27 +5538,23 @@ function createRequestHandler(instanceId: string) {
         }
 
         const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-          await radArtifactsDirForSelection(
-            artifactSelectionForBranch({
-              isLocal: !!(entry && baseSelection.fromWorkspace),
-              state: entry?.state,
-              github,
-              repo,
-              branch: data.base,
-              bicepRepoPath: baseSelection.bicepPath || ".radius/app.bicep"
-            })
-          );
+          await radArtifactsDirForSelection({
+            isLocal: !!(entry && baseSelection.fromWorkspace),
+            state: entry?.state,
+            github,
+            repo,
+            branch: data.base,
+            bicepRepoPath: baseSelection.bicepPath || ".radius/app.bicep"
+          });
         const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-          await radArtifactsDirForSelection(
-            artifactSelectionForBranch({
-              isLocal: !!(entry && headSelection.fromWorkspace),
-              state: entry?.state,
-              github,
-              repo,
-              branch: data.head,
-              bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep"
-            })
-          );
+          await radArtifactsDirForSelection({
+            isLocal: !!(entry && headSelection.fromWorkspace),
+            state: entry?.state,
+            github,
+            repo,
+            branch: data.head,
+            bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep"
+          });
         const baseResources = canvasGraphResources(
           await buildGraphViaRad(
             baseSelection.content || "",
@@ -5801,18 +5790,15 @@ function createRequestHandler(instanceId: string) {
                 const content = selection.content;
                 if (content) {
                   const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-                    await radArtifactsDirForSelection(
-                      artifactSelectionForBranch({
-                        isLocal: !!(entry && selection.fromWorkspace),
-                        state: entry?.state,
-                        github,
-                        repo,
-                        branch,
-                        bicepRepoPath:
-                          selection.bicepPath || ".radius/app.bicep",
-                        log: addLog
-                      })
-                    );
+                    await radArtifactsDirForSelection({
+                      isLocal: !!(entry && selection.fromWorkspace),
+                      state: entry?.state,
+                      github,
+                      repo,
+                      branch,
+                      bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+                      log: addLog
+                    });
                   const parsed = canvasGraphResources(
                     await buildGraphViaRad(
                       content,

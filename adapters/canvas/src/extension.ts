@@ -31,10 +31,7 @@ import {
   toSafeRepoRelPath,
   workspaceFileExists
 } from "./workspace.js";
-import {
-  artifactSelectionForBranch,
-  radArtifactsDirForSelection
-} from "./remote-rad-artifacts.js";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
   selectDeployEntry,
   buildDeployPayload,
@@ -759,37 +756,33 @@ const session = await joinSession({
             ]);
 
             const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-              await radArtifactsDirForSelection(
-                artifactSelectionForBranch({
-                  isLocal: isWorkspaceSelection(entry.state, repo, baseBranch),
-                  state: entry.state,
-                  github,
-                  repo,
-                  branch: baseBranch,
-                  bicepRepoPath: ".radius/app.bicep",
-                  log: (m) => {
-                    try {
-                      session.log(m);
-                    } catch {}
-                  }
-                })
-              );
+              await radArtifactsDirForSelection({
+                isLocal: isWorkspaceSelection(entry.state, repo, baseBranch),
+                state: entry.state,
+                github,
+                repo,
+                branch: baseBranch,
+                bicepRepoPath: ".radius/app.bicep",
+                log: (m) => {
+                  try {
+                    session.log(m);
+                  } catch {}
+                }
+              });
             const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-              await radArtifactsDirForSelection(
-                artifactSelectionForBranch({
-                  isLocal: isWorkspaceSelection(entry.state, repo, headBranch),
-                  state: entry.state,
-                  github,
-                  repo,
-                  branch: headBranch,
-                  bicepRepoPath: ".radius/app.bicep",
-                  log: (m) => {
-                    try {
-                      session.log(m);
-                    } catch {}
-                  }
-                })
-              );
+              await radArtifactsDirForSelection({
+                isLocal: isWorkspaceSelection(entry.state, repo, headBranch),
+                state: entry.state,
+                github,
+                repo,
+                branch: headBranch,
+                bicepRepoPath: ".radius/app.bicep",
+                log: (m) => {
+                  try {
+                    session.log(m);
+                  } catch {}
+                }
+              });
             const baseResources = await buildGraphViaRad(
               baseContent || "",
               ".radius/app.bicep",
@@ -1022,37 +1015,33 @@ const session = await joinSession({
           }
 
           const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await radArtifactsDirForSelection(
-              artifactSelectionForBranch({
-                isLocal: isWorkspaceSelection(state, repo, baseBranch),
-                state,
-                github,
-                repo,
-                branch: baseBranch,
-                bicepRepoPath: ".radius/app.bicep",
-                log: (m) => {
-                  try {
-                    session.log(m);
-                  } catch {}
-                }
-              })
-            );
+            await radArtifactsDirForSelection({
+              isLocal: isWorkspaceSelection(state, repo, baseBranch),
+              state,
+              github,
+              repo,
+              branch: baseBranch,
+              bicepRepoPath: ".radius/app.bicep",
+              log: (m) => {
+                try {
+                  session.log(m);
+                } catch {}
+              }
+            });
           const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await radArtifactsDirForSelection(
-              artifactSelectionForBranch({
-                isLocal: isWorkspaceSelection(state, repo, headBranch),
-                state,
-                github,
-                repo,
-                branch: headBranch,
-                bicepRepoPath: ".radius/app.bicep",
-                log: (m) => {
-                  try {
-                    session.log(m);
-                  } catch {}
-                }
-              })
-            );
+            await radArtifactsDirForSelection({
+              isLocal: isWorkspaceSelection(state, repo, headBranch),
+              state,
+              github,
+              repo,
+              branch: headBranch,
+              bicepRepoPath: ".radius/app.bicep",
+              log: (m) => {
+                try {
+                  session.log(m);
+                } catch {}
+              }
+            });
           const baseResources = await buildGraphViaRad(
             baseContent || "",
             ".radius/app.bicep",
