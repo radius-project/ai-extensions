@@ -72,20 +72,21 @@ Keep a connection alongside native variables when the source consumes generic va
 
 ## Container-to-container (service-to-service) addressing
 
-A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host from the **peer's resource `name`** (kebab-case) over in-cluster DNS:
+A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host by referencing the peer's read-only **`host`** output property (its in-cluster Service DNS name, published by the containers recipe) over in-cluster DNS:
 
 ```bicep
 env: {
   // peer resource is `resource orderingApi 'Radius.Compute/containers@...' = { name: 'ordering-api' ... }`
   ORDERING_URL: {
-    value: 'http://ordering-api:8080'
+    value: 'http://${orderingApi.properties.host}:8080'
   }
 }
 ```
 
-- Host is the peer's resource `name` (e.g. `ordering-api`), never the `containers`-map key and never `<resource-name>-<containerKey>`. The containers recipe emits a Kubernetes Service equal to the resource `name` for a single-container resource, so this host is stable and predictable.
+- Host is the peer's `properties.host` output (e.g. `orderingApi.properties.host`), never a literal built from the resource `name`, the `containers`-map key, or `<resource-name>-<containerKey>`. The containers recipe populates `host` with the peer's actual Service FQDN for a single-container resource, so this reference is stable, predictable, and creates a deploy-time dependency edge.
+- `host` is read-only — reference it, never set it, and only a single-container resource emits it.
 - Port is the peer container's published `containerPort` number from source.
-- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, use `<peer-resource-name>-<containerKey>` and confirm that Service exists.
+- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, `host` is not emitted — use `<peer-resource-name>-<containerKey>` and confirm that Service exists.
 
 ## Rules
 
