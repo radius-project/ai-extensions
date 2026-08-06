@@ -70,6 +70,23 @@ This is a representative pattern, not a required variable naming scheme. `APP_DB
 
 Keep a connection alongside native variables when the source consumes generic values or the selected profile explicitly requires Radius relationship metadata. Explicit native variables are not categorically forbidden just because generic projection exists. Ensure duplicate names do not carry conflicting values.
 
+## Container-to-container (service-to-service) addressing
+
+A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host from the **peer's resource `name`** (kebab-case) over in-cluster DNS:
+
+```bicep
+env: {
+  // peer resource is `resource orderingApi 'Radius.Compute/containers@...' = { name: 'ordering-api' ... }`
+  ORDERING_URL: {
+    value: 'http://ordering-api:8080'
+  }
+}
+```
+
+- Host is the peer's resource `name` (e.g. `ordering-api`), never the `containers`-map key and never `<resource-name>-<containerKey>`. The containers recipe emits a Kubernetes Service equal to the resource `name` for a single-container resource, so this host is stable and predictable.
+- Port is the peer container's published `containerPort` number from source.
+- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, use `<peer-resource-name>-<containerKey>` and confirm that Service exists.
+
 ## Rules
 
 1. Never assume a connection invents app-specific variables, URLs, credentials, database names, or protocol settings.
