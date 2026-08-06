@@ -2,7 +2,11 @@ import eslint from "@eslint/js";
 import babelParser from "@babel/eslint-parser";
 import globals from "globals";
 
-const sourceFiles = ["eslint.config.js", "packages/**/*.{ts,mjs}"];
+const sourceFiles = [
+  "eslint.config.js",
+  "packages/**/*.{ts,mjs}",
+  "vitest.config.ts"
+];
 const restrictedCoreImports = [
   {
     selector:

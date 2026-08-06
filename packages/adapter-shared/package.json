@@ -4,6 +4,9 @@
   "private": true,
   "description": "Node-runtime helpers shared across Radius adapters (e.g. building application graphs via the real rad CLI). Depends on @radius-project/core; contains the impure I/O that core intentionally excludes.",
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
@@ -17,6 +20,6 @@
     "@radius-project/core": "workspace:*"
   },
   "devDependencies": {
-    "vitest": "^4.1.10"
+    "vitest": "catalog:"
   }
 }

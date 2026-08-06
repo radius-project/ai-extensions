@@ -6,7 +6,7 @@
   "description": "Deploy with Radius - Copilot canvas extension",
   "packageManager": "pnpm@9.15.9",
   "engines": {
-    "node": ">=18",
+    "node": ">=24 <25",
     "pnpm": ">=9"
   },
   "scripts": {
@@ -16,11 +16,13 @@
     "watch:canvas": "pnpm --filter @radius-project/canvas run watch",
     "build:install": "pnpm --filter @radius-project/canvas run build:install",
     "watch:dev": "pnpm --filter @radius-project/canvas run watch:dev",
-    "typecheck": "pnpm -r run --if-present typecheck",
-    "test": "pnpm -r run --if-present test",
-    "lint": "eslint eslint.config.js && pnpm -r run --if-present lint",
-    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.js \"packages/**/*.{ts,mjs}\"",
-    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.js \"packages/**/*.{ts,mjs}\"",
+    "typecheck": "tsc -p tsconfig.json && pnpm -r run --if-present typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
+    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
+    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
     "lint:md": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml \"**/*.md\"",
     "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",
@@ -33,13 +35,15 @@
     "@babel/eslint-parser": "^7.29.7",
     "@babel/plugin-syntax-typescript": "^7.29.7",
     "@eslint/js": "^8.57.1",
-    "@types/node": "^26.1.1",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
     "eslint": "^8.57.1",
     "globals": "^17.8.0",
     "markdown-table-formatter": "1.7.0",
     "markdownlint-cli2": "0.23.1",
     "prettier": "^3.9.6",
-    "typescript": "^7.0.2"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "pnpm": {
     "overrides": {

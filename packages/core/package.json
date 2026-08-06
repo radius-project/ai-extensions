@@ -4,6 +4,9 @@
   "private": true,
   "description": "UI-agnostic core for the Radius Canvas product: repo modeling, application graph build/diff, compute-platform abstraction, and workflow generation. No SDK / HTTP / DOM dependencies.",
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
@@ -20,7 +23,7 @@
     "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.10",
-    "vitest": "^4.1.10"
+    "@vitest/coverage-v8": "catalog:",
+    "vitest": "catalog:"
   }
 }
