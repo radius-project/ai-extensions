@@ -1,0 +1,29 @@
+{
+  "name": "@radius-project/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UI-agnostic core for the Radius Canvas product: repo modeling, application graph build/diff, compute-platform abstraction, and workflow generation. No SDK / HTTP / DOM dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./graph": "./src/graph/index.ts",
+    "./modeling": "./src/modeling/index.ts",
+    "./platforms": "./src/platforms/index.ts",
+    "./workflows": "./src/workflows/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage --coverage.provider=v8",
+    "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "catalog:",
+    "vitest": "catalog:"
+  }
+}

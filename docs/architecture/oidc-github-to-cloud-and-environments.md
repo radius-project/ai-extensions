@@ -3,7 +3,7 @@
 This is an **architecture doc**: it describes how the canvas extension connects
 GitHub to a cloud provider over OIDC today, and what a Radius "Environment" actually
 provisions. It doubles as a **companion primer for the Azure-OIDC-from-enterprise
-pull request**, which is large (~4,400 lines across the `radius-core` platform layer
+pull request**, which is large (~4,400 lines across the `packages/core` platform layer
 and the canvas adapter) because it makes one deceptively simple action — "create an
 Environment and deploy to it from GitHub Actions" — work from a **locked-down
 enterprise tenant** (e.g. Microsoft Corpnet) where the naive happy path fails with a
@@ -33,19 +33,19 @@ map; that one is the *forensic* map.
 
 ## Terms and definitions
 
-| Term | Plain-English meaning |
-| --- | --- |
-| **OIDC (OpenID Connect)** | An identity layer on top of OAuth 2.0. Here it lets one system (GitHub Actions) prove "who is running" to another system (Azure/AWS) with a short-lived, signed token instead of a stored password. |
-| **Entra ID** | Microsoft's identity platform, formerly Azure Active Directory (Azure AD). |
-| **App registration** | An identity object in Entra ID — "a username for a robot." Globally defines an application and its allowed sign-in methods. Has a **client ID** (`AZURE_CLIENT_ID`). |
-| **Service principal** | The *local instance* of an app registration inside a specific tenant. You assign roles (Contributor, etc.) to the service principal, not to the global app. |
-| **Enterprise application** | The Entra portal's name for the service principal side of an app registration. When we say "we create the enterprise application," we mean the app registration **plus** its service principal presence in the tenant. |
-| **Federated Identity Credential (FIC)** | A trust rule on an app registration: *"accept a token from issuer `X` whose `subject` claim equals this exact string."* No secret involved. This is what makes secret-less OIDC deploys possible. |
-| **Subject (`sub`) claim** | The part of GitHub's OIDC token that describes the run: which repo, branch, or environment. The FIC's stored subject must match it **byte-for-byte**. |
-| **Service Management Reference (SMR)** | A governance identifier stamped on an app registration (Entra property `serviceManagementReference`) that links the robot identity back to an internal service catalog / CMDB, so security teams know who owns every app. At **Microsoft** this GUID is a **Service Tree ID**, but SMR is a generic Entra field: any enterprise can enforce *"every new app registration must carry one"* via tenant policy — a pattern already common in banks, government, and healthcare, and one we expect to **spread** as more orgs formalize identity governance. When the policy is on, `az ad app create` fails with `ServiceManagementReference field is required` unless the value is supplied. This is not novel to Radius: **Aspire's Azure path had to solve the exact same problem.** Aspire delegates its Azure identity/pipeline plumbing to the **`azd` CLI** (`Azure/azure-dev`, MIT-licensed), which added a first-class `-m, --applicationServiceManagementReference` flag (plus the `pipeline.config.applicationServiceManagementReference` config key) and re-prompts/retries on the Service-Tree policy error instead of surfacing a raw Graph error (azd CHANGELOG [#4049](https://github.com/Azure/azure-dev/pull/4049)). Radius mirrors that approach — see [§C.3](#c3-adapterscanvassrcazure-oidcmjs--azure-decision-logic). |
-| **Workload identity** | The runtime, pod-side counterpart to CI OIDC. After deployment, the Radius control-plane pods authenticate to the target cluster/cloud by presenting a **projected, auto-rotated OIDC token** (mounted as `AZURE_FEDERATED_TOKEN_FILE`), not a stored secret — validated against a FIC just like the CI runner's token. See the [AKS vs AKS Automatic note](#a-note-on-aks-vs-aks-automatic) for how this differs from *cluster access*. |
-| **GHCR** | GitHub Container Registry (`ghcr.io`). Radius stores per-environment control-plane **state** as a private OCI package here. |
-| **EMU** | Enterprise Managed User — a GitHub account fully managed by an enterprise. EMU accounts often **cannot** access resources (like public GHCR content) that a personal account can, which is central to the multi-account handling below. |
+| Term                                    | Plain-English meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **OIDC (OpenID Connect)**               | An identity layer on top of OAuth 2.0. Here it lets one system (GitHub Actions) prove "who is running" to another system (Azure/AWS) with a short-lived, signed token instead of a stored password.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Entra ID**                            | Microsoft's identity platform, formerly Azure Active Directory (Azure AD).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **App registration**                    | An identity object in Entra ID — "a username for a robot." Globally defines an application and its allowed sign-in methods. Has a **client ID** (`AZURE_CLIENT_ID`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Service principal**                   | The *local instance* of an app registration inside a specific tenant. You assign roles (Contributor, etc.) to the service principal, not to the global app.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Enterprise application**              | The Entra portal's name for the service principal side of an app registration. When we say "we create the enterprise application," we mean the app registration **plus** its service principal presence in the tenant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Federated Identity Credential (FIC)** | A trust rule on an app registration: *"accept a token from issuer `X` whose `subject` claim equals this exact string."* No secret involved. This is what makes secret-less OIDC deploys possible.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **Subject (`sub`) claim**               | The part of GitHub's OIDC token that describes the run: which repo, branch, or environment. The FIC's stored subject must match it **byte-for-byte**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **Service Management Reference (SMR)**  | A governance identifier stamped on an app registration (Entra property `serviceManagementReference`) that links the robot identity back to an internal service catalog / CMDB, so security teams know who owns every app. At **Microsoft** this GUID is a **Service Tree ID**, but SMR is a generic Entra field: any enterprise can enforce *"every new app registration must carry one"* via tenant policy — a pattern already common in banks, government, and healthcare, and one we expect to **spread** as more orgs formalize identity governance. When the policy is on, `az ad app create` fails with `ServiceManagementReference field is required` unless the value is supplied. This is not novel to Radius: **Aspire's Azure path had to solve the exact same problem.** Aspire delegates its Azure identity/pipeline plumbing to the **`azd` CLI** (`Azure/azure-dev`, MIT-licensed), which added a first-class `-m, --applicationServiceManagementReference` flag (plus the `pipeline.config.applicationServiceManagementReference` config key) and re-prompts/retries on the Service-Tree policy error instead of surfacing a raw Graph error (azd CHANGELOG [#4049](https://github.com/Azure/azure-dev/pull/4049)). Radius mirrors that approach — see §C.3. |
+| **Workload identity**                   | The runtime, pod-side counterpart to CI OIDC. After deployment, the Radius control-plane pods authenticate to the target cluster/cloud by presenting a **projected, auto-rotated OIDC token** (mounted as `AZURE_FEDERATED_TOKEN_FILE`), not a stored secret — validated against a FIC just like the CI runner's token. See the [AKS vs AKS Automatic note](#a-note-on-aks-vs-aks-automatic) for how this differs from *cluster access*.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **GHCR**                                | GitHub Container Registry (`ghcr.io`). Radius stores per-environment control-plane **state** as a private OCI package here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **EMU**                                 | Enterprise Managed User — a GitHub account fully managed by an enterprise. EMU accounts often **cannot** access resources (like public GHCR content) that a personal account can, which is central to the multi-account handling below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ## Scope
 
@@ -57,7 +57,7 @@ implement each capability, so the large diff reads as intentional.
 Out of scope: re-deriving every enterprise error (the companion forensic write-up in
 [References](#references) does that), the AKS Automatic deploy-time `kubelogin` gap (a
 separate `radius-project/radius` deploy-pipeline issue, beyond the credential-setup
-RBAC assignment noted in [§C.5](#c5-servermjs-apiazure-auto-setup--the-orchestrator)),
+RBAC assignment noted in [§C.5](#c5-serverts-apiazure-auto-setup--the-orchestrator)),
 and deep AWS parity (AWS OIDC is covered conceptually for contrast; the enterprise-
 policy hardening is concentrated on the Azure path).
 
@@ -113,7 +113,7 @@ Three Entra objects, three jobs:
 The deploy works **only if the FIC's stored subject equals the `sub` GitHub actually
 mints.** One character off and Azure returns
 `AADSTS700213: No matching federated identity record found`. This single fact drives
-the most subtle code in the PR (see [§C.1](#c1-radius-coresrcplatformsoidc-subjectts--the-heart-of-the-fix)).
+the most subtle code in the PR (see [§C.1](#c1-packagescoresrcplatformsoidc-subjectts--the-heart-of-the-fix)).
 
 ### A.3 Why the subject string is not a constant
 
@@ -136,7 +136,7 @@ AWS expresses the same pattern with different nouns: an **IAM OIDC identity
 provider** for `token.actions.githubusercontent.com`, and an **IAM role** whose
 **trust policy** conditions on the token's `sub`/`aud`. The workflow calls
 `AssumeRoleWithWebIdentity` and gets short-lived credentials. The Radius credential
-profile stores only the **role ARN** (see `shared.mjs`), never a secret. The canvas
+profile stores only the **role ARN** (see `shared.ts`), never a secret. The canvas
 supports both providers; the enterprise-policy hardening is concentrated on Azure
 because that is where app-registration governance and immutable subjects bite.
 
@@ -178,13 +178,13 @@ side of the connection.
 
 ## Part C — The components and how they changed
 
-The change set splits cleanly into a **pure platform layer** (`radius-core`,
+The change set splits cleanly into a **pure platform layer** (`packages/core`,
 provider-agnostic, no I/O, heavily unit-tested) and the **canvas adapter**
-(`adapters/canvas`, the HTTP server + UI that performs the I/O). This separation is
+(`packages/adapter-canvas`, the HTTP server + UI that performs the I/O). This separation is
 deliberate: the tricky identity logic lives in pure functions that are trivial to
 test, and the adapter wires them to `az`, `gh`, and the browser.
 
-### C.1 `radius-core/src/platforms/oidc-subject.ts` — the heart of the fix
+### C.1 `packages/core/src/platforms/oidc-subject.ts` — the heart of the fix
 
 New pure module. Turns "read, don't assume" into code:
 
@@ -201,13 +201,13 @@ New pure module. Turns "read, don't assume" into code:
 This module is why deploy-time login stops failing with `AADSTS700213`. It has a
 dedicated 407-line test file (`oidc-subject_test.ts`).
 
-### C.2 `radius-core/src/platforms/azure.ts`
+### C.2 `packages/core/src/platforms/azure.ts`
 
 Platform wiring that consumes the subject builder and exposes the Azure platform's
 OIDC surface to the adapter (re-exported via `platforms/index.ts` and the package
 `index.ts`). Keeps provider specifics out of the canvas server.
 
-### C.3 `adapters/canvas/src/azure-oidc.mjs` — Azure decision logic
+### C.3 `packages/adapter-canvas/src/azure-oidc.ts` — Azure decision logic
 
 New adapter module holding the *pure* Azure setup decisions (so they're testable
 without hitting `az`), 697 lines of tests alongside:
@@ -229,7 +229,7 @@ without hitting `az`), 697 lines of tests alongside:
 - **Fail-closed 404 detection.** `isAzResourceNotFound` matches only Graph 404
   markers, so a transient error is never mistaken for "resource absent."
 
-### C.4 `adapters/canvas/src/gh.mjs` — GitHub identity & multiple accounts
+### C.4 `packages/adapter-canvas/src/gh.ts` — GitHub identity & multiple accounts
 
 This is the "which GitHub account are we acting as?" capability. On an enterprise
 machine this was the source of a whole *cluster* of confusing, seemingly unrelated
@@ -270,9 +270,9 @@ testable:
   what stops the EMU "you cannot access this content" 403 when bootstrapping the
   private state package.
 
-### C.5 `server.mjs` `/api/azure-auto-setup` — the orchestrator
+### C.5 `server.ts` `/api/azure-auto-setup` — the orchestrator
 
-The largest single change (server.mjs grew ~784 lines). The `/api/azure-auto-setup`
+The largest single change (`server.ts` grew ~784 lines). The `/api/azure-auto-setup`
 handler is the end-to-end Azure setup sequence, in order: validate inputs → resolve
 the acting GitHub identity → resolve/create the app registration (owned-first) →
 create the missing FICs with the *correct* subjects → assign **Contributor** on the
@@ -289,17 +289,17 @@ cross-cutting fix strips `COPILOT_AGENT_SESSION_ID` from every child CLI so Azur
 CLI's "agentic session" tagging doesn't trigger `AADSTS901001` in locked-down
 tenants.
 
-### C.6 `pages.mjs` — the four-step UI
+### C.6 `pages.ts` — the four-step UI
 
 The Create Environment dialog was restructured into four numbered steps (see
-[Part D](#part-d--the-ui-redesign-and-its-rationale)). `pages.mjs` also holds the
+[Part D](#part-d--the-ui-redesign-and-its-rationale)). `pages.ts` also holds the
 owned-app picker, the opt-in "shared identity" pin, the acting-account switcher, and
 the provider-aware profile detail. Note the **client-script constraint** captured by
 a regression test: the client `<script>` is emitted inside a template literal, so an
 escaped apostrophe (`\'`) un-escapes to a raw `'` and halts page init — a `vm.Script`
 guard test now compiles every emitted script block.
 
-### C.7 `shared.mjs` — credential profiles
+### C.7 `shared.ts` — credential profiles
 
 A credential profile is a named, verified identity → cloud destination binding
 (`name, provider, user, tenantId, tenantName, subscriptionId, subscriptionName,
@@ -338,16 +338,16 @@ the user can't diagnose.
 A one-line index from "symptom" to "where it's handled." The full analysis is in the
 companion write-up ([References](#references)).
 
-| Symptom (enterprise) | Handled in |
-| --- | --- |
-| `AADSTS901001` (agentic-session client_session) | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.mjs`, `gh.mjs`) |
-| `ServiceManagementReference field is required` | `buildAppCreateArgs` + SMR detection (`azure-oidc.mjs`), UI prompt (`pages.mjs`) |
-| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.mjs`) |
-| `AADSTS700213` (subject mismatch) | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`) |
-| Wrong GitHub account acting | `decideGhTokenStrategy` + account switcher (`gh.mjs`, `pages.mjs`, `server.mjs`) |
-| App-registration sprawl / collisions | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.mjs`) |
-| Bare `404` from GitHub preflight | repo access + admin preflight (`server.mjs`) |
-| AKS Automatic data-plane `Forbidden` | AKS RBAC Cluster Admin assignment (`server.mjs`) |
+| Symptom (enterprise)                               | Handled in                                                                     |
+|----------------------------------------------------|--------------------------------------------------------------------------------|
+| `AADSTS901001` (agentic-session client_session)    | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.ts`, `gh.ts`)     |
+| `ServiceManagementReference field is required`     | `buildAppCreateArgs` + SMR detection (`azure-oidc.ts`), UI prompt (`pages.ts`) |
+| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.ts`)            |
+| `AADSTS700213` (subject mismatch)                  | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`) |
+| Wrong GitHub account acting                        | `decideGhTokenStrategy` + account switcher (`gh.ts`, `pages.ts`, `server.ts`)  |
+| App-registration sprawl / collisions               | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.ts`)                 |
+| Bare `404` from GitHub preflight                   | repo access + admin preflight (`server.ts`)                                    |
+| AKS Automatic data-plane `Forbidden`               | AKS RBAC Cluster Admin assignment (`server.ts`)                                |
 
 ### A note on AKS vs AKS Automatic
 
@@ -375,13 +375,13 @@ this door is what broke the deploy.
 *not* workload identity; it is simply how a client reaches the Kubernetes API. Here
 AKS Automatic is much stricter:
 
-| What matters | Standard AKS (defaults) | AKS Automatic |
-| --- | --- | --- |
-| Local admin accounts | Available (`get-credentials --admin` → cert kubeconfig) | **Disabled** |
-| Who you sign in as | Local or optional Entra | **Entra required** |
-| Who decides what you can do | Kubernetes RBAC | **Azure RBAC for Kubernetes** |
-| What the kubeconfig looks like | Often a simple cert, no plugin | **Needs the `kubelogin` exec plugin** |
-| Must run `kubelogin convert-kubeconfig`? | Only if Entra is enabled | **Always** (`-l azurecli` on the runner, `-l workloadidentity` in the pod) |
+| What matters                             | Standard AKS (defaults)                                 | AKS Automatic                                                              |
+|------------------------------------------|---------------------------------------------------------|----------------------------------------------------------------------------|
+| Local admin accounts                     | Available (`get-credentials --admin` → cert kubeconfig) | **Disabled**                                                               |
+| Who you sign in as                       | Local or optional Entra                                 | **Entra required**                                                         |
+| Who decides what you can do              | Kubernetes RBAC                                         | **Azure RBAC for Kubernetes**                                              |
+| What the kubeconfig looks like           | Often a simple cert, no plugin                          | **Needs the `kubelogin` exec plugin**                                      |
+| Must run `kubelogin convert-kubeconfig`? | Only if Entra is enabled                                | **Always** (`-l azurecli` on the runner, `-l workloadidentity` in the pod) |
 
 In plain terms: on **standard AKS** a deploy often "just works," because it can fall
 back to a built-in admin certificate and never touch `kubelogin`. On **AKS
@@ -393,7 +393,7 @@ plugin, and the deploy pipeline does not install or convert it yet. That is the
 **So where does this PR fit?** It fixes a *different* half of Door 2. AKS Automatic
 also requires an **Azure RBAC** role to authorize the identity (otherwise you get a
 `Forbidden`), and the credential-setup step in
-[§C.5](#c5-servermjs-apiazure-auto-setup--the-orchestrator) assigns exactly that
+[§C.5](#c5-serverts-apiazure-auto-setup--the-orchestrator) assigns exactly that
 role. The missing `kubelogin` **binary** is the separate, still-open gap in #12550 —
 adjacent to this work, but not part of it.
 
@@ -401,16 +401,16 @@ adjacent to this work, but not part of it.
 
 Suggested reading order for the diff:
 
-1. `radius-core/src/platforms/oidc-subject.ts` + `oidc-subject_test.ts` — the pure
+1. `packages/core/src/platforms/oidc-subject.ts` + `oidc-subject_test.ts` — the pure
    core of the correctness fix. Understand this and the rest follows.
-2. `adapters/canvas/src/azure-oidc.mjs` + `azure-oidc_test.mjs` — the pure Azure
+2. `packages/adapter-canvas/src/azure-oidc.ts` + `azure-oidc.test.ts` — the pure Azure
    decisions (app selection, SMR, FIC dedup, validation).
-3. `adapters/canvas/src/gh.mjs` + `gh_test.mjs` — multi-account identity and GHCR
+3. `packages/adapter-canvas/src/gh.ts` + `gh.test.ts` — multi-account identity and GHCR
    credential pinning; focus on `decideGhTokenStrategy`.
-4. `adapters/canvas/src/server.mjs` — `/api/azure-auto-setup` as the orchestration
+4. `packages/adapter-canvas/src/server.ts` — `/api/azure-auto-setup` as the orchestration
    spine that composes the above.
-5. `adapters/canvas/src/pages.mjs` — the four-step UI and its client-script guard.
-6. `shared.mjs` / `deploy.mjs` — credential-profile persistence and the deploy path.
+5. `packages/adapter-canvas/src/pages.ts` — the four-step UI and its client-script guard.
+6. `shared.ts` / `deploy.ts` — credential-profile persistence and the deploy path.
 
 The pure modules (1–3) carry the bulk of the test coverage precisely because they
 hold the tricky logic; the adapter is intentionally thin glue over them.

@@ -5,10 +5,10 @@ How the `radius` Copilot plugin is laid out, how its canvas bundle is built from
 ```mermaid
 graph TD
     subgraph Workspace["pnpm workspace (source, tracked)"]
-        Core["radius-core<br/>@radius-project/core (src/*.ts)"]
-        Shared["adapters/shared<br/>@radius-project/shared"]
-        Canvas["adapters/canvas<br/>@radius-project/canvas (src/*.mjs)"]
-        Build["adapters/canvas/build.mjs<br/>(esbuild)"]
+        Core["packages/core<br/>@radius-project/core (src/*.ts)"]
+        Shared["packages/adapter-shared<br/>@radius-project/shared"]
+        Canvas["packages/adapter-canvas<br/>@radius-project/canvas (src/*.ts)"]
+        Build["packages/adapter-canvas/build.mjs<br/>(esbuild)"]
     end
 
     subgraph PluginDir["plugins/radius (the plugin)"]
@@ -26,10 +26,10 @@ graph TD
 
 ## Key components
 
-- **`radius-core` (`@radius-project/core`)** — UI-agnostic product logic behind ports. `private`, `main: src/index.ts` (consumed as TypeScript source, not a published package).
-- **`adapters/shared` (`@radius-project/shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
-- **`adapters/canvas` (`@radius-project/canvas`)** — the canvas adapter whose entry `src/extension.mjs` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
-- **`adapters/canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file.
+- **`packages/core` (`@radius-project/core`)** — UI-agnostic product logic behind ports. `private`, `main: src/index.ts` (consumed as TypeScript source, not a published package).
+- **`packages/adapter-shared` (`@radius-project/shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
+- **`packages/adapter-canvas` (`@radius-project/canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
+- **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file.
 - **`plugins/radius/`** — the plugin that Copilot installs. Contains the tracked `plugin.json`, `package.json`, `README.md`, and `skills/`, plus the generated `extension.mjs`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at the plugin.
 - **`.github/workflows/publish.yml`** — the CI workflow that builds the bundle and publishes the whole plugin to the `release` branch.
@@ -38,7 +38,7 @@ graph TD
 
 ### 1. The plugin layout: tracked source vs. generated bundle
 
-The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace.yaml` lists `radius-core` and `adapters/*`). All three workspace packages are `private`; the canvas adapter pulls in the core and shared packages through the `workspace:*` protocol rather than from a registry.
+The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace.yaml` lists `packages/*` and `plugins/*`). All three workspace packages are `private`; the canvas adapter pulls in the core and shared packages through the `workspace:*` protocol rather than from a registry.
 
 The installable plugin lives at `plugins/radius/`. Everything there is committed **except** the canvas bundle:
 
@@ -54,9 +54,9 @@ Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and
 
 ### 2. The build: bundling the workspace into one file
 
-`pnpm run build` runs `node adapters/canvas/build.mjs`, which invokes esbuild with:
+`pnpm run build` delegates to `packages/adapter-canvas/build.mjs`, which invokes esbuild with:
 
-- **entry** `adapters/canvas/src/extension.mjs`,
+- **entry** `packages/adapter-canvas/src/extension.ts`,
 - **outfile** `plugins/radius/extension.mjs`,
 - **format** `esm`, and
 - **external** `@github/copilot-sdk` (and `/extension`) — the loader resolves the SDK at runtime, so it is never bundled.

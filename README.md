@@ -60,7 +60,7 @@ into three areas:
   Radius provisions the cloud infrastructure the application needs and runs it
   through the generated GitHub Actions workflow.
 
-The product logic is UI-agnostic and lives in a shared core (`radius-core`), so
+The product logic is UI-agnostic and lives in a shared core (`packages/core`), so
 the same modeling, graph, platform, and workflow-generation logic can back
 additional UI surfaces beyond the Copilot canvas in the future.
 
@@ -83,13 +83,13 @@ actions and tools:
 ## Architecture
 
 This is a [pnpm](https://pnpm.io/) workspace monorepo. UI-agnostic product logic
-lives in a shared core (`radius-core`), and the Copilot canvas adapter
-(`adapters/canvas`) wires it into the GitHub Copilot app. The core never depends
+lives in a shared core (`packages/core`), and the Copilot canvas adapter
+(`packages/adapter-canvas`) wires it into the GitHub Copilot app. The core never depends
 on an adapter, the Copilot SDK, HTTP, or the DOM; anything that touches the
 outside world goes through a **port**, which keeps the same logic reusable
 across future UI surfaces.
 
-See [`radius-core/README.md`](./radius-core/README.md) for the full architecture
+See [`packages/core/README.md`](./packages/core/README.md) for the full architecture
 and extension guides, and [Contributing](./CONTRIBUTING.md) for the repository
 layout and development workflow.
 

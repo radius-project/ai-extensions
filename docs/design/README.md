@@ -6,8 +6,8 @@ This folder holds **design docs** (design notes / proposals) for the `radius-pro
 
 Write one for larger changes, such as:
 
-- A new capability or a significant change to an existing one (for example, a new canvas page/action, a new compute platform in `radius-core`, or a change to how the plugin is packaged and shipped).
-- A change that affects a public contract: a canvas action/tool surface, the plugin manifest, the marketplace entry, or an API in `radius-core`.
+- A new capability or a significant change to an existing one (for example, a new canvas page/action, a new compute platform in `packages/core`, or a change to how the plugin is packaged and shipped).
+- A change that affects a public contract: a canvas action/tool surface, the plugin manifest, the marketplace entry, or an API in `packages/core`.
 - A change with meaningful security, compatibility, or cross-component impact.
 
 You do **not** need a design doc for minor changes such as documentation updates, small bug fixes, or refactors with no behavioral change — use a GitHub issue and pull request instead.

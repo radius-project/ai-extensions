@@ -24,9 +24,9 @@ On the canvas side the state registry is recomputed with `stateRegistryForEnviro
 
 ## Read path
 
-`createDeployStatusReader` in [`adapters/canvas/src/deploy.mjs`](../../adapters/canvas/src/deploy.mjs) is GHCR-first with a transparent branch fallback:
+`createDeployStatusReader` in [`packages/adapter-canvas/src/deploy.ts`](../../packages/adapter-canvas/src/deploy.ts) is GHCR-first with a transparent branch fallback:
 
-1. Pull the OCI artifact (`pullOciArtifactFiles` in [`adapters/canvas/src/ghcr.mjs`](../../adapters/canvas/src/ghcr.mjs)) using the stored `gh` CLI credential, cached per short TTL with single-flight de-duplication.
+1. Pull the OCI artifact (`pullOciArtifactFiles` in [`packages/adapter-canvas/src/ghcr.ts`](../../packages/adapter-canvas/src/ghcr.ts)) using the stored `gh` CLI credential, cached per short TTL with single-flight de-duplication.
 2. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `unconfigured`.
 3. When the artifact is unavailable for any reason, read `deploy-graph.json` from the `radius-deploy-status` branch instead.
 

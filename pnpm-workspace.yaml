@@ -1,3 +1,13 @@
 packages:
-  - radius-core
-  - adapters/*
+  - packages/*
+  - plugins/*
+
+catalog:
+  # Keep in sync with the pinned "@github/copilot-sdk" version in
+  # plugins/radius/package.json. That manifest ships to users without this
+  # file, so it must declare a literal version rather than "catalog:".
+  "@github/copilot-sdk": 1.0.8
+  "@types/node": ^26.1.1
+  "@vitest/coverage-v8": ^4.1.10
+  typescript: ^7.0.2
+  vitest: ^4.1.10

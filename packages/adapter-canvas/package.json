@@ -1,0 +1,29 @@
+{
+  "name": "@radius-project/canvas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Copilot canvas adapter for the Radius Canvas product. Builds to the single runtime-loadable extension.mjs that the canvas loader runs.",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:install": "node build.mjs --install",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "watch": "node build.mjs --watch",
+    "watch:dev": "node build.mjs --watch --install",
+    "lint": "eslint \"src/**/*.ts\" vitest.config.ts build.mjs"
+  },
+  "dependencies": {
+    "@radius-project/core": "workspace:*",
+    "@radius-project/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@github/copilot-sdk": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "esbuild": "^0.28.1",
+    "vitest": "catalog:"
+  }
+}

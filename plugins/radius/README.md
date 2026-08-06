@@ -57,7 +57,7 @@ deploy my app
 ## Development
 
 The canvas extension is produced from TypeScript source in the repository root
-(`radius-core/` + `adapters/canvas/`) via esbuild:
+(`packages/core/` + `packages/adapter-canvas/`) via esbuild:
 
 ```bash
 pnpm install
@@ -65,5 +65,5 @@ pnpm build        # bundles -> plugins/radius/extension.mjs
 ```
 
 See the repository [`README.md`](../../README.md) and
-[`radius-core/README.md`](../../radius-core/README.md) for architecture and
+[`packages/core/README.md`](../../packages/core/README.md) for architecture and
 extension recipes.

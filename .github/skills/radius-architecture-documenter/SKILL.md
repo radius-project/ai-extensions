@@ -21,7 +21,7 @@ Architecture docs are descriptive and have no approval gate. Design docs are dec
 ## When to Use
 
 - Generate a high-level architecture overview of the system or a subsystem.
-- Produce component diagrams showing how `radius-core`, the adapters, and the plugin relate.
+- Produce component diagrams showing how `packages/core`, the adapters, and the plugin relate.
 - Create sequence diagrams that are true-to-code (reflect actual call chains).
 - Explain how a subsystem works in plain language (for example, how canvas pages call into the core through ports).
 - Answer questions about the existing architecture.
@@ -52,7 +52,7 @@ Determine what the user wants documented:
 
 This is the most critical step. **Do not generate diagrams from memory or assumptions.**
 
-1. **Identify entry points**: Find the canvas entry (`adapters/canvas/src/extension.mjs`), the plugin manifest (`plugins/radius/plugin.json`), the core's public API (`radius-core/src/index.ts`), and any relevant skill under `plugins/radius/skills/`.
+1. **Identify entry points**: Find the canvas entry (`packages/adapter-canvas/src/extension.ts`), the plugin manifest (`plugins/radius/plugin.json`), the core's public API (`packages/core/src/index.ts`), and any relevant skill under `plugins/radius/skills/`.
 2. **Trace the call chain**: Follow calls from a canvas page or action into the shared core through its ports, and out to the outside world through adapters.
 3. **Map the workspace**: Understand how the pnpm workspace packages relate (`pnpm-workspace.yaml`, each `package.json`, `workspace:*` dependencies).
 4. **Identify key types**: Find the core ports, models, and functions that define the boundary between UI-agnostic logic and adapter code.
@@ -60,11 +60,11 @@ This is the most critical step. **Do not generate diagrams from memory or assump
 
 #### Repo-Specific Investigation Techniques
 
-- **Respect the core boundary**: `radius-core` must not depend on an adapter, the Copilot SDK, HTTP, or the DOM. Anything touching the outside world goes through a **port**. When documenting a flow, show where it crosses that boundary.
-- **Find port implementations**: A port is defined in `radius-core` and implemented in an adapter (`adapters/canvas`, `adapters/shared`). Search for the port name across `adapters/` to find its concrete implementation.
-- **Follow canvas registration**: Start at `adapters/canvas/src/extension.mjs` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages.mjs`), the server (`server.mjs`), and actions are wired.
-- **Understand packaging**: `adapters/canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into a single `plugins/radius/extension.mjs`. Note what is source vs. generated when documenting the build.
-- **Read test files**: `*_test.mjs` files (for example, `ghcr_test.mjs`, `rad_test.mjs`) reveal expected behavior and interaction patterns.
+- **Respect the core boundary**: `packages/core` must not depend on an adapter, the Copilot SDK, HTTP, or the DOM. Anything touching the outside world goes through a **port**. When documenting a flow, show where it crosses that boundary.
+- **Find port implementations**: A port is defined in `packages/core` and implemented in an adapter (`packages/adapter-canvas`, `packages/adapter-shared`). Search for the port name across `packages/adapter-*` to find its concrete implementation.
+- **Follow canvas registration**: Start at `packages/adapter-canvas/src/extension.ts` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages.ts`), the server (`server.ts`), and actions are wired.
+- **Understand packaging**: `packages/adapter-canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into a single `plugins/radius/extension.mjs`. Note what is source vs. generated when documenting the build.
+- **Read test files**: `*_test.ts` and `*.test.ts` files (for example, `appgraph_test.ts`, `rad.test.ts`) reveal expected behavior and interaction patterns.
 
 ### Step 3: Generate the Diagram
 
@@ -85,7 +85,7 @@ Choose the appropriate Mermaid diagram type. See [Mermaid Diagram Reference](./r
 - [ ] Relationships reflect actual code dependencies (imports, function calls, port implementations).
 - [ ] Labels use the actual names from the codebase (package names, module file names, function names).
 - [ ] The diagram is not overcrowded — split into multiple diagrams if >15 nodes.
-- [ ] Subgraphs group related components (for example, `radius-core` vs. `adapters/canvas` vs. `plugins/radius`).
+- [ ] Subgraphs group related components (for example, `packages/core` vs. `packages/adapter-canvas` vs. `plugins/radius`).
 - [ ] Arrow labels describe the nature of the relationship (for example, "implements port", "calls", "bundles").
 
 ### Step 4: Write the Explanation
@@ -115,13 +115,13 @@ This is a [pnpm](https://pnpm.io/) workspace monorepo written in TypeScript and 
 
 ### High-Level Components
 
-| Component         | Location                    | Purpose                                                                                                           |
-|-------------------|-----------------------------|-------------------------------------------------------------------------------------------------------------------|
-| Core              | `radius-core/`              | UI-agnostic product logic: modeling, application graph, platform, and workflow generation, exposed through ports. |
-| Canvas adapter    | `adapters/canvas/`          | Wires the core into the GitHub Copilot app as the `radius` canvas extension (pages, server, actions).             |
-| Shared adapter    | `adapters/shared/`          | Shared adapter utilities (for example, `rad` CLI invocation) used across surfaces.                                |
-| Plugin            | `plugins/radius/`           | The published Copilot plugin: `plugin.json` manifest, `skills/`, and the built `extension.mjs` canvas.            |
-| Build / packaging | `adapters/canvas/build.mjs` | esbuild step that bundles the adapter + core into `plugins/radius/extension.mjs`.                                 |
+| Component         | Location                            | Purpose                                                                                                           |
+|-------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Core              | `packages/core/`                    | UI-agnostic product logic: modeling, application graph, platform, and workflow generation, exposed through ports. |
+| Canvas adapter    | `packages/adapter-canvas/`          | Wires the core into the GitHub Copilot app as the `radius` canvas extension (pages, server, actions).             |
+| Shared adapter    | `packages/adapter-shared/`          | Shared adapter utilities (for example, `rad` CLI invocation) used across surfaces.                                |
+| Plugin            | `plugins/radius/`                   | The published Copilot plugin: `plugin.json` manifest, `skills/`, and the built `extension.mjs` canvas.            |
+| Build / packaging | `packages/adapter-canvas/build.mjs` | esbuild step that bundles the adapter + core into `plugins/radius/extension.mjs`.                                 |
 
 ### Key Modules in the Canvas Adapter
 

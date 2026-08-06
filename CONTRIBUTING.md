@@ -25,7 +25,7 @@ fixes, features) as long as they follow a few guidelines:
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) `>= 18`
+- [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
 - [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
 
 ## Repository layout
@@ -33,22 +33,22 @@ fixes, features) as long as they follow a few guidelines:
 This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 `@radius-project` scope.
 
-| Path               | npm name                 | Responsibility                                                                     |
-| ------------------ | ------------------------ | ---------------------------------------------------------------------------------- |
-| `radius-core/`     | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.       |
-| `adapters/shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).            |
-| `adapters/canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview.    |
+| Path                       | npm name                 | Responsibility                                                                  |
+|----------------------------|--------------------------|---------------------------------------------------------------------------------|
+| `packages/core/`           | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
+| `packages/adapter-shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
+| `packages/adapter-canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
 
 ### The dependency rule
 
-`radius-core` never imports from an adapter, the Copilot SDK, `node:http`, or the
+`packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
 DOM. Anything that touches the outside world goes through a **port**
-(`radius-core/src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`,
+(`packages/core/src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`,
 `Logger`. Adapters depend on the core, supply port implementations, and own all
 UI/transport concerns. This keeps the product logic testable in isolation and
 makes adding a second UI a thin layer rather than a fork.
 
-See [`radius-core/README.md`](./radius-core/README.md) for the architecture and
+See [`packages/core/README.md`](./packages/core/README.md) for the architecture and
 step-by-step guides for the three most common changes: **adding a compute
 platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
@@ -82,23 +82,24 @@ pnpm typecheck       # typecheck core + shared + canvas
 
 ## Testing
 
-Tests live in `radius-core` and run with [Vitest](https://vitest.dev/).
+Tests live across the workspace packages and run together through the root [Vitest](https://vitest.dev/) projects configuration.
 
 ```bash
-pnpm -C radius-core test           # run all core tests once
-pnpm -C radius-core test:watch     # run tests in watch mode
+pnpm test              # run every workspace test project once
+pnpm test:watch        # run every workspace test project in watch mode
+pnpm coverage          # run every project with unified V8 coverage
 ```
 
 Run a single test file:
 
 ```bash
-pnpm -C radius-core test -- src/graph/diff_test.ts
+pnpm test -- packages/core/src/graph/diff_test.ts
 ```
 
 ## Before you open a pull request
 
 1. `pnpm typecheck` passes.
-2. `pnpm -C radius-core test` passes (add or update tests for behavior changes).
+2. `pnpm test` passes across all projects (add or update tests for behavior changes).
 3. `pnpm build` succeeds.
 4. Add a changeset describing your change (see below).
 5. Fill out the [pull request template](./.github/pull_request_template.md).
@@ -128,7 +129,7 @@ project.
 Contributors sign off that they adhere to these requirements by adding a
 `Signed-off-by` line to commit messages.
 
-```
+```text
 This is my commit message
 
 Signed-off-by: Random J Developer <random@developer.example.org>
