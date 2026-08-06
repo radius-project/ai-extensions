@@ -1,5 +1,5 @@
 ---
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Fix Radius canvas deploy and environment-page issues:

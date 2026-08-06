@@ -20,7 +20,7 @@ import {
   ensureRadBinary,
   runRadBicepPublishExtension,
   runRadBicepPublish
-} from "@radius-project/shared";
+} from "@radius-project/adapter-shared";
 import { github } from "./gh.js";
 import {
   defaultBranchForState,
@@ -1398,7 +1398,7 @@ When planned graph resolution cannot resolve a resource type, distinguish two ca
 // (fire-and-forget) keeps that work off the hot path of most graph builds.
 // If the warm-up has not finished yet (or no binary exists), the first graph
 // build may still await ensureRadBinary() as a fallback.
-// @radius-project/shared, shared because the canvas server runs in-process).
+// @radius-project/adapter-shared, shared because the canvas server runs in-process).
 ensureRadBinary({
   log: (m) => {
     try {

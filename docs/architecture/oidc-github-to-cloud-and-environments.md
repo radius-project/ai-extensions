@@ -199,7 +199,7 @@ New pure module. Turns "read, don't assume" into code:
   trailing `environment:<name>` part and a collision-safe FIC name.
 
 This module is why deploy-time login stops failing with `AADSTS700213`. It has a
-dedicated 407-line test file (`oidc-subject_test.ts`).
+dedicated 407-line test file (`oidc-subject.test.ts`).
 
 ### C.2 `packages/core/src/platforms/azure.ts`
 
@@ -401,7 +401,7 @@ adjacent to this work, but not part of it.
 
 Suggested reading order for the diff:
 
-1. `packages/core/src/platforms/oidc-subject.ts` + `oidc-subject_test.ts` — the pure
+1. `packages/core/src/platforms/oidc-subject.ts` + `oidc-subject.test.ts` — the pure
    core of the correctness fix. Understand this and the rest follows.
 2. `packages/adapter-canvas/src/azure-oidc.ts` + `azure-oidc.test.ts` — the pure Azure
    decisions (app selection, SMR, FIC dedup, validation).

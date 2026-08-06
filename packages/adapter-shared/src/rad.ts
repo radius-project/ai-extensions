@@ -11,7 +11,7 @@
 //
 // It is adapter-agnostic: it takes an injected `log` and has no knowledge of
 // any specific adapter (canvas, GitHub, etc). Adapters import it from
-// `@radius-project/shared`.
+// `@radius-project/adapter-shared`.
 //
 // Gotchas honored here:
 //   - NEVER use console.log — an adapter's stdout may be a JSON-RPC channel.
@@ -1120,7 +1120,8 @@ export async function runRadBicepPublishExtension({
     return to;
   } catch (err) {
     throw new Error(
-      `rad bicep publish-extension failed: ${radErrorDetail(err)}`
+      `rad bicep publish-extension failed: ${radErrorDetail(err)}`,
+      { cause: err }
     );
   }
 }
@@ -1152,7 +1153,9 @@ export async function runRadBicepPublish({
     });
     return target;
   } catch (err) {
-    throw new Error(`rad bicep publish failed: ${radErrorDetail(err)}`);
+    throw new Error(`rad bicep publish failed: ${radErrorDetail(err)}`, {
+      cause: err
+    });
   }
 }
 
@@ -1329,7 +1332,9 @@ export async function runRadAppGraph(
     }
     return JSON.parse(raw);
   } catch (err) {
-    throw new Error(`rad app graph failed: ${radErrorDetail(err)}`);
+    throw new Error(`rad app graph failed: ${radErrorDetail(err)}`, {
+      cause: err
+    });
   } finally {
     try {
       fs.rmSync(cwd, { recursive: true, force: true });
@@ -1544,7 +1549,8 @@ export async function buildGraphViaRad(
       const radiusExtension = config?.extensions?.radius;
       if (typeof radiusExtension === "string") {
         throw new Error(
-          `${errorMessage(err)}\nCompiled with radius extension: ${radiusExtension}`
+          `${errorMessage(err)}\nCompiled with radius extension: ${radiusExtension}`,
+          { cause: err }
         );
       }
       throw err;

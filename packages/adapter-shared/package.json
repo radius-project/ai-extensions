@@ -1,5 +1,5 @@
 {
-  "name": "@radius-project/shared",
+  "name": "@radius-project/adapter-shared",
   "version": "0.1.0",
   "private": true,
   "description": "Node-runtime helpers shared across Radius adapters (e.g. building application graphs via the real rad CLI). Depends on @radius-project/core; contains the impure I/O that core intentionally excludes.",

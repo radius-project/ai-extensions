@@ -1,5 +1,5 @@
 ---
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Stop auto-generating and passing the `application` deploy parameter. `rad deploy`

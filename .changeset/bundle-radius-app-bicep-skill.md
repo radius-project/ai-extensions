@@ -1,5 +1,5 @@
 ---
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Bundle the full `radius-app-bicep` skill (SKILL.md and all reference files) into

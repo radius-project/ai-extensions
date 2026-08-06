@@ -71,13 +71,13 @@ The repository also ships a set of agentic skills under
 to drive a part of the Radius workflow, and pairs with the matching canvas
 actions and tools:
 
-| Skill                                                              | What it does                                                                                              |
+| Skill | What it does |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.   |
+| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md) | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
+| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md) | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes. |
 | [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.    |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment. |
+| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md) | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow. |
+| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md) | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment. |
 | [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ## Architecture
@@ -99,7 +99,7 @@ Build the extension bundle locally:
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/dist/
 ```
 
 See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development

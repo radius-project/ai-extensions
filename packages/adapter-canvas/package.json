@@ -1,5 +1,5 @@
 {
-  "name": "@radius-project/canvas",
+  "name": "@radius-project/adapter-canvas",
   "version": "0.1.0",
   "private": true,
   "description": "Copilot canvas adapter for the Radius Canvas product. Builds to the single runtime-loadable extension.mjs that the canvas loader runs.",
@@ -18,11 +18,10 @@
   },
   "dependencies": {
     "@radius-project/core": "workspace:*",
-    "@radius-project/shared": "workspace:*"
+    "@radius-project/adapter-shared": "workspace:*"
   },
   "devDependencies": {
     "@github/copilot-sdk": "catalog:",
-    "@vitest/coverage-v8": "catalog:",
     "esbuild": "^0.28.1",
     "vitest": "catalog:"
   }

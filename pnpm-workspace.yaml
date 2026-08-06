@@ -1,13 +1,26 @@
+---
 packages:
   - packages/*
   - plugins/*
 
+# Turn the "engines" ranges into install-time errors; pnpm only warns otherwise.
+engineStrict: true
+
+allowBuilds:
+  esbuild: true
+  koffi: true
+
+overrides:
+  read-yaml-file@<2: ^2.1.0
+
 catalog:
-  # Keep in sync with the pinned "@github/copilot-sdk" version in
-  # plugins/radius/package.json. That manifest ships to users without this
-  # file, so it must declare a literal version rather than "catalog:".
+  # Kept in sync with the pinned "@github/copilot-sdk" version in
+  # plugins/radius/package.json by copilot-sdk-pin.test.ts. That manifest ships
+  # to users without this file, so it must declare a literal version.
   "@github/copilot-sdk": 1.0.8
-  "@types/node": ^26.1.1
+  # Must track the Node major in the "engines.node" range (>=24 <25) so
+  # typechecking cannot reach APIs missing from the supported runtime.
+  "@types/node": ^24.13.3
   "@vitest/coverage-v8": ^4.1.10
   typescript: ^7.0.2
   vitest: ^4.1.10
