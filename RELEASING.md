@@ -25,8 +25,6 @@ All four are `private: true` and none is published to a registry. The three `pac
 | File                              | How it gets its version                                             |
 |-----------------------------------|---------------------------------------------------------------------|
 | `plugins/radius/package.json`     | Bumped by `changeset version`. **Source of truth.**                 |
-| `plugins/radius/plugin.json`      | Written by `scripts/sync-plugin-version.mjs`.                       |
-| `.github/plugin/marketplace.json` | Written by `scripts/sync-plugin-version.mjs` (both version fields). |
 | `packages/*/package.json`         | Not versioned — ignored by Changesets.                              |
 
 `pnpm run version` runs the sync automatically. CI runs `pnpm run version:check` and fails the build if the derived files drift; `pnpm run version:sync` repairs them.
