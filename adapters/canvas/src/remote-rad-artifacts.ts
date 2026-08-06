@@ -39,6 +39,40 @@ interface RemoteArtifactSelection {
 
 type ArtifactSelection = LocalArtifactSelection | RemoteArtifactSelection;
 
+interface ArtifactSelectionForBranchInput {
+  isLocal: boolean;
+  state?: CanvasState;
+  github: GitHubArtifactReader;
+  repo: string;
+  branch: string;
+  bicepRepoPath: string;
+  log?: (message: string) => void;
+}
+
+export function artifactSelectionForBranch(
+  input: ArtifactSelectionForBranchInput
+): ArtifactSelection {
+  if (input.isLocal) {
+    if (!input.state) {
+      throw new Error("Local artifact selection requires canvas state.");
+    }
+    return {
+      isLocal: true,
+      state: input.state,
+      bicepRepoPath: input.bicepRepoPath
+    };
+  }
+  return {
+    isLocal: false,
+    state: input.state,
+    github: input.github,
+    repo: input.repo,
+    branch: input.branch,
+    bicepRepoPath: input.bicepRepoPath,
+    log: input.log
+  };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

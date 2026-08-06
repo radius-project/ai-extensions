@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "vitest";
 import {
+  artifactSelectionForBranch,
   stageRemoteRadArtifacts,
   radArtifactsDirForSelection,
   radArtifactsFingerprint
@@ -236,4 +237,59 @@ test("radArtifactsDirForSelection uses the workspace dir for a local selection",
   });
   assert.equal(remote, false);
   assert.equal(dir, path.join(workspacePath, ".radius"));
+});
+
+test("artifactSelectionForBranch preserves a computed local selection as a discriminated case", () => {
+  const state = { workspacePath: path.resolve(path.sep, "tmp", "ws") };
+  assert.deepEqual(
+    artifactSelectionForBranch({
+      isLocal: Boolean(state.workspacePath),
+      state,
+      github: mockGithub(),
+      repo: "acme/app",
+      branch: "dev",
+      bicepRepoPath: ".radius/app.bicep"
+    }),
+    {
+      isLocal: true,
+      state,
+      bicepRepoPath: ".radius/app.bicep"
+    }
+  );
+});
+
+test("artifactSelectionForBranch preserves a computed remote selection as a discriminated case", () => {
+  const github = mockGithub();
+  assert.deepEqual(
+    artifactSelectionForBranch({
+      isLocal: Boolean(""),
+      github,
+      repo: "acme/app",
+      branch: "dev",
+      bicepRepoPath: ".radius/app.bicep"
+    }),
+    {
+      isLocal: false,
+      state: undefined,
+      github,
+      repo: "acme/app",
+      branch: "dev",
+      bicepRepoPath: ".radius/app.bicep",
+      log: undefined
+    }
+  );
+});
+
+test("artifactSelectionForBranch rejects a local selection without state", () => {
+  assert.throws(
+    () =>
+      artifactSelectionForBranch({
+        isLocal: Boolean("local"),
+        github: mockGithub(),
+        repo: "acme/app",
+        branch: "dev",
+        bicepRepoPath: ".radius/app.bicep"
+      }),
+    /requires canvas state/
+  );
 });
