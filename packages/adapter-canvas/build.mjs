@@ -23,7 +23,8 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
-  rmSync
+  rmSync,
+  writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
 
@@ -58,6 +59,35 @@ function assembleDist() {
   for (const entry of pluginSources) {
     cpSync(join(pluginDir, entry), join(distDir, entry), { recursive: true });
   }
+  resolveCatalogSpecifiers(join(distDir, "package.json"));
+}
+
+// The shipped manifest is read outside this workspace, where pnpm's "catalog:"
+// protocol means nothing, so bake the real versions in when assembling dist/.
+function resolveCatalogSpecifiers(manifestPath) {
+  const workspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
+  const block = workspace.match(/^catalog:\n((?:[ \t]+.*\n|\n)*)/m)?.[1] ?? "";
+  const catalog = {};
+  for (const line of block.split("\n")) {
+    if (line.trim().startsWith("#")) continue;
+    const entry = line.match(/^\s+"?([^":#\s]+)"?:\s*(\S+)\s*$/);
+    if (entry) catalog[entry[1]] = entry[2];
+  }
+
+  const raw = readFileSync(manifestPath, "utf8");
+  const resolved = raw.replace(
+    /("([^"]+)":\s*")catalog:(")/g,
+    (_match, prefix, name, suffix) => {
+      const version = catalog[name];
+      if (!version) {
+        throw new Error(
+          `${name} uses "catalog:" but pnpm-workspace.yaml has no catalog entry for it.`
+        );
+      }
+      return `${prefix}${version}${suffix}`;
+    }
+  );
+  if (resolved !== raw) writeFileSync(manifestPath, resolved);
 }
 
 // Where the extension is installed locally. Override with RADIUS_CANVAS_INSTALL_PATH.

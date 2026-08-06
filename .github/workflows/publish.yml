@@ -6,8 +6,9 @@ name: Publish plugin
 # get the whole plugin — skills, plugin.json, and the compiled canvas bundle —
 # without committing the git-ignored build output to main. On every push to main
 # (i.e. after a PR merges) this rebuilds `plugins/radius/dist` from the merged
-# source and force-recreates `releases/edge` to equal the main tree plus one
-# commit that force-adds that directory, then moves the `edge` tag.
+# source and force-recreates `releases/edge` as an ORPHAN branch holding only
+# that directory — one root commit, no source, no history — then moves the
+# `edge` tag onto it.
 # .github/plugin/marketplace.json pins `path: plugins/radius/dist` and
 # `ref: releases/edge`, so installs resolve the skills and a matching canvas
 # from that branch.
@@ -76,12 +77,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # releases/edge = current main commit + one commit that force-adds the
-          # git-ignored dist/. Recreate the branch each run so it never drifts.
-          git checkout -B releases/edge
+          # releases/edge is an ORPHAN branch carrying only the built plugin: no
+          # source, no history, one root commit per publish. --orphan starts an
+          # unborn branch with the old tree still staged, so clear the index and
+          # re-add just the (git-ignored) artifact. The source commit it was
+          # built from is recorded in the commit message.
+          git branch -D releases/edge 2>/dev/null || true
+          git checkout --orphan releases/edge
+          git rm -rfq --cached .
           git add -f "$DIST"
           git commit -m "chore(release): publish plugin dist for ${GITHUB_SHA}"
 
+          if git ls-tree -r --name-only HEAD | grep -qv "^$DIST/"; then
+            echo "::error::releases/edge must contain only $DIST; found:"
+            git ls-tree -r --name-only HEAD | grep -v "^$DIST/"
+            exit 1
+          fi
+
           git push --force origin releases/edge
-          git tag -f edge
+          # Tag the commit just published so `edge` always resolves to the
+          # current releases/edge head.
+          git tag -f edge releases/edge
           git push --force origin edge

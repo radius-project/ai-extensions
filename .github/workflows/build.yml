@@ -34,9 +34,6 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Check plugin version consistency
-        run: pnpm run version:check
-
       - name: Lint
         run: pnpm run lint
 

@@ -22,10 +22,10 @@ All four are `private: true` and none is published to a registry. The three `pac
 
 [`plugins/radius/package.json`](./plugins/radius/package.json) is the **single source of truth**. Every other version string is derived from it:
 
-| File                              | How it gets its version                                             |
-|-----------------------------------|---------------------------------------------------------------------|
-| `plugins/radius/package.json`     | Bumped by `changeset version`. **Source of truth.**                 |
-| `packages/*/package.json`         | Not versioned — ignored by Changesets.                              |
+| File                          | How it gets its version                             |
+|-------------------------------|-----------------------------------------------------|
+| `plugins/radius/package.json` | Bumped by `changeset version`. **Source of truth.** |
+| `packages/*/package.json`     | Not versioned — ignored by Changesets.              |
 
 `pnpm run version` runs the sync automatically. CI runs `pnpm run version:check` and fails the build if the derived files drift; `pnpm run version:sync` repairs them.
 
@@ -63,14 +63,16 @@ Publishing (say) `@radius-project/core` so third parties can build their own ada
 
 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml) runs on every push to `main`. It typechecks, tests, and builds the plugin into `plugins/radius/dist/`, then:
 
-- **force-recreates the `releases/edge` branch** at the current `main` commit plus one commit that force-adds the otherwise git-ignored `plugins/radius/dist/`, and
-- **force-moves the `edge` tag** to that commit.
+- **force-recreates `releases/edge` as an orphan branch** whose single root commit contains nothing but the otherwise git-ignored `plugins/radius/dist/`, and
+- **force-moves the `edge` tag** onto that commit.
 
 `plugins/radius/dist/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, all of `skills/`, and the compiled `extension.mjs` (plus its source map). The build assembles it, so nothing is copied separately in CI.
 
+Because the branch is an orphan, it carries **no source and no history** — a clone of `releases/edge` contains only the artifact. The commit message records the `main` SHA it was built from, which is the only link back to the source. A CI guard fails the publish if anything outside `plugins/radius/dist/` lands in the tree.
+
 The plugin `source` in [`.github/plugin/marketplace.json`](./.github/plugin/marketplace.json) pins `path: plugins/radius/dist` and `ref: releases/edge`, so every install resolves the skills and a matching canvas from that directory on that branch. This is why the build output can stay git-ignored on `main`.
 
-Both `releases/edge` and `edge` are force-updated on every push to `main` and carry no history. See [docs/design/2026-07-canvas-bundle-publishing.md](./docs/design/2026-07-canvas-bundle-publishing.md) for the full design.
+Both `releases/edge` and `edge` are replaced wholesale on every push to `main`, so superseded bundles become unreferenced objects rather than permanent repository growth. See [docs/design/2026-07-canvas-bundle-publishing.md](./docs/design/2026-07-canvas-bundle-publishing.md) for the full design.
 
 ## Why Changesets (vs. changie / git-cliff)
 

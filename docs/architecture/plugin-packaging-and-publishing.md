@@ -85,14 +85,14 @@ Because `dist/` is git-ignored and the marketplace installs only git-tracked fil
 graph TD
     subgraph CI["publish.yml (on push to main)"]
         Steps["install --frozen-lockfile<br/>typecheck / test / build"]
-        Assemble["git checkout -B releases/edge<br/>git add -f plugins/radius/dist<br/>commit + force-push<br/>move edge tag"]
+        Assemble["git checkout --orphan releases/edge<br/>clear index, git add -f dist<br/>root commit + force-push<br/>move edge tag"]
     end
 
     Main["main branch<br/>(source, no dist)"] -->|triggers| Steps
     Steps -->|dist/ assembled| Assemble
 
     subgraph Published["Install targets"]
-        Release["releases/edge branch<br/>(main tree + 1 dist commit)"]
+        Release["releases/edge branch<br/>(orphan: dist/ only, 1 root commit)"]
         Edge["edge tag"]
     end
 
@@ -103,9 +103,9 @@ graph TD
     MP -->|install from the app| Install["GitHub Copilot app<br/>installs complete plugin"]
 ```
 
-The publish step is deliberately simple: `git checkout -B releases/edge` **recreates** the branch at the just-built `main` commit, then a single commit force-adds the otherwise-ignored `plugins/radius/dist/`. Because the branch is the `main` tree plus that commit, the tracked sources travel automatically and only `dist/` is added. Finally the `edge` tag is force-moved to the new head.
+`releases/edge` is an **orphan** branch: it shares no history with `main` and contains nothing but `plugins/radius/dist/`. `git checkout --orphan` starts an unborn branch with the previous tree still staged, so the step clears the index (`git rm -rf --cached .`) and re-adds only the git-ignored artifact, producing a single root commit. A guard then fails the publish if `git ls-tree` reports any path outside `dist/`. Finally the `edge` tag is force-moved onto that commit, so `edge` and `releases/edge` always resolve to the same SHA.
 
-Both the branch and the tag are recreated on every push, so neither accumulates history — superseded bundles become unreferenced objects rather than permanent repository growth.
+The trade-off is deliberate: a clone of `releases/edge` is the artifact and nothing else — no source, no node_modules, no history — and the `main` SHA it was built from lives in the commit message. Because both refs are replaced wholesale each run, superseded bundles become unreferenced objects rather than permanent repository growth.
 
 ### 4. The install: resolving the complete artifact
 
