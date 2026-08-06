@@ -704,6 +704,27 @@ describe("deployingPage — Deployments landing", () => {
     );
     expect(html).toContain("branch: deployBranch");
   });
+
+  it("auto-refreshes the deployments table after a deploy starts (synthetic row + quiet in-flight polling)", () => {
+    const html = deployingPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    // Fix 1: loadDeployments takes a quiet flag and renders a synthetic row for
+    // any optimistic OP_STATUS op that has no server record yet, so a brand-new
+    // deployment appears immediately instead of staying invisible until the run
+    // reaches a terminal state or Refresh is clicked.
+    expect(html).toContain("function loadDeployments(fresh, quiet) {");
+    expect(html).toContain("var synthetic = [];");
+    expect(html).toContain("var rows = synthetic.concat(deps);");
+    // The quiet flag suppresses the "Loading…" placeholder on background refreshes.
+    expect(html).toContain(
+      'if (!quiet) body.innerHTML = \'<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>\';'
+    );
+    // Fix 2: while the run is still in flight, the deploy-status poll quietly
+    // refreshes the list so the real GitHub record replaces the synthetic row.
+    expect(html).toContain("loadDeployments(true, true);");
+  });
 });
 
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
