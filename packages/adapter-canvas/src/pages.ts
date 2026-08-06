@@ -1472,6 +1472,16 @@ export function deployedGraphPage(state: CanvasState = {}): string {
     state?.plannedRepo ||
     state?.graphTargetRepo ||
     "";
+  // The branch "View source code" links resolve against. The server returns the
+  // authoritative branch with the graph; this is only the value used before the
+  // first response lands. Previously this page hardcoded 'main', which broke
+  // source links for anyone working on a session worktree branch.
+  const targetBranch =
+    state?.contextBranch ||
+    state?.deployingBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
   return pageShell(
     "Deployed Graph",
     `
@@ -1492,6 +1502,7 @@ ${graphHeader("deployed")}
 
 <div class="rad-card" style="margin:0;">
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
+  <div id="deployed-mode-note" style="display:none; font-size:12px; color:var(--rad-text-secondary); margin-bottom:12px;"></div>
   <div id="deployed-status" class="status info">Loading deployed application graph…</div>
   <div id="graph-container"></div>
 </div>
@@ -1530,6 +1541,7 @@ ${graphHeader("deployed")}
 </style>
 <script>
 var CONTEXT_REPO = ${JSON.stringify(targetRepo)};
+var GRAPH_BRANCH = ${JSON.stringify(targetBranch)};
 
 function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
@@ -1547,9 +1559,16 @@ function escapeHtmlClient(s) {
     var deleteBtn = document.getElementById('deployed-delete-btn');
     var statusEl = document.getElementById('deployed-status');
     var labelEl = document.getElementById('deployed-graph-label');
+    var modeNote = document.getElementById('deployed-mode-note');
     var container = document.getElementById('graph-container');
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
+    var controller = null;
+    var LAST_MODE = '';
+    // Artifact uploads take several seconds, so a faster poll returns the same
+    // bytes. The deploy log below the graph streams at 1.5s and carries the
+    // moment-to-moment liveness.
+    var POLL_MS = 15000;
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
@@ -1587,6 +1606,17 @@ function escapeHtmlClient(s) {
         }).catch(function() {});
     }
 
+    // Show the deploy feed whenever this session has produced one, including
+    // after the run finished — that log is where a failure explains itself.
+    function maybeStartLogStream() {
+        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
+            if (!d) return;
+            if (d.status === 'in_progress' || d.status === 'complete' || d.status === 'success' || d.status === 'failed' || d.logTotal) {
+                startLogStream();
+            }
+        }).catch(function() {});
+    }
+
     function showInline(kind, msg) {
         inlineStatus.style.display = 'block';
         inlineStatus.textContent = msg;
@@ -1604,46 +1634,90 @@ function escapeHtmlClient(s) {
 
     function showNothing(msg) {
         if (statusEl) { statusEl.style.display = 'none'; }
+        if (controller) { try { controller.destroy(); } catch (e) {} controller = null; }
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
     }
 
-    function renderGraph(resources, showDeployStatus) {
+    // Render (or update in place). Updating through the controller preserves
+    // React Flow's viewport, so a status refresh never resets the user's pan
+    // or zoom mid-deploy.
+    function renderGraph(resources, branch) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        radiusRenderGraph('graph-container', resources, {
+        if (controller) { controller.update(resources); return; }
+        controller = radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
-            branch: 'main',
+            branch: branch || GRAPH_BRANCH || 'main',
             showLegend: true,
-            deployedMode: !showDeployStatus,
-            deployMode: !!showDeployStatus
+            deployMode: true
         });
+    }
+
+    // Describe what the graph is showing. The freshness suffix reports the age
+    // of the DATA (the producer's updatedAt), not the age of our last fetch --
+    // polling more often does not make a three-day-old deployment newer.
+    function describeMode(mode, updatedAt) {
+        if (mode === 'greyed') return 'Not deployed yet — showing the modeled application.';
+        var suffix = '';
+        var at = updatedAt ? Date.parse(updatedAt) : 0;
+        if (at) {
+            var secs = Math.max(0, Math.round((Date.now() - at) / 1000));
+            suffix = ' · updated ' + (secs < 60 ? secs + 's' : secs < 3600 ? Math.round(secs / 60) + 'm' : Math.round(secs / 3600) + 'h') + ' ago';
+        }
+        if (mode === 'live') {
+            // Be honest about the cadence: each artifact upload takes seconds,
+            // so a graph that looks static usually means "no new data yet".
+            return 'Deploying' + suffix + ' · refreshes every ' + Math.round(POLL_MS / 1000) + 's';
+        }
+        return 'Last deployment' + suffix + '.';
+    }
+
+    function setModeNote(text) {
+        if (!modeNote) return;
+        modeNote.textContent = text || '';
+        modeNote.style.display = text ? 'block' : 'none';
     }
 
     function loadGraph() {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
-        // Prefer a live/in-progress deployment so the graph fills in as it deploys.
-        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
-            var liveRes = (s && s.resources) || [];
-            var st = s && s.status;
-            // Stream deployment logs under the graph whenever a deploy is running
-            // or has produced log output.
-            if (st === 'in_progress' || st === 'success' || st === 'complete' || st === 'failed' || (s && s.logTotal)) {
-                startLogStream();
+        if (statusEl && !controller) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
+        var query = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO);
+        if (appSelect.value) { query += '&application=' + encodeURIComponent(appSelect.value); }
+        if (envSelect.value) { query += '&environment=' + encodeURIComponent(envSelect.value); }
+        fetch(query).then(function(r) { return r.json(); }).then(function(d) {
+            var resources = (d && d.resources) || [];
+            var mode = (d && d.mode) || 'greyed';
+            LAST_MODE = mode;
+            // Stream the deploy feed whenever there is one to show.
+            if (mode === 'live') { startLogStream(); }
+            if (!resources.length) {
+                // Genuinely nothing to draw: no deployed graph AND no modeled
+                // application to fall back to.
+                showNothing('Nothing deployed yet');
+                setModeNote('');
+            } else {
+                renderGraph(resources, d && d.branch);
+                setModeNote(describeMode(mode, d && d.updatedAt));
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success' || st === 'failed')) {
-                renderGraph(liveRes, true);
-                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
-                return;
-            }
-            // Fall back to the terminal deployed graph from the status branch.
-            fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
-                var resources = (d && d.resources) || [];
-                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-                renderGraph(resources, false);
-            }).catch(function() { showNothing('Nothing deployed yet'); });
-        }).catch(function() { showNothing('Nothing deployed yet'); });
+            if (mode === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }
+        }).catch(function() {
+            if (!controller) { showNothing('Nothing deployed yet'); }
+            // Keep polling through a transient failure. Dropping the timer here
+            // would freeze the graph mid-deploy for the life of the page while
+            // the note still promised a refresh.
+            if (LAST_MODE === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }
+        });
     }
+
+    // Pause polling while the panel is hidden; resume (and refresh once) when
+    // it comes back, so a backgrounded tab does not keep hitting the API.
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'hidden') {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        } else if (!pollTimer) {
+            loadGraph();
+        }
+    });
 
     function loadApplications() {
         return fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
@@ -1707,6 +1781,7 @@ function escapeHtmlClient(s) {
 
     Promise.all([loadApplications(), loadEnvironments()]).then(function() {
         refreshControls();
+        maybeStartLogStream();
         loadGraph();
     });
 })();
