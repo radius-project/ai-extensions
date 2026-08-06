@@ -58,6 +58,14 @@ export const DEPLOY_PROGRESS_SCHEMA_VERSION = 1;
 // HTTP request into a long serial fan-out.
 export const MAX_ARTIFACT_CANDIDATES = 5;
 
+// Repo-wide artifact listing: page size, and how many pages a single read will
+// walk before giving up. One page covers the newest 100 artifacts in the whole
+// repository, which a busy CI can burn through between two deploys, so the
+// deploy-status artifact has to be searched for past the first page. The budget
+// keeps a repo with no such artifact from walking its entire history.
+export const ARTIFACT_PAGE_SIZE = 100;
+export const MAX_ARTIFACT_PAGES = 5;
+
 export interface DeployProgressResource {
   id?: string;
   name: string;
@@ -90,7 +98,8 @@ export type ArtifactFiles = Record<string, string>;
 
 export type ListArtifacts = (
   repo: string,
-  runId?: number | string | null
+  runId?: number | string | null,
+  namePrefix?: string
 ) => Promise<WorkflowArtifact[]>;
 
 export type DownloadArtifact = (
@@ -552,15 +561,55 @@ function ghJsonArray(args: string[], timeout = 20000): Promise<unknown> {
  * The per-run endpoint is what makes live status possible: it is readable while
  * the run is still in progress. The repo-wide endpoint returns newest-first and
  * is how a fresh canvas session finds the last deploy without knowing a run id.
+ *
+ * The repo-wide read is paginated, which matters more than it looks. A single
+ * page covers the newest 100 artifacts in the ENTIRE repository, and a repo
+ * whose CI uploads test reports or build output on every push can easily produce
+ * that many between two deploys. Reading only the first page would push the
+ * deploy-status artifact off the end and render "Nothing deployed yet" for an
+ * application that is in fact deployed — the exact symptom this transport
+ * exists to eliminate.
+ *
+ * Paging stops as soon as a page yields an artifact matching `namePrefix`,
+ * because the listing is newest-first and nothing better can appear later; it
+ * also stops at a short page (end of the list) or the page budget, so a repo
+ * with no deploy-status artifact at all costs a bounded number of calls rather
+ * than walking its entire artifact history.
  */
-export const listWorkflowArtifacts: ListArtifacts = async (repo, runId) => {
-  const apiPath =
-    runId ?
-      `/repos/${repo}/actions/runs/${runId}/artifacts?per_page=100`
-    : `/repos/${repo}/actions/artifacts?per_page=100`;
-  const data = await ghJsonArray(["api", apiPath]);
-  if (!isRecord(data) || !Array.isArray(data.artifacts)) return [];
-  return data.artifacts.filter((a): a is WorkflowArtifact => isRecord(a));
+export const listWorkflowArtifacts: ListArtifacts = async (
+  repo,
+  runId,
+  namePrefix
+) => {
+  // A single run has few artifacts, so one page always covers it.
+  if (runId) {
+    const data = await ghJsonArray([
+      "api",
+      `/repos/${repo}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
+    ]);
+    if (!isRecord(data) || !Array.isArray(data.artifacts)) return [];
+    return data.artifacts.filter((a): a is WorkflowArtifact => isRecord(a));
+  }
+
+  const found: WorkflowArtifact[] = [];
+  const prefix = namePrefix || DEPLOY_STATUS_ARTIFACT_PREFIX;
+  for (let page = 1; page <= MAX_ARTIFACT_PAGES; page++) {
+    const data = await ghJsonArray([
+      "api",
+      `/repos/${repo}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=${page}`
+    ]);
+    if (!isRecord(data) || !Array.isArray(data.artifacts)) break;
+    const batch = data.artifacts.filter((a): a is WorkflowArtifact =>
+      isRecord(a)
+    );
+    found.push(...batch);
+    if (
+      batch.some((a) => typeof a.name === "string" && a.name.startsWith(prefix))
+    )
+      break;
+    if (batch.length < ARTIFACT_PAGE_SIZE) break; // end of the listing
+  }
+  return found;
 };
 
 /**
@@ -690,7 +739,13 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     if (!repo) return empty("missing");
     let artifacts: WorkflowArtifact[];
     try {
-      artifacts = await listArtifacts(repo, runId);
+      // Pass the environment-scoped prefix so a paginated repo-wide listing can
+      // stop as soon as it reaches the artifact we are looking for.
+      artifacts = await listArtifacts(
+        repo,
+        runId,
+        deployStatusArtifactPrefix(environment)
+      );
     } catch (e) {
       return empty(errorCode(e) === "GH_ARTIFACT_AUTH" ? "auth" : "error", e);
     }

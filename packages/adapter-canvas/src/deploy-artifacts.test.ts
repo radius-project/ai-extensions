@@ -969,6 +969,20 @@ describe("createDeployStatusReader", () => {
     expect(parsed?.runId).toBeUndefined();
   });
 
+  it("passes the environment-scoped prefix to the lister so paging can stop early", async () => {
+    let seenPrefix: string | undefined;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async (_repo, _runId, prefix) => {
+        seenPrefix = prefix;
+        return [artifact("radius-deploy-status-dev-todolist")];
+      },
+      downloadArtifact: async () => okFiles()
+    });
+    await reader.read();
+    expect(seenPrefix).toBe("radius-deploy-status-dev-");
+  });
+
   it("reports missing without calling GitHub when no repo is set", async () => {
     let calls = 0;
     const reader = createDeployStatusReader({

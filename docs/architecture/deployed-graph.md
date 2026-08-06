@@ -122,6 +122,8 @@ The one exception is `schemaVersion`. An unrecognized version is rejected outrig
 3. Download each candidate with `gh run download` (which handles the redirect to blob storage, authentication, and unzipping) until one yields a payload whose application and environment confirm.
 4. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `stale`.
 
+The repo-wide listing is paginated, which matters more than it appears. One page covers the newest 100 artifacts in the **entire repository**, and a repository whose CI uploads test reports or build output on every push can produce that many between two deploys. Reading only the first page would push the deploy-status artifact off the end and render "Nothing deployed yet" for an application that is in fact deployed — the exact symptom this transport exists to eliminate. Paging stops as soon as a page yields a match (the listing is newest-first, so nothing better appears later), at a short page, or at a five-page budget, so a repository with no deploy-status artifact costs a bounded number of calls rather than a walk of its whole history.
+
 Reads are cached for a short TTL and de-duplicated with single-flight, so the deploy monitor and a concurrent `/api/deployed-graph` request share one fetch. Payloads are accepted in monotonic `sequence` order per run, so a stale read — one served just after an overwrite, or arriving out of order — is reported as `stale` and can never roll the graph backwards.
 
 ## Rendering
