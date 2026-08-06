@@ -11,7 +11,7 @@
     "test": "vitest run",
     "watch": "node build.mjs --watch",
     "watch:dev": "node build.mjs --watch --install",
-    "lint": "eslint \"src/**/*.ts\" build.mjs"
+    "lint": "eslint \"src/**/*.ts\" vitest.config.ts build.mjs"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*",
