@@ -70,7 +70,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: 'catalog:'
-        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
 
   packages/adapter-canvas:
     dependencies:
@@ -89,7 +89,7 @@ importers:
         version: 0.28.1
       vitest:
         specifier: 'catalog:'
-        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
 
   packages/adapter-shared:
     dependencies:
@@ -99,13 +99,13 @@ importers:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
 
   packages/core:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+        version: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
 
   plugins/radius:
     dependencies:
@@ -120,15 +120,15 @@ packages:
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/compat-data@8.0.0':
-    resolution: {integrity: sha1-54DrYFLYzurq3Tps2C3aRwqUViI=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/compat-data/-/compat-data-8.0.0.tgz}
+    resolution: {integrity: sha1-54DrYFLYzurq3Tps2C3aRwqUViI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/compat-data/-/compat-data-8.0.0.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/core@8.0.1':
-    resolution: {integrity: sha1-3LEz093PsrWmVY2gO/JAMZ2guMg=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/core/-/core-8.0.1.tgz}
+    resolution: {integrity: sha1-3LEz093PsrWmVY2gO/JAMZ2guMg=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/core/-/core-8.0.1.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/eslint-parser@8.0.1':
-    resolution: {integrity: sha1-NKVsiN60zxNAJXKW0TCQKPrbuVM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/eslint-parser/-/eslint-parser-8.0.1.tgz}
+    resolution: {integrity: sha1-NKVsiN60zxNAJXKW0TCQKPrbuVM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/eslint-parser/-/eslint-parser-8.0.1.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
     peerDependencies:
       '@babel/core': ^8.0.0
@@ -139,15 +139,15 @@ packages:
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-compilation-targets@8.0.0':
-    resolution: {integrity: sha1-Y/Iw9CfJ6oIyPYKck19hkNk7NzY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-compilation-targets/-/helper-compilation-targets-8.0.0.tgz}
+    resolution: {integrity: sha1-Y/Iw9CfJ6oIyPYKck19hkNk7NzY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-compilation-targets/-/helper-compilation-targets-8.0.0.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-globals@8.0.0':
-    resolution: {integrity: sha1-yTeJ1sHC8bZal6B1FcRxoElVm/E=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-globals/-/helper-globals-8.0.0.tgz}
+    resolution: {integrity: sha1-yTeJ1sHC8bZal6B1FcRxoElVm/E=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-globals/-/helper-globals-8.0.0.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-plugin-utils@8.0.1':
-    resolution: {integrity: sha1-0cnYriJZAsWX3qyMeazkIn/qyK8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-plugin-utils/-/helper-plugin-utils-8.0.1.tgz}
+    resolution: {integrity: sha1-0cnYriJZAsWX3qyMeazkIn/qyK8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-plugin-utils/-/helper-plugin-utils-8.0.1.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
     peerDependencies:
       '@babel/core': ^8.0.0
@@ -161,11 +161,11 @@ packages:
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-validator-identifier@7.29.7':
-    resolution: {integrity: sha1-vYcITO0MeW7Ea9pJLeboPSnon8I=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz}
+    resolution: {integrity: sha1-vYcITO0MeW7Ea9pJLeboPSnon8I=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz}
     engines: {node: '>=6.9.0'}
 
   '@babel/helper-validator-identifier@8.0.4':
-    resolution: {integrity: sha1-YOQnqb56EBr1LxRYje8trYqfmIE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-validator-identifier/-/helper-validator-identifier-8.0.4.tgz}
+    resolution: {integrity: sha1-YOQnqb56EBr1LxRYje8trYqfmIE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helper-validator-identifier/-/helper-validator-identifier-8.0.4.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-validator-option@8.0.0':
@@ -173,16 +173,16 @@ packages:
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helpers@8.0.0':
-    resolution: {integrity: sha1-LGEtS3/b1fHS+nMhAV42sC0aLXk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helpers/-/helpers-8.0.0.tgz}
+    resolution: {integrity: sha1-LGEtS3/b1fHS+nMhAV42sC0aLXk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/helpers/-/helpers-8.0.0.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/parser@7.29.7':
-    resolution: {integrity: sha1-g3uHOHy/XsVTDLY0s8Yi9o7bkzQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/parser/-/parser-7.29.7.tgz}
+    resolution: {integrity: sha1-g3uHOHy/XsVTDLY0s8Yi9o7bkzQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/parser/-/parser-7.29.7.tgz}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
   '@babel/parser@8.0.4':
-    resolution: {integrity: sha1-JE4hyiOrVMb1NzryEiyzphj53Tk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/parser/-/parser-8.0.4.tgz}
+    resolution: {integrity: sha1-JE4hyiOrVMb1NzryEiyzphj53Tk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/parser/-/parser-8.0.4.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
     hasBin: true
 
@@ -197,7 +197,7 @@ packages:
     engines: {node: '>=6.9.0'}
 
   '@babel/template@8.0.0':
-    resolution: {integrity: sha1-GMEmJrDW0joEQ3cWVYZO11ZqNFI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/template/-/template-8.0.0.tgz}
+    resolution: {integrity: sha1-GMEmJrDW0joEQ3cWVYZO11ZqNFI=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/template/-/template-8.0.0.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/traverse@8.0.4':
@@ -205,47 +205,47 @@ packages:
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/types@7.29.7':
-    resolution: {integrity: sha1-gAXjHYJxLuetrvbiPGO3GmJ3CpI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/types/-/types-7.29.7.tgz}
+    resolution: {integrity: sha1-gAXjHYJxLuetrvbiPGO3GmJ3CpI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/types/-/types-7.29.7.tgz}
     engines: {node: '>=6.9.0'}
 
   '@babel/types@8.0.4':
-    resolution: {integrity: sha1-jCCHATIMnwMjtbaiM9CT5SweO0E=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/types/-/types-8.0.4.tgz}
+    resolution: {integrity: sha1-jCCHATIMnwMjtbaiM9CT5SweO0E=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@babel/types/-/types-8.0.4.tgz}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@bcoe/v8-coverage@1.0.2':
-    resolution: {integrity: sha1-u+EtyltO+YOg0K9LB7m8kOoKuro=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@bcoe/v8-coverage/-/v8-coverage-1.0.2.tgz}
+    resolution: {integrity: sha1-u+EtyltO+YOg0K9LB7m8kOoKuro=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@bcoe/v8-coverage/-/v8-coverage-1.0.2.tgz}
     engines: {node: '>=18'}
 
   '@changesets/apply-release-plan@7.1.1':
-    resolution: {integrity: sha1-GYw9Tdnq/Qs/pAKl0hLqvonbE04=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/apply-release-plan/-/apply-release-plan-7.1.1.tgz}
+    resolution: {integrity: sha1-GYw9Tdnq/Qs/pAKl0hLqvonbE04=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/apply-release-plan/-/apply-release-plan-7.1.1.tgz}
 
   '@changesets/assemble-release-plan@6.0.10':
-    resolution: {integrity: sha1-y4Lv7Q3Be3Qbw5tszVUePIak6z0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/assemble-release-plan/-/assemble-release-plan-6.0.10.tgz}
+    resolution: {integrity: sha1-y4Lv7Q3Be3Qbw5tszVUePIak6z0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/assemble-release-plan/-/assemble-release-plan-6.0.10.tgz}
 
   '@changesets/changelog-git@0.2.1':
-    resolution: {integrity: sha1-fzEfPcEerhI1qn/SwYBxEpYrQJs=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/changelog-git/-/changelog-git-0.2.1.tgz}
+    resolution: {integrity: sha1-fzEfPcEerhI1qn/SwYBxEpYrQJs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/changelog-git/-/changelog-git-0.2.1.tgz}
 
   '@changesets/cli@2.31.1':
-    resolution: {integrity: sha1-qu9PxcxKKq5OlSaWWT5I3cfXWnQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/cli/-/cli-2.31.1.tgz}
+    resolution: {integrity: sha1-qu9PxcxKKq5OlSaWWT5I3cfXWnQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/cli/-/cli-2.31.1.tgz}
     hasBin: true
 
   '@changesets/config@3.1.4':
-    resolution: {integrity: sha1-5QO+nYbxIuUtZMzKhohw5eqUPP0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/config/-/config-3.1.4.tgz}
+    resolution: {integrity: sha1-5QO+nYbxIuUtZMzKhohw5eqUPP0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/config/-/config-3.1.4.tgz}
 
   '@changesets/errors@0.2.0':
-    resolution: {integrity: sha1-PFRegCsPBTOJytzw7VTlY2/5Amo=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/errors/-/errors-0.2.0.tgz}
+    resolution: {integrity: sha1-PFRegCsPBTOJytzw7VTlY2/5Amo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/errors/-/errors-0.2.0.tgz}
 
   '@changesets/get-dependents-graph@2.1.4':
-    resolution: {integrity: sha1-oY5W2UtB1FiI9iAhrMxuF6YbXXw=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-dependents-graph/-/get-dependents-graph-2.1.4.tgz}
+    resolution: {integrity: sha1-oY5W2UtB1FiI9iAhrMxuF6YbXXw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-dependents-graph/-/get-dependents-graph-2.1.4.tgz}
 
   '@changesets/get-release-plan@4.0.16':
-    resolution: {integrity: sha1-GPAfA3xMk3as8yq4IPe8t+KS6qA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-release-plan/-/get-release-plan-4.0.16.tgz}
+    resolution: {integrity: sha1-GPAfA3xMk3as8yq4IPe8t+KS6qA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-release-plan/-/get-release-plan-4.0.16.tgz}
 
   '@changesets/get-version-range-type@0.4.0':
-    resolution: {integrity: sha1-QpqQQQ7v70NoUCxBxjQT4pF0C/U=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-version-range-type/-/get-version-range-type-0.4.0.tgz}
+    resolution: {integrity: sha1-QpqQQQ7v70NoUCxBxjQT4pF0C/U=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/get-version-range-type/-/get-version-range-type-0.4.0.tgz}
 
   '@changesets/git@3.0.4':
-    resolution: {integrity: sha1-deOBGrQH7AEL61ETHOtcazl1yRQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/git/-/git-3.0.4.tgz}
+    resolution: {integrity: sha1-deOBGrQH7AEL61ETHOtcazl1yRQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/git/-/git-3.0.4.tgz}
 
   '@changesets/logger@0.1.1':
     resolution: {integrity: sha1-mSasTcj7AEcv4XEWA7a0dV1ktDU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/logger/-/logger-0.1.1.tgz}
@@ -254,46 +254,46 @@ packages:
     resolution: {integrity: sha1-kSp+rH+Ms4ewX3SVlqaPL3Y2YOA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/parse/-/parse-0.4.3.tgz}
 
   '@changesets/pre@2.0.2':
-    resolution: {integrity: sha1-s16E0l/Ki5cDQGQsoEznbH/DTO0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/pre/-/pre-2.0.2.tgz}
+    resolution: {integrity: sha1-s16E0l/Ki5cDQGQsoEznbH/DTO0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/pre/-/pre-2.0.2.tgz}
 
   '@changesets/read@0.6.7':
-    resolution: {integrity: sha1-ZeFEyWA0SzSui9hRRHUqS2h+ktI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/read/-/read-0.6.7.tgz}
+    resolution: {integrity: sha1-ZeFEyWA0SzSui9hRRHUqS2h+ktI=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/read/-/read-0.6.7.tgz}
 
   '@changesets/should-skip-package@0.1.2':
     resolution: {integrity: sha1-wBjh4F6rPZevpMRZDysNt0hq5Ig=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/should-skip-package/-/should-skip-package-0.1.2.tgz}
 
   '@changesets/types@4.1.0':
-    resolution: {integrity: sha1-+498ojJP1UlUgk6GT5phqCy3j+A=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/types/-/types-4.1.0.tgz}
+    resolution: {integrity: sha1-+498ojJP1UlUgk6GT5phqCy3j+A=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/types/-/types-4.1.0.tgz}
 
   '@changesets/types@6.1.0':
-    resolution: {integrity: sha1-EqTISQgn0mvG+/l6FRSZvi+20vU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/types/-/types-6.1.0.tgz}
+    resolution: {integrity: sha1-EqTISQgn0mvG+/l6FRSZvi+20vU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/types/-/types-6.1.0.tgz}
 
   '@changesets/write@0.4.0':
-    resolution: {integrity: sha1-7JA8vYqpttpvoJ7xn7YJ7t0RXtY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/write/-/write-0.4.0.tgz}
+    resolution: {integrity: sha1-7JA8vYqpttpvoJ7xn7YJ7t0RXtY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@changesets/write/-/write-0.4.0.tgz}
 
-  '@emnapi/core@1.11.1':
-    resolution: {integrity: sha1-ueEGTzprFjHiQeY460jXNr/TcqY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/core/-/core-1.11.1.tgz}
+  '@emnapi/core@2.0.0-alpha.3':
+    resolution: {integrity: sha1-BJrOZx8wJ01qTRYdO3cROLhi9wQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/core/-/core-2.0.0-alpha.3.tgz}
 
-  '@emnapi/runtime@1.11.1':
-    resolution: {integrity: sha1-WPHz1dgamxL3k6tojJY3GQECfCQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/runtime/-/runtime-1.11.1.tgz}
+  '@emnapi/runtime@2.0.0-alpha.3':
+    resolution: {integrity: sha1-rvBMNcmoPCOrDyUfAwlUQO3XrV8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/runtime/-/runtime-2.0.0-alpha.3.tgz}
 
-  '@emnapi/wasi-threads@1.2.2':
-    resolution: {integrity: sha1-TJO+z1v6OxPRu9zAau44MhrYE5o=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/wasi-threads/-/wasi-threads-1.2.2.tgz}
+  '@emnapi/wasi-threads@2.0.1':
+    resolution: {integrity: sha1-HJKRkyi+H2q3n7YKZ8zz0uYs1Is=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@emnapi/wasi-threads/-/wasi-threads-2.0.1.tgz}
 
   '@esbuild/aix-ppc64@0.28.1':
-    resolution: {integrity: sha1-egGo0uwvuy2seK2tCbD6eB5Agr4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/aix-ppc64/-/aix-ppc64-0.28.1.tgz}
+    resolution: {integrity: sha1-egGo0uwvuy2seK2tCbD6eB5Agr4=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/aix-ppc64/-/aix-ppc64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [ppc64]
     os: [aix]
 
   '@esbuild/android-arm64@0.28.1':
-    resolution: {integrity: sha1-tUCifRTkr9BYSWpNvsTT9BTbEQo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/android-arm64/-/android-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-tUCifRTkr9BYSWpNvsTT9BTbEQo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/android-arm64/-/android-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [android]
 
   '@esbuild/android-arm@0.28.1':
-    resolution: {integrity: sha1-cEvSl95tdi3lTqu+r79V9nVqvi8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/android-arm/-/android-arm-0.28.1.tgz}
+    resolution: {integrity: sha1-cEvSl95tdi3lTqu+r79V9nVqvi8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/android-arm/-/android-arm-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm]
     os: [android]
@@ -305,31 +305,31 @@ packages:
     os: [android]
 
   '@esbuild/darwin-arm64@0.28.1':
-    resolution: {integrity: sha1-EDSyZFf8iGNo/mG70J9lP2r6jlQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/darwin-arm64/-/darwin-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-EDSyZFf8iGNo/mG70J9lP2r6jlQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/darwin-arm64/-/darwin-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [darwin]
 
   '@esbuild/darwin-x64@0.28.1':
-    resolution: {integrity: sha1-ZVVqQyoeTXIDLYIYwZMvzKGkl3I=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/darwin-x64/-/darwin-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-ZVVqQyoeTXIDLYIYwZMvzKGkl3I=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/darwin-x64/-/darwin-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [darwin]
 
   '@esbuild/freebsd-arm64@0.28.1':
-    resolution: {integrity: sha1-LmHgWS+QMNfj2uGO4l68U1kYrvY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-LmHgWS+QMNfj2uGO4l68U1kYrvY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [freebsd]
 
   '@esbuild/freebsd-x64@0.28.1':
-    resolution: {integrity: sha1-yV7CiZWe+AecTcqBeh4sS+Zrm9M=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/freebsd-x64/-/freebsd-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-yV7CiZWe+AecTcqBeh4sS+Zrm9M=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/freebsd-x64/-/freebsd-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [freebsd]
 
   '@esbuild/linux-arm64@0.28.1':
-    resolution: {integrity: sha1-QLIhdd2gYYLz7oFBGGxf8wTEpxc=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-arm64/-/linux-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-QLIhdd2gYYLz7oFBGGxf8wTEpxc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-arm64/-/linux-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [linux]
@@ -341,25 +341,25 @@ packages:
     os: [linux]
 
   '@esbuild/linux-ia32@0.28.1':
-    resolution: {integrity: sha1-pYD5xnZ5eDOJHlGfx6EzfIr9jbM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-ia32/-/linux-ia32-0.28.1.tgz}
+    resolution: {integrity: sha1-pYD5xnZ5eDOJHlGfx6EzfIr9jbM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-ia32/-/linux-ia32-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [ia32]
     os: [linux]
 
   '@esbuild/linux-loong64@0.28.1':
-    resolution: {integrity: sha1-RkUs8yHcf56Rwvp4Cla7Vuec1os=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-loong64/-/linux-loong64-0.28.1.tgz}
+    resolution: {integrity: sha1-RkUs8yHcf56Rwvp4Cla7Vuec1os=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-loong64/-/linux-loong64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [loong64]
     os: [linux]
 
   '@esbuild/linux-mips64el@0.28.1':
-    resolution: {integrity: sha1-QhGzGE3WYI9T3LIuOfXTTuCIUsg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-mips64el/-/linux-mips64el-0.28.1.tgz}
+    resolution: {integrity: sha1-QhGzGE3WYI9T3LIuOfXTTuCIUsg=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-mips64el/-/linux-mips64el-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [mips64el]
     os: [linux]
 
   '@esbuild/linux-ppc64@0.28.1':
-    resolution: {integrity: sha1-aXhXwqYcubC2u2ZS5AwdxeHKjl0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-ppc64/-/linux-ppc64-0.28.1.tgz}
+    resolution: {integrity: sha1-aXhXwqYcubC2u2ZS5AwdxeHKjl0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-ppc64/-/linux-ppc64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [ppc64]
     os: [linux]
@@ -371,49 +371,49 @@ packages:
     os: [linux]
 
   '@esbuild/linux-s390x@0.28.1':
-    resolution: {integrity: sha1-rOoDVtoODrwI+Xz3ucLkAeHmSNw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-s390x/-/linux-s390x-0.28.1.tgz}
+    resolution: {integrity: sha1-rOoDVtoODrwI+Xz3ucLkAeHmSNw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-s390x/-/linux-s390x-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [s390x]
     os: [linux]
 
   '@esbuild/linux-x64@0.28.1':
-    resolution: {integrity: sha1-bww84MtkxTS3DExF7LLBbTTjXf0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-x64/-/linux-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-bww84MtkxTS3DExF7LLBbTTjXf0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/linux-x64/-/linux-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [linux]
 
   '@esbuild/netbsd-arm64@0.28.1':
-    resolution: {integrity: sha1-i813B3oNzjN4tXT+2ybSolO3PTY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-i813B3oNzjN4tXT+2ybSolO3PTY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [netbsd]
 
   '@esbuild/netbsd-x64@0.28.1':
-    resolution: {integrity: sha1-5/sqAemcgwyU5mI82f77TI+1g0c=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/netbsd-x64/-/netbsd-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-5/sqAemcgwyU5mI82f77TI+1g0c=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/netbsd-x64/-/netbsd-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [netbsd]
 
   '@esbuild/openbsd-arm64@0.28.1':
-    resolution: {integrity: sha1-xSkJNy24uG4sVeBaiUADO1Zgo7I=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-xSkJNy24uG4sVeBaiUADO1Zgo7I=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [openbsd]
 
   '@esbuild/openbsd-x64@0.28.1':
-    resolution: {integrity: sha1-xCe5vlpkwmL/mn63C1+7qt9EbGw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openbsd-x64/-/openbsd-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-xCe5vlpkwmL/mn63C1+7qt9EbGw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openbsd-x64/-/openbsd-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [openbsd]
 
   '@esbuild/openharmony-arm64@0.28.1':
-    resolution: {integrity: sha1-3JsUe6yi5sSzyFVxdB70hgpIkJc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.1.tgz}
+    resolution: {integrity: sha1-3JsUe6yi5sSzyFVxdB70hgpIkJc=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [openharmony]
 
   '@esbuild/sunos-x64@0.28.1':
-    resolution: {integrity: sha1-zoZtEt8TwV5MmfBzo9Rm9uBkmzo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/sunos-x64/-/sunos-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-zoZtEt8TwV5MmfBzo9Rm9uBkmzo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/sunos-x64/-/sunos-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [sunos]
@@ -425,19 +425,19 @@ packages:
     os: [win32]
 
   '@esbuild/win32-ia32@0.28.1':
-    resolution: {integrity: sha1-pbwAY/sryrbQ7WPyoVN5WLwmnsY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/win32-ia32/-/win32-ia32-0.28.1.tgz}
+    resolution: {integrity: sha1-pbwAY/sryrbQ7WPyoVN5WLwmnsY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/win32-ia32/-/win32-ia32-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [ia32]
     os: [win32]
 
   '@esbuild/win32-x64@0.28.1':
-    resolution: {integrity: sha1-EAZO5E9DR7kMmgK0Rrv4CpFjKxI=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/win32-x64/-/win32-x64-0.28.1.tgz}
+    resolution: {integrity: sha1-EAZO5E9DR7kMmgK0Rrv4CpFjKxI=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@esbuild/win32-x64/-/win32-x64-0.28.1.tgz}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
 
   '@eslint-community/eslint-utils@4.10.1':
-    resolution: {integrity: sha1-iRG9crLDZApUNgngQAuMTS5+fLY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz}
+    resolution: {integrity: sha1-iRG9crLDZApUNgngQAuMTS5+fLY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz}
     engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
     peerDependencies:
       eslint: ^6.0.0 || ^7.0.0 || >=8.0.0
@@ -447,19 +447,19 @@ packages:
     engines: {node: ^12.0.0 || ^14.0.0 || >=16.0.0}
 
   '@eslint/config-array@0.23.5':
-    resolution: {integrity: sha1-VuhtJDBJGV2KzAwGobPf3D+j3pU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/config-array/-/config-array-0.23.5.tgz}
+    resolution: {integrity: sha1-VuhtJDBJGV2KzAwGobPf3D+j3pU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/config-array/-/config-array-0.23.5.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   '@eslint/config-helpers@0.7.0':
-    resolution: {integrity: sha1-Ce5KoHtz8FnsLUx0v0sv8CsyI3c=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/config-helpers/-/config-helpers-0.7.0.tgz}
+    resolution: {integrity: sha1-Ce5KoHtz8FnsLUx0v0sv8CsyI3c=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/config-helpers/-/config-helpers-0.7.0.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   '@eslint/core@1.2.1':
-    resolution: {integrity: sha1-wdp80bgvqHh/mLVin7gRhIobY84=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/core/-/core-1.2.1.tgz}
+    resolution: {integrity: sha1-wdp80bgvqHh/mLVin7gRhIobY84=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/core/-/core-1.2.1.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   '@eslint/js@10.0.1':
-    resolution: {integrity: sha1-HoqHb1ARevirZ+R9WtlNONZiJYM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/js/-/js-10.0.1.tgz}
+    resolution: {integrity: sha1-HoqHb1ARevirZ+R9WtlNONZiJYM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/js/-/js-10.0.1.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
     peerDependencies:
       eslint: ^10.0.0
@@ -468,48 +468,48 @@ packages:
         optional: true
 
   '@eslint/object-schema@3.0.5':
-    resolution: {integrity: sha1-iOm/TRHSsZwILnjr586IckpesJE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/object-schema/-/object-schema-3.0.5.tgz}
+    resolution: {integrity: sha1-iOm/TRHSsZwILnjr586IckpesJE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/object-schema/-/object-schema-3.0.5.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   '@eslint/plugin-kit@0.7.2':
-    resolution: {integrity: sha1-Swli8/LHzovJiz7P40UlwJ0styk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/plugin-kit/-/plugin-kit-0.7.2.tgz}
+    resolution: {integrity: sha1-Swli8/LHzovJiz7P40UlwJ0styk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@eslint/plugin-kit/-/plugin-kit-0.7.2.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
-  '@github/copilot-darwin-arm64@1.0.75':
-    resolution: {integrity: sha1-x2RsmqLN0o9CYamDGdQsdEvSVyk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-darwin-arm64/-/copilot-darwin-arm64-1.0.75.tgz}
+  '@github/copilot-darwin-arm64@1.0.77':
+    resolution: {integrity: sha1-UHXXezbuQ01kMR6Secy+68RKf2I=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-darwin-arm64/-/copilot-darwin-arm64-1.0.77.tgz}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@github/copilot-darwin-x64@1.0.75':
-    resolution: {integrity: sha1-Tf6wUkKis4sLJxqWm4GNQYsIz9U=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-darwin-x64/-/copilot-darwin-x64-1.0.75.tgz}
+  '@github/copilot-darwin-x64@1.0.77':
+    resolution: {integrity: sha1-DHNPL4KbtKbT8/32X4vnDmiAvrw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-darwin-x64/-/copilot-darwin-x64-1.0.77.tgz}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@github/copilot-linux-arm64@1.0.75':
-    resolution: {integrity: sha1-4p2m9ZUHdp0xtaZyHBL5J+DiAk8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linux-arm64/-/copilot-linux-arm64-1.0.75.tgz}
+  '@github/copilot-linux-arm64@1.0.77':
+    resolution: {integrity: sha1-WXjIMpdMEf5A+8qS3Soxm7JH4ZE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linux-arm64/-/copilot-linux-arm64-1.0.77.tgz}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@github/copilot-linux-x64@1.0.75':
-    resolution: {integrity: sha1-iDDFwqczNrzGw+VD4q8Ce90xJU4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.75.tgz}
+  '@github/copilot-linux-x64@1.0.77':
+    resolution: {integrity: sha1-ELVxRsa9WJCQEMaLr+DRM/R67o8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.77.tgz}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@github/copilot-linuxmusl-arm64@1.0.75':
-    resolution: {integrity: sha1-UXoy4G1wrCMOrByictENAWy6guQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linuxmusl-arm64/-/copilot-linuxmusl-arm64-1.0.75.tgz}
+  '@github/copilot-linuxmusl-arm64@1.0.77':
+    resolution: {integrity: sha1-ERcz79gwcn+xLv41FX2TYdwKtbQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linuxmusl-arm64/-/copilot-linuxmusl-arm64-1.0.77.tgz}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
     hasBin: true
 
-  '@github/copilot-linuxmusl-x64@1.0.75':
-    resolution: {integrity: sha1-NPcZvorXCYirJd317zrgTcUyJxw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linuxmusl-x64/-/copilot-linuxmusl-x64-1.0.75.tgz}
+  '@github/copilot-linuxmusl-x64@1.0.77':
+    resolution: {integrity: sha1-go5TV6rIE4S0Bj/p7itO+VCY7Vg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-linuxmusl-x64/-/copilot-linuxmusl-x64-1.0.77.tgz}
     cpu: [x64]
     os: [linux]
     libc: [musl]
@@ -519,32 +519,32 @@ packages:
     resolution: {integrity: sha1-bpfWLYOWmVxubz83rNb1YfMcoe0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-sdk/-/copilot-sdk-1.0.8.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
 
-  '@github/copilot-win32-arm64@1.0.75':
-    resolution: {integrity: sha1-rHjpXwJWFx7Mzua+auZJF1UpAo0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-win32-arm64/-/copilot-win32-arm64-1.0.75.tgz}
+  '@github/copilot-win32-arm64@1.0.77':
+    resolution: {integrity: sha1-wWHXWgq+cvXY1Hqmmkvw/9ip41U=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-win32-arm64/-/copilot-win32-arm64-1.0.77.tgz}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@github/copilot-win32-x64@1.0.75':
-    resolution: {integrity: sha1-lte9JsivGeYbfq+qLB3oZ0PE1x0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-win32-x64/-/copilot-win32-x64-1.0.75.tgz}
+  '@github/copilot-win32-x64@1.0.77':
+    resolution: {integrity: sha1-fN9mrgbCGKrzY7g3sARqjId/OOg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-win32-x64/-/copilot-win32-x64-1.0.77.tgz}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@github/copilot@1.0.75':
-    resolution: {integrity: sha1-0Kp08kDl6DYUTRjUA9B5jmkuMko=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot/-/copilot-1.0.75.tgz}
+  '@github/copilot@1.0.77':
+    resolution: {integrity: sha1-0iplFMTraJfVZrnP0ThiBrZk9es=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot/-/copilot-1.0.77.tgz}
     hasBin: true
 
   '@humanfs/core@0.19.2':
-    resolution: {integrity: sha1-qCcsoDsqz0kmcCIrIyC2xCG/3mA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/core/-/core-0.19.2.tgz}
+    resolution: {integrity: sha1-qCcsoDsqz0kmcCIrIyC2xCG/3mA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/core/-/core-0.19.2.tgz}
     engines: {node: '>=18.18.0'}
 
   '@humanfs/node@0.16.8':
-    resolution: {integrity: sha1-j4AMzME/T4zTEW4tnAqUk52j4+0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/node/-/node-0.16.8.tgz}
+    resolution: {integrity: sha1-j4AMzME/T4zTEW4tnAqUk52j4+0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/node/-/node-0.16.8.tgz}
     engines: {node: '>=18.18.0'}
 
   '@humanfs/types@0.15.0':
-    resolution: {integrity: sha1-8qCfYgEjkLK/8/xvskjd7IwJoJA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/types/-/types-0.15.0.tgz}
+    resolution: {integrity: sha1-8qCfYgEjkLK/8/xvskjd7IwJoJA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanfs/types/-/types-0.15.0.tgz}
     engines: {node: '>=18.18.0'}
 
   '@humanwhocodes/module-importer@1.0.1':
@@ -552,7 +552,7 @@ packages:
     engines: {node: '>=12.22'}
 
   '@humanwhocodes/retry@0.4.3':
-    resolution: {integrity: sha1-wrnS43TuYsWG062+qHGZsdenpro=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanwhocodes/retry/-/retry-0.4.3.tgz}
+    resolution: {integrity: sha1-wrnS43TuYsWG062+qHGZsdenpro=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@humanwhocodes/retry/-/retry-0.4.3.tgz}
     engines: {node: '>=18.18'}
 
   '@inquirer/external-editor@1.0.3':
@@ -565,276 +565,275 @@ packages:
         optional: true
 
   '@jridgewell/gen-mapping@0.3.13':
-    resolution: {integrity: sha1-Y0Khn0Q0dRjJPkOxrGnes8Rlah8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz}
+    resolution: {integrity: sha1-Y0Khn0Q0dRjJPkOxrGnes8Rlah8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz}
 
   '@jridgewell/resolve-uri@3.1.2':
-    resolution: {integrity: sha1-eg7mAfYPmaIMfHxf8MgDiMEYm9Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz}
+    resolution: {integrity: sha1-eg7mAfYPmaIMfHxf8MgDiMEYm9Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz}
     engines: {node: '>=6.0.0'}
 
   '@jridgewell/sourcemap-codec@1.5.5':
-    resolution: {integrity: sha1-aRKwDSxjHA0Vzhp6tXzWV/Ko+Lo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz}
+    resolution: {integrity: sha1-aRKwDSxjHA0Vzhp6tXzWV/Ko+Lo=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz}
 
   '@jridgewell/trace-mapping@0.3.31':
-    resolution: {integrity: sha1-2xXWeByTHzolGj2sOVAcmKYIL9A=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz}
+    resolution: {integrity: sha1-2xXWeByTHzolGj2sOVAcmKYIL9A=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz}
 
-  '@koromix/koffi-darwin-arm64@3.1.2':
-    resolution: {integrity: sha1-KfTADQAyyC5UIVcPRLj94FjnHTI=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-darwin-arm64/-/koffi-darwin-arm64-3.1.2.tgz}
+  '@koromix/koffi-darwin-arm64@3.1.4':
+    resolution: {integrity: sha1-Dc9DnEloGtq/KOWEhz9SzaAm3bU=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-darwin-arm64/-/koffi-darwin-arm64-3.1.4.tgz}
     cpu: [arm64]
     os: [darwin]
 
-  '@koromix/koffi-darwin-x64@3.1.2':
-    resolution: {integrity: sha1-gH55FUvtJMHJ+YUhqSAUR162ZiQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-darwin-x64/-/koffi-darwin-x64-3.1.2.tgz}
+  '@koromix/koffi-darwin-x64@3.1.4':
+    resolution: {integrity: sha1-kihYEOO/vzM2DD7LCs1RqjjJmac=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-darwin-x64/-/koffi-darwin-x64-3.1.4.tgz}
     cpu: [x64]
     os: [darwin]
 
-  '@koromix/koffi-freebsd-arm64@3.1.2':
-    resolution: {integrity: sha1-P6KHHcRjzAvDeb5LLCf8vq6yjUs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-arm64/-/koffi-freebsd-arm64-3.1.2.tgz}
+  '@koromix/koffi-freebsd-arm64@3.1.4':
+    resolution: {integrity: sha1-5bmKsothVd5aex9h/mvY8Uq83Jo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-arm64/-/koffi-freebsd-arm64-3.1.4.tgz}
     cpu: [arm64]
     os: [freebsd]
 
-  '@koromix/koffi-freebsd-ia32@3.1.2':
-    resolution: {integrity: sha1-RTF4Apb2YK7859wjrlrbGWvaAUg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-ia32/-/koffi-freebsd-ia32-3.1.2.tgz}
+  '@koromix/koffi-freebsd-ia32@3.1.4':
+    resolution: {integrity: sha1-5RJPyVYr3REpRTKBraVh6KyvdxA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-ia32/-/koffi-freebsd-ia32-3.1.4.tgz}
     cpu: [ia32]
     os: [freebsd]
 
-  '@koromix/koffi-freebsd-x64@3.1.2':
-    resolution: {integrity: sha1-uOW5VDWIPbYL1x4cRPTi1L9k2WI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-x64/-/koffi-freebsd-x64-3.1.2.tgz}
+  '@koromix/koffi-freebsd-x64@3.1.4':
+    resolution: {integrity: sha1-VnXaZJo9Ysu7pYgC4LsJIF//80s=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-freebsd-x64/-/koffi-freebsd-x64-3.1.4.tgz}
     cpu: [x64]
     os: [freebsd]
 
-  '@koromix/koffi-linux-arm64@3.1.2':
-    resolution: {integrity: sha1-PtPMvnCpsky41pD9WLe/ymB4cJM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-arm64/-/koffi-linux-arm64-3.1.2.tgz}
+  '@koromix/koffi-linux-arm64@3.1.4':
+    resolution: {integrity: sha1-mowhnA54iTZXjmwr/4QVCozSINI=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-arm64/-/koffi-linux-arm64-3.1.4.tgz}
     cpu: [arm64]
     os: [linux]
 
-  '@koromix/koffi-linux-ia32@3.1.2':
-    resolution: {integrity: sha1-Ys9dug6Fmjs6nrbZX4kyruFvk+E=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-ia32/-/koffi-linux-ia32-3.1.2.tgz}
+  '@koromix/koffi-linux-ia32@3.1.4':
+    resolution: {integrity: sha1-OTD5YfyLmP25FCDYW37YqkS3rhE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-ia32/-/koffi-linux-ia32-3.1.4.tgz}
     cpu: [ia32]
     os: [linux]
 
-  '@koromix/koffi-linux-loong64@3.1.2':
-    resolution: {integrity: sha1-RDbkmdDaIMokrg3MuIAVbTrdIt8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-loong64/-/koffi-linux-loong64-3.1.2.tgz}
+  '@koromix/koffi-linux-loong64@3.1.4':
+    resolution: {integrity: sha1-3E7he9GMKSignhPpNbPO7NXDS3E=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-loong64/-/koffi-linux-loong64-3.1.4.tgz}
     cpu: [loong64]
     os: [linux]
 
-  '@koromix/koffi-linux-riscv64@3.1.2':
-    resolution: {integrity: sha1-20wNPT+oP1BELCSZMjEvifJnu9E=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-riscv64/-/koffi-linux-riscv64-3.1.2.tgz}
+  '@koromix/koffi-linux-riscv64@3.1.4':
+    resolution: {integrity: sha1-9fWKD5zdeAIKNjuFrnXF+niXcWo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-riscv64/-/koffi-linux-riscv64-3.1.4.tgz}
     cpu: [riscv64]
     os: [linux]
 
-  '@koromix/koffi-linux-x64@3.1.2':
-    resolution: {integrity: sha1-XYl6gz1JESqYWAGODmufuy4uYHA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-x64/-/koffi-linux-x64-3.1.2.tgz}
+  '@koromix/koffi-linux-x64@3.1.4':
+    resolution: {integrity: sha1-Mz1fON2uoyRzQ1H1vLB69A5xUh4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-linux-x64/-/koffi-linux-x64-3.1.4.tgz}
     cpu: [x64]
     os: [linux]
 
-  '@koromix/koffi-openbsd-ia32@3.1.2':
-    resolution: {integrity: sha1-qQojt8lQHRsCK3Vt/xW8KwALYWs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-openbsd-ia32/-/koffi-openbsd-ia32-3.1.2.tgz}
+  '@koromix/koffi-openbsd-ia32@3.1.4':
+    resolution: {integrity: sha1-WjMblac5NdwkKNFjec2OBgbCdMY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-openbsd-ia32/-/koffi-openbsd-ia32-3.1.4.tgz}
     cpu: [ia32]
     os: [openbsd]
 
-  '@koromix/koffi-openbsd-x64@3.1.2':
-    resolution: {integrity: sha1-02T3y/5TpAphHx5sOPSsdCTN1Rc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-openbsd-x64/-/koffi-openbsd-x64-3.1.2.tgz}
+  '@koromix/koffi-openbsd-x64@3.1.4':
+    resolution: {integrity: sha1-/SAnQlJmznm6GvQ+NKEl73u946M=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-openbsd-x64/-/koffi-openbsd-x64-3.1.4.tgz}
     cpu: [x64]
     os: [openbsd]
 
-  '@koromix/koffi-win32-arm64@3.1.2':
-    resolution: {integrity: sha1-J13eDHIo3gWhoq5BKI7lXAxb28A=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-arm64/-/koffi-win32-arm64-3.1.2.tgz}
+  '@koromix/koffi-win32-arm64@3.1.4':
+    resolution: {integrity: sha1-pH5TpaecjVHYVW7OM9haJp7Eas8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-arm64/-/koffi-win32-arm64-3.1.4.tgz}
     cpu: [arm64]
     os: [win32]
 
-  '@koromix/koffi-win32-ia32@3.1.2':
-    resolution: {integrity: sha1-1iO5+HRm8PYDXHwfi3xWnfIWNA8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-ia32/-/koffi-win32-ia32-3.1.2.tgz}
+  '@koromix/koffi-win32-ia32@3.1.4':
+    resolution: {integrity: sha1-N6ok0y59+16Gt88nWzigUbC0vmo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-ia32/-/koffi-win32-ia32-3.1.4.tgz}
     cpu: [ia32]
     os: [win32]
 
-  '@koromix/koffi-win32-x64@3.1.2':
-    resolution: {integrity: sha1-zQWQ4px+J+NQq31qKZK1FEWFC9k=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-x64/-/koffi-win32-x64-3.1.2.tgz}
+  '@koromix/koffi-win32-x64@3.1.4':
+    resolution: {integrity: sha1-g6L3AiUC3Fg/viQ4QJ6hLeE4xcc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@koromix/koffi-win32-x64/-/koffi-win32-x64-3.1.4.tgz}
     cpu: [x64]
     os: [win32]
 
   '@manypkg/find-root@1.1.0':
-    resolution: {integrity: sha1-pi2O0c1+fUwR2dUqg5dGC11K0p8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@manypkg/find-root/-/find-root-1.1.0.tgz}
+    resolution: {integrity: sha1-pi2O0c1+fUwR2dUqg5dGC11K0p8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@manypkg/find-root/-/find-root-1.1.0.tgz}
 
   '@manypkg/get-packages@1.1.3':
-    resolution: {integrity: sha1-4YTbm7p5L6RpPeRljPsUY6wsnEc=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@manypkg/get-packages/-/get-packages-1.1.3.tgz}
+    resolution: {integrity: sha1-4YTbm7p5L6RpPeRljPsUY6wsnEc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@manypkg/get-packages/-/get-packages-1.1.3.tgz}
 
   '@napi-rs/wasm-runtime@1.2.1':
-    resolution: {integrity: sha1-llfqoQPBzt2UEQEllfr49HZgjxU=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.1.tgz}
+    resolution: {integrity: sha1-llfqoQPBzt2UEQEllfr49HZgjxU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.1.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
     peerDependencies:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.3
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.3
 
   '@nodelib/fs.scandir@2.1.5':
-    resolution: {integrity: sha1-dhnC6yGyVIP20WdUi0z9WnSIw9U=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.scandir/-/fs.scandir-2.1.5.tgz}
+    resolution: {integrity: sha1-dhnC6yGyVIP20WdUi0z9WnSIw9U=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.scandir/-/fs.scandir-2.1.5.tgz}
     engines: {node: '>= 8'}
 
   '@nodelib/fs.stat@2.0.5':
-    resolution: {integrity: sha1-W9Jir5Tp0lvR5xsF3u1Eh2oiLos=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.stat/-/fs.stat-2.0.5.tgz}
+    resolution: {integrity: sha1-W9Jir5Tp0lvR5xsF3u1Eh2oiLos=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.stat/-/fs.stat-2.0.5.tgz}
     engines: {node: '>= 8'}
 
   '@nodelib/fs.walk@1.2.8':
-    resolution: {integrity: sha1-6Vc36LtnRt3t9pxVaVNJTxlv5po=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.walk/-/fs.walk-1.2.8.tgz}
+    resolution: {integrity: sha1-6Vc36LtnRt3t9pxVaVNJTxlv5po=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@nodelib/fs.walk/-/fs.walk-1.2.8.tgz}
     engines: {node: '>= 8'}
 
-  '@oxc-project/types@0.139.0':
-    resolution: {integrity: sha1-ONdrnb+TTCoCvhdPsyzuvxgv50I=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@oxc-project/types/-/types-0.139.0.tgz}
+  '@oxc-project/types@0.142.0':
+    resolution: {integrity: sha1-C0vXhB7z3SZ6aRhLl0UswLMT+1I=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@oxc-project/types/-/types-0.142.0.tgz}
 
-  '@rolldown/binding-android-arm64@1.1.5':
-    resolution: {integrity: sha1-9Yy5oKgSjtBYIoJyBShUf8XANfM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-android-arm64/-/binding-android-arm64-1.1.5.tgz}
+  '@rolldown/binding-android-arm64@1.2.1':
+    resolution: {integrity: sha1-28WiRTwGOqmyl0QQ0ZtL4ucwhW8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [android]
 
-  '@rolldown/binding-darwin-arm64@1.1.5':
-    resolution: {integrity: sha1-RBFEwFpKgxqnUmmrw6SjJDdOpwc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.1.5.tgz}
+  '@rolldown/binding-darwin-arm64@1.2.1':
+    resolution: {integrity: sha1-3UPcEtWs1qNO29SM3zAI9dTFLio=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [darwin]
 
-  '@rolldown/binding-darwin-x64@1.1.5':
-    resolution: {integrity: sha1-yC4wZSzvUsSvkl1cZsiVWkAxmBY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.1.5.tgz}
+  '@rolldown/binding-darwin-x64@1.2.1':
+    resolution: {integrity: sha1-ALMtXgrbqKq2klYzKA7Rv22QwdI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [darwin]
 
-  '@rolldown/binding-freebsd-x64@1.1.5':
-    resolution: {integrity: sha1-wy6c5/ocD7K4CROio6BcPpB9BrA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.1.5.tgz}
+  '@rolldown/binding-freebsd-x64@1.2.1':
+    resolution: {integrity: sha1-CIT6ziV9J2MCR1SrrpR+HAt7bCQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [freebsd]
 
-  '@rolldown/binding-linux-arm-gnueabihf@1.1.5':
-    resolution: {integrity: sha1-zpC14iMWretQLqAQWC9JjNBgTyc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.1.5.tgz}
+  '@rolldown/binding-linux-arm-gnueabihf@1.2.1':
+    resolution: {integrity: sha1-qCWArFzzAwxlzPYYEybWT5GIlSQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm]
     os: [linux]
 
-  '@rolldown/binding-linux-arm64-gnu@1.1.5':
-    resolution: {integrity: sha1-kZRxEMTdqk7vsATlJogHCXcIUgE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.1.5.tgz}
+  '@rolldown/binding-linux-arm64-gnu@1.2.1':
+    resolution: {integrity: sha1-UiG2x+q1X4LXduZfkUbTh87DeR4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@rolldown/binding-linux-arm64-musl@1.1.5':
-    resolution: {integrity: sha1-6zKy1BCMHHArkejN6KBD6uXKqU0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.1.5.tgz}
+  '@rolldown/binding-linux-arm64-musl@1.2.1':
+    resolution: {integrity: sha1-NVLDUnXarR8VU/HylFKqYr/70SA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@rolldown/binding-linux-ppc64-gnu@1.1.5':
-    resolution: {integrity: sha1-zLlDwR5acmVcuwL8EWNUHOtkB4I=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.1.5.tgz}
+  '@rolldown/binding-linux-ppc64-gnu@1.2.1':
+    resolution: {integrity: sha1-a0ly0yYUtwiFxb9YBpX7HjZbUxM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [ppc64]
     os: [linux]
     libc: [glibc]
 
-  '@rolldown/binding-linux-s390x-gnu@1.1.5':
-    resolution: {integrity: sha1-ozcx7lZ+kLdfrG5eVTB+iiswOPA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.1.5.tgz}
+  '@rolldown/binding-linux-s390x-gnu@1.2.1':
+    resolution: {integrity: sha1-Quutpy5hcAPjC2esm0r/9mp1sVo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [s390x]
     os: [linux]
     libc: [glibc]
 
-  '@rolldown/binding-linux-x64-gnu@1.1.5':
-    resolution: {integrity: sha1-p0wBqqzt/BHDm2/rozpfoMZUlJ8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.1.5.tgz}
+  '@rolldown/binding-linux-x64-gnu@1.2.1':
+    resolution: {integrity: sha1-N3NLv0uQzznaUwHxi28Im2WnRdk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@rolldown/binding-linux-x64-musl@1.1.5':
-    resolution: {integrity: sha1-KM0XhJT6HmXbpBIim1zlXE3Vy9E=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.1.5.tgz}
+  '@rolldown/binding-linux-x64-musl@1.2.1':
+    resolution: {integrity: sha1-lRcJE/KHAPvVbI2FZJ45YKvlYy8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@rolldown/binding-openharmony-arm64@1.1.5':
-    resolution: {integrity: sha1-98dfqRP8IIhNJqfUiNT1xZfNccA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.1.5.tgz}
+  '@rolldown/binding-openharmony-arm64@1.2.1':
+    resolution: {integrity: sha1-0WOl/iXTVCt7MlwF4CEYJfQtK1w=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [openharmony]
 
-  '@rolldown/binding-wasm32-wasi@1.1.5':
-    resolution: {integrity: sha1-w3lYGUd4cIHfNj6hBhQPzV/sJS0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-wasm32-wasi/-/binding-wasm32-wasi-1.1.5.tgz}
-    engines: {node: ^20.19.0 || >=22.12.0}
-    cpu: [wasm32]
+  '@rolldown/binding-wasm32-wasi@1.2.1':
+    resolution: {integrity: sha1-gzMgW2GZfSmPtDMhSpmwGHRFk0I=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-wasm32-wasi/-/binding-wasm32-wasi-1.2.1.tgz}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
 
-  '@rolldown/binding-win32-arm64-msvc@1.1.5':
-    resolution: {integrity: sha1-8jyIaU96cpoS85UCSu4434Cha6M=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.1.5.tgz}
+  '@rolldown/binding-win32-arm64-msvc@1.2.1':
+    resolution: {integrity: sha1-xzBVnn10+puiQQbZEE58jcJfIjY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [win32]
 
-  '@rolldown/binding-win32-x64-msvc@1.1.5':
-    resolution: {integrity: sha1-M3fI3g5WqIV/ESF1YRRwkOh0y0Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.1.5.tgz}
+  '@rolldown/binding-win32-x64-msvc@1.2.1':
+    resolution: {integrity: sha1-6gQNhxn+Jsiw14EIEymyChYGoAY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [win32]
 
   '@rolldown/pluginutils@1.0.1':
-    resolution: {integrity: sha1-4/zuCT+7XOdl4a0Ij/TeKIn2+b4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz}
+    resolution: {integrity: sha1-4/zuCT+7XOdl4a0Ij/TeKIn2+b4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz}
 
   '@sindresorhus/merge-streams@4.0.0':
-    resolution: {integrity: sha1-q7Edma620n8bVjw4FHpy1QBY4zk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@sindresorhus/merge-streams/-/merge-streams-4.0.0.tgz}
+    resolution: {integrity: sha1-q7Edma620n8bVjw4FHpy1QBY4zk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@sindresorhus/merge-streams/-/merge-streams-4.0.0.tgz}
     engines: {node: '>=18'}
 
   '@standard-schema/spec@1.1.0':
-    resolution: {integrity: sha1-p5tV26+GBIEvUtFAssmrQbwVC7g=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@standard-schema/spec/-/spec-1.1.0.tgz}
+    resolution: {integrity: sha1-p5tV26+GBIEvUtFAssmrQbwVC7g=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@standard-schema/spec/-/spec-1.1.0.tgz}
 
   '@tybys/wasm-util@0.10.3':
-    resolution: {integrity: sha1-AVy6np3UfOFNA9KoxdVHv7FpZl0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@tybys/wasm-util/-/wasm-util-0.10.3.tgz}
+    resolution: {integrity: sha1-AVy6np3UfOFNA9KoxdVHv7FpZl0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@tybys/wasm-util/-/wasm-util-0.10.3.tgz}
 
   '@types/chai@5.2.3':
-    resolution: {integrity: sha1-jpzZ4cNYH6azQaWu1ViOsoW+C0o=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/chai/-/chai-5.2.3.tgz}
+    resolution: {integrity: sha1-jpzZ4cNYH6azQaWu1ViOsoW+C0o=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/chai/-/chai-5.2.3.tgz}
 
   '@types/debug@4.1.13':
     resolution: {integrity: sha1-ItHMnVQtNZPK6nZPl0MGqzYobuc=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/debug/-/debug-4.1.13.tgz}
 
   '@types/deep-eql@4.0.2':
-    resolution: {integrity: sha1-M0MRlx06BxIefrkbaEpgXn7qnL0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/deep-eql/-/deep-eql-4.0.2.tgz}
+    resolution: {integrity: sha1-M0MRlx06BxIefrkbaEpgXn7qnL0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/deep-eql/-/deep-eql-4.0.2.tgz}
 
   '@types/esrecurse@4.3.1':
-    resolution: {integrity: sha1-b2Nq+WL75hkbgwvWdrpZhpJrzOw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/esrecurse/-/esrecurse-4.3.1.tgz}
+    resolution: {integrity: sha1-b2Nq+WL75hkbgwvWdrpZhpJrzOw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/esrecurse/-/esrecurse-4.3.1.tgz}
 
   '@types/estree@1.0.9':
-    resolution: {integrity: sha1-zz8Oh2177hWpOrkluCv1cKOQSiQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/estree/-/estree-1.0.9.tgz}
+    resolution: {integrity: sha1-zz8Oh2177hWpOrkluCv1cKOQSiQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/estree/-/estree-1.0.9.tgz}
 
   '@types/gensync@1.0.5':
-    resolution: {integrity: sha1-GBnrpTfQNtz07H6MjxX7/pOOmaA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/gensync/-/gensync-1.0.5.tgz}
+    resolution: {integrity: sha1-GBnrpTfQNtz07H6MjxX7/pOOmaA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/gensync/-/gensync-1.0.5.tgz}
 
   '@types/jsesc@2.5.1':
     resolution: {integrity: sha1-w03vxgjslLaNxqEqWBtECULG1QM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/jsesc/-/jsesc-2.5.1.tgz}
 
   '@types/json-schema@7.0.15':
-    resolution: {integrity: sha1-WWoXRyM2lNUPatinhp/Lb1bPWEE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/json-schema/-/json-schema-7.0.15.tgz}
+    resolution: {integrity: sha1-WWoXRyM2lNUPatinhp/Lb1bPWEE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/json-schema/-/json-schema-7.0.15.tgz}
 
   '@types/katex@0.16.8':
-    resolution: {integrity: sha1-gL8+CBTQmoRkEqCw8UCUa3nDbD4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/katex/-/katex-0.16.8.tgz}
+    resolution: {integrity: sha1-gL8+CBTQmoRkEqCw8UCUa3nDbD4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/katex/-/katex-0.16.8.tgz}
 
   '@types/ms@2.1.0':
     resolution: {integrity: sha1-BSqmekjszEMJ1/AZG35BQ0uQu3g=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/ms/-/ms-2.1.0.tgz}
 
   '@types/node@12.20.55':
-    resolution: {integrity: sha1-wynL1DTEIWT4RrkJvW+FtVN/YkA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/node/-/node-12.20.55.tgz}
+    resolution: {integrity: sha1-wynL1DTEIWT4RrkJvW+FtVN/YkA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/node/-/node-12.20.55.tgz}
 
   '@types/node@24.13.3':
-    resolution: {integrity: sha1-SfGL08ZHhm3NpRoHVsFF4UWQzhY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/node/-/node-24.13.3.tgz}
+    resolution: {integrity: sha1-SfGL08ZHhm3NpRoHVsFF4UWQzhY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/node/-/node-24.13.3.tgz}
 
   '@types/unist@2.0.11':
-    resolution: {integrity: sha1-Ea9XsSfjJId3SEH3pOVOqxZtA8Q=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/unist/-/unist-2.0.11.tgz}
+    resolution: {integrity: sha1-Ea9XsSfjJId3SEH3pOVOqxZtA8Q=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@types/unist/-/unist-2.0.11.tgz}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
-    resolution: {integrity: sha1-zcfOgdYPHgkDSWDd+x+4gNendrY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz}
+    resolution: {integrity: sha1-zcfOgdYPHgkDSWDd+x+4gNendrY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [ppc64]
     os: [aix]
 
   '@typescript/typescript-darwin-arm64@7.0.2':
-    resolution: {integrity: sha1-pV/fz6WN9Y0n2yI3zealweNacjU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz}
+    resolution: {integrity: sha1-pV/fz6WN9Y0n2yI3zealweNacjU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [darwin]
@@ -846,13 +845,13 @@ packages:
     os: [darwin]
 
   '@typescript/typescript-freebsd-arm64@7.0.2':
-    resolution: {integrity: sha1-8f+IEAMLNdK1vg22otxlBGDqlPo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz}
+    resolution: {integrity: sha1-8f+IEAMLNdK1vg22otxlBGDqlPo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [freebsd]
 
   '@typescript/typescript-freebsd-x64@7.0.2':
-    resolution: {integrity: sha1-PYawPzU8WxupUWLrbONVM7/ClL0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz}
+    resolution: {integrity: sha1-PYawPzU8WxupUWLrbONVM7/ClL0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [freebsd]
@@ -864,19 +863,19 @@ packages:
     os: [linux]
 
   '@typescript/typescript-linux-arm@7.0.2':
-    resolution: {integrity: sha1-rZS0HhruKk3MaimMe2fEM0X94y4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz}
+    resolution: {integrity: sha1-rZS0HhruKk3MaimMe2fEM0X94y4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [arm]
     os: [linux]
 
   '@typescript/typescript-linux-loong64@7.0.2':
-    resolution: {integrity: sha1-KWWu5PyHM2ATnYk9qv5jl6KROK0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz}
+    resolution: {integrity: sha1-KWWu5PyHM2ATnYk9qv5jl6KROK0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [loong64]
     os: [linux]
 
   '@typescript/typescript-linux-mips64el@7.0.2':
-    resolution: {integrity: sha1-Goh6MRvtOoM/gL/Uqe03wnGTbPA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz}
+    resolution: {integrity: sha1-Goh6MRvtOoM/gL/Uqe03wnGTbPA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [mips64el]
     os: [linux]
@@ -888,13 +887,13 @@ packages:
     os: [linux]
 
   '@typescript/typescript-linux-riscv64@7.0.2':
-    resolution: {integrity: sha1-tuijXCibPql6kqQdRhqu7Q07NuE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz}
+    resolution: {integrity: sha1-tuijXCibPql6kqQdRhqu7Q07NuE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [riscv64]
     os: [linux]
 
   '@typescript/typescript-linux-s390x@7.0.2':
-    resolution: {integrity: sha1-Lvlmk75IYfbReWVCflsAnLvtGj4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz}
+    resolution: {integrity: sha1-Lvlmk75IYfbReWVCflsAnLvtGj4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [s390x]
     os: [linux]
@@ -912,7 +911,7 @@ packages:
     os: [netbsd]
 
   '@typescript/typescript-netbsd-x64@7.0.2':
-    resolution: {integrity: sha1-R+xZSRpAxHDSgH3E0rglUo/Zeas=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz}
+    resolution: {integrity: sha1-R+xZSRpAxHDSgH3E0rglUo/Zeas=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [netbsd]
@@ -924,25 +923,25 @@ packages:
     os: [openbsd]
 
   '@typescript/typescript-openbsd-x64@7.0.2':
-    resolution: {integrity: sha1-03/ipynrlCwHbEVO5/GBX699Vg8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz}
+    resolution: {integrity: sha1-03/ipynrlCwHbEVO5/GBX699Vg8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [openbsd]
 
   '@typescript/typescript-sunos-x64@7.0.2':
-    resolution: {integrity: sha1-q6jTRkw1ZacER4m6upaRa9SrLIg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz}
+    resolution: {integrity: sha1-q6jTRkw1ZacER4m6upaRa9SrLIg=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [sunos]
 
   '@typescript/typescript-win32-arm64@7.0.2':
-    resolution: {integrity: sha1-ud5QoXGWOD9iYgtfnQovNK07YNc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz}
+    resolution: {integrity: sha1-ud5QoXGWOD9iYgtfnQovNK07YNc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [win32]
 
   '@typescript/typescript-win32-x64@7.0.2':
-    resolution: {integrity: sha1-zzt7DWzlY12spMjgHBic3N5H7Dw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz}
+    resolution: {integrity: sha1-zzt7DWzlY12spMjgHBic3N5H7Dw=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [win32]
@@ -960,7 +959,7 @@ packages:
     resolution: {integrity: sha1-eZwG/ES7DPfieEE3tifFzBcyhdQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/expect/-/expect-4.1.10.tgz}
 
   '@vitest/mocker@4.1.10':
-    resolution: {integrity: sha1-JBOYerTNf6HCthS0BMQHv2rR6tE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/mocker/-/mocker-4.1.10.tgz}
+    resolution: {integrity: sha1-JBOYerTNf6HCthS0BMQHv2rR6tE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/mocker/-/mocker-4.1.10.tgz}
     peerDependencies:
       msw: ^2.4.9
       vite: ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -971,22 +970,22 @@ packages:
         optional: true
 
   '@vitest/pretty-format@4.1.10':
-    resolution: {integrity: sha1-dVQucnOgjMEP1Nja1OPrHxbNlYw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/pretty-format/-/pretty-format-4.1.10.tgz}
+    resolution: {integrity: sha1-dVQucnOgjMEP1Nja1OPrHxbNlYw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/pretty-format/-/pretty-format-4.1.10.tgz}
 
   '@vitest/runner@4.1.10':
     resolution: {integrity: sha1-/r8KIakWhCFCLRlVNw5gb+q2A1U=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/runner/-/runner-4.1.10.tgz}
 
   '@vitest/snapshot@4.1.10':
-    resolution: {integrity: sha1-fj6f7H1NRyMuSTz9y9IXDeQ3HAQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/snapshot/-/snapshot-4.1.10.tgz}
+    resolution: {integrity: sha1-fj6f7H1NRyMuSTz9y9IXDeQ3HAQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/snapshot/-/snapshot-4.1.10.tgz}
 
   '@vitest/spy@4.1.10':
     resolution: {integrity: sha1-XAv6l7Vrup43QDyXbbd2/2q1b2U=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/spy/-/spy-4.1.10.tgz}
 
   '@vitest/utils@4.1.10':
-    resolution: {integrity: sha1-/8cQVfGL/Msf0FhjZevCgkiS5AM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/utils/-/utils-4.1.10.tgz}
+    resolution: {integrity: sha1-/8cQVfGL/Msf0FhjZevCgkiS5AM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@vitest/utils/-/utils-4.1.10.tgz}
 
   acorn-jsx@5.3.2:
-    resolution: {integrity: sha1-ftW7VZCLOy8bxVxq8WU7rafweTc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/acorn-jsx/-/acorn-jsx-5.3.2.tgz}
+    resolution: {integrity: sha1-ftW7VZCLOy8bxVxq8WU7rafweTc=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/acorn-jsx/-/acorn-jsx-5.3.2.tgz}
     peerDependencies:
       acorn: ^6.0.0 || ^7.0.0 || ^8.0.0
 
@@ -1011,50 +1010,50 @@ packages:
     engines: {node: '>=12'}
 
   argparse@2.0.1:
-    resolution: {integrity: sha1-JG9Q88p4oyQPbJl+ipvR6sSeSzg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/argparse/-/argparse-2.0.1.tgz}
+    resolution: {integrity: sha1-JG9Q88p4oyQPbJl+ipvR6sSeSzg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/argparse/-/argparse-2.0.1.tgz}
 
   array-union@2.1.0:
-    resolution: {integrity: sha1-t5hCCtvrHego2ErNii4j0+/oXo0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/array-union/-/array-union-2.1.0.tgz}
+    resolution: {integrity: sha1-t5hCCtvrHego2ErNii4j0+/oXo0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/array-union/-/array-union-2.1.0.tgz}
     engines: {node: '>=8'}
 
   assertion-error@2.0.1:
-    resolution: {integrity: sha1-9kGhlrM1aQsQcL8AtudZP+wZC/c=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/assertion-error/-/assertion-error-2.0.1.tgz}
+    resolution: {integrity: sha1-9kGhlrM1aQsQcL8AtudZP+wZC/c=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/assertion-error/-/assertion-error-2.0.1.tgz}
     engines: {node: '>=12'}
 
   ast-v8-to-istanbul@1.0.5:
     resolution: {integrity: sha1-cIuutvXIeSJtESo0H/qCHEOIHS0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ast-v8-to-istanbul/-/ast-v8-to-istanbul-1.0.5.tgz}
 
   balanced-match@4.0.4:
-    resolution: {integrity: sha1-v7EGYv7tgZaixi58aOF3IMJ0F5o=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/balanced-match/-/balanced-match-4.0.4.tgz}
+    resolution: {integrity: sha1-v7EGYv7tgZaixi58aOF3IMJ0F5o=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/balanced-match/-/balanced-match-4.0.4.tgz}
     engines: {node: 18 || 20 || >=22}
 
   baseline-browser-mapping@2.11.8:
-    resolution: {integrity: sha1-Qutf/Jn9icqL8w4xVXtIcGPuyG8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/baseline-browser-mapping/-/baseline-browser-mapping-2.11.8.tgz}
+    resolution: {integrity: sha1-Qutf/Jn9icqL8w4xVXtIcGPuyG8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/baseline-browser-mapping/-/baseline-browser-mapping-2.11.8.tgz}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
   better-path-resolve@1.0.0:
-    resolution: {integrity: sha1-E6NaEQTN1Ip7dL+HWPlqHuYT+Z0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/better-path-resolve/-/better-path-resolve-1.0.0.tgz}
+    resolution: {integrity: sha1-E6NaEQTN1Ip7dL+HWPlqHuYT+Z0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/better-path-resolve/-/better-path-resolve-1.0.0.tgz}
     engines: {node: '>=4'}
 
   brace-expansion@5.0.9:
-    resolution: {integrity: sha1-fHJDiAm1+lur9UGZofHCgaaYT88=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/brace-expansion/-/brace-expansion-5.0.9.tgz}
+    resolution: {integrity: sha1-fHJDiAm1+lur9UGZofHCgaaYT88=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/brace-expansion/-/brace-expansion-5.0.9.tgz}
     engines: {node: 20 || >=22}
 
   braces@3.0.3:
-    resolution: {integrity: sha1-SQMy9AkZRSJy1VqEgK3AxEE1h4k=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/braces/-/braces-3.0.3.tgz}
+    resolution: {integrity: sha1-SQMy9AkZRSJy1VqEgK3AxEE1h4k=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/braces/-/braces-3.0.3.tgz}
     engines: {node: '>=8'}
 
   browserslist@4.28.7:
-    resolution: {integrity: sha1-QJBGUX/M0uUc3CDwd0VLcUEYQCg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/browserslist/-/browserslist-4.28.7.tgz}
+    resolution: {integrity: sha1-QJBGUX/M0uUc3CDwd0VLcUEYQCg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/browserslist/-/browserslist-4.28.7.tgz}
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
     hasBin: true
 
   caniuse-lite@1.0.30001806:
-    resolution: {integrity: sha1-G8jlArcj+jk0Vd++3VzOwMKbt04=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/caniuse-lite/-/caniuse-lite-1.0.30001806.tgz}
+    resolution: {integrity: sha1-G8jlArcj+jk0Vd++3VzOwMKbt04=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/caniuse-lite/-/caniuse-lite-1.0.30001806.tgz}
 
   chai@6.2.2:
-    resolution: {integrity: sha1-rkG1LJrKh3NFBTYnF/MlX6zaNg4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/chai/-/chai-6.2.2.tgz}
+    resolution: {integrity: sha1-rkG1LJrKh3NFBTYnF/MlX6zaNg4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/chai/-/chai-6.2.2.tgz}
     engines: {node: '>=18'}
 
   character-entities-legacy@3.0.0:
@@ -1064,24 +1063,24 @@ packages:
     resolution: {integrity: sha1-LQnC5yzZUjB2zLIRV9/2atQ/zCI=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/character-entities/-/character-entities-2.0.2.tgz}
 
   character-reference-invalid@2.0.1:
-    resolution: {integrity: sha1-hcZrBB5DtHIQ+vQBJ4q/gIrEXLk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/character-reference-invalid/-/character-reference-invalid-2.0.1.tgz}
+    resolution: {integrity: sha1-hcZrBB5DtHIQ+vQBJ4q/gIrEXLk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/character-reference-invalid/-/character-reference-invalid-2.0.1.tgz}
 
   chardet@2.2.0:
     resolution: {integrity: sha1-AF1mTyy9SWGIjS4sMsWmnlnY7sQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/chardet/-/chardet-2.2.0.tgz}
 
   commander@8.3.0:
-    resolution: {integrity: sha1-SDfqGy2me5xhamevuw+v7lZ7ymY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/commander/-/commander-8.3.0.tgz}
+    resolution: {integrity: sha1-SDfqGy2me5xhamevuw+v7lZ7ymY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/commander/-/commander-8.3.0.tgz}
     engines: {node: '>= 12'}
 
   convert-source-map@2.0.0:
-    resolution: {integrity: sha1-S1YPZJ/E6RjdCrdc9JYei8iC2Co=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/convert-source-map/-/convert-source-map-2.0.0.tgz}
+    resolution: {integrity: sha1-S1YPZJ/E6RjdCrdc9JYei8iC2Co=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/convert-source-map/-/convert-source-map-2.0.0.tgz}
 
   cross-spawn@7.0.6:
-    resolution: {integrity: sha1-ilj+ePANzXDDcEUXWd+/rwPo7p8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/cross-spawn/-/cross-spawn-7.0.6.tgz}
+    resolution: {integrity: sha1-ilj+ePANzXDDcEUXWd+/rwPo7p8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/cross-spawn/-/cross-spawn-7.0.6.tgz}
     engines: {node: '>= 8'}
 
   debug@4.4.3:
-    resolution: {integrity: sha1-xq5DLZvZZiWC/OCHCbA4xY6ePWo=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/debug/-/debug-4.4.3.tgz}
+    resolution: {integrity: sha1-xq5DLZvZZiWC/OCHCbA4xY6ePWo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/debug/-/debug-4.4.3.tgz}
     engines: {node: '>=6.0'}
     peerDependencies:
       supports-color: '*'
@@ -1090,13 +1089,13 @@ packages:
         optional: true
 
   decode-named-character-reference@1.3.0:
-    resolution: {integrity: sha1-PkBgN2CHTC5YZ2kbWZ1zp9oltT8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/decode-named-character-reference/-/decode-named-character-reference-1.3.0.tgz}
+    resolution: {integrity: sha1-PkBgN2CHTC5YZ2kbWZ1zp9oltT8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/decode-named-character-reference/-/decode-named-character-reference-1.3.0.tgz}
 
   deep-is@0.1.4:
-    resolution: {integrity: sha1-pvLc5hL63S7x9Rm3NVHxfoUZmDE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/deep-is/-/deep-is-0.1.4.tgz}
+    resolution: {integrity: sha1-pvLc5hL63S7x9Rm3NVHxfoUZmDE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/deep-is/-/deep-is-0.1.4.tgz}
 
   dequal@2.0.3:
-    resolution: {integrity: sha1-JkQhTxmX057Q7g7OcjNUkKesZ74=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/dequal/-/dequal-2.0.3.tgz}
+    resolution: {integrity: sha1-JkQhTxmX057Q7g7OcjNUkKesZ74=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/dequal/-/dequal-2.0.3.tgz}
     engines: {node: '>=6'}
 
   detect-indent@6.1.0:
@@ -1104,29 +1103,29 @@ packages:
     engines: {node: '>=8'}
 
   detect-libc@2.1.2:
-    resolution: {integrity: sha1-aJxdzcGQDvVYOky59te0c3QgdK0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/detect-libc/-/detect-libc-2.1.2.tgz}
+    resolution: {integrity: sha1-aJxdzcGQDvVYOky59te0c3QgdK0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/detect-libc/-/detect-libc-2.1.2.tgz}
     engines: {node: '>=8'}
 
   devlop@1.1.0:
-    resolution: {integrity: sha1-TbfCyk3G4Og0wwvnDJS7yXbccBg=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/devlop/-/devlop-1.1.0.tgz}
+    resolution: {integrity: sha1-TbfCyk3G4Og0wwvnDJS7yXbccBg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/devlop/-/devlop-1.1.0.tgz}
 
   dir-glob@3.0.1:
-    resolution: {integrity: sha1-Vtv3PZkqSpO6FYT0U0Bj/S5BcX8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/dir-glob/-/dir-glob-3.0.1.tgz}
+    resolution: {integrity: sha1-Vtv3PZkqSpO6FYT0U0Bj/S5BcX8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/dir-glob/-/dir-glob-3.0.1.tgz}
     engines: {node: '>=8'}
 
   electron-to-chromium@1.5.398:
-    resolution: {integrity: sha1-nU2Xk0SsdihAKT4+rL6+00IoqhY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/electron-to-chromium/-/electron-to-chromium-1.5.398.tgz}
+    resolution: {integrity: sha1-nU2Xk0SsdihAKT4+rL6+00IoqhY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/electron-to-chromium/-/electron-to-chromium-1.5.398.tgz}
 
   empathic@2.0.1:
     resolution: {integrity: sha1-N7G+3jEJPgSgPSq86V6jI/7o70k=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/empathic/-/empathic-2.0.1.tgz}
     engines: {node: '>=14'}
 
   enquirer@2.4.1:
-    resolution: {integrity: sha1-kzNLP710/HCXsiSrSo+35Av0rlY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/enquirer/-/enquirer-2.4.1.tgz}
+    resolution: {integrity: sha1-kzNLP710/HCXsiSrSo+35Av0rlY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/enquirer/-/enquirer-2.4.1.tgz}
     engines: {node: '>=8.6'}
 
   entities@4.5.0:
-    resolution: {integrity: sha1-XSaOpecRPsdMTQM7eepaNaSI+0g=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/entities/-/entities-4.5.0.tgz}
+    resolution: {integrity: sha1-XSaOpecRPsdMTQM7eepaNaSI+0g=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/entities/-/entities-4.5.0.tgz}
     engines: {node: '>=0.12'}
 
   es-module-lexer@2.3.1:
@@ -1138,23 +1137,23 @@ packages:
     hasBin: true
 
   escalade@3.2.0:
-    resolution: {integrity: sha1-ARo/aYVroYnf+n3I/M6Z0qh5A+U=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/escalade/-/escalade-3.2.0.tgz}
+    resolution: {integrity: sha1-ARo/aYVroYnf+n3I/M6Z0qh5A+U=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/escalade/-/escalade-3.2.0.tgz}
     engines: {node: '>=6'}
 
   escape-string-regexp@4.0.0:
-    resolution: {integrity: sha1-FLqDpdNz49MR5a/KKc9b+tllvzQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz}
+    resolution: {integrity: sha1-FLqDpdNz49MR5a/KKc9b+tllvzQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz}
     engines: {node: '>=10'}
 
   eslint-scope@9.1.2:
-    resolution: {integrity: sha1-ud5qzi+rHP8k0uWNhbdMj86jmAI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-scope/-/eslint-scope-9.1.2.tgz}
+    resolution: {integrity: sha1-ud5qzi+rHP8k0uWNhbdMj86jmAI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-scope/-/eslint-scope-9.1.2.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   eslint-visitor-keys@3.4.3:
-    resolution: {integrity: sha1-DNcv6FUOPC6uFWqWpN3c0cisWAA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-visitor-keys/-/eslint-visitor-keys-3.4.3.tgz}
+    resolution: {integrity: sha1-DNcv6FUOPC6uFWqWpN3c0cisWAA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-visitor-keys/-/eslint-visitor-keys-3.4.3.tgz}
     engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
 
   eslint-visitor-keys@5.0.1:
-    resolution: {integrity: sha1-njyUiWl4JNLUzjqK0SYo+R6fWb4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-visitor-keys/-/eslint-visitor-keys-5.0.1.tgz}
+    resolution: {integrity: sha1-njyUiWl4JNLUzjqK0SYo+R6fWb4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/eslint-visitor-keys/-/eslint-visitor-keys-5.0.1.tgz}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
   eslint@10.8.0:
@@ -1176,45 +1175,45 @@ packages:
     engines: {node: '>=0.10'}
 
   esrecurse@4.3.0:
-    resolution: {integrity: sha1-eteWTWeauyi+5yzsY3WLHF0smSE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/esrecurse/-/esrecurse-4.3.0.tgz}
+    resolution: {integrity: sha1-eteWTWeauyi+5yzsY3WLHF0smSE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/esrecurse/-/esrecurse-4.3.0.tgz}
     engines: {node: '>=4.0'}
 
   estraverse@5.3.0:
-    resolution: {integrity: sha1-LupSkHAvJquP5TcDcP+GyWXSESM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/estraverse/-/estraverse-5.3.0.tgz}
+    resolution: {integrity: sha1-LupSkHAvJquP5TcDcP+GyWXSESM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/estraverse/-/estraverse-5.3.0.tgz}
     engines: {node: '>=4.0'}
 
   estree-walker@3.0.3:
-    resolution: {integrity: sha1-Z8PlSexAKkh7T8GT0ZU6UkdSNA0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/estree-walker/-/estree-walker-3.0.3.tgz}
+    resolution: {integrity: sha1-Z8PlSexAKkh7T8GT0ZU6UkdSNA0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/estree-walker/-/estree-walker-3.0.3.tgz}
 
   esutils@2.0.3:
-    resolution: {integrity: sha1-dNLrTeC42hKTcRkQ1Qd1ubcQ72Q=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/esutils/-/esutils-2.0.3.tgz}
+    resolution: {integrity: sha1-dNLrTeC42hKTcRkQ1Qd1ubcQ72Q=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/esutils/-/esutils-2.0.3.tgz}
     engines: {node: '>=0.10.0'}
 
   expect-type@1.4.0:
-    resolution: {integrity: sha1-JO338MxppE0AhWe6RZSrlvPDo9Y=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/expect-type/-/expect-type-1.4.0.tgz}
+    resolution: {integrity: sha1-JO338MxppE0AhWe6RZSrlvPDo9Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/expect-type/-/expect-type-1.4.0.tgz}
     engines: {node: '>=12.0.0'}
 
   extendable-error@0.1.7:
-    resolution: {integrity: sha1-YLmt8gYmSskgBYpzlWha5GcMK5Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/extendable-error/-/extendable-error-0.1.7.tgz}
+    resolution: {integrity: sha1-YLmt8gYmSskgBYpzlWha5GcMK5Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/extendable-error/-/extendable-error-0.1.7.tgz}
 
   fast-deep-equal@3.1.3:
-    resolution: {integrity: sha1-On1WtVnWy8PrUSMlJE5hmmXGxSU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz}
+    resolution: {integrity: sha1-On1WtVnWy8PrUSMlJE5hmmXGxSU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz}
 
   fast-glob@3.3.3:
-    resolution: {integrity: sha1-0G1YXOjbqQoWsFBcVDw8z7OuuBg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-glob/-/fast-glob-3.3.3.tgz}
+    resolution: {integrity: sha1-0G1YXOjbqQoWsFBcVDw8z7OuuBg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-glob/-/fast-glob-3.3.3.tgz}
     engines: {node: '>=8.6.0'}
 
   fast-json-stable-stringify@2.1.0:
-    resolution: {integrity: sha1-h0v2nG9ATCtdmcSBNBOZ/VWJJjM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-json-stable-stringify/-/fast-json-stable-stringify-2.1.0.tgz}
+    resolution: {integrity: sha1-h0v2nG9ATCtdmcSBNBOZ/VWJJjM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-json-stable-stringify/-/fast-json-stable-stringify-2.1.0.tgz}
 
   fast-levenshtein@2.0.6:
-    resolution: {integrity: sha1-PYpcZog6FqMMqGQ+hR8Zuqd5eRc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-levenshtein/-/fast-levenshtein-2.0.6.tgz}
+    resolution: {integrity: sha1-PYpcZog6FqMMqGQ+hR8Zuqd5eRc=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fast-levenshtein/-/fast-levenshtein-2.0.6.tgz}
 
   fastq@1.20.1:
-    resolution: {integrity: sha1-ynUKENySW8ixiDn9ID4+9LPO1nU=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fastq/-/fastq-1.20.1.tgz}
+    resolution: {integrity: sha1-ynUKENySW8ixiDn9ID4+9LPO1nU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fastq/-/fastq-1.20.1.tgz}
 
   fdir@6.5.0:
-    resolution: {integrity: sha1-7Sq5Z6MxreYvGNB32uGSaE1Q01A=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fdir/-/fdir-6.5.0.tgz}
+    resolution: {integrity: sha1-7Sq5Z6MxreYvGNB32uGSaE1Q01A=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fdir/-/fdir-6.5.0.tgz}
     engines: {node: '>=12.0.0'}
     peerDependencies:
       picomatch: ^3 || ^4
@@ -1231,22 +1230,22 @@ packages:
     engines: {node: '>=8'}
 
   find-package-json@1.2.0:
-    resolution: {integrity: sha1-QFfRuUP4LYRF/lLcnPRW9ri1gIM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-package-json/-/find-package-json-1.2.0.tgz}
+    resolution: {integrity: sha1-QFfRuUP4LYRF/lLcnPRW9ri1gIM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-package-json/-/find-package-json-1.2.0.tgz}
 
   find-up@4.1.0:
-    resolution: {integrity: sha1-l6/n1s3AvFkoWEt8jXsW6KmqXRk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-up/-/find-up-4.1.0.tgz}
+    resolution: {integrity: sha1-l6/n1s3AvFkoWEt8jXsW6KmqXRk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-up/-/find-up-4.1.0.tgz}
     engines: {node: '>=8'}
 
   find-up@5.0.0:
-    resolution: {integrity: sha1-TJKBnstwg1YeT0okCoa+UZj1Nvw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-up/-/find-up-5.0.0.tgz}
+    resolution: {integrity: sha1-TJKBnstwg1YeT0okCoa+UZj1Nvw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/find-up/-/find-up-5.0.0.tgz}
     engines: {node: '>=10'}
 
   flat-cache@4.0.1:
-    resolution: {integrity: sha1-Ds45/LFO4BL0sEEL0z3ZwfAREnw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/flat-cache/-/flat-cache-4.0.1.tgz}
+    resolution: {integrity: sha1-Ds45/LFO4BL0sEEL0z3ZwfAREnw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/flat-cache/-/flat-cache-4.0.1.tgz}
     engines: {node: '>=16'}
 
   flatted@3.4.4:
-    resolution: {integrity: sha1-ruyipQYwPwzuYcWebJ8qiNLyn8Y=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/flatted/-/flatted-3.4.4.tgz}
+    resolution: {integrity: sha1-ruyipQYwPwzuYcWebJ8qiNLyn8Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/flatted/-/flatted-3.4.4.tgz}
 
   fs-extra@11.4.0:
     resolution: {integrity: sha1-+I7W0YCsnhS2GwjmeUaPCxtrRzA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fs-extra/-/fs-extra-11.4.0.tgz}
@@ -1261,28 +1260,28 @@ packages:
     engines: {node: '>=6 <7 || >=8'}
 
   fsevents@2.3.3:
-    resolution: {integrity: sha1-ysZAd4XQNnWipeGlMFxpezR9kNY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fsevents/-/fsevents-2.3.3.tgz}
+    resolution: {integrity: sha1-ysZAd4XQNnWipeGlMFxpezR9kNY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/fsevents/-/fsevents-2.3.3.tgz}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
   gensync@1.0.0-beta.2:
-    resolution: {integrity: sha1-MqbudsPX9S1GsrGuXZP+qFgKJeA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/gensync/-/gensync-1.0.0-beta.2.tgz}
+    resolution: {integrity: sha1-MqbudsPX9S1GsrGuXZP+qFgKJeA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/gensync/-/gensync-1.0.0-beta.2.tgz}
     engines: {node: '>=6.9.0'}
 
   get-east-asian-width@1.6.0:
-    resolution: {integrity: sha1-IWkA+R3xGossGYw+HZPWwDWndrk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/get-east-asian-width/-/get-east-asian-width-1.6.0.tgz}
+    resolution: {integrity: sha1-IWkA+R3xGossGYw+HZPWwDWndrk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/get-east-asian-width/-/get-east-asian-width-1.6.0.tgz}
     engines: {node: '>=18'}
 
   glob-parent@5.1.2:
-    resolution: {integrity: sha1-hpgyxYA0/mikCTwX3BXoNA2EAcQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob-parent/-/glob-parent-5.1.2.tgz}
+    resolution: {integrity: sha1-hpgyxYA0/mikCTwX3BXoNA2EAcQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob-parent/-/glob-parent-5.1.2.tgz}
     engines: {node: '>= 6'}
 
   glob-parent@6.0.2:
-    resolution: {integrity: sha1-bSN9mQg5UMeSkPJMdkKj3poo+eM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob-parent/-/glob-parent-6.0.2.tgz}
+    resolution: {integrity: sha1-bSN9mQg5UMeSkPJMdkKj3poo+eM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob-parent/-/glob-parent-6.0.2.tgz}
     engines: {node: '>=10.13.0'}
 
   glob@13.0.6:
-    resolution: {integrity: sha1-B4ZmVmpCUUfMrPvS4zLetmor5x0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob/-/glob-13.0.6.tgz}
+    resolution: {integrity: sha1-B4ZmVmpCUUfMrPvS4zLetmor5x0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/glob/-/glob-13.0.6.tgz}
     engines: {node: 18 || 20 || >=22}
 
   globals@17.8.0:
@@ -1290,25 +1289,25 @@ packages:
     engines: {node: '>=18'}
 
   globby@11.1.0:
-    resolution: {integrity: sha1-vUvpi7BC+D15b344EZkfvoKg00s=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/globby/-/globby-11.1.0.tgz}
+    resolution: {integrity: sha1-vUvpi7BC+D15b344EZkfvoKg00s=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/globby/-/globby-11.1.0.tgz}
     engines: {node: '>=10'}
 
   globby@16.2.2:
-    resolution: {integrity: sha1-vBVR5XF3Wv3ci6xjE6N26ponU6o=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/globby/-/globby-16.2.2.tgz}
+    resolution: {integrity: sha1-vBVR5XF3Wv3ci6xjE6N26ponU6o=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/globby/-/globby-16.2.2.tgz}
     engines: {node: '>=20'}
 
   graceful-fs@4.2.11:
-    resolution: {integrity: sha1-QYPk6L8Iu24Fu7L30uDI9xLKQOM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/graceful-fs/-/graceful-fs-4.2.11.tgz}
+    resolution: {integrity: sha1-QYPk6L8Iu24Fu7L30uDI9xLKQOM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/graceful-fs/-/graceful-fs-4.2.11.tgz}
 
   has-flag@4.0.0:
-    resolution: {integrity: sha1-lEdx/ZyByBJlxNaUGGDaBrtZR5s=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/has-flag/-/has-flag-4.0.0.tgz}
+    resolution: {integrity: sha1-lEdx/ZyByBJlxNaUGGDaBrtZR5s=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/has-flag/-/has-flag-4.0.0.tgz}
     engines: {node: '>=8'}
 
   html-escaper@2.0.2:
-    resolution: {integrity: sha1-39YAJ9o2o238viNiYsAKWCJoFFM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/html-escaper/-/html-escaper-2.0.2.tgz}
+    resolution: {integrity: sha1-39YAJ9o2o238viNiYsAKWCJoFFM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/html-escaper/-/html-escaper-2.0.2.tgz}
 
   human-id@4.2.0:
-    resolution: {integrity: sha1-mmBUgmfdjIoBKwuOdmfmzS8aFw4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/human-id/-/human-id-4.2.0.tgz}
+    resolution: {integrity: sha1-mmBUgmfdjIoBKwuOdmfmzS8aFw4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/human-id/-/human-id-4.2.0.tgz}
     hasBin: true
 
   iconv-lite@0.7.3:
@@ -1316,31 +1315,31 @@ packages:
     engines: {node: '>=0.10.0'}
 
   ignore@5.3.2:
-    resolution: {integrity: sha1-PNQOcp82Q/2HywTlC/DrcivFlvU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ignore/-/ignore-5.3.2.tgz}
+    resolution: {integrity: sha1-PNQOcp82Q/2HywTlC/DrcivFlvU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ignore/-/ignore-5.3.2.tgz}
     engines: {node: '>= 4'}
 
   ignore@7.0.6:
-    resolution: {integrity: sha1-aleq70yQ3yesNZCHXSno8RmIyI4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ignore/-/ignore-7.0.6.tgz}
+    resolution: {integrity: sha1-aleq70yQ3yesNZCHXSno8RmIyI4=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ignore/-/ignore-7.0.6.tgz}
     engines: {node: '>= 4'}
 
   import-meta-resolve@4.2.0:
     resolution: {integrity: sha1-CMuFtb037MjrHg9nDcJ2cALUNzQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/import-meta-resolve/-/import-meta-resolve-4.2.0.tgz}
 
   imurmurhash@0.1.4:
-    resolution: {integrity: sha1-khi5srkoojixPcT7a21XbyMUU+o=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/imurmurhash/-/imurmurhash-0.1.4.tgz}
+    resolution: {integrity: sha1-khi5srkoojixPcT7a21XbyMUU+o=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/imurmurhash/-/imurmurhash-0.1.4.tgz}
     engines: {node: '>=0.8.19'}
 
   is-alphabetical@2.0.1:
     resolution: {integrity: sha1-AQcgU+p8EDbfPH0Zptqux/GeeJs=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-alphabetical/-/is-alphabetical-2.0.1.tgz}
 
   is-alphanumerical@2.0.1:
-    resolution: {integrity: sha1-fAP76W4+kxET5X+WSwo2jMLf2HU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz}
+    resolution: {integrity: sha1-fAP76W4+kxET5X+WSwo2jMLf2HU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz}
 
   is-decimal@2.0.1:
-    resolution: {integrity: sha1-lGnS3BkNAhT9h9eLeMrswMwU7vc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-decimal/-/is-decimal-2.0.1.tgz}
+    resolution: {integrity: sha1-lGnS3BkNAhT9h9eLeMrswMwU7vc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-decimal/-/is-decimal-2.0.1.tgz}
 
   is-extglob@2.1.1:
-    resolution: {integrity: sha1-qIwCU1eR8C7TfHahueqXc8gz+MI=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-extglob/-/is-extglob-2.1.1.tgz}
+    resolution: {integrity: sha1-qIwCU1eR8C7TfHahueqXc8gz+MI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-extglob/-/is-extglob-2.1.1.tgz}
     engines: {node: '>=0.10.0'}
 
   is-glob@4.0.3:
@@ -1348,63 +1347,63 @@ packages:
     engines: {node: '>=0.10.0'}
 
   is-hexadecimal@2.0.1:
-    resolution: {integrity: sha1-hrW/Zo/KMHSY0xnfwDKJ14GpACc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-hexadecimal/-/is-hexadecimal-2.0.1.tgz}
+    resolution: {integrity: sha1-hrW/Zo/KMHSY0xnfwDKJ14GpACc=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-hexadecimal/-/is-hexadecimal-2.0.1.tgz}
 
   is-number@7.0.0:
     resolution: {integrity: sha1-dTU0W4lnNNX4DE0GxQlVUnoU8Ss=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-number/-/is-number-7.0.0.tgz}
     engines: {node: '>=0.12.0'}
 
   is-path-inside@4.0.0:
-    resolution: {integrity: sha1-gFrrYsR8GxL8P9E7+z7R50MAcds=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-path-inside/-/is-path-inside-4.0.0.tgz}
+    resolution: {integrity: sha1-gFrrYsR8GxL8P9E7+z7R50MAcds=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-path-inside/-/is-path-inside-4.0.0.tgz}
     engines: {node: '>=12'}
 
   is-subdir@1.2.0:
-    resolution: {integrity: sha1-t5HNKPq1IC6RoIKA1R2dclT9INQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-subdir/-/is-subdir-1.2.0.tgz}
+    resolution: {integrity: sha1-t5HNKPq1IC6RoIKA1R2dclT9INQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-subdir/-/is-subdir-1.2.0.tgz}
     engines: {node: '>=4'}
 
   is-windows@1.0.2:
-    resolution: {integrity: sha1-0YUOuXkezRjmGCzhKjDzlmNLsZ0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-windows/-/is-windows-1.0.2.tgz}
+    resolution: {integrity: sha1-0YUOuXkezRjmGCzhKjDzlmNLsZ0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/is-windows/-/is-windows-1.0.2.tgz}
     engines: {node: '>=0.10.0'}
 
   isexe@2.0.0:
-    resolution: {integrity: sha1-6PvzdNxVb/iUehDcsFctYz8s+hA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/isexe/-/isexe-2.0.0.tgz}
+    resolution: {integrity: sha1-6PvzdNxVb/iUehDcsFctYz8s+hA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/isexe/-/isexe-2.0.0.tgz}
 
   istanbul-lib-coverage@3.2.2:
-    resolution: {integrity: sha1-LRZsSwZE1Do58Ev2wu3R5YXzF1Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-lib-coverage/-/istanbul-lib-coverage-3.2.2.tgz}
+    resolution: {integrity: sha1-LRZsSwZE1Do58Ev2wu3R5YXzF1Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-lib-coverage/-/istanbul-lib-coverage-3.2.2.tgz}
     engines: {node: '>=8'}
 
   istanbul-lib-report@3.0.1:
-    resolution: {integrity: sha1-kIMFusmlvRdaxqdEier9D8JEWn0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-lib-report/-/istanbul-lib-report-3.0.1.tgz}
+    resolution: {integrity: sha1-kIMFusmlvRdaxqdEier9D8JEWn0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-lib-report/-/istanbul-lib-report-3.0.1.tgz}
     engines: {node: '>=10'}
 
   istanbul-reports@3.2.0:
-    resolution: {integrity: sha1-y0U1FitXhKpiPO4hpyUs8sgHrJM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-reports/-/istanbul-reports-3.2.0.tgz}
+    resolution: {integrity: sha1-y0U1FitXhKpiPO4hpyUs8sgHrJM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/istanbul-reports/-/istanbul-reports-3.2.0.tgz}
     engines: {node: '>=8'}
 
   js-tokens@10.0.0:
-    resolution: {integrity: sha1-3/51mbSou3/jCv+NAjUjTf+3mDE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-tokens/-/js-tokens-10.0.0.tgz}
+    resolution: {integrity: sha1-3/51mbSou3/jCv+NAjUjTf+3mDE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-tokens/-/js-tokens-10.0.0.tgz}
 
   js-yaml@4.3.0:
-    resolution: {integrity: sha1-0ZAFcqf3zwtfVAyDZz5gutNDZZI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-yaml/-/js-yaml-4.3.0.tgz}
+    resolution: {integrity: sha1-0ZAFcqf3zwtfVAyDZz5gutNDZZI=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-yaml/-/js-yaml-4.3.0.tgz}
     hasBin: true
 
   js-yaml@5.2.2:
-    resolution: {integrity: sha1-SXv+Y/Cw2xHHu8XOi8Vo6DbIsIw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-yaml/-/js-yaml-5.2.2.tgz}
+    resolution: {integrity: sha1-SXv+Y/Cw2xHHu8XOi8Vo6DbIsIw=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/js-yaml/-/js-yaml-5.2.2.tgz}
     hasBin: true
 
   jsesc@3.1.0:
-    resolution: {integrity: sha1-dNM1ojT2ftGZB/2t+sfM+dQJgl0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jsesc/-/jsesc-3.1.0.tgz}
+    resolution: {integrity: sha1-dNM1ojT2ftGZB/2t+sfM+dQJgl0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jsesc/-/jsesc-3.1.0.tgz}
     engines: {node: '>=6'}
     hasBin: true
 
   json-buffer@3.0.1:
-    resolution: {integrity: sha1-kziAKjDTtmBfvgYT4JQAjKjAWhM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-buffer/-/json-buffer-3.0.1.tgz}
+    resolution: {integrity: sha1-kziAKjDTtmBfvgYT4JQAjKjAWhM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-buffer/-/json-buffer-3.0.1.tgz}
 
   json-schema-traverse@0.4.1:
-    resolution: {integrity: sha1-afaofZUTq4u4/mO9sJecRI5oRmA=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-schema-traverse/-/json-schema-traverse-0.4.1.tgz}
+    resolution: {integrity: sha1-afaofZUTq4u4/mO9sJecRI5oRmA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-schema-traverse/-/json-schema-traverse-0.4.1.tgz}
 
   json-stable-stringify-without-jsonify@1.0.1:
-    resolution: {integrity: sha1-nbe1lJatPzz+8wp1FC0tkwrXJlE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-stable-stringify-without-jsonify/-/json-stable-stringify-without-jsonify-1.0.1.tgz}
+    resolution: {integrity: sha1-nbe1lJatPzz+8wp1FC0tkwrXJlE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json-stable-stringify-without-jsonify/-/json-stable-stringify-without-jsonify-1.0.1.tgz}
 
   json5@2.2.3:
     resolution: {integrity: sha1-eM1vGhm9wStz21rQxh79ZsHikoM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/json5/-/json5-2.2.3.tgz}
@@ -1412,7 +1411,7 @@ packages:
     hasBin: true
 
   jsonc-parser@3.3.1:
-    resolution: {integrity: sha1-8qUktPf9EePXkeVZl3rWC5i3mLQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jsonc-parser/-/jsonc-parser-3.3.1.tgz}
+    resolution: {integrity: sha1-8qUktPf9EePXkeVZl3rWC5i3mLQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jsonc-parser/-/jsonc-parser-3.3.1.tgz}
 
   jsonfile@4.0.0:
     resolution: {integrity: sha1-h3Gq4HmbZAdrdmQPygWPnBDjPss=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jsonfile/-/jsonfile-4.0.0.tgz}
@@ -1431,33 +1430,33 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha1-qHmpnilFL5QkOfKkBeOvizHU3pM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/keyv/-/keyv-4.5.4.tgz}
 
-  koffi@3.1.2:
-    resolution: {integrity: sha1-mlgukqlv3d1oC3V+J5OUYxJU7nI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/koffi/-/koffi-3.1.2.tgz}
+  koffi@3.1.4:
+    resolution: {integrity: sha1-wz+JxwMvC13y15fg54BK3elK3/8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/koffi/-/koffi-3.1.4.tgz}
 
   levn@0.4.1:
-    resolution: {integrity: sha1-rkViwAdHO5MqYgDUAyaN0v/8at4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/levn/-/levn-0.4.1.tgz}
+    resolution: {integrity: sha1-rkViwAdHO5MqYgDUAyaN0v/8at4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/levn/-/levn-0.4.1.tgz}
     engines: {node: '>= 0.8.0'}
 
   lightningcss-android-arm64@1.33.0:
-    resolution: {integrity: sha1-mmhB+IrlD8g1ApA4krQa9BvCuQc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-android-arm64/-/lightningcss-android-arm64-1.33.0.tgz}
+    resolution: {integrity: sha1-mmhB+IrlD8g1ApA4krQa9BvCuQc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-android-arm64/-/lightningcss-android-arm64-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [android]
 
   lightningcss-darwin-arm64@1.33.0:
-    resolution: {integrity: sha1-wPLDHAv9GfpN0/GOlXofGhUgl9Y=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.33.0.tgz}
+    resolution: {integrity: sha1-wPLDHAv9GfpN0/GOlXofGhUgl9Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [darwin]
 
   lightningcss-darwin-x64@1.33.0:
-    resolution: {integrity: sha1-ywcFllrLU4xmg5Sc5pJfs833w2E=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-darwin-x64/-/lightningcss-darwin-x64-1.33.0.tgz}
+    resolution: {integrity: sha1-ywcFllrLU4xmg5Sc5pJfs833w2E=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-darwin-x64/-/lightningcss-darwin-x64-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [darwin]
 
   lightningcss-freebsd-x64@1.33.0:
-    resolution: {integrity: sha1-djU4gosmurJoDa2vzITueLDrUCs=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-freebsd-x64/-/lightningcss-freebsd-x64-1.33.0.tgz}
+    resolution: {integrity: sha1-djU4gosmurJoDa2vzITueLDrUCs=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-freebsd-x64/-/lightningcss-freebsd-x64-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [freebsd]
@@ -1469,75 +1468,75 @@ packages:
     os: [linux]
 
   lightningcss-linux-arm64-gnu@1.33.0:
-    resolution: {integrity: sha1-xqOi7RUUHa9r3CYokw+OOb30c6o=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-arm64-gnu/-/lightningcss-linux-arm64-gnu-1.33.0.tgz}
+    resolution: {integrity: sha1-xqOi7RUUHa9r3CYokw+OOb30c6o=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-arm64-gnu/-/lightningcss-linux-arm64-gnu-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
   lightningcss-linux-arm64-musl@1.33.0:
-    resolution: {integrity: sha1-f6EzSXH8goRfmCffbvigsgkUusY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-arm64-musl/-/lightningcss-linux-arm64-musl-1.33.0.tgz}
+    resolution: {integrity: sha1-f6EzSXH8goRfmCffbvigsgkUusY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-arm64-musl/-/lightningcss-linux-arm64-musl-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
   lightningcss-linux-x64-gnu@1.33.0:
-    resolution: {integrity: sha1-i5J4YuqMK7xoMaRlCSRLUNmTblU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz}
+    resolution: {integrity: sha1-i5J4YuqMK7xoMaRlCSRLUNmTblU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
   lightningcss-linux-x64-musl@1.33.0:
-    resolution: {integrity: sha1-DFJbsHff2UQEwFnP5C2teX6Wrq8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz}
+    resolution: {integrity: sha1-DFJbsHff2UQEwFnP5C2teX6Wrq8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
   lightningcss-win32-arm64-msvc@1.33.0:
-    resolution: {integrity: sha1-hQ7hED2smJz6tQ46wi0aaeOU5j0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.33.0.tgz}
+    resolution: {integrity: sha1-hQ7hED2smJz6tQ46wi0aaeOU5j0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [win32]
 
   lightningcss-win32-x64-msvc@1.33.0:
-    resolution: {integrity: sha1-40OuFS7tNgncbhGUnRo785oclG8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.33.0.tgz}
+    resolution: {integrity: sha1-40OuFS7tNgncbhGUnRo785oclG8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [win32]
 
   lightningcss@1.33.0:
-    resolution: {integrity: sha1-wIhn1xp5OFxuGQIU/XL+8+X5Xws=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss/-/lightningcss-1.33.0.tgz}
+    resolution: {integrity: sha1-wIhn1xp5OFxuGQIU/XL+8+X5Xws=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lightningcss/-/lightningcss-1.33.0.tgz}
     engines: {node: '>= 12.0.0'}
 
   linkify-it@5.0.2:
-    resolution: {integrity: sha1-074KaTrz2p3ziD8eNGoOl0YajBk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/linkify-it/-/linkify-it-5.0.2.tgz}
+    resolution: {integrity: sha1-074KaTrz2p3ziD8eNGoOl0YajBk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/linkify-it/-/linkify-it-5.0.2.tgz}
 
   locate-path@5.0.0:
-    resolution: {integrity: sha1-Gvujlq/WdqbUJQTQpno6frn2KqA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/locate-path/-/locate-path-5.0.0.tgz}
+    resolution: {integrity: sha1-Gvujlq/WdqbUJQTQpno6frn2KqA=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/locate-path/-/locate-path-5.0.0.tgz}
     engines: {node: '>=8'}
 
   locate-path@6.0.0:
-    resolution: {integrity: sha1-VTIeswn+u8WcSAHZMackUqaB0oY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/locate-path/-/locate-path-6.0.0.tgz}
+    resolution: {integrity: sha1-VTIeswn+u8WcSAHZMackUqaB0oY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/locate-path/-/locate-path-6.0.0.tgz}
     engines: {node: '>=10'}
 
   lodash.startcase@4.4.0:
-    resolution: {integrity: sha1-lDbjTtJgk+1/+uGTYUQ1CRXZrdg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lodash.startcase/-/lodash.startcase-4.4.0.tgz}
+    resolution: {integrity: sha1-lDbjTtJgk+1/+uGTYUQ1CRXZrdg=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lodash.startcase/-/lodash.startcase-4.4.0.tgz}
 
   lru-cache@11.5.2:
-    resolution: {integrity: sha1-AOFmZckMYg+6FKPDaHMql2ST92A=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lru-cache/-/lru-cache-11.5.2.tgz}
+    resolution: {integrity: sha1-AOFmZckMYg+6FKPDaHMql2ST92A=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lru-cache/-/lru-cache-11.5.2.tgz}
     engines: {node: 20 || >=22}
 
   magic-string@0.30.21:
-    resolution: {integrity: sha1-VnY+wJoPqAkd8nh5/ZTRkHjADZE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/magic-string/-/magic-string-0.30.21.tgz}
+    resolution: {integrity: sha1-VnY+wJoPqAkd8nh5/ZTRkHjADZE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/magic-string/-/magic-string-0.30.21.tgz}
 
   magicast@0.5.3:
     resolution: {integrity: sha1-GAD2523YsNvnJXQ4osM2rvq72QU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/magicast/-/magicast-0.5.3.tgz}
 
   make-dir@4.0.0:
-    resolution: {integrity: sha1-w8IwencSd82WODBfkVwprnQbYU4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/make-dir/-/make-dir-4.0.0.tgz}
+    resolution: {integrity: sha1-w8IwencSd82WODBfkVwprnQbYU4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/make-dir/-/make-dir-4.0.0.tgz}
     engines: {node: '>=10'}
 
   markdown-it@14.3.0:
@@ -1545,12 +1544,12 @@ packages:
     hasBin: true
 
   markdown-table-formatter@1.7.0:
-    resolution: {integrity: sha1-/J0UYlA3rbu6iYIFhjqEuxMoaMk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdown-table-formatter/-/markdown-table-formatter-1.7.0.tgz}
+    resolution: {integrity: sha1-/J0UYlA3rbu6iYIFhjqEuxMoaMk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdown-table-formatter/-/markdown-table-formatter-1.7.0.tgz}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
   markdown-table-prettify@3.7.0:
-    resolution: {integrity: sha1-b5bNdd7SU1ePD9vPt/iZUiifl4Q=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdown-table-prettify/-/markdown-table-prettify-3.7.0.tgz}
+    resolution: {integrity: sha1-b5bNdd7SU1ePD9vPt/iZUiifl4Q=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdown-table-prettify/-/markdown-table-prettify-3.7.0.tgz}
     engines: {vscode: ^1.103.0}
     hasBin: true
 
@@ -1560,19 +1559,19 @@ packages:
       markdownlint-cli2: '>=0.0.4'
 
   markdownlint-cli2@0.23.2:
-    resolution: {integrity: sha1-G6auonUqlTWr5yhXg1+Nr1DaKXU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdownlint-cli2/-/markdownlint-cli2-0.23.2.tgz}
+    resolution: {integrity: sha1-G6auonUqlTWr5yhXg1+Nr1DaKXU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdownlint-cli2/-/markdownlint-cli2-0.23.2.tgz}
     engines: {node: '>=22'}
     hasBin: true
 
   markdownlint@0.41.1:
-    resolution: {integrity: sha1-jZK7JwgUiuVNDxIvhWVjiiLreuY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdownlint/-/markdownlint-0.41.1.tgz}
+    resolution: {integrity: sha1-jZK7JwgUiuVNDxIvhWVjiiLreuY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/markdownlint/-/markdownlint-0.41.1.tgz}
     engines: {node: '>=22'}
 
   mdurl@2.1.0:
-    resolution: {integrity: sha1-1xHT97zn8ixIfJG+eFRfNW+pZXM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/mdurl/-/mdurl-2.1.0.tgz}
+    resolution: {integrity: sha1-1xHT97zn8ixIfJG+eFRfNW+pZXM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/mdurl/-/mdurl-2.1.0.tgz}
 
   merge2@1.4.1:
-    resolution: {integrity: sha1-Q2iJL4hekHRVpv19xVwMnUBJkK4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/merge2/-/merge2-1.4.1.tgz}
+    resolution: {integrity: sha1-Q2iJL4hekHRVpv19xVwMnUBJkK4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/merge2/-/merge2-1.4.1.tgz}
     engines: {node: '>= 8'}
 
   micromark-core-commonmark@2.0.3:
@@ -1582,84 +1581,84 @@ packages:
     resolution: {integrity: sha1-rzieM/4GVMFfhGa3Og9a9ZjQA2g=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-directive/-/micromark-extension-directive-4.0.0.tgz}
 
   micromark-extension-gfm-autolink-literal@2.1.0:
-    resolution: {integrity: sha1-Yoau6WhsRGLB41UqnVBf7dzuuTU=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-autolink-literal/-/micromark-extension-gfm-autolink-literal-2.1.0.tgz}
+    resolution: {integrity: sha1-Yoau6WhsRGLB41UqnVBf7dzuuTU=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-autolink-literal/-/micromark-extension-gfm-autolink-literal-2.1.0.tgz}
 
   micromark-extension-gfm-footnote@2.1.0:
-    resolution: {integrity: sha1-TatW1OOYuYU/b+TvrE/JNh8+B1A=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-footnote/-/micromark-extension-gfm-footnote-2.1.0.tgz}
+    resolution: {integrity: sha1-TatW1OOYuYU/b+TvrE/JNh8+B1A=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-footnote/-/micromark-extension-gfm-footnote-2.1.0.tgz}
 
   micromark-extension-gfm-table@2.1.1:
-    resolution: {integrity: sha1-+scLy/Uf5l9fRAMxGNOb6Km1lAs=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-table/-/micromark-extension-gfm-table-2.1.1.tgz}
+    resolution: {integrity: sha1-+scLy/Uf5l9fRAMxGNOb6Km1lAs=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-gfm-table/-/micromark-extension-gfm-table-2.1.1.tgz}
 
   micromark-extension-math@3.1.0:
-    resolution: {integrity: sha1-xC7jsd1amgNYToPdjwjj3lECEsE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-math/-/micromark-extension-math-3.1.0.tgz}
+    resolution: {integrity: sha1-xC7jsd1amgNYToPdjwjj3lECEsE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-extension-math/-/micromark-extension-math-3.1.0.tgz}
 
   micromark-factory-destination@2.0.1:
-    resolution: {integrity: sha1-j++OD3CB8EdPvdkt61DJkKAmRjk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-destination/-/micromark-factory-destination-2.0.1.tgz}
+    resolution: {integrity: sha1-j++OD3CB8EdPvdkt61DJkKAmRjk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-destination/-/micromark-factory-destination-2.0.1.tgz}
 
   micromark-factory-label@2.0.1:
     resolution: {integrity: sha1-UmfvqX8eUlTvx/ILRZo4yyEFi6E=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-label/-/micromark-factory-label-2.0.1.tgz}
 
   micromark-factory-space@2.0.1:
-    resolution: {integrity: sha1-NtAhLpYrKzEh+FJfx6PHwCnzNPw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-space/-/micromark-factory-space-2.0.1.tgz}
+    resolution: {integrity: sha1-NtAhLpYrKzEh+FJfx6PHwCnzNPw=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-space/-/micromark-factory-space-2.0.1.tgz}
 
   micromark-factory-title@2.0.1:
     resolution: {integrity: sha1-I35KpdWKlYY/AQMtnumwkPHebpQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-title/-/micromark-factory-title-2.0.1.tgz}
 
   micromark-factory-whitespace@2.0.1:
-    resolution: {integrity: sha1-BrJrKYPE0nv8xlezPiUTTUhosLE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-whitespace/-/micromark-factory-whitespace-2.0.1.tgz}
+    resolution: {integrity: sha1-BrJrKYPE0nv8xlezPiUTTUhosLE=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-factory-whitespace/-/micromark-factory-whitespace-2.0.1.tgz}
 
   micromark-util-character@2.1.1:
-    resolution: {integrity: sha1-L5h4MaQNTFEKwmHomFLE6XA8zaY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-character/-/micromark-util-character-2.1.1.tgz}
+    resolution: {integrity: sha1-L5h4MaQNTFEKwmHomFLE6XA8zaY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-character/-/micromark-util-character-2.1.1.tgz}
 
   micromark-util-chunked@2.0.1:
-    resolution: {integrity: sha1-R/vNk0caP8yrhs/wOEf8NVLbEFE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-chunked/-/micromark-util-chunked-2.0.1.tgz}
+    resolution: {integrity: sha1-R/vNk0caP8yrhs/wOEf8NVLbEFE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-chunked/-/micromark-util-chunked-2.0.1.tgz}
 
   micromark-util-classify-character@2.0.1:
     resolution: {integrity: sha1-05n6+cRcoUyLS+mLHqSBvO2Htik=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-classify-character/-/micromark-util-classify-character-2.0.1.tgz}
 
   micromark-util-combine-extensions@2.0.1:
-    resolution: {integrity: sha1-Kg9JCrCL/1zC/V7sbdDKBPibMKk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-combine-extensions/-/micromark-util-combine-extensions-2.0.1.tgz}
+    resolution: {integrity: sha1-Kg9JCrCL/1zC/V7sbdDKBPibMKk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-combine-extensions/-/micromark-util-combine-extensions-2.0.1.tgz}
 
   micromark-util-decode-numeric-character-reference@2.0.2:
     resolution: {integrity: sha1-/PFbZgl5OI5vEYzba/fXnXPSb+U=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-decode-numeric-character-reference/-/micromark-util-decode-numeric-character-reference-2.0.2.tgz}
 
   micromark-util-encode@2.0.1:
-    resolution: {integrity: sha1-DVHRwJVVHPqsNoMmljz1XxX1QLg=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-encode/-/micromark-util-encode-2.0.1.tgz}
+    resolution: {integrity: sha1-DVHRwJVVHPqsNoMmljz1XxX1QLg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-encode/-/micromark-util-encode-2.0.1.tgz}
 
   micromark-util-html-tag-name@2.0.1:
-    resolution: {integrity: sha1-5AQDCWSBmGtBwQZif5j3LU0QuCU=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-html-tag-name/-/micromark-util-html-tag-name-2.0.1.tgz}
+    resolution: {integrity: sha1-5AQDCWSBmGtBwQZif5j3LU0QuCU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-html-tag-name/-/micromark-util-html-tag-name-2.0.1.tgz}
 
   micromark-util-normalize-identifier@2.0.1:
-    resolution: {integrity: sha1-ww13sugyrPZSb4vxqke8nJQ4wW0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-normalize-identifier/-/micromark-util-normalize-identifier-2.0.1.tgz}
+    resolution: {integrity: sha1-ww13sugyrPZSb4vxqke8nJQ4wW0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-normalize-identifier/-/micromark-util-normalize-identifier-2.0.1.tgz}
 
   micromark-util-resolve-all@2.0.1:
     resolution: {integrity: sha1-4aLWLN0jcjCirhGDkCexk4HjHos=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-resolve-all/-/micromark-util-resolve-all-2.0.1.tgz}
 
   micromark-util-sanitize-uri@2.0.1:
-    resolution: {integrity: sha1-q4l4m4GKWHUrc9a1UjhiG3+qj9c=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-sanitize-uri/-/micromark-util-sanitize-uri-2.0.1.tgz}
+    resolution: {integrity: sha1-q4l4m4GKWHUrc9a1UjhiG3+qj9c=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-sanitize-uri/-/micromark-util-sanitize-uri-2.0.1.tgz}
 
   micromark-util-subtokenize@2.1.0:
-    resolution: {integrity: sha1-2K3lug8xl6HPaimZ+7/mNXoaGe4=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-subtokenize/-/micromark-util-subtokenize-2.1.0.tgz}
+    resolution: {integrity: sha1-2K3lug8xl6HPaimZ+7/mNXoaGe4=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-subtokenize/-/micromark-util-subtokenize-2.1.0.tgz}
 
   micromark-util-symbol@2.0.1:
     resolution: {integrity: sha1-5dpJTo6ysHGg0I+zT2zv7GwKGbg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-symbol/-/micromark-util-symbol-2.0.1.tgz}
 
   micromark-util-types@2.0.2:
-    resolution: {integrity: sha1-8AIl9fWg68MlT5bDa2YFxLOTkI4=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-types/-/micromark-util-types-2.0.2.tgz}
+    resolution: {integrity: sha1-8AIl9fWg68MlT5bDa2YFxLOTkI4=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark-util-types/-/micromark-util-types-2.0.2.tgz}
 
   micromark@4.0.2:
-    resolution: {integrity: sha1-kTlaPhiEoZjmIRbjPJxWjjmTb9s=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark/-/micromark-4.0.2.tgz}
+    resolution: {integrity: sha1-kTlaPhiEoZjmIRbjPJxWjjmTb9s=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromark/-/micromark-4.0.2.tgz}
 
   micromatch@4.0.8:
-    resolution: {integrity: sha1-1m+hjzpHB2eJMgubGvMr2G2fogI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromatch/-/micromatch-4.0.8.tgz}
+    resolution: {integrity: sha1-1m+hjzpHB2eJMgubGvMr2G2fogI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/micromatch/-/micromatch-4.0.8.tgz}
     engines: {node: '>=8.6'}
 
   minimatch@10.2.6:
-    resolution: {integrity: sha1-/ZVrvgt3JB6fFaxdzLHGOAYJaO8=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/minimatch/-/minimatch-10.2.6.tgz}
+    resolution: {integrity: sha1-/ZVrvgt3JB6fFaxdzLHGOAYJaO8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/minimatch/-/minimatch-10.2.6.tgz}
     engines: {node: 18 || 20 || >=22}
 
   minipass@7.1.3:
-    resolution: {integrity: sha1-eTibTrG7LQA6m7qH1JLyvTe9xls=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/minipass/-/minipass-7.1.3.tgz}
+    resolution: {integrity: sha1-eTibTrG7LQA6m7qH1JLyvTe9xls=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/minipass/-/minipass-7.1.3.tgz}
     engines: {node: '>=16 || 14 >=14.17'}
 
   mri@1.2.0:
@@ -1667,49 +1666,49 @@ packages:
     engines: {node: '>=4'}
 
   ms@2.1.3:
-    resolution: {integrity: sha1-V0yBOM4dK1hh8LRFedut1gxmFbI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ms/-/ms-2.1.3.tgz}
+    resolution: {integrity: sha1-V0yBOM4dK1hh8LRFedut1gxmFbI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/ms/-/ms-2.1.3.tgz}
 
   nanoid@3.3.16:
-    resolution: {integrity: sha1-oE2OxLHxAAnS1TOUeu/kKTc3gWw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/nanoid/-/nanoid-3.3.16.tgz}
+    resolution: {integrity: sha1-oE2OxLHxAAnS1TOUeu/kKTc3gWw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/nanoid/-/nanoid-3.3.16.tgz}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
   natural-compare@1.4.0:
-    resolution: {integrity: sha1-Sr6/7tdUHywnrPspvbvRXI1bpPc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/natural-compare/-/natural-compare-1.4.0.tgz}
+    resolution: {integrity: sha1-Sr6/7tdUHywnrPspvbvRXI1bpPc=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/natural-compare/-/natural-compare-1.4.0.tgz}
 
   node-releases@2.0.51:
-    resolution: {integrity: sha1-zcCEM1d/WzKtAWlEgXJuIu61Su8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/node-releases/-/node-releases-2.0.51.tgz}
+    resolution: {integrity: sha1-zcCEM1d/WzKtAWlEgXJuIu61Su8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/node-releases/-/node-releases-2.0.51.tgz}
     engines: {node: '>=18'}
 
   obug@2.1.4:
-    resolution: {integrity: sha1-kJDYpUilIlF5FdKqaq6QcZesbPg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/obug/-/obug-2.1.4.tgz}
+    resolution: {integrity: sha1-kJDYpUilIlF5FdKqaq6QcZesbPg=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/obug/-/obug-2.1.4.tgz}
     engines: {node: '>=12.20.0'}
 
   optionator@0.9.4:
-    resolution: {integrity: sha1-fqHBpdkddk+yghOciP4R4YKjpzQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/optionator/-/optionator-0.9.4.tgz}
+    resolution: {integrity: sha1-fqHBpdkddk+yghOciP4R4YKjpzQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/optionator/-/optionator-0.9.4.tgz}
     engines: {node: '>= 0.8.0'}
 
   outdent@0.5.0:
     resolution: {integrity: sha1-nhCYL9xBSSu0c60ThA0i+WVb4v8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/outdent/-/outdent-0.5.0.tgz}
 
   p-filter@2.1.0:
-    resolution: {integrity: sha1-GxRyVirnoPdC8PPT03GOpm/5wJw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-filter/-/p-filter-2.1.0.tgz}
+    resolution: {integrity: sha1-GxRyVirnoPdC8PPT03GOpm/5wJw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-filter/-/p-filter-2.1.0.tgz}
     engines: {node: '>=8'}
 
   p-limit@2.3.0:
-    resolution: {integrity: sha1-PdM8ZHohT9//2DWTPrCG2g3CHbE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-limit/-/p-limit-2.3.0.tgz}
+    resolution: {integrity: sha1-PdM8ZHohT9//2DWTPrCG2g3CHbE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-limit/-/p-limit-2.3.0.tgz}
     engines: {node: '>=6'}
 
   p-limit@3.1.0:
-    resolution: {integrity: sha1-4drMvnjQ0TiMoYxk/qOOPlfjcGs=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-limit/-/p-limit-3.1.0.tgz}
+    resolution: {integrity: sha1-4drMvnjQ0TiMoYxk/qOOPlfjcGs=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-limit/-/p-limit-3.1.0.tgz}
     engines: {node: '>=10'}
 
   p-locate@4.1.0:
-    resolution: {integrity: sha1-o0KLtwiLOmApL2aRkni3wpetTwc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-locate/-/p-locate-4.1.0.tgz}
+    resolution: {integrity: sha1-o0KLtwiLOmApL2aRkni3wpetTwc=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-locate/-/p-locate-4.1.0.tgz}
     engines: {node: '>=8'}
 
   p-locate@5.0.0:
-    resolution: {integrity: sha1-g8gxXGeFAF470CGDlBHJ4RDm2DQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-locate/-/p-locate-5.0.0.tgz}
+    resolution: {integrity: sha1-g8gxXGeFAF470CGDlBHJ4RDm2DQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-locate/-/p-locate-5.0.0.tgz}
     engines: {node: '>=10'}
 
   p-map@2.1.0:
@@ -1717,17 +1716,17 @@ packages:
     engines: {node: '>=6'}
 
   p-try@2.2.0:
-    resolution: {integrity: sha1-yyhoVA4xPWHeWPr741zpAE1VQOY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-try/-/p-try-2.2.0.tgz}
+    resolution: {integrity: sha1-yyhoVA4xPWHeWPr741zpAE1VQOY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/p-try/-/p-try-2.2.0.tgz}
     engines: {node: '>=6'}
 
   package-manager-detector@0.2.11:
-    resolution: {integrity: sha1-OvCzT5nYbSSvCgYgYD0uEYDQXJw=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/package-manager-detector/-/package-manager-detector-0.2.11.tgz}
+    resolution: {integrity: sha1-OvCzT5nYbSSvCgYgYD0uEYDQXJw=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/package-manager-detector/-/package-manager-detector-0.2.11.tgz}
 
   parse-entities@4.0.2:
-    resolution: {integrity: sha1-YdRvXtKOTuYundxD1rAQGIRD8Vk=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/parse-entities/-/parse-entities-4.0.2.tgz}
+    resolution: {integrity: sha1-YdRvXtKOTuYundxD1rAQGIRD8Vk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/parse-entities/-/parse-entities-4.0.2.tgz}
 
   path-exists@4.0.0:
-    resolution: {integrity: sha1-UTvb4tO5XXdi6METfvoZXGxhtbM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-exists/-/path-exists-4.0.0.tgz}
+    resolution: {integrity: sha1-UTvb4tO5XXdi6METfvoZXGxhtbM=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-exists/-/path-exists-4.0.0.tgz}
     engines: {node: '>=8'}
 
   path-key@3.1.1:
@@ -1735,11 +1734,11 @@ packages:
     engines: {node: '>=8'}
 
   path-scurry@2.0.2:
-    resolution: {integrity: sha1-a+DQ7gKhDZ4N56mLrmXhgskGH4U=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-scurry/-/path-scurry-2.0.2.tgz}
+    resolution: {integrity: sha1-a+DQ7gKhDZ4N56mLrmXhgskGH4U=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-scurry/-/path-scurry-2.0.2.tgz}
     engines: {node: 18 || 20 || >=22}
 
   path-type@4.0.0:
-    resolution: {integrity: sha1-hO0BwKe6OAr+CdkKjBgNzZ0DBDs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-type/-/path-type-4.0.0.tgz}
+    resolution: {integrity: sha1-hO0BwKe6OAr+CdkKjBgNzZ0DBDs=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/path-type/-/path-type-4.0.0.tgz}
     engines: {node: '>=8'}
 
   pathe@2.0.3:
@@ -1757,7 +1756,7 @@ packages:
     engines: {node: '>=12'}
 
   postcss@8.5.25:
-    resolution: {integrity: sha1-UBKlmOqqiX8hu+hVO+PLe9K9eMs=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/postcss/-/postcss-8.5.25.tgz}
+    resolution: {integrity: sha1-UBKlmOqqiX8hu+hVO+PLe9K9eMs=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/postcss/-/postcss-8.5.25.tgz}
     engines: {node: ^10 || ^12 || >=14}
 
   prelude-ls@1.2.1:
@@ -1765,70 +1764,70 @@ packages:
     engines: {node: '>= 0.8.0'}
 
   prettier@2.8.8:
-    resolution: {integrity: sha1-6MXX6YpDBf/j3i4fxKyhpxwosdo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/prettier/-/prettier-2.8.8.tgz}
+    resolution: {integrity: sha1-6MXX6YpDBf/j3i4fxKyhpxwosdo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/prettier/-/prettier-2.8.8.tgz}
     engines: {node: '>=10.13.0'}
     hasBin: true
 
   prettier@3.9.6:
-    resolution: {integrity: sha1-s+pRRlFdQPxT8YqmP3Tfqx4Q2/Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/prettier/-/prettier-3.9.6.tgz}
+    resolution: {integrity: sha1-s+pRRlFdQPxT8YqmP3Tfqx4Q2/Y=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/prettier/-/prettier-3.9.6.tgz}
     engines: {node: '>=14'}
     hasBin: true
 
   punycode.js@2.3.1:
-    resolution: {integrity: sha1-a1PlatdViCNOefSv+pCXLH3Yzbc=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/punycode.js/-/punycode.js-2.3.1.tgz}
+    resolution: {integrity: sha1-a1PlatdViCNOefSv+pCXLH3Yzbc=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/punycode.js/-/punycode.js-2.3.1.tgz}
     engines: {node: '>=6'}
 
   punycode@2.3.1:
-    resolution: {integrity: sha1-AnQi4vrsCyXhVJw+G9gwm5EztuU=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/punycode/-/punycode-2.3.1.tgz}
+    resolution: {integrity: sha1-AnQi4vrsCyXhVJw+G9gwm5EztuU=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/punycode/-/punycode-2.3.1.tgz}
     engines: {node: '>=6'}
 
   quansync@0.2.11:
-    resolution: {integrity: sha1-+cOt2i4ScuT4zz8UV7BMvbTuaSo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/quansync/-/quansync-0.2.11.tgz}
+    resolution: {integrity: sha1-+cOt2i4ScuT4zz8UV7BMvbTuaSo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/quansync/-/quansync-0.2.11.tgz}
 
   queue-microtask@1.2.3:
-    resolution: {integrity: sha1-SSkii7xyTfrEPg77BYyve2z7YkM=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/queue-microtask/-/queue-microtask-1.2.3.tgz}
+    resolution: {integrity: sha1-SSkii7xyTfrEPg77BYyve2z7YkM=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/queue-microtask/-/queue-microtask-1.2.3.tgz}
 
   read-yaml-file@2.1.0:
     resolution: {integrity: sha1-xYZnEtue9TQ7TQLCQTutpTxBxKk=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/read-yaml-file/-/read-yaml-file-2.1.0.tgz}
     engines: {node: '>=10.13'}
 
   resolve-from@5.0.0:
-    resolution: {integrity: sha1-w1IlhD3493bfIcV1V7wIfp39/Gk=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/resolve-from/-/resolve-from-5.0.0.tgz}
+    resolution: {integrity: sha1-w1IlhD3493bfIcV1V7wIfp39/Gk=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/resolve-from/-/resolve-from-5.0.0.tgz}
     engines: {node: '>=8'}
 
   reusify@1.1.0:
     resolution: {integrity: sha1-D+E7lSLhRz9RtVjueW4I8R+bSJ8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/reusify/-/reusify-1.1.0.tgz}
     engines: {iojs: '>=1.0.0', node: '>=0.10.0'}
 
-  rolldown@1.1.5:
-    resolution: {integrity: sha1-M5quJQhENR/FW3TiZS0+vW+6OJ0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/rolldown/-/rolldown-1.1.5.tgz}
+  rolldown@1.2.1:
+    resolution: {integrity: sha1-ZEIEvePaEeDqqNdJlL4luQ/PTUQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/rolldown/-/rolldown-1.2.1.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
 
   run-parallel@1.2.0:
-    resolution: {integrity: sha1-ZtE2jae9+SHrnZW9GpIp5/IaQ+4=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/run-parallel/-/run-parallel-1.2.0.tgz}
+    resolution: {integrity: sha1-ZtE2jae9+SHrnZW9GpIp5/IaQ+4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/run-parallel/-/run-parallel-1.2.0.tgz}
 
   safer-buffer@2.1.2:
-    resolution: {integrity: sha1-RPoWGwGHuVSd2Eu5GAL5vYOFzWo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/safer-buffer/-/safer-buffer-2.1.2.tgz}
+    resolution: {integrity: sha1-RPoWGwGHuVSd2Eu5GAL5vYOFzWo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/safer-buffer/-/safer-buffer-2.1.2.tgz}
 
   semver@7.8.5:
-    resolution: {integrity: sha1-ObZGA33VDBT7RR5+TKxY7YuGP2k=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/semver/-/semver-7.8.5.tgz}
+    resolution: {integrity: sha1-ObZGA33VDBT7RR5+TKxY7YuGP2k=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/semver/-/semver-7.8.5.tgz}
     engines: {node: '>=10'}
     hasBin: true
 
   shebang-command@2.0.0:
-    resolution: {integrity: sha1-zNCvT4g1+9wmW4JGGq8MNmY/NOo=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/shebang-command/-/shebang-command-2.0.0.tgz}
+    resolution: {integrity: sha1-zNCvT4g1+9wmW4JGGq8MNmY/NOo=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/shebang-command/-/shebang-command-2.0.0.tgz}
     engines: {node: '>=8'}
 
   shebang-regex@3.0.0:
-    resolution: {integrity: sha1-rhbxZE2HPsrYQ7AwexQzYtTEIXI=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/shebang-regex/-/shebang-regex-3.0.0.tgz}
+    resolution: {integrity: sha1-rhbxZE2HPsrYQ7AwexQzYtTEIXI=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/shebang-regex/-/shebang-regex-3.0.0.tgz}
     engines: {node: '>=8'}
 
   siginfo@2.0.0:
     resolution: {integrity: sha1-MudscLeXJOO7Vny51UPrhYzPrzA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/siginfo/-/siginfo-2.0.0.tgz}
 
   signal-exit@4.1.0:
-    resolution: {integrity: sha1-lSGIwcvVRgcOLdIND0HArgUwywQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/signal-exit/-/signal-exit-4.1.0.tgz}
+    resolution: {integrity: sha1-lSGIwcvVRgcOLdIND0HArgUwywQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/signal-exit/-/signal-exit-4.1.0.tgz}
     engines: {node: '>=14'}
 
   slash@3.0.0:
@@ -1840,24 +1839,24 @@ packages:
     engines: {node: '>=14.16'}
 
   smol-toml@1.7.0:
-    resolution: {integrity: sha1-7RslnOfgWQffGr51iXG9Cg7ywN0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/smol-toml/-/smol-toml-1.7.0.tgz}
+    resolution: {integrity: sha1-7RslnOfgWQffGr51iXG9Cg7ywN0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/smol-toml/-/smol-toml-1.7.0.tgz}
     engines: {node: '>= 18'}
 
   source-map-js@1.2.1:
-    resolution: {integrity: sha1-HOVlD93YerwJnto33P8CTCZnrkY=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/source-map-js/-/source-map-js-1.2.1.tgz}
+    resolution: {integrity: sha1-HOVlD93YerwJnto33P8CTCZnrkY=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/source-map-js/-/source-map-js-1.2.1.tgz}
     engines: {node: '>=0.10.0'}
 
   spawndamnit@3.0.1:
-    resolution: {integrity: sha1-REECNdPcTiH45PdArjJm5EhsKu0=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/spawndamnit/-/spawndamnit-3.0.1.tgz}
+    resolution: {integrity: sha1-REECNdPcTiH45PdArjJm5EhsKu0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/spawndamnit/-/spawndamnit-3.0.1.tgz}
 
   stackback@0.0.2:
-    resolution: {integrity: sha1-Gsig2Ug4SNFpXkGLbQMaPDzmjjs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/stackback/-/stackback-0.0.2.tgz}
+    resolution: {integrity: sha1-Gsig2Ug4SNFpXkGLbQMaPDzmjjs=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/stackback/-/stackback-0.0.2.tgz}
 
   std-env@4.2.0:
     resolution: {integrity: sha1-jr4OxgSFZoq0ciezEvQlTN+AydM=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/std-env/-/std-env-4.2.0.tgz}
 
   string-width@8.2.1:
-    resolution: {integrity: sha1-FlCJz6UnzIj7wj3XMxP14zSvHqE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/string-width/-/string-width-8.2.1.tgz}
+    resolution: {integrity: sha1-FlCJz6UnzIj7wj3XMxP14zSvHqE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/string-width/-/string-width-8.2.1.tgz}
     engines: {node: '>=20'}
 
   strip-ansi@6.0.1:
@@ -1869,15 +1868,15 @@ packages:
     engines: {node: '>=12'}
 
   strip-bom@4.0.0:
-    resolution: {integrity: sha1-nDUFwdtFvO3KPZz3oW9cWqOQGHg=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/strip-bom/-/strip-bom-4.0.0.tgz}
+    resolution: {integrity: sha1-nDUFwdtFvO3KPZz3oW9cWqOQGHg=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/strip-bom/-/strip-bom-4.0.0.tgz}
     engines: {node: '>=8'}
 
   supports-color@7.2.0:
-    resolution: {integrity: sha1-G33NyzK4E4gBs+R4umpRyqiWSNo=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/supports-color/-/supports-color-7.2.0.tgz}
+    resolution: {integrity: sha1-G33NyzK4E4gBs+R4umpRyqiWSNo=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/supports-color/-/supports-color-7.2.0.tgz}
     engines: {node: '>=8'}
 
   term-size@2.2.1:
-    resolution: {integrity: sha1-KmpUhAQywvtjIP6g9BVTHpAYn1Q=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/term-size/-/term-size-2.2.1.tgz}
+    resolution: {integrity: sha1-KmpUhAQywvtjIP6g9BVTHpAYn1Q=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/term-size/-/term-size-2.2.1.tgz}
     engines: {node: '>=8'}
 
   tinybench@2.9.0:
@@ -1888,19 +1887,19 @@ packages:
     engines: {node: '>=18'}
 
   tinyglobby@0.2.17:
-    resolution: {integrity: sha1-ViqabJ6ys7Ej05cZ+a9btE/NdjE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tinyglobby/-/tinyglobby-0.2.17.tgz}
+    resolution: {integrity: sha1-ViqabJ6ys7Ej05cZ+a9btE/NdjE=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tinyglobby/-/tinyglobby-0.2.17.tgz}
     engines: {node: '>=12.0.0'}
 
   tinyrainbow@3.1.1:
-    resolution: {integrity: sha1-wBaDh9PY1wtrPCwJNt5f7nOM6iA=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tinyrainbow/-/tinyrainbow-3.1.1.tgz}
+    resolution: {integrity: sha1-wBaDh9PY1wtrPCwJNt5f7nOM6iA=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tinyrainbow/-/tinyrainbow-3.1.1.tgz}
     engines: {node: '>=14.0.0'}
 
   to-regex-range@5.0.1:
-    resolution: {integrity: sha1-FkjESq58jZiKMmAY7XL1tN0DkuQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/to-regex-range/-/to-regex-range-5.0.1.tgz}
+    resolution: {integrity: sha1-FkjESq58jZiKMmAY7XL1tN0DkuQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/to-regex-range/-/to-regex-range-5.0.1.tgz}
     engines: {node: '>=8.0'}
 
   tslib@2.8.1:
-    resolution: {integrity: sha1-YS7+TtI11Wfoq6Xypfq3AoCt6D8=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tslib/-/tslib-2.8.1.tgz}
+    resolution: {integrity: sha1-YS7+TtI11Wfoq6Xypfq3AoCt6D8=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tslib/-/tslib-2.8.1.tgz}
 
   type-check@0.4.0:
     resolution: {integrity: sha1-B7ggO/pwVsBlcFDjzNLDdzC6uPE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/type-check/-/type-check-0.4.0.tgz}
@@ -1915,36 +1914,36 @@ packages:
     resolution: {integrity: sha1-+NP30OxMPeo1p+PI76TLi0XJ5+4=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/uc.micro/-/uc.micro-2.1.0.tgz}
 
   undici-types@7.18.2:
-    resolution: {integrity: sha1-KTV6iee3ykrvO/D9P9DNc4hCKek=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/undici-types/-/undici-types-7.18.2.tgz}
+    resolution: {integrity: sha1-KTV6iee3ykrvO/D9P9DNc4hCKek=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/undici-types/-/undici-types-7.18.2.tgz}
 
   unicorn-magic@0.4.0:
-    resolution: {integrity: sha1-eMagkP1tB6vSRouDs4VgPgDf2yQ=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/unicorn-magic/-/unicorn-magic-0.4.0.tgz}
+    resolution: {integrity: sha1-eMagkP1tB6vSRouDs4VgPgDf2yQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/unicorn-magic/-/unicorn-magic-0.4.0.tgz}
     engines: {node: '>=20'}
 
   universalify@0.1.2:
-    resolution: {integrity: sha1-tkb2m+OULavOzJ1mOcgNwQXvqmY=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/universalify/-/universalify-0.1.2.tgz}
+    resolution: {integrity: sha1-tkb2m+OULavOzJ1mOcgNwQXvqmY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/universalify/-/universalify-0.1.2.tgz}
     engines: {node: '>= 4.0.0'}
 
   universalify@2.0.1:
-    resolution: {integrity: sha1-Fo78IYCWTmOG0GHglN9hr+I5sY0=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/universalify/-/universalify-2.0.1.tgz}
+    resolution: {integrity: sha1-Fo78IYCWTmOG0GHglN9hr+I5sY0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/universalify/-/universalify-2.0.1.tgz}
     engines: {node: '>= 10.0.0'}
 
   update-browserslist-db@1.2.3:
-    resolution: {integrity: sha1-ZNdttYcTE2rL60xJEUNmzGzC6A0=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/update-browserslist-db/-/update-browserslist-db-1.2.3.tgz}
+    resolution: {integrity: sha1-ZNdttYcTE2rL60xJEUNmzGzC6A0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/update-browserslist-db/-/update-browserslist-db-1.2.3.tgz}
     hasBin: true
     peerDependencies:
       browserslist: '>= 4.21.0'
 
   uri-js@4.4.1:
-    resolution: {integrity: sha1-mxpSWVIlhZ5V9mnZKPiMbFfyp34=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/uri-js/-/uri-js-4.4.1.tgz}
+    resolution: {integrity: sha1-mxpSWVIlhZ5V9mnZKPiMbFfyp34=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/uri-js/-/uri-js-4.4.1.tgz}
 
-  vite@8.1.2:
-    resolution: {integrity: sha1-OsKbWGjM8oxZMhORvh6+kG8TXr0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vite/-/vite-8.1.2.tgz}
+  vite@8.2.0:
+    resolution: {integrity: sha1-kC/NPcAxL1U8hbbLxGJdysotjfg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vite/-/vite-8.2.0.tgz}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
     peerDependencies:
       '@types/node': ^20.19.0 || >=22.12.0
-      '@vitejs/devtools': ^0.3.0
+      '@vitejs/devtools': ^0.4.0
       esbuild: ^0.27.0 || ^0.28.0
       jiti: '>=1.21.0'
       less: ^4.0.0
@@ -1982,7 +1981,7 @@ packages:
         optional: true
 
   vitest@4.1.10:
-    resolution: {integrity: sha1-fpKF7+JksRZwULejp/80eI4bevw=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vitest/-/vitest-4.1.10.tgz}
+    resolution: {integrity: sha1-fpKF7+JksRZwULejp/80eI4bevw=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vitest/-/vitest-4.1.10.tgz}
     engines: {node: ^20.0.0 || ^22.0.0 || >=24.0.0}
     hasBin: true
     peerDependencies:
@@ -2023,29 +2022,29 @@ packages:
         optional: true
 
   vscode-jsonrpc@8.2.1:
-    resolution: {integrity: sha1-oyLMDx2X95T/2cTNKomKC94JfzQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vscode-jsonrpc/-/vscode-jsonrpc-8.2.1.tgz}
+    resolution: {integrity: sha1-oyLMDx2X95T/2cTNKomKC94JfzQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/vscode-jsonrpc/-/vscode-jsonrpc-8.2.1.tgz}
     engines: {node: '>=14.0.0'}
 
   which@2.0.2:
-    resolution: {integrity: sha1-fGqN0KY2oDJ+ELWckobu6T8/UbE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/which/-/which-2.0.2.tgz}
+    resolution: {integrity: sha1-fGqN0KY2oDJ+ELWckobu6T8/UbE=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/which/-/which-2.0.2.tgz}
     engines: {node: '>= 8'}
     hasBin: true
 
   why-is-node-running@2.3.0:
-    resolution: {integrity: sha1-o/aalxB/SUs83Dvd3Yg6fWXOvwQ=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/why-is-node-running/-/why-is-node-running-2.3.0.tgz}
+    resolution: {integrity: sha1-o/aalxB/SUs83Dvd3Yg6fWXOvwQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/why-is-node-running/-/why-is-node-running-2.3.0.tgz}
     engines: {node: '>=8'}
     hasBin: true
 
   word-wrap@1.2.5:
-    resolution: {integrity: sha1-0sRcbdT7zmIaZvE2y+Mor9BBCzQ=, tarball: https://ms-feed-2.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/word-wrap/-/word-wrap-1.2.5.tgz}
+    resolution: {integrity: sha1-0sRcbdT7zmIaZvE2y+Mor9BBCzQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/word-wrap/-/word-wrap-1.2.5.tgz}
     engines: {node: '>=0.10.0'}
 
   yocto-queue@0.1.0:
-    resolution: {integrity: sha1-ApTrPe4FAo0x7hpfosVWpqrxChs=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/yocto-queue/-/yocto-queue-0.1.0.tgz}
+    resolution: {integrity: sha1-ApTrPe4FAo0x7hpfosVWpqrxChs=, tarball: https://ms-feed-17.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/yocto-queue/-/yocto-queue-0.1.0.tgz}
     engines: {node: '>=10'}
 
   zod@4.4.3:
-    resolution: {integrity: sha1-toDxcohdGLvr8hqDTqJeVaG781Y=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/zod/-/zod-4.4.3.tgz}
+    resolution: {integrity: sha1-toDxcohdGLvr8hqDTqJeVaG781Y=, tarball: https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/zod/-/zod-4.4.3.tgz}
 
 snapshots:
 
@@ -2307,18 +2306,18 @@ snapshots:
       human-id: 4.2.0
       prettier: 2.8.8
 
-  '@emnapi/core@1.11.1':
+  '@emnapi/core@2.0.0-alpha.3':
     dependencies:
-      '@emnapi/wasi-threads': 1.2.2
+      '@emnapi/wasi-threads': 2.0.1
       tslib: 2.8.1
     optional: true
 
-  '@emnapi/runtime@1.11.1':
+  '@emnapi/runtime@2.0.0-alpha.3':
     dependencies:
       tslib: 2.8.1
     optional: true
 
-  '@emnapi/wasi-threads@1.2.2':
+  '@emnapi/wasi-threads@2.0.1':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -2435,49 +2434,49 @@ snapshots:
       '@eslint/core': 1.2.1
       levn: 0.4.1
 
-  '@github/copilot-darwin-arm64@1.0.75':
+  '@github/copilot-darwin-arm64@1.0.77':
     optional: true
 
-  '@github/copilot-darwin-x64@1.0.75':
+  '@github/copilot-darwin-x64@1.0.77':
     optional: true
 
-  '@github/copilot-linux-arm64@1.0.75':
+  '@github/copilot-linux-arm64@1.0.77':
     optional: true
 
-  '@github/copilot-linux-x64@1.0.75':
+  '@github/copilot-linux-x64@1.0.77':
     optional: true
 
-  '@github/copilot-linuxmusl-arm64@1.0.75':
+  '@github/copilot-linuxmusl-arm64@1.0.77':
     optional: true
 
-  '@github/copilot-linuxmusl-x64@1.0.75':
+  '@github/copilot-linuxmusl-x64@1.0.77':
     optional: true
 
   '@github/copilot-sdk@1.0.8':
     dependencies:
-      '@github/copilot': 1.0.75
-      koffi: 3.1.2
+      '@github/copilot': 1.0.77
+      koffi: 3.1.4
       vscode-jsonrpc: 8.2.1
       zod: 4.4.3
 
-  '@github/copilot-win32-arm64@1.0.75':
+  '@github/copilot-win32-arm64@1.0.77':
     optional: true
 
-  '@github/copilot-win32-x64@1.0.75':
+  '@github/copilot-win32-x64@1.0.77':
     optional: true
 
-  '@github/copilot@1.0.75':
+  '@github/copilot@1.0.77':
     dependencies:
       detect-libc: 2.1.2
     optionalDependencies:
-      '@github/copilot-darwin-arm64': 1.0.75
-      '@github/copilot-darwin-x64': 1.0.75
-      '@github/copilot-linux-arm64': 1.0.75
-      '@github/copilot-linux-x64': 1.0.75
-      '@github/copilot-linuxmusl-arm64': 1.0.75
-      '@github/copilot-linuxmusl-x64': 1.0.75
-      '@github/copilot-win32-arm64': 1.0.75
-      '@github/copilot-win32-x64': 1.0.75
+      '@github/copilot-darwin-arm64': 1.0.77
+      '@github/copilot-darwin-x64': 1.0.77
+      '@github/copilot-linux-arm64': 1.0.77
+      '@github/copilot-linux-x64': 1.0.77
+      '@github/copilot-linuxmusl-arm64': 1.0.77
+      '@github/copilot-linuxmusl-x64': 1.0.77
+      '@github/copilot-win32-arm64': 1.0.77
+      '@github/copilot-win32-x64': 1.0.77
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -2516,49 +2515,49 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@koromix/koffi-darwin-arm64@3.1.2':
+  '@koromix/koffi-darwin-arm64@3.1.4':
     optional: true
 
-  '@koromix/koffi-darwin-x64@3.1.2':
+  '@koromix/koffi-darwin-x64@3.1.4':
     optional: true
 
-  '@koromix/koffi-freebsd-arm64@3.1.2':
+  '@koromix/koffi-freebsd-arm64@3.1.4':
     optional: true
 
-  '@koromix/koffi-freebsd-ia32@3.1.2':
+  '@koromix/koffi-freebsd-ia32@3.1.4':
     optional: true
 
-  '@koromix/koffi-freebsd-x64@3.1.2':
+  '@koromix/koffi-freebsd-x64@3.1.4':
     optional: true
 
-  '@koromix/koffi-linux-arm64@3.1.2':
+  '@koromix/koffi-linux-arm64@3.1.4':
     optional: true
 
-  '@koromix/koffi-linux-ia32@3.1.2':
+  '@koromix/koffi-linux-ia32@3.1.4':
     optional: true
 
-  '@koromix/koffi-linux-loong64@3.1.2':
+  '@koromix/koffi-linux-loong64@3.1.4':
     optional: true
 
-  '@koromix/koffi-linux-riscv64@3.1.2':
+  '@koromix/koffi-linux-riscv64@3.1.4':
     optional: true
 
-  '@koromix/koffi-linux-x64@3.1.2':
+  '@koromix/koffi-linux-x64@3.1.4':
     optional: true
 
-  '@koromix/koffi-openbsd-ia32@3.1.2':
+  '@koromix/koffi-openbsd-ia32@3.1.4':
     optional: true
 
-  '@koromix/koffi-openbsd-x64@3.1.2':
+  '@koromix/koffi-openbsd-x64@3.1.4':
     optional: true
 
-  '@koromix/koffi-win32-arm64@3.1.2':
+  '@koromix/koffi-win32-arm64@3.1.4':
     optional: true
 
-  '@koromix/koffi-win32-ia32@3.1.2':
+  '@koromix/koffi-win32-ia32@3.1.4':
     optional: true
 
-  '@koromix/koffi-win32-x64@3.1.2':
+  '@koromix/koffi-win32-x64@3.1.4':
     optional: true
 
   '@manypkg/find-root@1.1.0':
@@ -2577,10 +2576,10 @@ snapshots:
       globby: 11.1.0
       read-yaml-file: 2.1.0
 
-  '@napi-rs/wasm-runtime@1.2.1(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)':
+  '@napi-rs/wasm-runtime@1.2.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
     dependencies:
-      '@emnapi/core': 1.11.1
-      '@emnapi/runtime': 1.11.1
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
       '@tybys/wasm-util': 0.10.3
     optional: true
 
@@ -2596,55 +2595,55 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
-  '@oxc-project/types@0.139.0': {}
+  '@oxc-project/types@0.142.0': {}
 
-  '@rolldown/binding-android-arm64@1.1.5':
+  '@rolldown/binding-android-arm64@1.2.1':
     optional: true
 
-  '@rolldown/binding-darwin-arm64@1.1.5':
+  '@rolldown/binding-darwin-arm64@1.2.1':
     optional: true
 
-  '@rolldown/binding-darwin-x64@1.1.5':
+  '@rolldown/binding-darwin-x64@1.2.1':
     optional: true
 
-  '@rolldown/binding-freebsd-x64@1.1.5':
+  '@rolldown/binding-freebsd-x64@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-arm-gnueabihf@1.1.5':
+  '@rolldown/binding-linux-arm-gnueabihf@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-arm64-gnu@1.1.5':
+  '@rolldown/binding-linux-arm64-gnu@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-arm64-musl@1.1.5':
+  '@rolldown/binding-linux-arm64-musl@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-ppc64-gnu@1.1.5':
+  '@rolldown/binding-linux-ppc64-gnu@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-s390x-gnu@1.1.5':
+  '@rolldown/binding-linux-s390x-gnu@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-x64-gnu@1.1.5':
+  '@rolldown/binding-linux-x64-gnu@1.2.1':
     optional: true
 
-  '@rolldown/binding-linux-x64-musl@1.1.5':
+  '@rolldown/binding-linux-x64-musl@1.2.1':
     optional: true
 
-  '@rolldown/binding-openharmony-arm64@1.1.5':
+  '@rolldown/binding-openharmony-arm64@1.2.1':
     optional: true
 
-  '@rolldown/binding-wasm32-wasi@1.1.5':
+  '@rolldown/binding-wasm32-wasi@1.2.1':
     dependencies:
-      '@emnapi/core': 1.11.1
-      '@emnapi/runtime': 1.11.1
-      '@napi-rs/wasm-runtime': 1.2.1(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
+      '@napi-rs/wasm-runtime': 1.2.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
     optional: true
 
-  '@rolldown/binding-win32-arm64-msvc@1.1.5':
+  '@rolldown/binding-win32-arm64-msvc@1.2.1':
     optional: true
 
-  '@rolldown/binding-win32-x64-msvc@1.1.5':
+  '@rolldown/binding-win32-x64-msvc@1.2.1':
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
@@ -2763,7 +2762,7 @@ snapshots:
       obug: 2.1.4
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+      vitest: 4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
 
   '@vitest/expect@4.1.10':
     dependencies:
@@ -2774,13 +2773,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  '@vitest/mocker@4.1.10(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))':
+  '@vitest/mocker@4.1.10(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))':
     dependencies:
       '@vitest/spy': 4.1.10
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.1.2(@types/node@24.13.3)(esbuild@0.28.1)
+      vite: 8.2.0(@types/node@24.13.3)(esbuild@0.28.1)
 
   '@vitest/pretty-format@4.1.10':
     dependencies:
@@ -3239,23 +3238,23 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  koffi@3.1.2:
+  koffi@3.1.4:
     optionalDependencies:
-      '@koromix/koffi-darwin-arm64': 3.1.2
-      '@koromix/koffi-darwin-x64': 3.1.2
-      '@koromix/koffi-freebsd-arm64': 3.1.2
-      '@koromix/koffi-freebsd-ia32': 3.1.2
-      '@koromix/koffi-freebsd-x64': 3.1.2
-      '@koromix/koffi-linux-arm64': 3.1.2
-      '@koromix/koffi-linux-ia32': 3.1.2
-      '@koromix/koffi-linux-loong64': 3.1.2
-      '@koromix/koffi-linux-riscv64': 3.1.2
-      '@koromix/koffi-linux-x64': 3.1.2
-      '@koromix/koffi-openbsd-ia32': 3.1.2
-      '@koromix/koffi-openbsd-x64': 3.1.2
-      '@koromix/koffi-win32-arm64': 3.1.2
-      '@koromix/koffi-win32-ia32': 3.1.2
-      '@koromix/koffi-win32-x64': 3.1.2
+      '@koromix/koffi-darwin-arm64': 3.1.4
+      '@koromix/koffi-darwin-x64': 3.1.4
+      '@koromix/koffi-freebsd-arm64': 3.1.4
+      '@koromix/koffi-freebsd-ia32': 3.1.4
+      '@koromix/koffi-freebsd-x64': 3.1.4
+      '@koromix/koffi-linux-arm64': 3.1.4
+      '@koromix/koffi-linux-ia32': 3.1.4
+      '@koromix/koffi-linux-loong64': 3.1.4
+      '@koromix/koffi-linux-riscv64': 3.1.4
+      '@koromix/koffi-linux-x64': 3.1.4
+      '@koromix/koffi-openbsd-ia32': 3.1.4
+      '@koromix/koffi-openbsd-x64': 3.1.4
+      '@koromix/koffi-win32-arm64': 3.1.4
+      '@koromix/koffi-win32-ia32': 3.1.4
+      '@koromix/koffi-win32-x64': 3.1.4
 
   levn@0.4.1:
     dependencies:
@@ -3691,26 +3690,26 @@ snapshots:
 
   reusify@1.1.0: {}
 
-  rolldown@1.1.5:
+  rolldown@1.2.1:
     dependencies:
-      '@oxc-project/types': 0.139.0
+      '@oxc-project/types': 0.142.0
       '@rolldown/pluginutils': 1.0.1
     optionalDependencies:
-      '@rolldown/binding-android-arm64': 1.1.5
-      '@rolldown/binding-darwin-arm64': 1.1.5
-      '@rolldown/binding-darwin-x64': 1.1.5
-      '@rolldown/binding-freebsd-x64': 1.1.5
-      '@rolldown/binding-linux-arm-gnueabihf': 1.1.5
-      '@rolldown/binding-linux-arm64-gnu': 1.1.5
-      '@rolldown/binding-linux-arm64-musl': 1.1.5
-      '@rolldown/binding-linux-ppc64-gnu': 1.1.5
-      '@rolldown/binding-linux-s390x-gnu': 1.1.5
-      '@rolldown/binding-linux-x64-gnu': 1.1.5
-      '@rolldown/binding-linux-x64-musl': 1.1.5
-      '@rolldown/binding-openharmony-arm64': 1.1.5
-      '@rolldown/binding-wasm32-wasi': 1.1.5
-      '@rolldown/binding-win32-arm64-msvc': 1.1.5
-      '@rolldown/binding-win32-x64-msvc': 1.1.5
+      '@rolldown/binding-android-arm64': 1.2.1
+      '@rolldown/binding-darwin-arm64': 1.2.1
+      '@rolldown/binding-darwin-x64': 1.2.1
+      '@rolldown/binding-freebsd-x64': 1.2.1
+      '@rolldown/binding-linux-arm-gnueabihf': 1.2.1
+      '@rolldown/binding-linux-arm64-gnu': 1.2.1
+      '@rolldown/binding-linux-arm64-musl': 1.2.1
+      '@rolldown/binding-linux-ppc64-gnu': 1.2.1
+      '@rolldown/binding-linux-s390x-gnu': 1.2.1
+      '@rolldown/binding-linux-x64-gnu': 1.2.1
+      '@rolldown/binding-linux-x64-musl': 1.2.1
+      '@rolldown/binding-openharmony-arm64': 1.2.1
+      '@rolldown/binding-wasm32-wasi': 1.2.1
+      '@rolldown/binding-win32-arm64-msvc': 1.2.1
+      '@rolldown/binding-win32-x64-msvc': 1.2.1
 
   run-parallel@1.2.0:
     dependencies:
@@ -3833,22 +3832,22 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1):
+  vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.5
       postcss: 8.5.25
-      rolldown: 1.1.5
+      rolldown: 1.2.1
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 24.13.3
       esbuild: 0.28.1
       fsevents: 2.3.3
 
-  vitest@4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1)):
+  vitest@4.1.10(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1)):
     dependencies:
       '@vitest/expect': 4.1.10
-      '@vitest/mocker': 4.1.10(vite@8.1.2(@types/node@24.13.3)(esbuild@0.28.1))
+      '@vitest/mocker': 4.1.10(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.1))
       '@vitest/pretty-format': 4.1.10
       '@vitest/runner': 4.1.10
       '@vitest/snapshot': 4.1.10
@@ -3865,7 +3864,7 @@ snapshots:
       tinyexec: 1.2.4
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.1
-      vite: 8.1.2(@types/node@24.13.3)(esbuild@0.28.1)
+      vite: 8.2.0(@types/node@24.13.3)(esbuild@0.28.1)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 24.13.3
