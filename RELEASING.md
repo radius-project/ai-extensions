@@ -56,8 +56,8 @@ package:
 
    ```bash
    pnpm release          # runs the workspace build
-git tag "@radius-project/core@$(node -p 'require("./packages/core/package.json").version')"
-git tag "@radius-project/canvas@$(node -p 'require("./packages/adapter-canvas/package.json").version')"
+   git tag "@radius-project/core@$(node -p 'require("./packages/core/package.json").version')"
+   git tag "@radius-project/canvas@$(node -p 'require("./packages/adapter-canvas/package.json").version')"
    git push --follow-tags
    ```
 
