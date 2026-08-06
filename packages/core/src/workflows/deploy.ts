@@ -1,4 +1,4 @@
-import { fillTemplate } from "./template.js";
+import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 
 // The pinned ref of radius-project/radius that hosts BOTH the shared composite
 // actions (setup-control-plane, restore-state, run-rad-commands, teardown) and
@@ -52,7 +52,7 @@ export function generateDeployWorkflow(
     }
     return body;
   };
-  return {
+  const files: DeployWorkflowFiles = {
     [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), {
       ENV: env
     }),
@@ -67,4 +67,8 @@ export function generateDeployWorkflow(
       RADIUS_REF
     })
   };
+  for (const [file, body] of Object.entries(files)) {
+    assertNoUnresolvedPlaceholders(body, `deploy workflow "${file}"`);
+  }
+  return files;
 }
