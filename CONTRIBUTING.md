@@ -25,7 +25,7 @@ fixes, features) as long as they follow a few guidelines:
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) `>= 18`
+- [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
 - [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
 
 ## Repository layout
@@ -82,23 +82,24 @@ pnpm typecheck       # typecheck core + shared + canvas
 
 ## Testing
 
-Tests live in `packages/core` and run with [Vitest](https://vitest.dev/).
+Tests live across the workspace packages and run together through the root [Vitest](https://vitest.dev/) projects configuration.
 
 ```bash
-pnpm -C packages/core test           # run all core tests once
-pnpm -C packages/core test:watch     # run tests in watch mode
+pnpm test              # run every workspace test project once
+pnpm test:watch        # run every workspace test project in watch mode
+pnpm coverage          # run every project with unified V8 coverage
 ```
 
 Run a single test file:
 
 ```bash
-pnpm -C packages/core test -- src/graph/diff_test.ts
+pnpm test -- packages/core/src/graph/diff_test.ts
 ```
 
 ## Before you open a pull request
 
 1. `pnpm typecheck` passes.
-2. `pnpm -C packages/core test` passes (add or update tests for behavior changes).
+2. `pnpm test` passes across all projects (add or update tests for behavior changes).
 3. `pnpm build` succeeds.
 4. Add a changeset describing your change (see below).
 5. Fill out the [pull request template](./.github/pull_request_template.md).
@@ -128,7 +129,7 @@ project.
 Contributors sign off that they adhere to these requirements by adding a
 `Signed-off-by` line to commit messages.
 
-```
+```text
 This is my commit message
 
 Signed-off-by: Random J Developer <random@developer.example.org>

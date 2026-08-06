@@ -4,6 +4,24 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@github/copilot-sdk':
+      specifier: 1.0.8
+      version: 1.0.8
+    '@types/node':
+      specifier: ^26.1.1
+      version: 26.1.1
+    '@vitest/coverage-v8':
+      specifier: ^4.1.10
+      version: 4.1.10
+    typescript:
+      specifier: ^7.0.2
+      version: 7.0.2
+    vitest:
+      specifier: ^4.1.10
+      version: 4.1.10
+
 overrides:
   read-yaml-file@<2: ^2.1.0
 
@@ -27,8 +45,11 @@ importers:
         specifier: ^8.57.1
         version: 8.57.1
       '@types/node':
-        specifier: ^26.1.1
+        specifier: 'catalog:'
         version: 26.1.1
+      '@vitest/coverage-v8':
+        specifier: 'catalog:'
+        version: 4.1.10(vitest@4.1.10)
       eslint:
         specifier: ^8.57.1
         version: 8.57.1
@@ -45,8 +66,11 @@ importers:
         specifier: ^3.9.6
         version: 3.9.6
       typescript:
-        specifier: ^7.0.2
+        specifier: 'catalog:'
         version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.1)(esbuild@0.28.1))
 
   packages/adapter-canvas:
     dependencies:
@@ -58,16 +82,16 @@ importers:
         version: link:../adapter-shared
     devDependencies:
       '@github/copilot-sdk':
-        specifier: 1.0.8
+        specifier: 'catalog:'
         version: 1.0.8
       '@vitest/coverage-v8':
-        specifier: ^4.1.10
+        specifier: 'catalog:'
         version: 4.1.10(vitest@4.1.10)
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
       vitest:
-        specifier: ^4.1.10
+        specifier: 'catalog:'
         version: 4.1.10(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.1)(esbuild@0.28.1))
 
   packages/adapter-shared:
@@ -77,7 +101,7 @@ importers:
         version: link:../core
     devDependencies:
       vitest:
-        specifier: ^4.1.10
+        specifier: 'catalog:'
         version: 4.1.10(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.1)(esbuild@0.28.1))
 
   plugins/radius:
@@ -89,10 +113,10 @@ importers:
   packages/core:
     devDependencies:
       '@vitest/coverage-v8':
-        specifier: ^4.1.10
+        specifier: 'catalog:'
         version: 4.1.10(vitest@4.1.10)
       vitest:
-        specifier: ^4.1.10
+        specifier: 'catalog:'
         version: 4.1.10(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.1)(esbuild@0.28.1))
 
 packages:

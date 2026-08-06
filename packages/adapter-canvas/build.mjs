@@ -91,7 +91,7 @@ const options = {
   bundle: true,
   format: "esm",
   platform: "node",
-  target: "node18",
+  target: "node24",
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
   // Inline the radius-app-bicep skill Markdown (SKILL.md + references) as text
