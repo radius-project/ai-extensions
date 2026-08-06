@@ -1,4 +1,5 @@
 ---
+registry: https://packagefeedproxy.microsoft.io/npm
 packages:
   - packages/*
   - plugins/*
