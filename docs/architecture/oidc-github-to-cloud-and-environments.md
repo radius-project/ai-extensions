@@ -57,7 +57,7 @@ implement each capability, so the large diff reads as intentional.
 Out of scope: re-deriving every enterprise error (the companion forensic write-up in
 [References](#references) does that), the AKS Automatic deploy-time `kubelogin` gap (a
 separate `radius-project/radius` deploy-pipeline issue, beyond the credential-setup
-RBAC assignment noted in [§C.5](#c5-servermjs-apiazure-auto-setup--the-orchestrator)),
+RBAC assignment noted in [§C.5](#c5-serverts-apiazure-auto-setup--the-orchestrator)),
 and deep AWS parity (AWS OIDC is covered conceptually for contrast; the enterprise-
 policy hardening is concentrated on the Azure path).
 
@@ -136,7 +136,7 @@ AWS expresses the same pattern with different nouns: an **IAM OIDC identity
 provider** for `token.actions.githubusercontent.com`, and an **IAM role** whose
 **trust policy** conditions on the token's `sub`/`aud`. The workflow calls
 `AssumeRoleWithWebIdentity` and gets short-lived credentials. The Radius credential
-profile stores only the **role ARN** (see `shared.mjs`), never a secret. The canvas
+profile stores only the **role ARN** (see `shared.ts`), never a secret. The canvas
 supports both providers; the enterprise-policy hardening is concentrated on Azure
 because that is where app-registration governance and immutable subjects bite.
 
@@ -270,9 +270,9 @@ testable:
   what stops the EMU "you cannot access this content" 403 when bootstrapping the
   private state package.
 
-### C.5 `server.mjs` `/api/azure-auto-setup` — the orchestrator
+### C.5 `server.ts` `/api/azure-auto-setup` — the orchestrator
 
-The largest single change (server.mjs grew ~784 lines). The `/api/azure-auto-setup`
+The largest single change (`server.ts` grew ~784 lines). The `/api/azure-auto-setup`
 handler is the end-to-end Azure setup sequence, in order: validate inputs → resolve
 the acting GitHub identity → resolve/create the app registration (owned-first) →
 create the missing FICs with the *correct* subjects → assign **Contributor** on the
@@ -289,17 +289,17 @@ cross-cutting fix strips `COPILOT_AGENT_SESSION_ID` from every child CLI so Azur
 CLI's "agentic session" tagging doesn't trigger `AADSTS901001` in locked-down
 tenants.
 
-### C.6 `pages.mjs` — the four-step UI
+### C.6 `pages.ts` — the four-step UI
 
 The Create Environment dialog was restructured into four numbered steps (see
-[Part D](#part-d--the-ui-redesign-and-its-rationale)). `pages.mjs` also holds the
+[Part D](#part-d--the-ui-redesign-and-its-rationale)). `pages.ts` also holds the
 owned-app picker, the opt-in "shared identity" pin, the acting-account switcher, and
 the provider-aware profile detail. Note the **client-script constraint** captured by
 a regression test: the client `<script>` is emitted inside a template literal, so an
 escaped apostrophe (`\'`) un-escapes to a raw `'` and halts page init — a `vm.Script`
 guard test now compiles every emitted script block.
 
-### C.7 `shared.mjs` — credential profiles
+### C.7 `shared.ts` — credential profiles
 
 A credential profile is a named, verified identity → cloud destination binding
 (`name, provider, user, tenantId, tenantName, subscriptionId, subscriptionName,
@@ -338,16 +338,16 @@ the user can't diagnose.
 A one-line index from "symptom" to "where it's handled." The full analysis is in the
 companion write-up ([References](#references)).
 
-| Symptom (enterprise)                               | Handled in                                                                       |
-|----------------------------------------------------|----------------------------------------------------------------------------------|
-| `AADSTS901001` (agentic-session client_session)    | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.mjs`, `gh.mjs`)     |
-| `ServiceManagementReference field is required`     | `buildAppCreateArgs` + SMR detection (`azure-oidc.mjs`), UI prompt (`pages.mjs`) |
-| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.mjs`)             |
-| `AADSTS700213` (subject mismatch)                  | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`)   |
-| Wrong GitHub account acting                        | `decideGhTokenStrategy` + account switcher (`gh.mjs`, `pages.mjs`, `server.mjs`) |
-| App-registration sprawl / collisions               | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.mjs`)                  |
-| Bare `404` from GitHub preflight                   | repo access + admin preflight (`server.mjs`)                                     |
-| AKS Automatic data-plane `Forbidden`               | AKS RBAC Cluster Admin assignment (`server.mjs`)                                 |
+| Symptom (enterprise)                               | Handled in                                                                     |
+|----------------------------------------------------|--------------------------------------------------------------------------------|
+| `AADSTS901001` (agentic-session client_session)    | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.ts`, `gh.ts`)     |
+| `ServiceManagementReference field is required`     | `buildAppCreateArgs` + SMR detection (`azure-oidc.ts`), UI prompt (`pages.ts`) |
+| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.ts`)            |
+| `AADSTS700213` (subject mismatch)                  | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`) |
+| Wrong GitHub account acting                        | `decideGhTokenStrategy` + account switcher (`gh.ts`, `pages.ts`, `server.ts`)  |
+| App-registration sprawl / collisions               | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.ts`)                 |
+| Bare `404` from GitHub preflight                   | repo access + admin preflight (`server.ts`)                                    |
+| AKS Automatic data-plane `Forbidden`               | AKS RBAC Cluster Admin assignment (`server.ts`)                                |
 
 ### A note on AKS vs AKS Automatic
 
@@ -393,7 +393,7 @@ plugin, and the deploy pipeline does not install or convert it yet. That is the
 **So where does this PR fit?** It fixes a *different* half of Door 2. AKS Automatic
 also requires an **Azure RBAC** role to authorize the identity (otherwise you get a
 `Forbidden`), and the credential-setup step in
-[§C.5](#c5-servermjs-apiazure-auto-setup--the-orchestrator) assigns exactly that
+[§C.5](#c5-serverts-apiazure-auto-setup--the-orchestrator) assigns exactly that
 role. The missing `kubelogin` **binary** is the separate, still-open gap in #12550 —
 adjacent to this work, but not part of it.
 
@@ -410,7 +410,7 @@ Suggested reading order for the diff:
 4. `adapters/canvas/src/server.ts` — `/api/azure-auto-setup` as the orchestration
    spine that composes the above.
 5. `adapters/canvas/src/pages.ts` — the four-step UI and its client-script guard.
-6. `shared.mjs` / `deploy.mjs` — credential-profile persistence and the deploy path.
+6. `shared.ts` / `deploy.ts` — credential-profile persistence and the deploy path.
 
 The pure modules (1–3) carry the bulk of the test coverage precisely because they
 hold the tricky logic; the adapter is intentionally thin glue over them.

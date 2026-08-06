@@ -9,7 +9,7 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 | File           | Responsibility                                                      |
 |----------------|---------------------------------------------------------------------|
 | `extension.ts` | SDK entry: `joinSession()` canvas + tool wiring, process lifecycle. |
-| `server.ts`    | Loopback HTTP host: request handler, page router, server lifecycle.   |
+| `server.ts`    | Loopback HTTP host: request handler, page router, server lifecycle. |
 | `pages.ts`     | HTML page renderers.                                                |
 | `client.ts`    | Browser-side JS injected into pages as string constants.            |
 | `vendor.ts`    | CDN/vendor script caching.                                          |
@@ -24,7 +24,7 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 pnpm build:canvas   # esbuild -> plugins/radius/extension.mjs
 ```
 
-`@github/copilot-sdk` is marked external; everything else (the sibling `.mjs`
+`@github/copilot-sdk` is marked external; everything else (the sibling TypeScript
 modules and the TypeScript core) is bundled.
 
 ## Extending
