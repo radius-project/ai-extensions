@@ -25,20 +25,20 @@ const VENDOR_URLS = {
 const VENDOR_STYLE_URLS = {
   "reactflow-css": "https://unpkg.com/reactflow@11.11.4/dist/style.css"
 };
-const vendorCache = new Map(); // name → content string
+const vendorCache = new Map<string, string>(); // name → content string
 
-function fetchVendorScript(url, redirectsLeft = 5) {
+function fetchVendorScript(
+  url: string,
+  redirectsLeft = 5
+): Promise<string | null> {
   return new Promise((resolve) => {
     https
       .get(url, { timeout: 15000 }, (resp) => {
         // Follow redirects. unpkg resolves floating tags (react@18 →
         // react@18.3.1) with a *relative* Location header, so resolve it
         // against the current URL and follow up to redirectsLeft hops.
-        if (
-          resp.statusCode >= 300 &&
-          resp.statusCode < 400 &&
-          resp.headers.location
-        ) {
+        const statusCode = resp.statusCode ?? 0;
+        if (statusCode >= 300 && statusCode < 400 && resp.headers.location) {
           resp.resume(); // drain the redirect body
           if (redirectsLeft <= 0) {
             resolve(null);
@@ -48,7 +48,7 @@ function fetchVendorScript(url, redirectsLeft = 5) {
           resolve(fetchVendorScript(next, redirectsLeft - 1));
           return;
         }
-        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        if (statusCode < 200 || statusCode >= 300) {
           resp.resume();
           resolve(null);
           return;
@@ -63,7 +63,7 @@ function fetchVendorScript(url, redirectsLeft = 5) {
 }
 
 // Ensure all vendor assets (scripts + styles) are loaded (called before rendering pages)
-export async function ensureVendorScripts() {
+export async function ensureVendorScripts(): Promise<void> {
   const all = { ...VENDOR_URLS, ...VENDOR_STYLE_URLS };
   for (const [name, url] of Object.entries(all)) {
     if (!vendorCache.has(name)) {
@@ -75,18 +75,20 @@ export async function ensureVendorScripts() {
 
 // Returns inline <style> tags for the vendored CSS (React Flow). Injected into
 // the page <head> before our own .rad-node styles so our overrides win.
-export function getInlineVendorStyles() {
+export function getInlineVendorStyles(): string {
   // Escape </style> inside the CSS to prevent premature tag closure
-  const esc = (s) => (s || "").replace(/<\/style>/gi, "<\\/style>");
+  const esc = (s: string | undefined) =>
+    (s || "").replace(/<\/style>/gi, "<\\/style>");
   const rfCss = esc(vendorCache.get("reactflow-css"));
   return `<style>${rfCss}</style>`;
 }
 
 // Returns inline <script> tags with the library code embedded, in load order:
 // React → ReactDOM → React Flow → dagre.
-export function getInlineVendorScripts() {
+export function getInlineVendorScripts(): string {
   // Escape </script> inside lib code to prevent premature tag closure
-  const esc = (s) => (s || "").replace(/<\/script>/gi, "<\\/script>");
+  const esc = (s: string | undefined) =>
+    (s || "").replace(/<\/script>/gi, "<\\/script>");
   const react = esc(vendorCache.get("react"));
   const reactDom = esc(vendorCache.get("react-dom"));
   const reactFlow = esc(vendorCache.get("reactflow"));

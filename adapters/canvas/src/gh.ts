@@ -4,6 +4,108 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import type {
+  ChildProcess,
+  ExecFileException,
+  ExecFileOptions,
+  ExecFileOptionsWithStringEncoding
+} from "node:child_process";
+
+export interface GhAccount {
+  login: string;
+  source: string;
+  active: boolean;
+  scopes: string[];
+}
+
+interface GhSnapshot {
+  hasToken: boolean;
+  withTokenAccts: GhAccount[];
+  keyringAccts: GhAccount[];
+  tokenAcct: GhAccount | null;
+  keyringActive: GhAccount | null;
+}
+
+export interface GhTokenStrategyInput {
+  hasToken: boolean;
+  tokenLogin?: string;
+  tokenHasWorkflow?: boolean;
+  keyringLogin?: string;
+  keyringHasWorkflow?: boolean;
+  preferredLogin?: string | null;
+}
+
+export interface GhTokenStrategy {
+  useKeyring: boolean;
+  reason: string;
+}
+
+export interface GitHubIdentityAccount {
+  login: string;
+  hasWorkflow: boolean;
+  hasPackages: boolean;
+  switchable: boolean;
+  acting: boolean;
+}
+
+export interface GitHubIdentity {
+  actingLogin: string;
+  displayLogin: string;
+  mismatch: boolean;
+  actingHasWorkflow: boolean;
+  actingHasPackages: boolean;
+  preferredLogin: string | null;
+  reason: string;
+  accounts: GitHubIdentityAccount[];
+  repoAccess?: string;
+}
+
+type CliCallback = (
+  error: ExecFileException | null,
+  stdout: string,
+  stderr: string
+) => void;
+
+export interface CliOptions extends ExecFileOptions {
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface CommandOptions extends CliOptions {
+  stdin?: string;
+}
+
+export interface ContentResult {
+  content: string | null;
+  error: string | null;
+}
+
+export interface ContentBytesTooLarge {
+  tooLarge: true;
+  size?: number;
+}
+
+export interface BranchRefResult {
+  ok: boolean;
+  stderr: string;
+}
+
+export interface PullRequestResult {
+  ok: boolean;
+  url?: string;
+  number?: number;
+  stderr?: string;
+}
+
+export interface GhApiResult {
+  ok: boolean;
+  status: number | null;
+  json: unknown;
+  stderr: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment, and
 // gh always prefers that env token over the user's stored (keyring) login. That
@@ -21,25 +123,25 @@ function ghExecutable() {
 // The login the user explicitly chose in the UI (via switchGhAccount). Sticky
 // for the process lifetime and always wins over the scope-based default. null
 // means "no explicit choice — decide automatically".
-let _preferredLogin = null;
+let _preferredLogin: string | null = null;
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
 // the derived token strategy. `_ghSnapshotPromise` is the in-flight/settled
 // single-flight probe; `_ghSnapshot` is its resolved value, readable
 // synchronously by the hot path once primed. Reset by resetGhIdentityCache()
 // after a switch.
-let _ghSnapshot = null;
-let _ghSnapshotPromise = null;
-let _ghStrategy = null;
+let _ghSnapshot: GhSnapshot | null = null;
+let _ghSnapshotPromise: Promise<GhSnapshot> | null = null;
+let _ghStrategy: GhTokenStrategy | null = null;
 
 // Parse `gh auth status` text into structured accounts. Pure so it can be unit
 // tested against real gh output across versions. Each account block looks like:
 //   ✓ Logged in to github.com account <login> (<source>)
 //     - Active account: true|false
 //     - Token scopes: 'a', 'b', ...
-export function parseGhAuthStatus(text) {
-  const accounts = [];
-  let cur = null;
+export function parseGhAuthStatus(text: unknown): GhAccount[] {
+  const accounts: GhAccount[] = [];
+  let cur: GhAccount | null = null;
   for (const line of String(text || "").split(/\r?\n/)) {
     const acct = line.match(/Logged in to \S+ account (\S+) \(([^)]+)\)/);
     if (acct) {
@@ -82,7 +184,7 @@ export function decideGhTokenStrategy({
   keyringLogin,
   keyringHasWorkflow,
   preferredLogin
-}) {
+}: GhTokenStrategyInput): GhTokenStrategy {
   // 1. An explicit user choice is authoritative. Keep the injected token only
   //    when the chosen login IS the token account; otherwise strip so gh uses
   //    the (already switched-to) keyring account.
@@ -110,7 +212,7 @@ export function decideGhTokenStrategy({
 // rather than treating it as empty. Async on purpose: a synchronous spawn here
 // froze the whole event loop for up to the timeout (twice, so ~16s worst case)
 // on a slow/locked-down network.
-function ghAuthStatusText(env) {
+function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve) => {
     execFile(
       ghExecutable(),
@@ -132,7 +234,7 @@ function ghAuthStatusText(env) {
 // (including ones that arrive while it is still in flight) awaits that same
 // Promise, so concurrent gh work never spawns duplicate `gh auth status` runs.
 // The resolved value is also cached in _ghSnapshot for the synchronous hot path.
-function ensureGhSnapshot() {
+function ensureGhSnapshot(): Promise<GhSnapshot> {
   if (_ghSnapshotPromise) return _ghSnapshotPromise;
   _ghSnapshotPromise = (async () => {
     const base = process.env;
@@ -165,7 +267,7 @@ function ensureGhSnapshot() {
 }
 
 // Resolve (memoized) the token strategy from the current snapshot + preference.
-async function ensureGhStrategy() {
+async function ensureGhStrategy(): Promise<GhTokenStrategy> {
   if (_ghStrategy) return _ghStrategy;
   const s = await ensureGhSnapshot();
   _ghStrategy = decideGhTokenStrategy({
@@ -189,7 +291,7 @@ async function ensureGhStrategy() {
 // never blocks on the network. The default is superseded the moment the strategy
 // resolves, which always happens before any workflow-scope write in the deploy
 // flow (that flow resolves the identity up front).
-function ghStrategyCached() {
+function ghStrategyCached(): GhTokenStrategy {
   return (
     _ghStrategy || { useKeyring: false, reason: "identity-not-yet-resolved" }
   );
@@ -199,7 +301,7 @@ function ghStrategyCached() {
 // strategy. Callers that need the token-stripping decision in effect for the gh
 // calls that follow (the deploy flow, the identity endpoints, server startup)
 // await this first. Single-flight/memoized, so calling it repeatedly is cheap.
-export function primeGhIdentity() {
+export function primeGhIdentity(): Promise<GhTokenStrategy> {
   return ensureGhStrategy();
 }
 
@@ -208,7 +310,7 @@ export function primeGhIdentity() {
 // so this module stays free of disk I/O. Resets the identity cache so the next
 // resolution honors the restored choice. A blank login clears the preference
 // (back to "decide automatically").
-export function setPreferredGhLogin(login) {
+export function setPreferredGhLogin(login: string): void {
   const next = (login || "").trim() || null;
   if (next === _preferredLogin) return;
   _preferredLogin = next;
@@ -218,7 +320,7 @@ export function setPreferredGhLogin(login) {
 // Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
 // status`. Call after anything that changes the active account (a switch). The
 // sticky user preference is intentionally preserved across resets.
-export function resetGhIdentityCache() {
+export function resetGhIdentityCache(): void {
   _ghSnapshot = null;
   _ghSnapshotPromise = null;
   _ghStrategy = null;
@@ -233,7 +335,7 @@ export function resetGhIdentityCache() {
 // priming happens at server startup and whenever the identity is resolved
 // (the identity endpoints and the deploy flow), which is before any
 // workflow-scope write, so the strategy is in effect when it matters.
-function ghChildEnv(baseEnv) {
+function ghChildEnv(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...(baseEnv || process.env) };
   if (ghStrategyCached().useKeyring) {
     delete env.GH_TOKEN;
@@ -246,7 +348,7 @@ function ghChildEnv(baseEnv) {
 // list. `actingLogin` is who gh mutates as (after the strategy decision);
 // `displayLogin` is who the injected token represents (what the host UI shows).
 // A mismatch means setup would act as a different account than the user thinks.
-export async function getGitHubIdentity() {
+export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   const s = await ensureGhSnapshot();
   const strat = await ensureGhStrategy();
   const displayLogin =
@@ -276,10 +378,10 @@ export async function getGitHubIdentity() {
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
-  const packageScopesFor = (login) =>
+  const packageScopesFor = (login: string): string[] =>
     keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
-  const seen = new Set();
-  const accounts = [];
+  const seen = new Set<string>();
+  const accounts: GitHubIdentityAccount[] = [];
   for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
     if (seen.has(a.login)) continue;
     seen.add(a.login);
@@ -309,7 +411,9 @@ export async function getGitHubIdentity() {
 // time, we also record the preference (so ghChildEnv strips the token when the
 // chosen account is not the token account) and reset the identity cache.
 // Resolves { ok, error } and never rejects.
-export function switchGhAccount(login) {
+export function switchGhAccount(
+  login: string
+): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     if (!login) {
       resolve({ ok: false, error: "A GitHub account login is required." });
@@ -345,7 +449,7 @@ export function switchGhAccount(login) {
 // (keyring) credential, and `--user` pins the account so we never fall through
 // to whichever account happens to be active. Returns "" when gh can't produce a
 // token for that login (e.g. no keyring entry).
-function ghKeyringTokenForUser(login) {
+function ghKeyringTokenForUser(login: string): Promise<string> {
   const env = { ...process.env };
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
@@ -379,7 +483,10 @@ function ghKeyringTokenForUser(login) {
 //      error the caller surfaces with refresh guidance.
 // Throws when no credential can be resolved. `username` is always the acting
 // login so the Basic-auth pair matches the token.
-export async function getGhPackageCredentials() {
+export async function getGhPackageCredentials(): Promise<{
+  token: string;
+  username: string;
+}> {
   const id = await getGitHubIdentity();
   const login = id.actingLogin;
   if (!login) {
@@ -405,7 +512,7 @@ export async function getGhPackageCredentials() {
 
 // Returns true when cmd refers to the gh CLI regardless of whether the caller
 // passes "gh", "gh.exe", or an absolute path to the executable.
-function isGhCmd(cmd) {
+function isGhCmd(cmd: string): boolean {
   return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
 }
 
@@ -417,7 +524,7 @@ function isGhCmd(cmd) {
 // (discover, app registration, role assignment). The canvas runs az as the signed-in human user
 // for infra setup, so agentic tagging is both unwanted and fatal here — strip it so az uses normal
 // cache-first user auth. Applies to every child CLI (az/aws/kubectl/gh); none of them need it.
-function withoutAgentSession(baseEnv) {
+function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...(baseEnv || process.env) };
   delete env.COPILOT_AGENT_SESSION_ID;
   return env;
@@ -428,7 +535,12 @@ function withoutAgentSession(baseEnv) {
 // API path (for example, '&' in a query string) be interpreted as shell syntax.
 // Other Windows CLIs may only provide `.cmd` shims, so retain the existing
 // cmd.exe wrapper for those commands.
-export function cliExec(cmd, args, opts, cb) {
+export function cliExec(
+  cmd: string,
+  args: string[],
+  opts: CliOptions,
+  cb: CliCallback
+): ChildProcess {
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);
   const file =
@@ -436,7 +548,12 @@ export function cliExec(cmd, args, opts, cb) {
     : isWindows ? "cmd.exe"
     : cmd;
   const finalArgs = isWindows && !isWindowsGh ? ["/c", cmd, ...args] : args;
-  const execOpts = { maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...opts };
+  const execOpts: ExecFileOptionsWithStringEncoding = {
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
+    ...opts,
+    encoding: "utf8"
+  };
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
   return execFile(file, finalArgs, execOpts, cb);
@@ -444,7 +561,11 @@ export function cliExec(cmd, args, opts, cb) {
 
 // Runs a CLI and resolves with trimmed stdout. Pass `opts.stdin` to feed a value
 // (e.g. a secret) over stdin instead of exposing it on the argv/process list.
-export function runCommand(cmd, args, opts = {}) {
+export function runCommand(
+  cmd: string,
+  args: string[],
+  opts: CommandOptions = {}
+): Promise<string> {
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
@@ -461,7 +582,10 @@ export function runCommand(cmd, args, opts = {}) {
 // Deleting GH_HOST pins these calls to github.com. That is intentional: the GHCR
 // and GitHub Packages API paths in this feature are hardcoded to ghcr.io/github.com,
 // so package bootstrap is github.com-only and does not support GHES today.
-export function runGhKeyringCommand(args, opts = {}) {
+export function runGhKeyringCommand(
+  args: string[],
+  opts: CommandOptions = {}
+): Promise<string> {
   const env = { ...(opts.env || process.env) };
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
@@ -488,7 +612,10 @@ export const AWS_REGIONS = [
   "ca-central-1"
 ];
 
-export function ghApiGetContent(apiPath, timeout = 15000) {
+export function ghApiGetContent(
+  apiPath: string,
+  timeout = 15000
+): Promise<string | null> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -516,7 +643,10 @@ export function ghApiGetContent(apiPath, timeout = 15000) {
 // be needed. Used to stage binary extension artifacts (e.g. custom-types.tgz)
 // from a committed branch, which ghApiGetContent would corrupt by decoding as
 // UTF-8.
-export function ghApiGetContentBytes(apiPath, timeout = 20000) {
+export function ghApiGetContentBytes(
+  apiPath: string,
+  timeout = 20000
+): Promise<Buffer | ContentBytesTooLarge | null> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -544,7 +674,10 @@ export function ghApiGetContentBytes(apiPath, timeout = 20000) {
   });
 }
 
-export function ghApiListNames(apiPath, timeout = 15000) {
+export function ghApiListNames(
+  apiPath: string,
+  timeout = 15000
+): Promise<string[]> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -565,7 +698,11 @@ export function ghApiListNames(apiPath, timeout = 15000) {
   });
 }
 
-export function fetchFileFromRepo(repo, path, branch = "main") {
+export function fetchFileFromRepo(
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<string | null> {
   return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
 }
 
@@ -576,7 +713,10 @@ export function fetchFileFromRepo(repo, path, branch = "main") {
  * is null and `error` is a human-readable cause (gh stderr, a decode error, or
  * an empty-response note). Never rejects.
  */
-export function ghApiGetContentResult(apiPath, timeout = 15000) {
+export function ghApiGetContentResult(
+  apiPath: string,
+  timeout = 15000
+): Promise<ContentResult> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -601,7 +741,7 @@ export function ghApiGetContentResult(apiPath, timeout = 15000) {
         } catch (e) {
           resolve({
             content: null,
-            error: `failed to decode response: ${e?.message ?? e}`
+            error: `failed to decode response: ${errorMessage(e)}`
           });
         }
       }
@@ -610,11 +750,18 @@ export function ghApiGetContentResult(apiPath, timeout = 15000) {
 }
 
 /** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
-export function fetchFileFromRepoResult(repo, path, branch = "main") {
+export function fetchFileFromRepoResult(
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<ContentResult> {
   return ghApiGetContentResult(`/repos/${repo}/contents/${path}?ref=${branch}`);
 }
 
-export function fetchRepoTree(repo, branch = "main") {
+export function fetchRepoTree(
+  repo: string,
+  branch = "main"
+): Promise<string[]> {
   return new Promise((resolve) => {
     const args = [
       "api",
@@ -628,7 +775,12 @@ export function fetchRepoTree(repo, branch = "main") {
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        const value: unknown = JSON.parse(stdout);
+        resolve(
+          Array.isArray(value) ?
+            value.filter((item): item is string => typeof item === "string")
+          : []
+        );
       } catch (e) {
         resolve([]);
       }
@@ -637,14 +789,19 @@ export function fetchRepoTree(repo, branch = "main") {
 }
 
 export const github = {
-  getContent: (apiPath) => ghApiGetContent(apiPath),
-  getContentBytes: (apiPath) => ghApiGetContentBytes(apiPath),
-  listNames: (apiPath) => ghApiListNames(apiPath),
-  treePaths: (repo, branch = "main") => fetchRepoTree(repo, branch)
+  getContent: (apiPath: string) => ghApiGetContent(apiPath),
+  getContentBytes: (apiPath: string) => ghApiGetContentBytes(apiPath),
+  listNames: (apiPath: string) => ghApiListNames(apiPath),
+  treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch)
 };
 
 // Look up a file's blob SHA on a branch; resolves '' when the file is absent.
-function getRepoFileSha(repo, path, branch, timeout = 10000) {
+function getRepoFileSha(
+  repo: string,
+  path: string,
+  branch: string,
+  timeout = 10000
+): Promise<string> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -662,13 +819,13 @@ function getRepoFileSha(repo, path, branch, timeout = 10000) {
 // than a rejected create. The commit body is fed over stdin (never argv) so the
 // base64 payload can't collide with shell/CLI parsing. Rejects on failure.
 export async function commitFileToRepo(
-  repo,
-  path,
-  content,
-  branch,
-  message,
+  repo: string,
+  path: string,
+  content: string,
+  branch: string,
+  message: string,
   timeout = 30000
-) {
+): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
   const body = JSON.stringify({
     message,
@@ -688,7 +845,7 @@ export async function commitFileToRepo(
         "-"
       ],
       { timeout },
-      (err, stdout, stderr) => {
+      (err, _stdout, stderr) => {
         if (err) reject(new Error((stderr && stderr.trim()) || err.message));
         else resolve(true);
       }
@@ -702,7 +859,10 @@ export async function commitFileToRepo(
 }
 
 // Resolve a repo's default branch name (e.g. "main"). Resolves '' on failure.
-export function getDefaultBranch(repo, timeout = 15000) {
+export function getDefaultBranch(
+  repo: string,
+  timeout = 15000
+): Promise<string> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -716,7 +876,11 @@ export function getDefaultBranch(repo, timeout = 15000) {
 }
 
 // Get the head commit SHA of a branch. Resolves '' when the branch is absent.
-export function getBranchHeadSha(repo, branch, timeout = 15000) {
+export function getBranchHeadSha(
+  repo: string,
+  branch: string,
+  timeout = 15000
+): Promise<string> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -736,14 +900,19 @@ export function getBranchHeadSha(repo, branch, timeout = 15000) {
 
 // Create a new branch ref (refs/heads/<newBranch>) pointing at fromSha.
 // Resolves { ok, stderr }; never rejects.
-export function createBranchRef(repo, newBranch, fromSha, timeout = 20000) {
+export function createBranchRef(
+  repo: string,
+  newBranch: string,
+  fromSha: string,
+  timeout = 20000
+): Promise<BranchRefResult> {
   const body = JSON.stringify({ ref: `refs/heads/${newBranch}`, sha: fromSha });
   return new Promise((resolve) => {
     const child = cliExec(
       "gh",
       ["api", "--method", "POST", `/repos/${repo}/git/refs`, "--input", "-"],
       { timeout },
-      (err, stdout, stderr) => {
+      (err, _stdout, stderr) => {
         resolve({
           ok: !err,
           stderr: ((stderr && stderr.trim()) || err?.message || "").trim()
@@ -762,13 +931,13 @@ export function createBranchRef(repo, newBranch, fromSha, timeout = 20000) {
 // { ok, url, number, stderr }; never rejects. The body is fed over stdin so
 // arbitrary title/body text can't collide with CLI parsing.
 export function createPullRequestApi(
-  repo,
-  head,
-  base,
-  title,
-  prBody,
+  repo: string,
+  head: string,
+  base: string,
+  title: string,
+  prBody: string,
   timeout = 20000
-) {
+): Promise<PullRequestResult> {
   const body = JSON.stringify({ title, head, base, body: prBody || "" });
   return new Promise((resolve) => {
     const child = cliExec(
@@ -789,7 +958,7 @@ export function createPullRequestApi(
         } catch (e) {
           resolve({
             ok: false,
-            stderr: `Could not parse PR response: ${e?.message ?? e}`
+            stderr: `Could not parse PR response: ${errorMessage(e)}`
           });
         }
       }
@@ -808,7 +977,13 @@ export function createPullRequestApi(
 // we parse that status out. Optional `headers` are passed as `-H k: v` (used to
 // pin X-GitHub-Api-Version). Resolves `{ ok, status, json, stderr }`; never
 // rejects. stdin is closed so gh can never block on an interactive prompt.
-export function ghApiJson(apiPath, { headers = {}, timeout = 15000 } = {}) {
+export function ghApiJson(
+  apiPath: string,
+  {
+    headers = {},
+    timeout = 15000
+  }: { headers?: Record<string, string>; timeout?: number } = {}
+): Promise<GhApiResult> {
   const args = ["api", apiPath];
   for (const [k, v] of Object.entries(headers)) args.push("-H", `${k}: ${v}`);
   return new Promise((resolve) => {
@@ -826,7 +1001,7 @@ export function ghApiJson(apiPath, { headers = {}, timeout = 15000 } = {}) {
             ok: false,
             status: 200,
             json: null,
-            stderr: `failed to parse response: ${e?.message ?? e}`
+            stderr: `failed to parse response: ${errorMessage(e)}`
           });
         }
         return;

@@ -9,7 +9,7 @@ import {
   DEPLOY_ERROR_CHAR_CAP,
   graphTriggerTargets,
   evaluateAppBicepHook
-} from "./hooks.mjs";
+} from "./hooks.js";
 
 describe("GRAPH_PAGES", () => {
   it("covers the graph-generating canvas pages", () => {

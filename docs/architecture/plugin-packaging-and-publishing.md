@@ -7,7 +7,7 @@ graph TD
     subgraph Workspace["pnpm workspace (source, tracked)"]
         Core["radius-core<br/>@radius-project/core (src/*.ts)"]
         Shared["adapters/shared<br/>@radius-project/shared"]
-        Canvas["adapters/canvas<br/>@radius-project/canvas (src/*.mjs)"]
+        Canvas["adapters/canvas<br/>@radius-project/canvas (src/*.ts)"]
         Build["adapters/canvas/build.mjs<br/>(esbuild)"]
     end
 
@@ -28,7 +28,7 @@ graph TD
 
 - **`radius-core` (`@radius-project/core`)** — UI-agnostic product logic behind ports. `private`, `main: src/index.ts` (consumed as TypeScript source, not a published package).
 - **`adapters/shared` (`@radius-project/shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
-- **`adapters/canvas` (`@radius-project/canvas`)** — the canvas adapter whose entry `src/extension.mjs` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
+- **`adapters/canvas` (`@radius-project/canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
 - **`adapters/canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file.
 - **`plugins/radius/`** — the plugin that Copilot installs. Contains the tracked `plugin.json`, `package.json`, `README.md`, and `skills/`, plus the generated `extension.mjs`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at the plugin.
@@ -56,7 +56,7 @@ Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and
 
 `pnpm run build` runs `node adapters/canvas/build.mjs`, which invokes esbuild with:
 
-- **entry** `adapters/canvas/src/extension.mjs`,
+- **entry** `adapters/canvas/src/extension.ts`,
 - **outfile** `plugins/radius/extension.mjs`,
 - **format** `esm`, and
 - **external** `@github/copilot-sdk` (and `/extension`) — the loader resolves the SDK at runtime, so it is never bundled.

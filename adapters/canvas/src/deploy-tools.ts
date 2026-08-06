@@ -1,5 +1,5 @@
 // Pure helpers behind the radius_deploy / radius_deploy_status tools, kept out of
-// extension.mjs so they can be tested without the SDK or a live canvas server.
+// extension.ts so they can be tested without the SDK or a live canvas server.
 
 import {
   fenceDeployDiagnostic,

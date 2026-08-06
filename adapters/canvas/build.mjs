@@ -31,7 +31,7 @@ const isWatch = process.argv.includes("--watch");
 // rebuild would tear down ALL sessions (they'd appear to "constantly stop"). New
 // code is instead picked up when a session next starts a fresh process. A
 // developer who explicitly wants hot-reload for a given process can set
-// RADIUS_CANVAS_DEV=1 (see src/extension.mjs); it is intentionally not enabled by
+// RADIUS_CANVAS_DEV=1 (see src/extension.ts); it is intentionally not enabled by
 // an on-disk sentinel, which would persist and re-enable the destructive behavior
 // for everyone.
 const isInstall = process.argv.includes("--install");
@@ -84,7 +84,7 @@ const installPlugin = {
 
 /** @type {import('esbuild').BuildOptions} */
 const options = {
-  entryPoints: [join(__dirname, "src", "extension.mjs")],
+  entryPoints: [join(__dirname, "src", "extension.ts")],
   outfile,
   bundle: true,
   format: "esm",
@@ -94,7 +94,7 @@ const options = {
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
   // Inline the radius-app-bicep skill Markdown (SKILL.md + references) as text
   // so the extension ships the authoritative skill content even when installed
-  // without the sibling plugins/radius/skills/ tree. See src/skill.mjs.
+  // without the sibling plugins/radius/skills/ tree. See src/skill.ts.
   loader: { ".md": "text" },
   legalComments: "none",
   logLevel: "info",

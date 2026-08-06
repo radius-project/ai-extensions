@@ -18,17 +18,20 @@ export interface CanvasReloadSession {
         extensionId: string;
         canvasId: string;
         instanceId: string;
-        input?: unknown;
+        input?: Record<string, unknown>;
       }): Promise<unknown>;
     };
   };
-  log?: (message: string, options: { level: "warning" }) => void;
+  log?: (
+    message: string,
+    options?: { level?: "info" | "warning" | "error"; ephemeral?: boolean }
+  ) => Promise<void> | void;
 }
 
 export async function reloadCanvasInstance(
   session: CanvasReloadSession,
   context: CanvasInstanceContext,
-  input?: unknown
+  input?: Record<string, unknown>
 ): Promise<unknown> {
   try {
     return await session.rpc.canvas.open({

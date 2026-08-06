@@ -1,13 +1,13 @@
 // Canvas adapter — Azure OIDC auto-setup orchestration helpers.
 //
-// The `/api/azure-auto-setup` route in server.mjs runs `az`/`gh` as child
+// The `/api/azure-auto-setup` route in server.ts runs `az`/`gh` as child
 // processes to bootstrap a federated-identity App Registration so a user's repo
 // can deploy to Azure. The pure decisions in that flow — which
 // federated-credential `subject`(s) to create, how to build the `az ad app
 // create` argv, how to classify an `az` Service Management Reference policy
 // failure, and how to validate inputs — live here so they can be unit-tested
 // without spawning processes. Actual I/O (spawning `az`/`gh`) stays in
-// server.mjs; the network reads are injected as a `runner` so this module
+// server.ts; the network reads are injected as a `runner` so this module
 // remains testable.
 
 import {

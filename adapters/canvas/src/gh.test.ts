@@ -9,6 +9,21 @@ vi.mock("node:child_process", () => childProcess);
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
+interface LoadGhOptions {
+  withToken?: string;
+  keyring?: string;
+  token?: string | null;
+  userTokens?: Record<string, string>;
+  switchError?: string | null;
+  prime?: boolean;
+}
+
+function restorePlatform(): void {
+  if (platformDescriptor) {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+}
+
 // Realistic `gh auth status` fixtures. gh reports the env-token account with a
 // `GITHUB_TOKEN`/`GH_TOKEN` source and a keyring account with a `keyring` source.
 const STATUS = {
@@ -41,14 +56,14 @@ const STATUS = {
     - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`
 };
 
-function setPlatform(platform) {
+function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: platform
   });
 }
 
-// Load gh.mjs with a controlled environment. `withToken`/`keyring` are the
+// Load gh.ts with a controlled environment. `withToken`/`keyring` are the
 // `gh auth status` texts returned for the injected-token vs token-stripped
 // probes; `token` sets the ambient injected GH_TOKEN the strategy evaluates.
 // `userTokens` maps a login to the token `gh auth token --user <login>` yields.
@@ -56,7 +71,7 @@ function setPlatform(platform) {
 // `prime: true` awaits the async identity probe (so the token-stripping strategy
 // is resolved) and clears the recorded probe calls, leaving the next spawn as
 // mock.calls[0] — mirroring gh commands that run after identity resolution.
-async function loadGh(platform, opts = {}) {
+async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   const {
     withToken = "",
     keyring = "",
@@ -77,7 +92,7 @@ async function loadGh(platform, opts = {}) {
   // synchronous execFileSync), so one router serves them all.
   childProcess.execFile.mockImplementation((_file, args, options, cb) => {
     const a = args || [];
-    const done = (err, out) => {
+    const done = (err: Error | null, out: string) => {
       cb(err, out || "", err ? String((err && err.message) || err) : "");
       return { stdin: { end() {} } };
     };
@@ -101,7 +116,7 @@ async function loadGh(platform, opts = {}) {
     return done(null, "");
   });
   vi.resetModules();
-  const gh = await import("./gh.mjs");
+  const gh = await import("./gh.js");
   if (prime) {
     await gh.primeGhIdentity();
     childProcess.execFile.mockClear();
@@ -116,7 +131,7 @@ describe.sequential("cliExec", () => {
   });
 
   afterEach(() => {
-    Object.defineProperty(process, "platform", platformDescriptor);
+    restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
   });
@@ -392,14 +407,14 @@ describe.sequential("ghApiJson", () => {
   });
 
   afterEach(() => {
-    Object.defineProperty(process, "platform", platformDescriptor);
+    restorePlatform();
   });
 
   const stubChild = () => ({ stdin: { end() {} } });
 
   it("parses a successful JSON body as ok/200", async () => {
     const { ghApiJson } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
       cb(null, '{"full_name":"o/r"}', "");
       return stubChild();
     });
@@ -414,7 +429,7 @@ describe.sequential("ghApiJson", () => {
 
   it("extracts an HTTP status from gh stderr on failure", async () => {
     const { ghApiJson } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
       cb(new Error("gh: exit 1"), "", "gh: Not Found (HTTP 404)");
       return stubChild();
     });
@@ -426,7 +441,7 @@ describe.sequential("ghApiJson", () => {
 
   it("returns a null status when no HTTP code is present (transport error)", async () => {
     const { ghApiJson } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
       cb(new Error("ECONNRESET"), "", "ECONNRESET");
       return stubChild();
     });
@@ -437,7 +452,7 @@ describe.sequential("ghApiJson", () => {
 
   it("reports a JSON parse failure as not-ok with status 200", async () => {
     const { ghApiJson } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
       cb(null, "not json", "");
       return stubChild();
     });
@@ -449,7 +464,7 @@ describe.sequential("ghApiJson", () => {
 
   it("passes custom headers through as -H args", async () => {
     const { ghApiJson } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((file, args, opts, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
       cb(null, "null", "");
       return stubChild();
     });
@@ -468,7 +483,7 @@ describe.sequential("ghApiJson", () => {
 
 describe("parseGhAuthStatus", () => {
   it("parses login, source, active flag, and scopes for multiple accounts", async () => {
-    const { parseGhAuthStatus } = await import("./gh.mjs");
+    const { parseGhAuthStatus } = await import("./gh.js");
     const text = `github.com
   ✓ Logged in to github.com account tokuser (GITHUB_TOKEN)
     - Active account: true
@@ -488,7 +503,7 @@ describe("parseGhAuthStatus", () => {
   });
 
   it("returns an empty array for empty or unrecognized text", async () => {
-    const { parseGhAuthStatus } = await import("./gh.mjs");
+    const { parseGhAuthStatus } = await import("./gh.js");
     expect(parseGhAuthStatus("")).toEqual([]);
     expect(parseGhAuthStatus("not logged in")).toEqual([]);
     expect(parseGhAuthStatus(null)).toEqual([]);
@@ -496,9 +511,9 @@ describe("parseGhAuthStatus", () => {
 });
 
 describe("decideGhTokenStrategy", () => {
-  let decide;
+  let decide: typeof import("./gh.js").decideGhTokenStrategy;
   beforeEach(async () => {
-    ({ decideGhTokenStrategy: decide } = await import("./gh.mjs"));
+    ({ decideGhTokenStrategy: decide } = await import("./gh.js"));
   });
 
   it("keeps the token when it already has workflow", () => {
@@ -577,7 +592,7 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
   });
 
   afterEach(() => {
-    Object.defineProperty(process, "platform", platformDescriptor);
+    restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
   });
@@ -624,6 +639,8 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(id.actingLogin).toBe("pubuser");
     expect(id.actingHasPackages).toBe(true);
     const pub = id.accounts.find((a) => a.login === "pubuser");
+    expect(pub).toBeDefined();
+    if (!pub) throw new Error("pubuser account missing");
     expect(pub.hasPackages).toBe(true);
   });
 
@@ -706,7 +723,7 @@ describe.sequential("getGhPackageCredentials", () => {
   });
 
   afterEach(() => {
-    Object.defineProperty(process, "platform", platformDescriptor);
+    restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
   });

@@ -10,14 +10,56 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { workspaceRadArtifactsDir } from "./workspace.js";
+import type { CanvasState } from "./shared.js";
 
-function isOciExtensionRef(ref) {
+interface GitHubArtifactReader {
+  getContent(apiPath: string): Promise<string | null>;
+  getContentBytes(apiPath: string): Promise<Buffer | { tooLarge: true } | null>;
+}
+
+interface StageOptions {
+  log?: (message: string) => void;
+}
+
+interface LocalArtifactSelection {
+  isLocal: true;
+  state: CanvasState;
+  bicepRepoPath: string;
+}
+
+interface RemoteArtifactSelection {
+  isLocal: false;
+  state?: CanvasState;
+  github: GitHubArtifactReader;
+  repo: string;
+  branch: string;
+  bicepRepoPath: string;
+  log?: (message: string) => void;
+}
+
+type ArtifactSelection = LocalArtifactSelection | RemoteArtifactSelection;
+
+interface ComputedArtifactSelection {
+  isLocal: boolean;
+  state?: CanvasState;
+  github: GitHubArtifactReader;
+  repo: string;
+  branch: string;
+  bicepRepoPath: string;
+  log?: (message: string) => void;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isOciExtensionRef(ref: string): boolean {
   return /^(br|oci):/i.test(ref);
 }
 
 // A local extension artifact reference from a bicepconfig alias must be a
 // repo-relative path with no traversal or absolute segment.
-function safeLocalRef(ref) {
+function safeLocalRef(ref: unknown): string {
   if (typeof ref !== "string") return "";
   const rel = ref.replace(/^\.\//, "");
   if (
@@ -29,7 +71,7 @@ function safeLocalRef(ref) {
   return rel;
 }
 
-export function radArtifactsFingerprint(dir) {
+export function radArtifactsFingerprint(dir?: string): string {
   const hash = createHash("sha256");
   hash.update("radius-base-config");
   if (!dir) return hash.digest("hex");
@@ -95,13 +137,13 @@ export function radArtifactsFingerprint(dir) {
  * via `cleanupRadArtifactsDir`, must remove it), else null.
  */
 export async function stageRemoteRadArtifacts(
-  github,
-  repo,
-  branch,
-  bicepRepoPath,
-  { log = () => {} } = {}
-) {
-  if (!github?.getContentBytes || !repo || !branch) return null;
+  github: GitHubArtifactReader,
+  repo: string,
+  branch: string,
+  bicepRepoPath: string,
+  { log = () => {} }: StageOptions = {}
+): Promise<string | null> {
+  if (!repo || !branch) return null;
   const normalized = String(bicepRepoPath || ".radius/app.bicep").replace(
     /\\/g,
     "/"
@@ -118,7 +160,7 @@ export async function stageRemoteRadArtifacts(
     );
   } catch (err) {
     log(
-      `Warning: could not fetch ${configRepoPath} on ${branch}: ${String(err?.message ?? err)}`
+      `Warning: could not fetch ${configRepoPath} on ${branch}: ${errorMessage(err)}`
     );
     return null;
   }
@@ -129,7 +171,7 @@ export async function stageRemoteRadArtifacts(
     config = JSON.parse(configText);
   } catch (err) {
     log(
-      `Warning: ${configRepoPath} on ${branch} is not valid JSON; ignoring: ${String(err?.message ?? err)}`
+      `Warning: ${configRepoPath} on ${branch} is not valid JSON; ignoring: ${errorMessage(err)}`
     );
     return null;
   }
@@ -156,11 +198,11 @@ export async function stageRemoteRadArtifacts(
         );
       } catch (err) {
         log(
-          `Warning: could not fetch extension artifact ${artifactRepoPath} on ${branch}: ${String(err?.message ?? err)}`
+          `Warning: could not fetch extension artifact ${artifactRepoPath} on ${branch}: ${errorMessage(err)}`
         );
         continue;
       }
-      if (bytes && bytes.tooLarge) {
+      if (bytes && !Buffer.isBuffer(bytes) && bytes.tooLarge) {
         log(
           `Warning: extension artifact ${artifactRepoPath} on ${branch} exceeds the GitHub contents API inline limit; the ${alias} extension will not resolve for this branch.`
         );
@@ -174,7 +216,7 @@ export async function stageRemoteRadArtifacts(
       }
       const dest = path.join(dir, rel);
       mkdirSync(path.dirname(dest), { recursive: true });
-      writeFileSync(dest, bytes);
+      if (Buffer.isBuffer(bytes)) writeFileSync(dest, bytes);
     }
     return dir;
   } catch (err) {
@@ -184,7 +226,7 @@ export async function stageRemoteRadArtifacts(
       /* best-effort */
     }
     log(
-      `Warning: could not stage remote .radius artifacts for ${repo}@${branch}: ${String(err?.message ?? err)}`
+      `Warning: could not stage remote .radius artifacts for ${repo}@${branch}: ${errorMessage(err)}`
     );
     return null;
   }
@@ -198,27 +240,33 @@ export async function stageRemoteRadArtifacts(
  * removed after the compile. Returns { dir, remote }, where `remote` is true
  * when `dir` is a staged temp dir to clean up (pass as `cleanupRadArtifactsDir`).
  */
-export async function radArtifactsDirForSelection({
-  isLocal,
-  state,
-  github,
-  repo,
-  branch,
-  bicepRepoPath,
-  log
-}) {
-  if (isLocal) {
+export function radArtifactsDirForSelection(
+  selection: LocalArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
+export function radArtifactsDirForSelection(
+  selection: RemoteArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
+export function radArtifactsDirForSelection(
+  selection: ComputedArtifactSelection
+): Promise<{ dir: string; remote: boolean }>;
+export async function radArtifactsDirForSelection(
+  selection: ArtifactSelection | ComputedArtifactSelection
+): Promise<{ dir: string; remote: boolean }> {
+  if (selection.isLocal) {
+    if (!selection.state) {
+      throw new Error("Local artifact selection requires canvas state.");
+    }
     return {
-      dir: workspaceRadArtifactsDir(state, bicepRepoPath),
+      dir: workspaceRadArtifactsDir(selection.state, selection.bicepRepoPath),
       remote: false
     };
   }
   const dir = await stageRemoteRadArtifacts(
-    github,
-    repo,
-    branch,
-    bicepRepoPath,
-    { log }
+    selection.github,
+    selection.repo,
+    selection.branch,
+    selection.bicepRepoPath,
+    { log: selection.log }
   );
   return { dir: dir || "", remote: !!dir };
 }

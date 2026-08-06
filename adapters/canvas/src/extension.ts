@@ -6,6 +6,7 @@
 // no product logic — only the SDK surface and process-lifecycle hardening.
 
 import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
 import { dirname } from "node:path";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
@@ -20,7 +21,7 @@ import {
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/shared";
-import { github } from "./gh.mjs";
+import { github } from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
@@ -30,7 +31,7 @@ import {
   toSafeRepoRelPath,
   workspaceFileExists
 } from "./workspace.js";
-import { radArtifactsDirForSelection } from "./remote-rad-artifacts.mjs";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
   selectDeployEntry,
   buildDeployPayload,
@@ -38,7 +39,7 @@ import {
   validateDeployAttempt,
   summarizeDeployStatus
 } from "./deploy-tools.js";
-import { generateAzureOIDC, generateAWSOIDC } from "./infra.mjs";
+import { generateAzureOIDC, generateAWSOIDC } from "./infra.js";
 import {
   servers,
   getOrCreateServer,
@@ -48,7 +49,9 @@ import {
   setDeployRepairHandoff,
   setSessionPromptHandler,
   setOpenSourceHandler
-} from "./server.mjs";
+} from "./server.js";
+import type { CanvasServerEntry } from "./server.js";
+import type { CanvasGraphResource, CanvasState } from "./shared.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -61,18 +64,55 @@ import {
   DEFAULT_CANVAS_PAGE,
   appBicepHandoffPrompt,
   deployRepairHandoffPrompt
-} from "./hooks.mjs";
-import { radiusAppBicepSkill } from "./skill.mjs";
+} from "./hooks.js";
+import { radiusAppBicepSkill } from "./skill.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
-import { withGhcrDockerConfig } from "./ghcr.mjs";
+import { withGhcrDockerConfig } from "./ghcr.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 
-async function workspaceState() {
+const execFileAsync = promisify(execFile);
+
+interface CanvasContext {
+  extensionId: string;
+  canvasId: string;
+  instanceId: string;
+  input?: Record<string, unknown>;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value));
+}
+
+function optionalString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function graphResources(value: unknown): CanvasGraphResource[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((resource) => {
+    const fields = record(resource);
+    return {
+      ...fields,
+      id: optionalString(fields.id),
+      name: optionalString(fields.name),
+      type: optionalString(fields.type)
+    };
+  });
+}
+
+async function workspaceState(): Promise<CanvasState> {
   const workspace = await detectWorkspaceContext(session);
   return {
     workspacePath: workspace.workspacePath,
@@ -83,7 +123,11 @@ async function workspaceState() {
   };
 }
 
-async function fetchBicepForBranch(repo, branch, state) {
+async function fetchBicepForBranch(
+  repo: string,
+  branch: string,
+  state: CanvasState
+): Promise<string | null> {
   if (isWorkspaceSelection(state, repo, branch)) {
     const local = await fetchWorkspaceBicep(state, repo, branch);
     if (local) return local;
@@ -97,16 +141,24 @@ async function fetchBicepForBranch(repo, branch, state) {
 // instead of surfacing a dead-end in the canvas. Fire-and-forget
 // (session.send resolves only when the agent finishes, and we are mid-open), and
 // guard so we send at most once per repo+branch combination.
-async function maybeHandoffAppBicep(entry, page, ctx) {
+async function maybeHandoffAppBicep(
+  entry: CanvasServerEntry,
+  page: string,
+  ctx: CanvasContext
+): Promise<void> {
   try {
     if (!GRAPH_PAGES.has(page)) return;
     const state = entry.state;
-    const repo = state.contextRepo || ctx.input?.repo || "";
+    const input = record(ctx.input);
+    const repo = state.contextRepo || optionalString(input.repo);
     if (!repo) return;
 
     let branches;
     if (page === "graph-diff") {
-      branches = [ctx.input?.baseBranch, ctx.input?.headBranch].filter(Boolean);
+      branches = [
+        optionalString(input.baseBranch),
+        optionalString(input.headBranch)
+      ].filter(Boolean);
       // Match the onPreToolUse hook's graphTriggerTargets: when no branches
       // are supplied, use [undefined] so both paths resolve to the default
       // branch below and compute the same dedupe key.
@@ -115,7 +167,7 @@ async function maybeHandoffAppBicep(entry, page, ctx) {
       // Honor an explicit branch from open_canvas input; fall back to the
       // resolved context branch (the session worktree branch for the
       // workspace repo) so we never default the session repo to main.
-      branches = [ctx.input?.branch || state.contextBranch];
+      branches = [optionalString(input.branch) || state.contextBranch];
     }
     branches = branches.map((b) => b || defaultBranchForState(state));
 
@@ -284,11 +336,12 @@ const session = await joinSession({
           },
           handler: async (ctx) => {
             const entry = await getOrCreateServer(ctx.instanceId, "graph");
+            const input = record(ctx.input);
             // Populate the active worktree context (repo/branch/path) so the
             // graph page defaults to the session branch and reads the worktree
             // app.bicep — matching the open() handler.
             Object.assign(entry.state, await workspaceState());
-            if (ctx.input?.resources) {
+            if (Array.isArray(input.resources)) {
               const context = {
                 repo:
                   entry.state.contextRepo || entry.state.workspaceRepo || "",
@@ -299,7 +352,7 @@ const session = await joinSession({
               // and their ghcr-registry-creds secret) so they are never
               // rendered — matching the buildGraphViaRad data path.
               const resources = filterGraphVisualizationResources(
-                ctx.input.resources
+                graphResources(input.resources)
               );
               setSourceRefResources(entry, "graph", resources, context);
               setSourceRefResources(entry, "planned", resources, context);
@@ -356,15 +409,19 @@ const session = await joinSession({
           },
           handler: async (ctx) => {
             const entry = await getOrCreateServer(ctx.instanceId, "graph-diff");
+            const input = record(ctx.input);
             // Compute diff from base/head if provided
-            if (ctx.input?.baseResources && ctx.input?.headResources) {
+            if (
+              Array.isArray(input.baseResources) &&
+              Array.isArray(input.headResources)
+            ) {
               // Filter both sides before diffing so containerImages and
               // their ghcr-registry-creds secret never appear in the diff.
               const baseResources = filterGraphVisualizationResources(
-                ctx.input.baseResources
+                graphResources(input.baseResources)
               );
               const headResources = filterGraphVisualizationResources(
-                ctx.input.headResources
+                graphResources(input.headResources)
               );
               // Compute diff using the shared algorithm (see computeGraphDiff).
               const diffResources = computeGraphDiff(
@@ -372,13 +429,13 @@ const session = await joinSession({
                 headResources
               );
               setSourceRefResources(entry, "diff", diffResources, {
-                repo: ctx.input.repo,
-                baseBranch: ctx.input.baseBranch,
-                headBranch: ctx.input.headBranch
+                repo: optionalString(input.repo),
+                baseBranch: optionalString(input.baseBranch),
+                headBranch: optionalString(input.headBranch)
               });
-              entry.state.diffTargetRepo = ctx.input.repo;
-              entry.state.diffBase = ctx.input.baseBranch;
-              entry.state.diffHead = ctx.input.headBranch;
+              entry.state.diffTargetRepo = optionalString(input.repo);
+              entry.state.diffBase = optionalString(input.baseBranch);
+              entry.state.diffHead = optionalString(input.headBranch);
             }
             entry.state.activeGraphView = "diff";
             entry.url = `${entry.baseUrl}/?page=graph-diff`;
@@ -442,10 +499,11 @@ const session = await joinSession({
               ctx.instanceId,
               "environment"
             );
-            const data = ctx.input;
+            const data = record(ctx.input);
             try {
+              const provider = optionalString(data.provider);
               const required =
-                data.provider === "azure" ?
+                provider === "azure" ?
                   [
                     "clientId",
                     "tenantId",
@@ -457,7 +515,7 @@ const session = await joinSession({
               const missing = required.filter((name) => !data[name]);
               if (missing.length > 0) {
                 throw new Error(
-                  `Missing required ${data.provider} environment inputs: ${missing.join(", ")}.`
+                  `Missing required ${provider} environment inputs: ${missing.join(", ")}.`
                 );
               }
               const response = await fetch(
@@ -467,17 +525,17 @@ const session = await joinSession({
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     ...data,
-                    environment: data.name
+                    environment: optionalString(data.name)
                   })
                 }
               );
-              const result = await response.json();
+              const result = record(await response.json());
               if (!response.ok && !result.error) {
                 result.error = `Environment setup failed with HTTP ${response.status}.`;
               }
               entry.state.envResult = result;
             } catch (e) {
-              entry.state.envResult = { error: e.message };
+              entry.state.envResult = { error: errorMessage(e) };
             }
             entry.url = `${entry.baseUrl}/?page=environment`;
             return entry.state.envResult;
@@ -505,7 +563,11 @@ const session = await joinSession({
           },
           handler: async (ctx) => {
             const entry = await getOrCreateServer(ctx.instanceId);
-            const result = getSourceRefResources(entry, ctx.input?.view);
+            const input = record(ctx.input);
+            const result = getSourceRefResources(
+              entry,
+              optionalString(input.view) || undefined
+            );
             if (!result.ready) {
               return {
                 ready: false,
@@ -514,7 +576,14 @@ const session = await joinSession({
                   "Graph has not been built yet. Open the graph page and wait for it to load, then try again."
               };
             }
-            const missingOnly = ctx.input?.missingOnly !== false;
+            const missingOnly = input.missingOnly !== false;
+            if (!result.context) {
+              return {
+                ready: false,
+                resources: [],
+                message: "Graph context is unavailable."
+              };
+            }
             const resources =
               missingOnly ?
                 result.resources.filter(
@@ -577,7 +646,8 @@ const session = await joinSession({
           },
           handler: async (ctx) => {
             const entry = await getOrCreateServer(ctx.instanceId);
-            const contextToken = ctx.input?.contextToken;
+            const input = record(ctx.input);
+            const contextToken = input.contextToken;
             if (!contextToken || typeof contextToken !== "string") {
               return {
                 error: "contextToken is required",
@@ -586,7 +656,7 @@ const session = await joinSession({
                 skipped: 0
               };
             }
-            const refs = ctx.input?.refs;
+            const refs = input.refs;
             if (!Array.isArray(refs) || refs.length === 0) {
               return {
                 error: "refs array is required",
@@ -595,7 +665,13 @@ const session = await joinSession({
                 skipped: 0
               };
             }
-            const result = updateSourceRefs(entry, contextToken, refs);
+            const parsedRefs = refs.flatMap((value) => {
+              const fields = record(value);
+              const id = optionalString(fields.id);
+              const codeReference = optionalString(fields.codeReference);
+              return id && codeReference ? [{ id, codeReference }] : [];
+            });
+            const result = updateSourceRefs(entry, contextToken, parsedRefs);
             if (result.error) return result;
             const page = result.view === "diff" ? "graph-diff" : result.view;
             entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
@@ -609,7 +685,8 @@ const session = await joinSession({
         }
       ],
       open: async (ctx) => {
-        const page = ctx.input?.page || DEFAULT_CANVAS_PAGE;
+        const input = record(ctx.input);
+        const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
         const entry = await getOrCreateServer(ctx.instanceId, page);
         entry.state.activeGraphView =
           page === "graph-diff" ? "diff"
@@ -619,30 +696,23 @@ const session = await joinSession({
         const workspace = await workspaceState();
         Object.assign(entry.state, workspace);
         // If a repo is passed in input, set it as context for all pages
-        if (ctx.input?.repo) {
-          entry.state.contextRepo = ctx.input.repo;
-          if (ctx.input.repo === workspace.workspaceRepo) {
+        const inputRepo = optionalString(input.repo);
+        if (inputRepo) {
+          entry.state.contextRepo = inputRepo;
+          if (inputRepo === workspace.workspaceRepo) {
             entry.state.contextBranch = workspace.workspaceBranch;
           } else {
-            entry.state.contextBranch = ctx.input?.branch || "main";
+            entry.state.contextBranch = optionalString(input.branch) || "main";
           }
         } else if (!entry.state.contextRepo && session.workspacePath) {
           // Try to detect repo from workspace git remote
           try {
-            const remoteUrl = await new Promise((resolve) => {
-              execFile(
-                "git",
-                ["-C", session.workspacePath, "remote", "get-url", "origin"],
-                { timeout: 5000 },
-                (err, stdout) => {
-                  if (err) {
-                    resolve("");
-                    return;
-                  }
-                  resolve(stdout.trim());
-                }
-              );
-            });
+            const { stdout } = await execFileAsync(
+              "git",
+              ["-C", session.workspacePath, "remote", "get-url", "origin"],
+              { timeout: 5000, encoding: "utf8" }
+            );
+            const remoteUrl = stdout.trim();
             const repo = parseRepoFromRemote(remoteUrl);
             if (repo) {
               entry.state.contextRepo = repo;
@@ -662,38 +732,36 @@ const session = await joinSession({
         // Auto-compare when baseBranch and headBranch are provided (PR diff mode)
         if (
           page === "graph-diff" &&
-          ctx.input?.baseBranch &&
-          ctx.input?.headBranch
+          optionalString(input.baseBranch) &&
+          optionalString(input.headBranch)
         ) {
-          const repo = entry.state.contextRepo || ctx.input?.repo || "";
+          const baseBranch = optionalString(input.baseBranch);
+          const headBranch = optionalString(input.headBranch);
+          const repo = entry.state.contextRepo || inputRepo;
           const sourceRefContext = prepareSourceRefResources(entry, "diff", {
             repo,
-            baseBranch: ctx.input.baseBranch,
-            headBranch: ctx.input.headBranch
+            baseBranch,
+            headBranch
           });
-          entry.state.diffBase = ctx.input.baseBranch;
-          entry.state.diffHead = ctx.input.headBranch;
+          entry.state.diffBase = baseBranch;
+          entry.state.diffHead = headBranch;
           entry.state.diffTargetRepo = repo;
           delete entry.state.diffError;
           try {
             // Fetch the committed/persisted app.bicep on each branch.
             // Generation is owned by the radius-app-bicep skill.
             let [baseContent, headContent] = await Promise.all([
-              fetchBicepForBranch(repo, ctx.input.baseBranch, entry.state),
-              fetchBicepForBranch(repo, ctx.input.headBranch, entry.state)
+              fetchBicepForBranch(repo, baseBranch, entry.state),
+              fetchBicepForBranch(repo, headBranch, entry.state)
             ]);
 
             const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
               await radArtifactsDirForSelection({
-                isLocal: isWorkspaceSelection(
-                  entry.state,
-                  repo,
-                  ctx.input.baseBranch
-                ),
+                isLocal: isWorkspaceSelection(entry.state, repo, baseBranch),
                 state: entry.state,
                 github,
                 repo,
-                branch: ctx.input.baseBranch,
+                branch: baseBranch,
                 bicepRepoPath: ".radius/app.bicep",
                 log: (m) => {
                   try {
@@ -703,15 +771,11 @@ const session = await joinSession({
               });
             const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
               await radArtifactsDirForSelection({
-                isLocal: isWorkspaceSelection(
-                  entry.state,
-                  repo,
-                  ctx.input.headBranch
-                ),
+                isLocal: isWorkspaceSelection(entry.state, repo, headBranch),
                 state: entry.state,
                 github,
                 repo,
-                branch: ctx.input.headBranch,
+                branch: headBranch,
                 bicepRepoPath: ".radius/app.bicep",
                 log: (m) => {
                   try {
@@ -756,8 +820,8 @@ const session = await joinSession({
               diffResources,
               {
                 repo,
-                baseBranch: ctx.input.baseBranch,
-                headBranch: ctx.input.headBranch
+                baseBranch,
+                headBranch
               },
               sourceRefContext.token
             );
@@ -774,12 +838,17 @@ const session = await joinSession({
                 sourceRefContext.token
               )
             ) {
-              entry.state.diffError = e.message;
+              entry.state.diffError = errorMessage(e);
             }
           }
         }
 
-        await maybeHandoffAppBicep(entry, page, ctx);
+        await maybeHandoffAppBicep(entry, page, {
+          extensionId: ctx.extensionId,
+          canvasId: ctx.canvasId,
+          instanceId: ctx.instanceId,
+          input
+        });
 
         return { title: "Radius", url: entry.url };
       },
@@ -787,7 +856,9 @@ const session = await joinSession({
         const entry = servers.get(ctx.instanceId);
         if (entry) {
           servers.delete(ctx.instanceId);
-          await new Promise((resolve) => entry.server.close(() => resolve()));
+          await new Promise<void>((resolve) =>
+            entry.server.close(() => resolve())
+          );
         }
       }
     })
@@ -807,7 +878,7 @@ const session = await joinSession({
           }
         }
       },
-      handler: async () => {
+      handler: async (_args) => {
         return "Open the radius canvas with page 'environment' to configure OIDC and deploy. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
       }
     },
@@ -1003,7 +1074,7 @@ const session = await joinSession({
           const diffResources = computeGraphDiff(baseResources, headResources);
           return renderPrDiffMarkdown(diffResources, baseBranch, headBranch);
         } catch (err) {
-          return `⚠️ Could not generate app graph diff: ${err.message}`;
+          return `⚠️ Could not generate app graph diff: ${errorMessage(err)}`;
         }
       }
     },
@@ -1025,7 +1096,7 @@ const session = await joinSession({
           }
         }
       },
-      handler: async () => {
+      handler: async (_args) => {
         return "Open the radius canvas with page 'environment' to create a GitHub environment. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
       }
     },
@@ -1075,7 +1146,7 @@ const session = await joinSession({
           });
           return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
         } catch (err) {
-          return `⚠️ Could not publish the custom-type extension: ${err.message}`;
+          return `⚠️ Could not publish the custom-type extension: ${errorMessage(err)}`;
         }
       }
     },
@@ -1128,9 +1199,9 @@ const session = await joinSession({
               }
             })
           );
-          return `Published recipe to ${published}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
+          return `Published recipe to ${String(published)}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
         } catch (err) {
-          return `⚠️ Could not publish the recipe: ${err.message}`;
+          return `⚠️ Could not publish the recipe: ${errorMessage(err)}`;
         }
       }
     },
@@ -1192,13 +1263,13 @@ const session = await joinSession({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
           });
-          const result = await response.json().catch(() => ({}));
+          const result = record(await response.json().catch(() => ({})));
           if (!response.ok || result.error) {
             return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
           }
           return `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started. It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed. Poll the radius_deploy_status tool until it reports success or failed.`;
         } catch (err) {
-          return `⚠️ Could not start the deploy: ${err.message}`;
+          return `⚠️ Could not start the deploy: ${errorMessage(err)}`;
         }
       }
     },
@@ -1232,10 +1303,35 @@ const session = await joinSession({
           const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
           if (!response.ok)
             return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
-          const d = await response.json().catch(() => ({}));
-          return JSON.stringify(summarizeDeployStatus(d, args.logLines));
+          const d = record(await response.json().catch(() => ({})));
+          return JSON.stringify(
+            summarizeDeployStatus(
+              {
+                status: optionalString(d.status),
+                errorKind: optionalString(d.errorKind) || null,
+                deployRunUrl: optionalString(d.deployRunUrl) || null,
+                startedAt:
+                  (
+                    typeof d.startedAt === "string" ||
+                    typeof d.startedAt === "number"
+                  ) ?
+                    d.startedAt
+                  : null,
+                finishedAt:
+                  (
+                    typeof d.finishedAt === "string" ||
+                    typeof d.finishedAt === "number"
+                  ) ?
+                    d.finishedAt
+                  : null,
+                error: d.error,
+                logs: d.logs
+              },
+              args.logLines
+            )
+          );
         } catch (err) {
-          return `⚠️ Could not read the deploy status: ${err.message}`;
+          return `⚠️ Could not read the deploy status: ${errorMessage(err)}`;
         }
       }
     }
@@ -1358,8 +1454,9 @@ setOpenSourceHandler(async ({ path: relPath, state }) => {
     safe = toSafeRepoRelPath(relPath);
     const worktree = state && state.workspacePath;
     if (!worktree || !(await workspaceFileExists(worktree, safe))) {
-      const err = new Error("file is not on this worktree");
-      err.code = "NOT_ON_WORKTREE";
+      const err = new Error("file is not on this worktree", {
+        cause: { code: "NOT_ON_WORKTREE" }
+      });
       throw err;
     }
     await session.rpc.canvas.open({
@@ -1376,7 +1473,7 @@ setOpenSourceHandler(async ({ path: relPath, state }) => {
   } catch (e) {
     try {
       session.log(
-        `Radius: could not open ${safe || relPath} in the editor canvas: ${e && e.message ? e.message : e}`,
+        `Radius: could not open ${safe || relPath} in the editor canvas: ${errorMessage(e)}`,
         { level: "warning" }
       );
     } catch {}
@@ -1401,7 +1498,7 @@ setOpenSourceHandler(async ({ path: relPath, state }) => {
 // can release the tool names before any replacement process registers them.
 
 let shuttingDown = false;
-async function gracefulShutdown(signal) {
+async function gracefulShutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
@@ -1411,12 +1508,12 @@ async function gracefulShutdown(signal) {
   } catch {}
 
   // Close all canvas HTTP servers so their ports are released promptly.
-  const closes = [];
+  const closes: Array<Promise<void>> = [];
   for (const [id, entry] of servers) {
     try {
       entry.server.closeAllConnections?.();
       closes.push(
-        new Promise((resolve) => {
+        new Promise<void>((resolve) => {
           try {
             entry.server.close(() => resolve());
           } catch {
@@ -1432,16 +1529,17 @@ async function gracefulShutdown(signal) {
   // Don't hang forever waiting on lingering keep-alive sockets.
   await Promise.race([
     Promise.all(closes),
-    new Promise((resolve) => setTimeout(resolve, 2000))
+    new Promise<void>((resolve) => setTimeout(resolve, 2000))
   ]);
 
   // Leave/dispose the session so the host deregisters our tools and canvases
   // before any replacement process tries to register the same names. The SDK
   // surface isn't introspectable here, so try the common teardown methods.
   try {
-    for (const fn of ["close", "dispose", "leave", "stop", "disconnect"]) {
-      if (session && typeof session[fn] === "function") {
-        await session[fn]();
+    for (const name of ["close", "dispose", "leave", "stop", "disconnect"]) {
+      const candidate = Reflect.get(session, name);
+      if (typeof candidate === "function") {
+        await Reflect.apply(candidate, session, []);
         break;
       }
     }
@@ -1450,7 +1548,7 @@ async function gracefulShutdown(signal) {
     }
   } catch (e) {
     try {
-      console.error(`[radius] session teardown error: ${e?.message || e}`);
+      console.error(`[radius] session teardown error: ${errorMessage(e)}`);
     } catch {}
   }
 
@@ -1481,7 +1579,11 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
   try {
     console.error(
-      `[radius] unhandledRejection (ignored to stay alive): ${reason?.stack || reason}`
+      `[radius] unhandledRejection (ignored to stay alive): ${
+        reason instanceof Error ?
+          reason.stack || reason.message
+        : String(reason)
+      }`
     );
   } catch {}
 });
@@ -1521,12 +1623,13 @@ const keepaliveTimer = setInterval(async () => {
   if (!panelRecentlyActive && !deployInFlight()) return;
   keepaliveBusy = true;
   try {
-    if (
-      session &&
-      session.metadata &&
-      typeof session.metadata.snapshot === "function"
-    ) {
-      await session.metadata.snapshot();
+    const metadata = Reflect.get(session, "metadata");
+    const snapshot =
+      metadata && typeof metadata === "object" ?
+        Reflect.get(metadata, "snapshot")
+      : undefined;
+    if (typeof snapshot === "function") {
+      await Reflect.apply(snapshot, metadata, []);
     }
   } catch {
     /* keepalive must never crash or surface errors */
@@ -1571,7 +1674,7 @@ try {
     try {
       lastSize = statSync(extPath).size;
     } catch {}
-    let debounce = null;
+    let debounce: NodeJS.Timeout | null = null;
     let triggered = false; // set once we commit to the actual restart
     let reloadPending = false; // a deferral loop is already running
     let reloadRequestedAt = 0; // when the pending reload was first requested
@@ -1653,7 +1756,7 @@ try {
   } catch (e) {
     try {
       console.error(
-        `[radius][dev] self-reload setup failed (ignored): ${e?.message || e}`
+        `[radius][dev] self-reload setup failed (ignored): ${errorMessage(e)}`
       );
     } catch {}
   }

@@ -76,6 +76,9 @@ export interface CanvasGraphResource {
   connections?: CanvasGraphConnection[];
   diffStatus?: string;
   codeReference?: string;
+  outputResources?: CanvasGraphResource[];
+  deployStatus?: "pending" | "in_progress" | "success" | "failed";
+  portalUrl?: string;
 }
 
 export type GraphView = "graph" | "planned" | "diff";
@@ -159,10 +162,32 @@ export interface CanvasState {
   deployLogs?: string[];
   deployLogBase?: number;
   deployStatus?: string;
-  deployError?: string;
+  deployError?: string | null;
   activeGraphView?: GraphView;
   sourceRefContexts?: Partial<Record<GraphView, SourceRefContext>>;
   pendingSourceRefs?: PendingSourceRef[];
+  page?: string;
+  graphDefinitionHash?: string;
+  graphBuildGeneration?: number;
+  progressMessages?: string[];
+  appBicepHandoffKey?: string;
+  deployEnvName?: string;
+  deployAppName?: string;
+  deployDispatchedAt?: number;
+  deployRunId?: string | number | null;
+  deployRunUrl?: string | null;
+  deployErrorKind?: string | null;
+  deployErrorBranch?: string | null;
+  deployRepairing?: boolean;
+  deployHandoffState?: string;
+  deployHandoffAttempts?: number;
+  verifyRunId?: string | number | null;
+  verifyRunUrl?: string;
+  deployedGraph?: CanvasGraphResource[] | null;
+  deployedGraphRepo?: string;
+  resolvedRecipes?: unknown[];
+  diffBaseGenerated?: boolean;
+  diffHeadGenerated?: boolean;
 }
 
 export function escapeHtml(str: unknown): string {

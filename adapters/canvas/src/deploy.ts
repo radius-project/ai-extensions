@@ -2,15 +2,154 @@
 // Polls GitHub Actions runs and the orphan radius-deploy-status branch for live
 // deploy/activity/control-plane logs and the deployed graph, then parses rad
 // deploy output into per-resource progress/status the deployingPage renders.
-// Reads GitHub via the gh CLI; portal links come from ./infra.mjs.
+// Reads GitHub via the gh CLI; portal links come from ./infra.ts.
 
-import { ghApiGetContent, cliExec } from "./gh.mjs";
-import { generatePortalUrl } from "./infra.mjs";
+import { ghApiGetContent, cliExec } from "./gh.js";
+import { generatePortalUrl } from "./infra.js";
 import {
   pullOciArtifactFiles,
   loadGhKeyringCredentials,
   DEPLOY_STATUS_ARTIFACT_TYPE
-} from "./ghcr.mjs";
+} from "./ghcr.js";
+import type {
+  FetchImplementation,
+  GhCredentials,
+  PullOciOptions
+} from "./ghcr.js";
+import type { CanvasState } from "./shared.js";
+
+type DeployStatus = "pending" | "in_progress" | "success" | "failed";
+
+export interface DeployedConnection {
+  id?: string;
+  name?: string;
+  direction?: string;
+}
+
+export interface DeployedOutputResource {
+  id?: string;
+  name?: string;
+  type?: string;
+  displayType?: string;
+  deployStatus?: DeployStatus;
+  portalUrl?: string;
+}
+
+export interface DeployedResource {
+  id?: string;
+  name?: string;
+  type?: string;
+  connections?: DeployedConnection[];
+  outputResources?: DeployedOutputResource[];
+  deployStatus?: DeployStatus;
+}
+
+interface WorkflowStep {
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+}
+
+interface WorkflowJob {
+  steps?: WorkflowStep[];
+}
+
+interface WorkflowRun {
+  databaseId?: number;
+  createdAt?: string;
+  status?: string;
+  conclusion?: string | null;
+}
+
+interface WorkflowRunDetail extends WorkflowRun {
+  jobs: WorkflowJob[];
+  steps: WorkflowStep[];
+}
+
+interface ReaderPullResult {
+  status: "unconfigured" | "missing" | "malformed" | "ok" | "auth" | "error";
+  files: Record<string, string> | null;
+  registry: string;
+  tag: string;
+  error: unknown;
+}
+
+interface DeployArtifact {
+  files: Record<string, string>;
+  artifactType?: string;
+}
+
+type PullArtifact = (options: PullOciOptions) => Promise<DeployArtifact | null>;
+
+interface DeployStatusReaderOptions {
+  repo: string;
+  environment?: string;
+  app?: string;
+  stateRegistry?: string;
+  graphRegistry?: string;
+  graphTag?: string;
+  credentials?: GhCredentials;
+  loadCredentials?: () => Promise<GhCredentials>;
+  fetchImpl?: FetchImplementation;
+  registryOrigin?: string;
+  pullArtifact?: PullArtifact;
+  getBranchContent?: (
+    apiPath: string,
+    timeout?: number
+  ) => Promise<string | Buffer | null>;
+  ttlMs?: number;
+  now?: () => number;
+}
+
+export interface ActivityEntry {
+  status: Exclude<DeployStatus, "pending">;
+  rid: string;
+  op: string;
+  type: string;
+  name: string;
+}
+
+interface RepoPermissions {
+  admin?: boolean;
+  maintain?: boolean;
+  push?: boolean;
+  triage?: boolean;
+  pull?: boolean;
+}
+
+interface RepoAccessInput {
+  repo?: string;
+  login?: string;
+  readFailed?: boolean;
+  permissions?: RepoPermissions | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function errorCode(error: unknown): string {
+  if (!isRecord(error)) return "";
+  return typeof error.code === "string" ? error.code : "";
+}
+
+function parseWorkflowRun(value: unknown): WorkflowRun | null {
+  if (!isRecord(value)) return null;
+  return {
+    databaseId:
+      typeof value.databaseId === "number" ? value.databaseId : undefined,
+    createdAt: stringField(value.createdAt),
+    status: stringField(value.status),
+    conclusion:
+      typeof value.conclusion === "string" || value.conclusion === null ?
+        value.conclusion
+      : undefined
+  };
+}
 
 // File names the producer's publish-deploy-status action packs into the GHCR
 // deploy-status artifact (radius-project/radius PR #12591). These double as the
@@ -29,7 +168,10 @@ export const DEPLOY_STATUS_FILES = {
 //   2. else derive from the state registry: swap the first "radius-state" for
 //      "radius-graph", or append "-graph" when the token is absent.
 // Returns "" when neither input is available (GHCR read is then skipped).
-export function deriveGraphRegistry(stateRegistry, graphRegistryOverride) {
+export function deriveGraphRegistry(
+  stateRegistry?: string,
+  graphRegistryOverride?: string
+): string {
   const override = (graphRegistryOverride || "").trim();
   if (override) return override;
   const state = (stateRegistry || "").trim();
@@ -44,7 +186,11 @@ export function deriveGraphRegistry(stateRegistry, graphRegistryOverride) {
 //   every run of characters outside [a-z0-9._-] collapsed to '-', leading and
 //   trailing '-' stripped, capped at 80 chars (falling back to "deploy-status"
 //   when the base sanitizes to empty).
-export function deriveGraphTag(environment, app, tagOverride) {
+export function deriveGraphTag(
+  environment?: string,
+  app?: string,
+  tagOverride?: string
+): string {
   const override = (tagOverride || "").trim();
   if (override) return override;
   const base = `${environment || ""}-${app || ""}`
@@ -60,13 +206,17 @@ export function deriveGraphTag(environment, app, tagOverride) {
 // build the tag: the first `name: '...'` literal in the app bicep (single
 // quotes, matching its `grep -oP "name:\\s*'\\K[^']+" | head -1`). Returns ""
 // when no literal name is present.
-export function appNameForGraphTag(source) {
+export function appNameForGraphTag(source?: string | null): string {
   if (!source) return "";
   const match = source.match(/name:\s*'([^']+)'/);
   return match ? match[1] : "";
 }
 
-export function ghJson(args, fallback = null, timeout = 15000) {
+export function ghJson(
+  args: string[],
+  fallback: unknown = null,
+  timeout = 15000
+): Promise<unknown> {
   return new Promise((resolve) => {
     cliExec("gh", args, { timeout }, (err, stdout) => {
       if (err) {
@@ -82,7 +232,12 @@ export function ghJson(args, fallback = null, timeout = 15000) {
   });
 }
 
-export async function findWorkflowRun(repo, workflowFile, sinceMs, knownId) {
+export async function findWorkflowRun(
+  repo: string,
+  workflowFile: string,
+  sinceMs: number,
+  knownId?: number | string | null
+): Promise<number | string | null> {
   if (knownId) return knownId;
   const runs = await ghJson(
     [
@@ -102,14 +257,19 @@ export async function findWorkflowRun(repo, workflowFile, sinceMs, knownId) {
   // Newest first; accept the first run created within ~60s before dispatch
   // (clock skew tolerance) to avoid picking up stale prior runs.
   const cutoff = (sinceMs || 0) - 60000;
-  for (const r of runs) {
+  for (const value of runs) {
+    const r = parseWorkflowRun(value);
+    if (!r) continue;
     const created = Date.parse(r.createdAt || "") || 0;
-    if (created >= cutoff) return r.databaseId;
+    if (created >= cutoff && r.databaseId !== undefined) return r.databaseId;
   }
   return null;
 }
 
-export async function getRunDetail(repo, runId) {
+export async function getRunDetail(
+  repo: string,
+  runId: number | string
+): Promise<WorkflowRunDetail | null> {
   let data = await ghJson(
     [
       "run",
@@ -129,7 +289,7 @@ export async function getRunDetail(repo, runId) {
   // completion, so fall back to a status-only read when the combined call
   // fails. This keeps completion detection (e.g. verify-status → success)
   // working even while the jobs endpoint is unavailable.
-  if (!data) {
+  if (!isRecord(data)) {
     data = await ghJson(
       [
         "run",
@@ -142,29 +302,42 @@ export async function getRunDetail(repo, runId) {
       ],
       null
     );
-    if (!data) return null;
+    if (!isRecord(data)) return null;
     return {
-      status: data.status,
-      conclusion: data.conclusion,
+      status: stringField(data.status),
+      conclusion:
+        typeof data.conclusion === "string" || data.conclusion === null ?
+          data.conclusion
+        : undefined,
       jobs: [],
       steps: []
     };
   }
-  const steps = [];
-  for (const job of data.jobs || []) {
+  const jobs: WorkflowJob[] =
+    Array.isArray(data.jobs) ?
+      data.jobs.filter((job): job is WorkflowJob => isRecord(job))
+    : [];
+  const steps: WorkflowStep[] = [];
+  for (const job of jobs) {
     for (const s of job.steps || []) {
       steps.push({ name: s.name, status: s.status, conclusion: s.conclusion });
     }
   }
   return {
-    status: data.status,
-    conclusion: data.conclusion,
-    jobs: data.jobs || [],
+    status: stringField(data.status),
+    conclusion:
+      typeof data.conclusion === "string" || data.conclusion === null ?
+        data.conclusion
+      : undefined,
+    jobs,
     steps
   };
 }
 
-export function fetchRunLog(repo, runId) {
+export function fetchRunLog(
+  repo: string,
+  runId: number | string
+): Promise<string | null> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -181,35 +354,35 @@ export function fetchRunLog(repo, runId) {
   });
 }
 
-export function fetchLiveDeployLog(repo) {
+export function fetchLiveDeployLog(repo: string): Promise<string | null> {
   return ghApiGetContent(
     `/repos/${repo}/contents/deploy-progress.log?ref=radius-deploy-status`,
     12000
   );
 }
 
-export function fetchLiveActivityLog(repo) {
+export function fetchLiveActivityLog(repo: string): Promise<string | null> {
   return ghApiGetContent(
     `/repos/${repo}/contents/deploy-activity.log?ref=radius-deploy-status`,
     12000
   );
 }
 
-export function fetchLiveControlPlaneLog(repo) {
+export function fetchLiveControlPlaneLog(repo: string): Promise<string | null> {
   return ghApiGetContent(
     `/repos/${repo}/contents/deploy-controlplane.log?ref=radius-deploy-status`,
     12000
   );
 }
 
-export function fetchDeployState(repo) {
+export function fetchDeployState(repo: string): Promise<string | null> {
   return ghApiGetContent(
     `/repos/${repo}/contents/deploy-state.txt?ref=radius-deploy-status`,
     10000
   ).then((t) => (t ? t.trim() : null));
 }
 
-export function fetchDeployGraph(repo) {
+export function fetchDeployGraph(repo: string): Promise<unknown | null> {
   return ghApiGetContent(
     `/repos/${repo}/contents/deploy-graph.json?ref=radius-deploy-status`,
     12000
@@ -233,7 +406,7 @@ export function fetchDeployGraph(repo) {
 // Only deploy-graph.json is treated as authoritative from GHCR — the sibling
 // log files the producer packs there are status snapshots, so live-log/state
 // reads stay on the branch (see graph() vs the branch fetch helpers above).
-export function createDeployStatusReader(options = {}) {
+export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   const {
     repo,
     environment = "",
@@ -262,19 +435,20 @@ export function createDeployStatusReader(options = {}) {
       deriveGraphTag(environment, app, graphTag)
     : "";
 
-  let cache = null; // { at, result }
-  let inflight = null; // Promise<result>
-  let credPromise = null;
+  let cache: { at: number; result: ReaderPullResult } | null = null;
+  let inflight: Promise<ReaderPullResult> | null = null;
+  let credPromise: Promise<GhCredentials> | null = null;
 
-  function resolveCredentials() {
+  function resolveCredentials(): Promise<GhCredentials> {
     if (credentials) return Promise.resolve(credentials);
-    if (!credPromise) credPromise = Promise.resolve().then(loadCredentials);
+    if (!credPromise)
+      credPromise = Promise.resolve().then(() => loadCredentials());
     return credPromise;
   }
 
   // pull - fetch (and cache) the GHCR artifact, classifying the outcome:
   //   ok | missing | malformed | auth | error | unconfigured
-  async function pull() {
+  async function pull(): Promise<ReaderPullResult> {
     if (!registry || !tag) {
       return {
         status: "unconfigured",
@@ -287,7 +461,7 @@ export function createDeployStatusReader(options = {}) {
     if (cache && now() - cache.at < ttlMs) return cache.result;
     if (inflight) return inflight;
     inflight = (async () => {
-      let result;
+      let result: ReaderPullResult;
       try {
         const resolvedCreds = await resolveCredentials();
         const artifact = await pullArtifact({
@@ -342,7 +516,7 @@ export function createDeployStatusReader(options = {}) {
         }
       } catch (e) {
         result = {
-          status: e && e.code === "GHCR_AUTH" ? "auth" : "error",
+          status: errorCode(e) === "GHCR_AUTH" ? "auth" : "error",
           files: null,
           registry,
           tag,
@@ -356,14 +530,14 @@ export function createDeployStatusReader(options = {}) {
     return inflight;
   }
 
-  function branchGraph() {
+  function branchGraph(): Promise<unknown | null> {
     return getBranchContent(
       `/repos/${repo}/contents/${DEPLOY_STATUS_FILES.graph}?ref=radius-deploy-status`,
       12000
-    ).then((t) => {
+    ).then((t: string | Buffer | null) => {
       if (!t) return null;
       try {
-        return JSON.parse(t);
+        return JSON.parse(t.toString());
       } catch (e) {
         return null;
       }
@@ -380,7 +554,7 @@ export function createDeployStatusReader(options = {}) {
     // { graph, source: "ghcr"|"branch"|"none", status }.
     async graph() {
       const result = await pull();
-      if (result.status === "ok") {
+      if (result.status === "ok" && result.files) {
         try {
           return {
             graph: JSON.parse(result.files[DEPLOY_STATUS_FILES.graph]),
@@ -407,10 +581,12 @@ export function createDeployStatusReader(options = {}) {
   };
 }
 
-export function normalizeDeployedGraph(resources) {
+export function normalizeDeployedGraph(
+  resources: DeployedResource[] | null | undefined
+): DeployedResource[] | null | undefined {
   if (!Array.isArray(resources) || resources.length < 2) return resources;
-  const keyOf = (r) => r.id || r.name;
-  const hasConn = (r, otherKey) =>
+  const keyOf = (r: DeployedResource): string | undefined => r.id || r.name;
+  const hasConn = (r: DeployedResource, otherKey?: string): boolean =>
     Array.isArray(r.connections) &&
     r.connections.some((c) => (c.id || c.name) === otherKey);
   for (let a = 0; a < resources.length; a++) {
@@ -453,7 +629,7 @@ export function normalizeDeployedGraph(resources) {
   return resources;
 }
 
-export function deployedResourceCategory(type) {
+export function deployedResourceCategory(type?: string): string {
   const t = (type || "").toLowerCase();
   if (
     (t.includes("container") &&
@@ -490,19 +666,26 @@ export function deployedResourceCategory(type) {
   return "other";
 }
 
-export function rewireDeployedGraphChain(resources) {
+export function rewireDeployedGraphChain(
+  resources: DeployedResource[] | null | undefined
+): DeployedResource[] | null | undefined {
   if (!Array.isArray(resources)) return resources;
-  const byKey = {};
-  for (const r of resources) byKey[r.id || r.name] = r;
-  const keyOf = (r) => r.id || r.name;
-  const catOf = (r) => deployedResourceCategory(r && r.type);
+  const byKey: Record<string, DeployedResource> = {};
+  for (const r of resources) {
+    const key = r.id || r.name;
+    if (key) byKey[key] = r;
+  }
+  const keyOf = (r: DeployedResource): string => r.id || r.name || "";
+  const catOf = (r: DeployedResource) => deployedResourceCategory(r.type);
   for (const c of resources) {
     if (catOf(c) !== "compute" || !Array.isArray(c.connections)) continue;
-    const caches = [],
-      dbs = [];
+    const caches: DeployedResource[] = [],
+      dbs: DeployedResource[] = [];
     for (const conn of c.connections) {
       if (conn.direction !== "Outbound") continue;
-      const dst = byKey[conn.id || conn.name];
+      const connectionKey = conn.id || conn.name;
+      if (!connectionKey) continue;
+      const dst = byKey[connectionKey];
       if (!dst) continue;
       if (catOf(dst) === "cache") caches.push(dst);
       else if (catOf(dst) === "data") dbs.push(dst);
@@ -531,7 +714,10 @@ export function rewireDeployedGraphChain(resources) {
   return resources;
 }
 
-export function azureTypeFromResourceId(rid) {
+export function azureTypeFromResourceId(rid?: string): {
+  type: string;
+  name: string;
+} {
   if (!rid) return { type: "", name: "" };
   const idx = rid.toLowerCase().indexOf("/providers/");
   if (idx < 0) return { type: "", name: "" };
@@ -542,7 +728,7 @@ export function azureTypeFromResourceId(rid) {
   if (segs.length < 2) return { type: "", name: "" };
   const ns = segs[0];
   const rest = segs.slice(1);
-  const typeParts = [];
+  const typeParts: string[] = [];
   let name = "";
   for (let i = 0; i < rest.length; i += 2) {
     typeParts.push(rest[i]);
@@ -551,10 +737,14 @@ export function azureTypeFromResourceId(rid) {
   return { type: ns + "/" + typeParts.join("/"), name };
 }
 
-export function reduceActivityLog(text) {
+export function reduceActivityLog(text?: string | null): ActivityEntry[] {
   if (!text) return [];
-  const rank = { in_progress: 1, success: 2, failed: 3 };
-  const map = new Map();
+  const rank: Record<Exclude<DeployStatus, "pending">, number> = {
+    in_progress: 1,
+    success: 2,
+    failed: 3
+  };
+  const map = new Map<string, ActivityEntry>();
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -564,7 +754,7 @@ export function reduceActivityLog(text) {
     const rid = parts[1] || "";
     const op = parts[2] || "";
     if (!rid) continue;
-    let status = "in_progress";
+    let status: Exclude<DeployStatus, "pending"> = "in_progress";
     if (/succeed|resolv/.test(sRaw)) status = "success";
     else if (/fail|error|cancel|denied/.test(sRaw)) status = "failed";
     const { type, name } = azureTypeFromResourceId(rid);
@@ -576,9 +766,19 @@ export function reduceActivityLog(text) {
   return [...map.values()];
 }
 
-export function applyActivityToResources(entries, resources, provider, state) {
-  const rank = { pending: 0, in_progress: 1, success: 2, failed: 3 };
-  const changes = [];
+export function applyActivityToResources(
+  entries: ActivityEntry[],
+  resources: DeployedResource[],
+  provider: string,
+  state: CanvasState
+): string[] {
+  const rank: Record<DeployStatus, number> = {
+    pending: 0,
+    in_progress: 1,
+    success: 2,
+    failed: 3
+  };
+  const changes: string[] = [];
   for (const e of entries) {
     const etype = e.type.toLowerCase();
     for (const r of resources) {
@@ -630,7 +830,7 @@ export function applyActivityToResources(entries, resources, provider, state) {
     if (!Array.isArray(r.outputResources) || r.outputResources.length === 0)
       continue;
     const states = r.outputResources.map((o) => o.deployStatus || "pending");
-    let parent = "pending";
+    let parent: DeployStatus = "pending";
     if (states.some((s) => s === "failed")) parent = "failed";
     else if (states.every((s) => s === "success")) parent = "success";
     else if (states.some((s) => s === "in_progress" || s === "success"))
@@ -641,9 +841,9 @@ export function applyActivityToResources(entries, resources, provider, state) {
   return changes;
 }
 
-export function extractErrorLines(logText, max = 12) {
+export function extractErrorLines(logText?: string | null, max = 12): string[] {
   if (!logText) return [];
-  const out = [];
+  const out: string[] = [];
   const re =
     /\b(error|errors|failed|failure|fatal|denied|unauthorized|forbidden|not\s+found|cannot|unable|panic|exception|invalid|timed?\s*out)\b/i;
   for (const raw of logText.split(/\r?\n/)) {
@@ -659,7 +859,7 @@ export function extractErrorLines(logText, max = 12) {
 // Tenant-agnostic: the accepted enterprise values and the actual value are parsed
 // out of the error text itself, so this works for any tenant policy, not just
 // Microsoft's. Returns a friendly multi-line explanation, or '' if not applicable.
-export function explainOidcEnterpriseClaim(logText) {
+export function explainOidcEnterpriseClaim(logText?: string | null): string {
   if (!logText) return "";
   if (
     !/AADSTS7002381/.test(logText) &&
@@ -667,8 +867,8 @@ export function explainOidcEnterpriseClaim(logText) {
   )
     return "";
   // Parse: "...enterprise claim with value 'a', 'b' or 'c' but actual value is 'x'..."
-  let accepted = [];
-  let actual = null;
+  let accepted: string[] = [];
+  let actual: string | null = null;
   const m =
     /enterprise claim with value\s+(.+?)\s+but actual value is\s+'([^']*)'/i.exec(
       logText
@@ -681,7 +881,7 @@ export function explainOidcEnterpriseClaim(logText) {
     accepted.length ?
       accepted.join(", ")
     : "a value required by the target Azure tenant";
-  let leadLine, actualLabel;
+  let leadLine: string, actualLabel: string;
   if (actual === "") {
     // Claim present in the issuer config but empty — the classic personal-repo case.
     leadLine =
@@ -726,7 +926,7 @@ export function explainRepoAccessForEnvSetup({
   login,
   readFailed,
   permissions
-} = {}) {
+}: RepoAccessInput = {}): string {
   const who = login || "the active gh account";
   if (readFailed) {
     return (
@@ -775,17 +975,20 @@ export function explainRepoAccessForEnvSetup({
 // The bare `not found` alternate is INTENTIONAL, not an oversight: gh surfaces
 // this condition with variable wording (e.g. "gh: Not Found (HTTP 404)" but also
 // plain "the repository was not found"), and both must match. The match is
-// deliberately allowed to be broad because the sole caller (server.mjs, the repo
+// deliberately allowed to be broad because the sole caller (server.ts, the repo
 // preflight) is fail-open — a match only flips an advisory `readFailed` flag and
 // GitHub still enforces real permissions server-side — so a false positive here
 // costs nothing while a false negative would misdirect the preflight. Narrowing
-// to `HTTP 404` only would drop the tested bare-phrase case (deploy_test.mjs).
-export function isRepoNotFoundError(errText) {
+// to `HTTP 404` only would drop the tested bare-phrase case (deploy.test.ts).
+export function isRepoNotFoundError(errText?: string | null): boolean {
   if (!errText) return false;
   return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
 }
 
-export function extractRadDeployError(logText, maxChars = 4000) {
+export function extractRadDeployError(
+  logText?: string | null,
+  maxChars = 4000
+): string {
   if (!logText) return "";
   // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,
   // so the structured block is detectable regardless of the log source.
@@ -819,10 +1022,15 @@ export function extractRadDeployError(logText, maxChars = 4000) {
   return extractErrorLines(lines.join("\n"), 20).join("\n").slice(0, maxChars);
 }
 
-export function parseResourceProgress(logText, resources) {
-  const result = {};
+export function parseResourceProgress(
+  logText: string | null | undefined,
+  resources: ReadonlyArray<{ name?: string }>
+): Record<string, DeployStatus> {
+  const result: Record<string, DeployStatus> = {};
   if (!logText) return result;
-  const names = resources.map((r) => r.name).filter(Boolean);
+  const names = resources
+    .map((r) => r.name)
+    .filter((name): name is string => Boolean(name));
   const lines = logText.split(/\r?\n/);
   for (const line of lines) {
     const lower = line.toLowerCase();
@@ -854,11 +1062,17 @@ export function parseResourceProgress(logText, resources) {
   return result;
 }
 
-export function parseRadDeployLog(logText, resources, opts = {}) {
+export function parseRadDeployLog(
+  logText: string | null | undefined,
+  resources: ReadonlyArray<{ name?: string }>,
+  opts: { stripPrefix?: boolean } = {}
+): Record<string, DeployStatus> {
   const stripPrefix = opts.stripPrefix !== false;
-  const result = {};
+  const result: Record<string, DeployStatus> = {};
   if (!logText) return result;
-  const names = resources.map((r) => r.name).filter(Boolean);
+  const names = resources
+    .map((r) => r.name)
+    .filter((name): name is string => Boolean(name));
   const lines = logText.split(/\r?\n/);
   for (const raw of lines) {
     const line = stripPrefix ? raw.replace(/^\S+\s+\S+\s+/, "") : raw; // strip GH "job\tstep\t" prefix

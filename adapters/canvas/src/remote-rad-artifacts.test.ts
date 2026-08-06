@@ -6,20 +6,26 @@ import {
   stageRemoteRadArtifacts,
   radArtifactsDirForSelection,
   radArtifactsFingerprint
-} from "./remote-rad-artifacts.mjs";
+} from "./remote-rad-artifacts.js";
 
 const CONFIG_API = "/repos/acme/app/contents/.radius/bicepconfig.json?ref=dev";
 const TGZ_API = "/repos/acme/app/contents/.radius/custom-types.tgz?ref=dev";
 
-function mockGithub(texts = {}, bytes = {}) {
-  const calls = { getContent: [], getContentBytes: [] };
+function mockGithub(
+  texts: Record<string, string> = {},
+  bytes: Record<string, Buffer | { tooLarge: true }> = {}
+) {
+  const calls: { getContent: string[]; getContentBytes: string[] } = {
+    getContent: [],
+    getContentBytes: []
+  };
   return {
     calls,
-    async getContent(apiPath) {
+    async getContent(apiPath: string) {
       calls.getContent.push(apiPath);
       return apiPath in texts ? texts[apiPath] : null;
     },
-    async getContentBytes(apiPath) {
+    async getContentBytes(apiPath: string) {
       calls.getContentBytes.push(apiPath);
       return apiPath in bytes ? bytes[apiPath] : null;
     }
@@ -34,7 +40,7 @@ const CONFIG = JSON.stringify({
   }
 });
 
-function cleanup(dir) {
+function cleanup(dir: string | null) {
   if (dir) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -132,7 +138,7 @@ test("skips an artifact too large for the contents API and logs it", async () =>
     { [CONFIG_API]: CONFIG },
     { [TGZ_API]: { tooLarge: true } }
   );
-  const logs = [];
+  const logs: string[] = [];
   const dir = await stageRemoteRadArtifacts(
     gh,
     "acme/app",
@@ -151,7 +157,7 @@ test("skips an artifact too large for the contents API and logs it", async () =>
 
 test("skips a missing artifact and logs it", async () => {
   const gh = mockGithub({ [CONFIG_API]: CONFIG }, {});
-  const logs = [];
+  const logs: string[] = [];
   const dir = await stageRemoteRadArtifacts(
     gh,
     "acme/app",
@@ -176,7 +182,7 @@ test("refuses a traversing local extension reference", async () => {
     }
   });
   const gh = mockGithub({ [CONFIG_API]: config }, {});
-  const logs = [];
+  const logs: string[] = [];
   const dir = await stageRemoteRadArtifacts(
     gh,
     "acme/app",
@@ -230,4 +236,49 @@ test("radArtifactsDirForSelection uses the workspace dir for a local selection",
   });
   assert.equal(remote, false);
   assert.equal(dir, path.join(workspacePath, ".radius"));
+});
+
+test("radArtifactsDirForSelection accepts a computed local selection", async () => {
+  const state = { workspacePath: path.resolve(path.sep, "tmp", "ws") };
+  assert.deepEqual(
+    await radArtifactsDirForSelection({
+      isLocal: Boolean(state.workspacePath),
+      state,
+      github: mockGithub(),
+      repo: "acme/app",
+      branch: "dev",
+      bicepRepoPath: ".radius/app.bicep"
+    }),
+    { dir: path.join(state.workspacePath, ".radius"), remote: false }
+  );
+});
+
+test("radArtifactsDirForSelection accepts a computed remote selection", async () => {
+  const github = mockGithub();
+  const { dir, remote } = await radArtifactsDirForSelection({
+    isLocal: Boolean(""),
+    github,
+    repo: "acme/app",
+    branch: "dev",
+    bicepRepoPath: ".radius/app.bicep"
+  });
+  try {
+    assert.equal(remote, false);
+    assert.equal(dir, "");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("radArtifactsDirForSelection rejects a local selection without state", async () => {
+  await assert.rejects(
+    radArtifactsDirForSelection({
+      isLocal: Boolean("local"),
+      github: mockGithub(),
+      repo: "acme/app",
+      branch: "dev",
+      bicepRepoPath: ".radius/app.bicep"
+    }),
+    /requires canvas state/
+  );
 });

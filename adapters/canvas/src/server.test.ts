@@ -8,6 +8,7 @@ import {
   canReuseModeledGraph,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  endChildInput,
   findFederatedCredentialNameCollision,
   graphDefinitionHash,
   isCrossSiteMutation,
@@ -19,11 +20,27 @@ import {
   resolveDeployStatus,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
-} from "./server.mjs";
+} from "./server.js";
 import {
   buildFederatedCredentialName,
   buildEnvironmentSuffix
 } from "@radius-project/core";
+import type { CanvasState } from "./shared.js";
+import type { DeployRepairHandoffInput } from "./server.js";
+
+describe("endChildInput", () => {
+  it("keeps command execution authoritative when closing stdin fails", () => {
+    expect(() =>
+      endChildInput({
+        stdin: {
+          end() {
+            throw new Error("stdin already closed");
+          }
+        }
+      })
+    ).not.toThrow();
+  });
+});
 
 describe("resolveDeployStatus", () => {
   it("returns success when the run concluded with success", () => {
@@ -257,6 +274,7 @@ describe("findFederatedCredentialNameCollision", () => {
     const existing = new Map([[colonName, colonSubject]]);
     const hit = findFederatedCredentialNameCollision(desired, existing);
     expect(hit).not.toBeNull();
+    if (!hit) throw new Error("expected a credential collision");
     expect(hit.name).toBe(hyphenName);
     expect(hit.existingSubject).toBe(colonSubject);
     expect(hit.desiredSubject).toBe(hyphenSubject);
@@ -372,7 +390,7 @@ describe("triggerDeployRepairHandoff", () => {
     setDeployRepairHandoff(null);
   });
 
-  function failedEntry(overrides = {}) {
+  function failedEntry(overrides: Partial<CanvasState> = {}) {
     return {
       state: {
         deployStatus: "failed",
@@ -382,12 +400,12 @@ describe("triggerDeployRepairHandoff", () => {
         deployRunUrl: "https://github.com/octo/app/actions/runs/42",
         deployAttempt: { id: "attempt-A" },
         ...overrides
-      }
+      } satisfies CanvasState
     };
   }
 
   it("hands the failure to the agent with the repo, branch, error, run URL, and instance", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
     });
@@ -408,7 +426,7 @@ describe("triggerDeployRepairHandoff", () => {
   });
 
   it("fires only once so the agent's own redeploys can't double-drive the loop", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
     });
@@ -422,7 +440,7 @@ describe("triggerDeployRepairHandoff", () => {
   });
 
   it("hands off again once a fresh user-initiated deploy fails", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
     });
@@ -452,7 +470,7 @@ describe("triggerDeployRepairHandoff", () => {
   });
 
   it("does not hand off a branch-not-pushed failure, which a model fix cannot solve", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
     });
@@ -465,7 +483,7 @@ describe("triggerDeployRepairHandoff", () => {
   });
 
   it("does not hand off unless the deploy actually failed", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
     });
@@ -497,7 +515,7 @@ describe("triggerDeployRepairHandoff", () => {
     });
     expect(entry.state.deployRepairing).toBe(false);
 
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
       return Promise.resolve("message-id");
@@ -529,7 +547,7 @@ describe("triggerDeployRepairHandoff", () => {
   });
 
   it("does not deliver twice while a send is still in flight", () => {
-    const calls = [];
+    const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
       calls.push(payload);
       return new Promise(() => {});
