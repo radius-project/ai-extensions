@@ -11,7 +11,7 @@ often: **adding a compute platform**, **adding a canvas action/tool**, and
 ## Layout
 
 ```
-radius-core/        UI-agnostic core (this package). No SDK, no HTTP, no DOM.
+packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
   src/
     graph/                    Bicep -> application graph build + diff (pure).
     modeling/                 Repo modeling: app.bicep generation, recipe resolution.
@@ -20,7 +20,7 @@ radius-core/        UI-agnostic core (this package). No SDK, no HTTP, no DOM.
     ports/                    Interfaces for the outside world (Shell, GitHub, …).
     index.ts                  The public use-case API surface.
 
-adapters/canvas/              The Copilot-canvas UI adapter (thin).
+packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
   src/
     extension.mjs             SDK entry: joinSession() wiring + process lifecycle.
     server.mjs                Loopback HTTP host: request handler, router, server lifecycle.
@@ -36,7 +36,7 @@ adapters/canvas/              The Copilot-canvas UI adapter (thin).
 
 ### The dependency rule
 
-`radius-core` never imports from an adapter, the Copilot SDK, `node:http`, or the
+`packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
 DOM. Anything that touches the outside world is reached through a **port**
 (`src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`, `Logger`.
 Adapters depend on the core, supply port implementations, and own all
@@ -57,9 +57,9 @@ platform never requires touching the workflow templates or any UI adapter.
 2. Register it in `src/platforms/index.ts`: import it and add it to `REGISTRY`,
    then re-export it.
 3. Add its id to any UI `enum`s (e.g. the canvas `provider` action input in
-   `adapters/canvas/src/extension.mjs`). The route/UI layer reads capabilities
+   `packages/adapter-canvas/src/extension.ts`). The route/UI layer reads capabilities
    and degrades gracefully, so partial platforms are fine.
-4. `pnpm typecheck:core && pnpm build:canvas`.
+4. `pnpm --filter @radius-project/core typecheck && pnpm build:canvas`.
 
 No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
 
@@ -67,7 +67,7 @@ No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
 
 Actions are invoked on an open canvas; tools are callable by the agent. Both are
 declared in the `joinSession({ canvases, tools })` block in
-`adapters/canvas/src/extension.mjs` and should delegate to a core use-case.
+`packages/adapter-canvas/src/extension.ts` and should delegate to a core use-case.
 
 1. **Put the logic in the core.** Add (or reuse) a function in the relevant
    `src/<area>/` module and export it from `src/index.ts`. The core function
@@ -84,10 +84,10 @@ declared in the `joinSession({ canvases, tools })` block in
 
 ## Guide 3: Add a new UI adapter
 
-Because all product logic is in `radius-core` behind ports, a new front-end
+Because all product logic is in `packages/core` behind ports, a new front-end
 (browser panel, chat surface, CLI) is a thin adapter:
 
-1. Create `adapters/<name>/` with its own entry and build.
+1. Create `packages/adapter-<name>/` with its own entry and build.
 2. Implement the ports your adapter needs (`Shell`, `GitHub`, `StateStore`,
    `Clock`, `Logger`) for that environment. The canvas implementations in
    `gh.mjs` (Shell + GitHub) are a reference.
@@ -95,15 +95,15 @@ Because all product logic is in `radius-core` behind ports, a new front-end
    and rendering. Reuse pure renderers/helpers where the environment allows;
    keep transport-specific code (HTTP host, SDK surface) in the adapter.
 4. Add a build script that bundles the adapter, mirroring
-   `adapters/canvas/build.mjs`.
+   `packages/adapter-canvas/build.mjs`.
 
 Do **not** copy logic out of an adapter into the new one — if something is
-shared and UI-agnostic, lift it into `radius-core` first.
+shared and UI-agnostic, lift it into `packages/core` first.
 
 ## Commands
 
 ```bash
-pnpm typecheck:core   # tsc over radius-core (strict)
+pnpm --filter @radius-project/core typecheck
 pnpm build:canvas     # esbuild -> plugins/radius/extension.mjs
 ```
 
@@ -112,11 +112,11 @@ pnpm build:canvas     # esbuild -> plugins/radius/extension.mjs
 Run tests from the workspace root:
 
 ```bash
-pnpm -C radius-core test         # run all tests once
-pnpm -C radius-core test:watch   # run in watch mode
+pnpm -C packages/core test         # run all tests once
+pnpm -C packages/core test:watch   # run in watch mode
 ```
 
-Or run from inside `radius-core/`:
+Or run from inside `packages/core/`:
 
 ```bash
 pnpm test
@@ -126,5 +126,5 @@ pnpm test:watch
 Run a single test file:
 
 ```bash
-pnpm -C radius-core test -- src/graph/diff_test.ts
+pnpm -C packages/core test -- src/graph/diff_test.ts
 ```

@@ -1,6 +1,6 @@
 // Canvas adapter — cloud infrastructure wrappers: OIDC bootstrap, Azure CLI
 // credential validation/login, and GitHub Actions workflow + portal-URL
-// generation. Provider-specific logic is delegated to the radius-core
+// generation. Provider-specific logic is delegated to the @radius-project/core
 // ComputePlatform; this module only orchestrates the local `az` login flow and
 // adapts core outputs for the canvas routes.
 

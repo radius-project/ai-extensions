@@ -1,6 +1,6 @@
 // Canvas adapter — shell + GitHub access primitives.
 // Thin wrappers over the gh/az/aws CLIs plus the concrete GitHub port object
-// (`github`) injected into radius-core use-cases. This is the adapter's only
+// (`github`) injected into @radius-project/core use-cases. This is the adapter's only
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";

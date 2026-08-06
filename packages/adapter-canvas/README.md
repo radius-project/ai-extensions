@@ -2,7 +2,7 @@
 
 The Copilot-canvas UI adapter for Radius Canvas. It owns the SDK surface and the
 loopback HTTP host that backs the webview, and delegates all product logic to
-[`@radius-project/core`](../../radius-core/README.md).
+[`@radius-project/core`](../core/README.md).
 
 ## Modules
 
@@ -30,5 +30,5 @@ modules and the TypeScript core) is bundled.
 ## Extending
 
 See the architecture guides in
-[`radius-core/README.md`](../../radius-core/README.md) for
+[`packages/core/README.md`](../core/README.md) for
 adding a compute platform, a canvas action/tool, or a new UI adapter.

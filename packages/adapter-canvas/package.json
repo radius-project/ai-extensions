@@ -6,8 +6,12 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "build:install": "node build.mjs --install",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "watch": "node build.mjs --watch"
+    "watch": "node build.mjs --watch",
+    "watch:dev": "node build.mjs --watch --install",
+    "lint": "eslint \"src/**/*.ts\" vitest.config.ts build.mjs"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*",
@@ -16,6 +20,7 @@
   "devDependencies": {
     "@github/copilot-sdk": "1.0.8",
     "@vitest/coverage-v8": "^4.1.10",
+    "esbuild": "^0.28.1",
     "vitest": "^4.1.10"
   }
 }

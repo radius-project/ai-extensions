@@ -29,9 +29,6 @@ importers:
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
-      esbuild:
-        specifier: ^0.28.1
-        version: 0.28.1
       eslint:
         specifier: ^8.57.1
         version: 8.57.1
@@ -51,14 +48,14 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  adapters/canvas:
+  packages/adapter-canvas:
     dependencies:
       '@radius-project/core':
         specifier: workspace:*
-        version: link:../../radius-core
+        version: link:../core
       '@radius-project/shared':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../adapter-shared
     devDependencies:
       '@github/copilot-sdk':
         specifier: 1.0.8
@@ -66,15 +63,18 @@ importers:
       '@vitest/coverage-v8':
         specifier: ^4.1.10
         version: 4.1.10(vitest@4.1.10)
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       vitest:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(vite@8.1.2(@types/node@26.1.1)(esbuild@0.28.1))
 
-  adapters/shared:
+  packages/adapter-shared:
     dependencies:
       '@radius-project/core':
         specifier: workspace:*
-        version: link:../../radius-core
+        version: link:../core
     devDependencies:
       vitest:
         specifier: ^4.1.10
@@ -86,7 +86,7 @@ importers:
         specifier: 1.0.8
         version: 1.0.8
 
-  radius-core:
+  packages/core:
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.1.10

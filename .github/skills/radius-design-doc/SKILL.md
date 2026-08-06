@@ -15,8 +15,8 @@ This skill is a convenience wrapper around the process and template in [`docs/de
 
 Use this skill when the user wants to propose a non-trivial change, such as:
 
-- A new capability or a significant change to an existing one (a new canvas page/action or tool, a new compute platform in `radius-core`, a change to how the plugin is built, packaged, or shipped).
-- A change to a public contract: a canvas action/tool surface, `plugin.json`, the marketplace entry, or a `radius-core` API.
+- A new capability or a significant change to an existing one (a new canvas page/action or tool, a new compute platform in `packages/core`, a change to how the plugin is built, packaged, or shipped).
+- A change to a public contract: a canvas action/tool surface, `plugin.json`, the marketplace entry, or a `packages/core` API.
 - A change with meaningful security, compatibility, or cross-component impact.
 
 Do **not** use this skill for:
@@ -33,12 +33,12 @@ Do **not** use this skill for:
 ## Steps
 
 1. **Confirm it is a design doc.** This skill authors forward-looking design proposals placed in `docs/design/`. If the request is really about documenting existing architecture or writing a how-to, stop and use the appropriate approach instead.
-2. **Gather context from code.** Read the relevant source before writing. Trace the components the design touches across `radius-core/` (product logic), `adapters/canvas/` and `adapters/shared/` (Copilot wiring), and `plugins/radius/` (skills + canvas extension packaging). Identify entry points, key types, ports, and existing patterns. Never design from assumptions — verify against the code.
+2. **Gather context from code.** Read the relevant source before writing. Trace the components the design touches across `packages/core/` (product logic), `packages/adapter-canvas/` and `packages/adapter-shared/` (Copilot wiring), and `plugins/radius/` (skills + canvas extension packaging). Identify entry points, key types, ports, and existing patterns. Never design from assumptions — verify against the code.
 3. **Create the file.** Copy [`docs/design/template.md`](../../../docs/design/template.md) to `docs/design/YYYY-MM-short-name.md`, using the current year and month plus a short descriptive name (for example, `2026-07-control-plane-state-ghcr.md`). Put supporting assets in a directory of the same name without `.md`.
 4. **Fill out every section.** Do not omit sections. If a section does not apply, write `N/A` and briefly explain why. Pay particular attention to:
    - **Objectives** — explicit goals and non-goals.
    - **Detailed design** — give each option its own section with advantages, disadvantages, and a clearly chosen **Proposed option** with reasoning.
-   - **Implementation details** — map the work onto the affected components (`radius-core`, `adapters/canvas`, `adapters/shared`, `plugins/radius`, build/packaging); delete the subsections that do not apply.
+   - **Implementation details** — map the work onto the affected components (`packages/core`, `packages/adapter-canvas`, `packages/adapter-shared`, `plugins/radius`, build/packaging); delete the subsections that do not apply.
    - **Security**, **Test plan**, and **Open questions** — do not skip these.
 5. **Ground every reference in code.** Link to real files, symbols, commands, and flags. Never invent a path, type, or behavior. Put alternatives you are unsure about in **Open questions** or **Alternatives considered**.
 6. **Add diagrams where they help.** Use a fenced ```mermaid``` block for the architecture diagram so it renders on GitHub. Keep diagrams true to the code — a correct simple diagram beats an elaborate wrong one.

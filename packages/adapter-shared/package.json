@@ -10,7 +10,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*"

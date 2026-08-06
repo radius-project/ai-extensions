@@ -17,12 +17,12 @@ graph TD
         Ext["plugins/radius/extension.mjs<br/>(built bundle)"]
     end
 
-    subgraph Adapters["adapters/"]
+    subgraph Adapters["packages/adapter-*"]
         Canvas["canvas<br/>(canvas adapter)"]
         Shared["shared<br/>(rad CLI, utils)"]
     end
 
-    Core["radius-core<br/>(UI-agnostic logic + ports)"]
+    Core["packages/core<br/>(UI-agnostic logic + ports)"]
 
     Agent -->|invokes| Skills
     Panel -->|renders| Ext
@@ -36,12 +36,12 @@ graph TD
 
 ```mermaid
 graph LR
-    subgraph core["radius-core"]
+    subgraph core["packages/core"]
         API["src/index.ts<br/>(public API)"]
         Port["Port<br/>(interface)"]
     end
 
-    subgraph canvas["adapters/canvas"]
+    subgraph canvas["packages/adapter-canvas"]
         Impl["Adapter<br/>(port implementation)"]
     end
 
@@ -56,7 +56,7 @@ sequenceDiagram
     participant User
     participant Panel as Canvas Panel<br/>(ui.mjs)
     participant Server as Canvas Server<br/>(server.mjs)
-    participant Core as radius-core<br/>(port)
+    participant Core as packages/core<br/>(port)
     participant Ext as External<br/>(gh / ghcr / rad)
 
     User->>Panel: Interact (open graph, deploy)
@@ -74,9 +74,9 @@ sequenceDiagram
 ```mermaid
 graph TD
     subgraph Source["Source (tracked)"]
-        CoreTS["radius-core/src/*.ts"]
-        CanvasSrc["adapters/canvas/src/*.mjs"]
-        Build["adapters/canvas/build.mjs<br/>(esbuild)"]
+        CoreTS["packages/core/src/*.ts"]
+        CanvasSrc["packages/adapter-canvas/src/*.ts"]
+        Build["packages/adapter-canvas/build.mjs<br/>(esbuild)"]
     end
 
     subgraph Output["Generated"]
@@ -107,7 +107,7 @@ stateDiagram-v2
 ### Keep It Readable
 
 - **Max ~15 nodes** per diagram. Split complex systems into multiple diagrams.
-- Use **subgraphs** to group related components (for example, `radius-core` vs. `adapters/canvas` vs. `plugins/radius`).
+- Use **subgraphs** to group related components (for example, `packages/core` vs. `packages/adapter-canvas` vs. `plugins/radius`).
 - Use **short labels** on arrows — one or two words.
 - Prefer **top-down** (`TD`) for hierarchical relationships and **left-right** (`LR`) for data flows.
 

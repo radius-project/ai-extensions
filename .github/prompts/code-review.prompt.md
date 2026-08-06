@@ -1,6 +1,6 @@
 ---
 mode: agent
-description: "Review a pull request in the ai-extensions repo for bugs, security issues, idiomatic TypeScript/ESM, and repo-specific conventions (radius-core vs canvas adapter, generated extension.mjs, workflow-YAML generators, Changesets)."
+description: "Review a pull request in the ai-extensions repo for bugs, security issues, idiomatic TypeScript/ESM, and repo-specific conventions (core vs canvas adapter, generated extension.mjs, workflow-YAML generators, Changesets)."
 ---
 
 # Review a Pull Request
@@ -10,8 +10,8 @@ in the `ai-extensions` repository and produce actionable, well-structured feedba
 is given, review the current branch's diff against its base.
 
 This repo is a pnpm-workspace monorepo: UI-agnostic product logic lives in
-`radius-core` (TypeScript) and the Copilot-canvas SDK wiring + webview host lives
-in `adapters/canvas` (ESM `.mjs`). The canvas adapter is bundled by esbuild into a
+`packages/core` (TypeScript) and the Copilot-canvas SDK wiring + webview host lives
+in `packages/adapter-canvas` (TypeScript/ESM). The canvas adapter is bundled by esbuild into a
 single generated artifact, `plugins/radius/extension.mjs`.
 
 **Error handling:**
@@ -30,9 +30,9 @@ single generated artifact, `plugins/radius/extension.mjs`.
 ## Before Starting a Review
 
 1. Use the active pull request context (`gh pr view`, `gh api`) to understand the PR's purpose and scope.
-2. Read [README.md](../../README.md) and [radius-core/README.md](../../radius-core/README.md) for the architecture and core/adapter boundary.
+2. Read [README.md](../../README.md) and [packages/core/README.md](../../packages/core/README.md) for the architecture and core/adapter boundary.
 3. Check for related issues referenced in the PR description and any prior review discussion.
-4. Note which packages are touched (`radius-core`, `adapters/canvas`) and whether the change is user-facing.
+4. Note which packages are touched (`packages/core`, `packages/adapter-canvas`) and whether the change is user-facing.
 
 ## Step 1: Analyze the Changes
 
@@ -72,10 +72,10 @@ non-idiomatic usage; avoid purely complimentary comments or unnecessary summarie
 
 ### Repo-Specific Criteria
 
-- **Generated artifact**: `plugins/radius/extension.mjs` is produced by `adapters/canvas/build.mjs` — never hand-edited. If adapter/core source changed, confirm the bundle was rebuilt (`pnpm run build`) and is in sync.
-- **Core/adapter boundary**: Keep UI-agnostic logic in `radius-core` and Copilot/webview wiring in `adapters/canvas`. Flag leakage of UI/process concerns into core, or duplicated product logic in the adapter.
-- **Workflow-YAML generators** (`radius-core/src/platforms/*`, `radius-core/src/workflows/*`): Ensure `secrets.*` vs `vars.*` references match where the values are actually set, prefer OIDC/workload-identity (`azure wi`, `aws irsa`) over static credentials, and guard against unknown providers (`getPlatform` may return `undefined`).
-- **Changesets**: A user-facing change to `radius-core` or `adapters/canvas` should include a changeset under `.changeset/`.
+- **Generated artifact**: `plugins/radius/extension.mjs` is produced by `packages/adapter-canvas/build.mjs` — never hand-edited. If adapter/core source changed, confirm the bundle was rebuilt (`pnpm run build`) and is in sync.
+- **Core/adapter boundary**: Keep UI-agnostic logic in `packages/core` and Copilot/webview wiring in `packages/adapter-canvas`. Flag leakage of UI/process concerns into core, or duplicated product logic in the adapter.
+- **Workflow-YAML generators** (`packages/core/src/platforms/*`, `packages/core/src/workflows/*`): Ensure `secrets.*` vs `vars.*` references match where the values are actually set, prefer OIDC/workload-identity (`azure wi`, `aws irsa`) over static credentials, and guard against unknown providers (`getPlatform` may return `undefined`).
+- **Changesets**: A user-facing change to `packages/core` or `packages/adapter-canvas` should include a changeset under `.changeset/`.
 - **Typecheck**: Confirm `pnpm run typecheck` (core + canvas) passes for the change.
 
 ### Unit Test Review Criteria
@@ -101,7 +101,7 @@ never reported as an error. To prevent this:
 - **Never type a line number from memory.** Find the exact line by searching the file for a unique substring on it:
 
   ```bash
-  grep -n 'function radiusRenderGraph' adapters/canvas/src/client.mjs
+  grep -n 'function radiusRenderGraph' packages/adapter-canvas/src/client.ts
   ```
 
 - Record the **anchor** (the unique snippet you grepped for) next to each comment; the anchor — not the integer — is the source of truth.

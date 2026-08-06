@@ -2,11 +2,7 @@ import eslint from "@eslint/js";
 import babelParser from "@babel/eslint-parser";
 import globals from "globals";
 
-const sourceFiles = [
-  "eslint.config.js",
-  "radius-core/**/*.ts",
-  "adapters/**/*.{ts,mjs}"
-];
+const sourceFiles = ["eslint.config.js", "packages/**/*.{ts,mjs}"];
 const restrictedCoreImports = [
   {
     selector:
@@ -19,7 +15,8 @@ const restrictedCoreImports = [
     message: "Core must not dynamically import HTTP implementations."
   },
   {
-    selector: "ImportExpression[source.value=/adapters/]",
+    selector:
+      "ImportExpression[source.value=/(?:^|\\/)adapter-(?:canvas|shared)(?:\\/|$)/]",
     message: "Core must not dynamically import adapter implementations."
   }
 ];
@@ -70,13 +67,13 @@ export default [
     }
   },
   {
-    files: ["adapters/**/*.mjs"],
+    files: ["packages/**/*.mjs"],
     rules: {
       "no-inner-declarations": "off"
     }
   },
   {
-    files: ["radius-core/src/**/*.ts"],
+    files: ["packages/core/src/**/*.ts"],
     rules: {
       "no-restricted-imports": [
         "error",
@@ -96,10 +93,14 @@ export default [
           patterns: [
             {
               group: [
-                "adapters",
-                "adapters/**",
-                "**/adapters",
-                "**/adapters/**"
+                "packages/adapter-*",
+                "packages/adapter-*/**",
+                "**/packages/adapter-*",
+                "**/packages/adapter-*/**",
+                "adapter-*",
+                "adapter-*/**",
+                "**/adapter-*",
+                "**/adapter-*/**"
               ],
               message: "Core must not depend on adapter implementations."
             },
@@ -118,10 +119,10 @@ export default [
     }
   },
   {
-    files: ["radius-core/src/**/*.ts"],
+    files: ["packages/core/src/**/*.ts"],
     ignores: [
-      "radius-core/src/**/*_test.ts",
-      "radius-core/src/**/*.live_test.ts"
+      "packages/core/src/**/*_test.ts",
+      "packages/core/src/**/*.live_test.ts"
     ],
     rules: {
       "no-restricted-globals": [

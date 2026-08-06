@@ -5,10 +5,10 @@ versioned and changelogged with [Changesets](https://github.com/changesets/chang
 
 ## Packages & naming convention
 
-| Package directory | npm name                 | Notes                                  |
-| ----------------- | ------------------------ | -------------------------------------- |
-| `radius-core/`    | `@radius-project/core`   | UI-agnostic product core.              |
-| `adapters/canvas/`| `@radius-project/canvas` | Copilot canvas adapter (builds bundle).|
+| Package directory          | npm name                 | Notes                                   |
+|----------------------------|--------------------------|-----------------------------------------|
+| `packages/core/`           | `@radius-project/core`   | UI-agnostic product core.               |
+| `packages/adapter-canvas/` | `@radius-project/canvas` | Copilot canvas adapter (builds bundle). |
 
 - All packages live under the **`@radius-project`** org scope to match the
   GitHub organization.
@@ -56,8 +56,8 @@ package:
 
    ```bash
    pnpm release          # runs the workspace build
-   git tag "@radius-project/core@$(node -p "require('./radius-core/package.json').version")"
-   git tag "@radius-project/canvas@$(node -p "require('./adapters/canvas/package.json').version")"
+   git tag "@radius-project/core@$(node -p 'require("./packages/core/package.json").version')"
+   git tag "@radius-project/canvas@$(node -p 'require("./packages/adapter-canvas/package.json").version')"
    git push --follow-tags
    ```
 
@@ -66,11 +66,11 @@ package:
 
 ## Why Changesets (vs. changie / git-cliff)
 
-| Tool           | Model                                   | Fit for this repo |
-| -------------- | --------------------------------------- | ----------------- |
-| **Changesets** | Developer-authored change fragments; JS/pnpm-native. Bumps per-package versions, rewrites `workspace:*` ranges, writes per-package changelogs, and can publish. | **Chosen.** Purpose-built for pnpm/TS monorepos with independently versioned packages. |
-| changie        | Developer-authored fragments (YAML/TOML), language-agnostic. | Similar dev-managed model, but not workspace-aware — it won't bump versions or rewrite internal dependency ranges, so we'd hand-roll that. |
-| git-cliff      | Automated changelog from [Conventional Commits](https://www.conventionalcommits.org/); no per-change files. | Great for single packages, but it generates changelog text only — it does not decide per-package version bumps or update workspace deps, and quality depends entirely on commit hygiene. |
+| Tool           | Model                                                                                                                                                           | Fit for this repo                                                                                                                                                                        |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Changesets** | Developer-authored change fragments; JS/pnpm-native. Bumps per-package versions, rewrites `workspace:*` ranges, writes per-package changelogs, and can publish. | **Chosen.** Purpose-built for pnpm/TS monorepos with independently versioned packages.                                                                                                   |
+| changie        | Developer-authored fragments (YAML/TOML), language-agnostic.                                                                                                    | Similar dev-managed model, but not workspace-aware — it won't bump versions or rewrite internal dependency ranges, so we'd hand-roll that.                                               |
+| git-cliff      | Automated changelog from [Conventional Commits](https://www.conventionalcommits.org/); no per-change files.                                                     | Great for single packages, but it generates changelog text only — it does not decide per-package version bumps or update workspace deps, and quality depends entirely on commit hygiene. |
 
 Changesets gives us the same **developer-curated** changelog quality as changie
 while also handling the **monorepo versioning mechanics** (per-package bumps +
