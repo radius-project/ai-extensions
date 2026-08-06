@@ -23,6 +23,16 @@ describe("fillTemplate", () => {
 
     expect(fillTemplate(input, {})).toBe(input);
   });
+
+  it("leaves ${{ ... }} expressions untouched even without inner whitespace", () => {
+    expect(fillTemplate("run: echo ${{github.sha}}", {})).toBe(
+      "run: echo ${{github.sha}}"
+    );
+  });
+
+  it("does not replace an UPPER_SNAKE token inside a ${{ ... }} expression", () => {
+    expect(fillTemplate("v=${{ENV}}", { ENV: "prod" })).toBe("v=${{ENV}}");
+  });
 });
 
 describe("findUnresolvedPlaceholders", () => {
@@ -34,6 +44,16 @@ describe("findUnresolvedPlaceholders", () => {
 
   it("returns an empty array when nothing remains", () => {
     expect(findUnresolvedPlaceholders("nothing here ${{ ok }}")).toEqual([]);
+  });
+
+  it("ignores UPPER_SNAKE tokens embedded in ${{ ... }} expressions", () => {
+    expect(findUnresolvedPlaceholders("a=${{ENV}} b=${{ REF }}")).toEqual([]);
+  });
+
+  it("still reports a bare token next to a ${{ ... }} expression", () => {
+    expect(findUnresolvedPlaceholders("${{ github.sha }} {{ENV}}")).toEqual([
+      "{{ENV}}"
+    ]);
   });
 });
 

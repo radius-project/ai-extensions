@@ -1,31 +1,45 @@
 /**
+ * Matches a `{{UPPER_SNAKE}}` template token, but NOT when it is the tail of a
+ * GitHub Actions expression `${{ ... }}`. The negative lookbehind `(?<!\$)`
+ * rejects a preceding `$` so `${{ENV}}` / `${{ github.sha }}` (with or without
+ * inner whitespace) is left untouched, while a bare `{{ENV}}` template token is
+ * still matched. Callers construct their own instance (the `g` flag carries
+ * mutable `lastIndex` state, so a shared object must not be reused concurrently).
+ */
+const PLACEHOLDER_PATTERN_SOURCE = "(?<!\\$)\\{\\{([A-Z_]+)\\}\\}";
+
+/**
  * Fill `{{TOKEN}}` placeholders in a static workflow template.
  *
  * Substitution uses a replacer function (not `String.replaceAll` with a string
  * replacement) so that `$` sequences in the injected values — GitHub Actions
  * expressions like `${{ ... }}`, shell `$VAR`, `$(...)` — are inserted verbatim
  * and never interpreted as replacement patterns (`$&`, `$$`, …). Only known
- * `{{UPPER_SNAKE}}` tokens are replaced; anything else (including GitHub's
- * `${{ ... }}` expressions, which always have a space after `{{`) is left as-is.
+ * `{{UPPER_SNAKE}}` tokens are replaced; anything else is left as-is, including
+ * GitHub `${{ ... }}` expressions, which are excluded by the token pattern
+ * regardless of inner whitespace (see `PLACEHOLDER_PATTERN_SOURCE`).
  */
 export function fillTemplate(
   template: string,
   vars: Record<string, string>
 ): string {
-  return template.replace(/\{\{([A-Z_]+)\}\}/g, (match, key: string) =>
-    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match
+  return template.replace(
+    new RegExp(PLACEHOLDER_PATTERN_SOURCE, "g"),
+    (match, key: string) =>
+      Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match
   );
 }
 
 /**
  * Return the distinct unresolved `{{UPPER_SNAKE}}` tokens still present in
  * `text`, in first-seen order. Uses the same token pattern as `fillTemplate`, so
- * GitHub Actions `${{ ... }}` expressions (which always have a space after
- * `{{`) are never reported.
+ * GitHub `${{ ... }}` expressions are never reported.
  */
 export function findUnresolvedPlaceholders(text: string): string[] {
   const seen = new Set<string>();
-  for (const match of text.matchAll(/\{\{[A-Z_]+\}\}/g)) {
+  for (const match of text.matchAll(
+    new RegExp(PLACEHOLDER_PATTERN_SOURCE, "g")
+  )) {
     seen.add(match[0]);
   }
   return [...seen];
