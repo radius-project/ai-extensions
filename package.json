@@ -1,53 +1,48 @@
 {
   "name": "ai-extensions",
-  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Deploy with Radius - Copilot canvas extension",
-  "packageManager": "pnpm@9.15.9",
+  "packageManager": "pnpm@11.20.0",
   "engines": {
     "node": ">=24 <25",
-    "pnpm": ">=9"
+    "pnpm": ">=11"
   },
   "scripts": {
-    "build": "pnpm --filter @radius-project/canvas run build",
-    "watch": "pnpm --filter @radius-project/canvas run watch",
-    "build:canvas": "pnpm --filter @radius-project/canvas run build",
-    "watch:canvas": "pnpm --filter @radius-project/canvas run watch",
-    "build:install": "pnpm --filter @radius-project/canvas run build:install",
-    "watch:dev": "pnpm --filter @radius-project/canvas run watch:dev",
-    "typecheck": "tsc -p tsconfig.json && pnpm -r run --if-present typecheck",
+    "build": "pnpm --filter @radius-project/adapter-canvas run build",
+    "watch": "pnpm --filter @radius-project/adapter-canvas run watch",
+    "build:canvas": "pnpm --filter @radius-project/adapter-canvas run build",
+    "watch:canvas": "pnpm --filter @radius-project/adapter-canvas run watch",
+    "build:install": "pnpm --filter @radius-project/adapter-canvas run build:install",
+    "watch:dev": "pnpm --filter @radius-project/adapter-canvas run watch:dev",
+    "typecheck": "tsc -p tsconfig.test.json && pnpm -r run --if-present typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
-    "lint": "eslint eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
-    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
-    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.js \"packages/**/*.{ts,mjs}\" vitest.config.ts",
+    "lint": "eslint eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
+    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
+    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
     "lint:md": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml \"**/*.md\"",
     "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",
-    "version": "changeset version",
-    "release": "pnpm run build"
+    "version": "changeset version && node scripts/sync-plugin-version.mjs",
+    "version:sync": "node scripts/sync-plugin-version.mjs",
+    "version:check": "node scripts/sync-plugin-version.mjs --check"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
-    "@babel/core": "^7.29.7",
-    "@babel/eslint-parser": "^7.29.7",
-    "@babel/plugin-syntax-typescript": "^7.29.7",
-    "@eslint/js": "^8.57.1",
+    "@babel/core": "^8.0.1",
+    "@babel/eslint-parser": "^8.0.1",
+    "@babel/plugin-syntax-typescript": "^8.0.3",
+    "@eslint/js": "^10.0.1",
     "@types/node": "catalog:",
     "@vitest/coverage-v8": "catalog:",
-    "eslint": "^8.57.1",
+    "eslint": "^10.8.0",
     "globals": "^17.8.0",
     "markdown-table-formatter": "1.7.0",
-    "markdownlint-cli2": "0.23.1",
+    "markdownlint-cli2": "0.23.2",
     "prettier": "^3.9.6",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  },
-  "pnpm": {
-    "overrides": {
-      "read-yaml-file@<2": "^2.1.0"
-    }
   }
 }

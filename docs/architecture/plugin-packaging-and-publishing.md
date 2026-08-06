@@ -1,97 +1,111 @@
 # Plugin packaging and publishing
 
-How the `radius` Copilot plugin is laid out, how its canvas bundle is built from the workspace source, and how CI publishes a complete, installable artifact to a generated `release` branch without committing the bundle to `main`.
+How the `radius` Copilot plugin is laid out, how its canvas bundle is built from the workspace source, and how CI assembles a complete, installable artifact into `plugins/radius/dist/` and publishes it to a generated `releases/edge` branch without committing build output to `main`.
 
 ```mermaid
 graph TD
     subgraph Workspace["pnpm workspace (source, tracked)"]
         Core["packages/core<br/>@radius-project/core (src/*.ts)"]
-        Shared["packages/adapter-shared<br/>@radius-project/shared"]
-        Canvas["packages/adapter-canvas<br/>@radius-project/canvas (src/*.ts)"]
-        Build["packages/adapter-canvas/build.mjs<br/>(esbuild)"]
+        Shared["packages/adapter-shared<br/>@radius-project/adapter-shared"]
+        Canvas["packages/adapter-canvas<br/>@radius-project/adapter-canvas (src/*.ts)"]
+        Build["packages/adapter-canvas/build.mjs<br/>(esbuild + assemble)"]
     end
 
-    subgraph PluginDir["plugins/radius (the plugin)"]
+    subgraph PluginSrc["plugins/radius (source, tracked)"]
         Manifest["plugin.json<br/>(skills: ./skills/, extensions: .)"]
         Pkg["package.json<br/>(type: module, main: extension.mjs)"]
-        Skills["skills/<br/>(4 SKILL.md trees, tracked)"]
-        Bundle["extension.mjs<br/>(generated, git-ignored)"]
+        Skills["skills/<br/>(6 SKILL.md trees)"]
+    end
+
+    subgraph Dist["plugins/radius/dist (generated, git-ignored)"]
+        DistAll["plugin.json + package.json<br/>README.md + skills/"]
+        Bundle["extension.mjs (+ .map)"]
     end
 
     Core -->|workspace:* import| Canvas
     Shared -->|workspace:* import| Canvas
     Canvas -->|entry point| Build
-    Build -->|emits single file| Bundle
+    Build -->|emits bundle| Bundle
+    Manifest --> DistAll
+    Pkg --> DistAll
+    Skills --> DistAll
 ```
 
 ## Key components
 
 - **`packages/core` (`@radius-project/core`)** — UI-agnostic product logic behind ports. `private`, `main: src/index.ts` (consumed as TypeScript source, not a published package).
-- **`packages/adapter-shared` (`@radius-project/shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
-- **`packages/adapter-canvas` (`@radius-project/canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
-- **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file.
-- **`plugins/radius/`** — the plugin that Copilot installs. Contains the tracked `plugin.json`, `package.json`, `README.md`, and `skills/`, plus the generated `extension.mjs`.
-- **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at the plugin.
-- **`.github/workflows/publish.yml`** — the CI workflow that builds the bundle and publishes the whole plugin to the `release` branch.
+- **`packages/adapter-shared` (`@radius-project/adapter-shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
+- **`packages/adapter-canvas` (`@radius-project/adapter-canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
+- **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file, then assembles `plugins/radius/dist/`.
+- **`plugins/radius/`** — the tracked plugin source: `plugin.json`, `package.json`, `README.md`, and `skills/`.
+- **`plugins/radius/dist/`** — the generated, installable plugin: the tracked source above plus the built `extension.mjs`. Git-ignored on `main`.
+- **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius/dist` on `releases/edge`.
+- **`.github/workflows/publish.yml`** — the CI workflow that builds the plugin and publishes `dist/` to the `releases/edge` branch and `edge` tag.
 
 ## How it works
 
-### 1. The plugin layout: tracked source vs. generated bundle
+### 1. The plugin layout: tracked source vs. generated dist
 
-The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace.yaml` lists `packages/*` and `plugins/*`). All three workspace packages are `private`; the canvas adapter pulls in the core and shared packages through the `workspace:*` protocol rather than from a registry.
+The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace.yaml` lists `packages/*` and `plugins/*`). All workspace packages are `private`; the canvas adapter pulls in the core and shared packages through the `workspace:*` protocol rather than from a registry.
 
-The installable plugin lives at `plugins/radius/`. Everything there is committed **except** the canvas bundle:
+The plugin **source** lives at `plugins/radius/`; the **installable** plugin is assembled into `plugins/radius/dist/`, which is git-ignored:
 
-| Path                           | Origin          | Tracked? | Purpose                                                   |
-|--------------------------------|-----------------|----------|-----------------------------------------------------------|
-| `plugins/radius/plugin.json`   | source          | yes      | Manifest: `skills: "./skills/"`, `extensions: "."`.       |
-| `plugins/radius/package.json`  | source          | yes      | Extension package: `type: module`, `main: extension.mjs`. |
-| `plugins/radius/skills/`       | source          | yes      | The four skill trees (`SKILL.md` plus `references/`).     |
-| `plugins/radius/README.md`     | source          | yes      | Plugin documentation.                                     |
-| `plugins/radius/extension.mjs` | built (esbuild) | no       | The canvas bundle; git-ignored (`.gitignore`).            |
+| Path                                | Origin          | Tracked? | Purpose                                                   |
+|-------------------------------------|-----------------|----------|-----------------------------------------------------------|
+| `plugins/radius/plugin.json`        | source          | yes      | Manifest: `skills: "./skills/"`, `extensions: "."`.       |
+| `plugins/radius/package.json`       | source          | yes      | Extension package: `type: module`, `main: extension.mjs`. |
+| `plugins/radius/skills/`            | source          | yes      | The six skill trees (`SKILL.md` plus `references/`).      |
+| `plugins/radius/README.md`          | source          | yes      | Plugin documentation.                                     |
+| `plugins/radius/dist/`              | built           | no       | The complete installable plugin; git-ignored.             |
+| `plugins/radius/dist/extension.mjs` | built (esbuild) | no       | The canvas bundle, plus its `.map`.                       |
 
-Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and its `package.json` live at the **plugin root** alongside `skills/`, matching the layout of GitHub's own `awesome-copilot` canvas plugins.
+Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and its `package.json` sit at the **plugin root** — which, for an install, is `dist/`. The build copies the tracked source into `dist/` so those relative paths resolve.
 
-### 2. The build: bundling the workspace into one file
+### 2. The build: bundling the workspace, then assembling `dist/`
 
 `pnpm run build` delegates to `packages/adapter-canvas/build.mjs`, which invokes esbuild with:
 
 - **entry** `packages/adapter-canvas/src/extension.ts`,
-- **outfile** `plugins/radius/extension.mjs`,
-- **format** `esm`, and
+- **outfile** `plugins/radius/dist/extension.mjs`,
+- **format** `esm`, **target** derived from `.node-version`,
+- **minify** with `keepNames` and an external source map, and
 - **external** `@github/copilot-sdk` (and `/extension`) — the loader resolves the SDK at runtime, so it is never bundled.
 
-esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencies, producing a single self-contained `extension.mjs` (~450 KB). This file is the reason a build step is unavoidable: the plugin cannot ship hand-authored source because the canvas imports the **TypeScript** core via `workspace:*`, which must be transpiled and inlined first.
+esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencies, producing a single self-contained `extension.mjs` (~700 KB minified). This file is the reason a build step is unavoidable: the plugin cannot ship hand-authored source because the canvas imports the **TypeScript** core via `workspace:*`, which must be transpiled and inlined first.
 
-The bundle is intentionally git-ignored so `main` never carries a large generated file that would cause constant merge conflicts.
+The script then copies `plugin.json`, `package.json`, `README.md`, and `skills/` next to the bundle, so `dist/` is a complete plugin directory. `dist/` is wiped at the start of every run and refreshed after each rebuild in watch mode.
 
-### 3. The publish: assembling a complete artifact on `release`
+The whole of `dist/` is git-ignored so `main` never carries large generated files that would cause constant merge conflicts.
 
-Because the bundle is git-ignored and the marketplace installs only git-tracked files with no build step, the bundle would never ship from `main`. `.github/workflows/publish.yml` closes that gap. It runs on every push to `main` (after a PR merges) and on manual `workflow_dispatch`, with `permissions: contents: write` and a `concurrency` group so only one publish runs at a time.
+### 3. The publish: shipping `dist/` on `releases/edge`
+
+Because `dist/` is git-ignored and the marketplace installs only git-tracked files with no build step, it would never ship from `main`. `.github/workflows/publish.yml` closes that gap. It runs on every push to `main` (after a PR merges) and on manual `workflow_dispatch`, with `permissions: contents: write` and a `concurrency` group so only one publish runs at a time.
 
 ```mermaid
 graph TD
     subgraph CI["publish.yml (on push to main)"]
         Steps["install --frozen-lockfile<br/>typecheck / test / build"]
-        Assemble["git checkout -B release<br/>git add -f extension.mjs<br/>commit + force-push<br/>move latest tag"]
+        Assemble["git checkout -B releases/edge<br/>git add -f plugins/radius/dist<br/>commit + force-push<br/>move edge tag"]
     end
 
-    Main["main branch<br/>(source, no bundle)"] -->|triggers| Steps
-    Steps -->|extension.mjs built| Assemble
+    Main["main branch<br/>(source, no dist)"] -->|triggers| Steps
+    Steps -->|dist/ assembled| Assemble
 
     subgraph Published["Install targets"]
-        Release["release branch<br/>(main tree + 1 bundle commit)"]
-        Latest["latest tag"]
+        Release["releases/edge branch<br/>(main tree + 1 dist commit)"]
+        Edge["edge tag"]
     end
 
     Assemble --> Release
-    Assemble --> Latest
+    Assemble --> Edge
 
-    Release -->|source pins ref: release| MP[".github/plugin/marketplace.json"]
+    Release -->|source pins path + ref| MP[".github/plugin/marketplace.json"]
     MP -->|install from the app| Install["GitHub Copilot app<br/>installs complete plugin"]
 ```
 
-The publish step is deliberately simple: `git checkout -B release` **recreates** the `release` branch at the just-built `main` commit, then a single commit force-adds the otherwise-ignored `extension.mjs`. The result is that `release` equals the entire `main` tree — `plugin.json`, `package.json`, all `skills/`, and `README.md` — **plus** one commit that adds only the bundle. The skills and manifest travel to `release` automatically because the branch is the `main` tree; there is no separate copy step. Finally the `latest` tag is force-moved to the new `release` head.
+The publish step is deliberately simple: `git checkout -B releases/edge` **recreates** the branch at the just-built `main` commit, then a single commit force-adds the otherwise-ignored `plugins/radius/dist/`. Because the branch is the `main` tree plus that commit, the tracked sources travel automatically and only `dist/` is added. Finally the `edge` tag is force-moved to the new head.
+
+Both the branch and the tag are recreated on every push, so neither accumulates history — superseded bundles become unreferenced objects rather than permanent repository growth.
 
 ### 4. The install: resolving the complete artifact
 
@@ -101,12 +115,12 @@ The publish step is deliberately simple: `git checkout -B release` **recreates**
 "source": {
   "source": "github",
   "repo": "radius-project/ai-extensions",
-  "path": "plugins/radius",
-  "ref": "release"
+  "path": "plugins/radius/dist",
+  "ref": "releases/edge"
 }
 ```
 
-The pinned `ref: release` means an install resolves the plugin from the `release` branch regardless of which ref the marketplace was added from, so there is no `@ref` suffix to specify. Because the Radius canvas can only be hosted by the GitHub Copilot app, the plugin is installed from the app: open app settings, click **Plugins**, add the `radius-project/ai-extensions` marketplace, and install the `radius` plugin.
+The pinned `ref: releases/edge` means an install resolves the plugin from that branch regardless of which ref the marketplace was added from, so there is no `@ref` suffix to specify, and `path` points at the assembled `dist/` rather than the source directory. Because the Radius canvas can only be hosted by the GitHub Copilot app, the plugin is installed from the app: open app settings, click **Plugins**, add the `radius-project/ai-extensions` marketplace, and install the `radius` plugin.
 
 The installer copies the git-tracked files at `plugins/radius/` from the `release` ref into the app's installed-plugins directory (for example, `~/.copilot/installed-plugins/radius-plugins/radius/`). Because the bundle is committed on `release`, the installed plugin now contains everything: `plugin.json`, `package.json`, `extension.mjs`, and `skills/`.
 

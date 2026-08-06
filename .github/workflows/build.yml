@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   build:
-    name: Build extension.mjs
+    name: Build plugin dist
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,12 +20,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies
@@ -33,6 +33,9 @@ jobs:
 
       - name: Typecheck
         run: pnpm run typecheck
+
+      - name: Check plugin version consistency
+        run: pnpm run version:check
 
       - name: Lint
         run: pnpm run lint
@@ -46,9 +49,9 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Upload extension.mjs artifact
+      - name: Upload plugin dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: extension-mjs
-          path: plugins/radius/extension.mjs
+          name: plugin-dist
+          path: plugins/radius/dist
           if-no-files-found: error

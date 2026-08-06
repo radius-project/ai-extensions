@@ -2,16 +2,15 @@
 ---
 name: Publish plugin
 
-# Publishes the radius plugin to a generated `release` branch so installs get
-# the whole plugin — skills, plugin.json, and the compiled canvas bundle
-# (plugins/radius/extension.mjs) — without committing the git-ignored bundle to
-# main. On every push to main (i.e. after a PR merges) this rebuilds the bundle
-# from the merged source and force-recreates `release` to equal the main tree
-# plus one commit that force-adds the bundle, then moves the `latest` tag.
-# Because `release` is the main tree plus that single commit, the latest skills
-# and manifest travel with it automatically. The plugin `source` in
-# .github/plugin/marketplace.json pins `ref: release`, so installs resolve the
-# skills and a matching canvas from that branch.
+# Publishes the radius plugin to a generated `releases/edge` branch so installs
+# get the whole plugin — skills, plugin.json, and the compiled canvas bundle —
+# without committing the git-ignored build output to main. On every push to main
+# (i.e. after a PR merges) this rebuilds `plugins/radius/dist` from the merged
+# source and force-recreates `releases/edge` to equal the main tree plus one
+# commit that force-adds that directory, then moves the `edge` tag.
+# .github/plugin/marketplace.json pins `path: plugins/radius/dist` and
+# `ref: releases/edge`, so installs resolve the skills and a matching canvas
+# from that branch.
 #
 # See docs/design/2026-07-canvas-bundle-publishing.md for the full design.
 
@@ -23,14 +22,14 @@ on:
 permissions: {}
 
 # Only one publish may run at a time; a newer run supersedes an in-flight one so
-# `release` always reflects the most recent main it observed.
+# `releases/edge` always reflects the most recent main it observed.
 concurrency:
   group: publish
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Build and publish to release branch
+    name: Build and publish to releases/edge branch
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,12 +40,12 @@ jobs:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies
@@ -61,26 +60,28 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Publish bundle to release branch and latest tag
+      - name: Publish plugin dist to releases/edge branch and edge tag
         env:
-          BUNDLE: plugins/radius/extension.mjs
+          DIST: plugins/radius/dist
         run: |
           set -euo pipefail
 
-          if [ ! -f "$BUNDLE" ]; then
-            echo "::error::Expected build artifact $BUNDLE was not produced."
-            exit 1
-          fi
+          for f in "$DIST/plugin.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Expected build artifact $f was not produced."
+              exit 1
+            fi
+          done
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # release = current main commit + one commit that force-adds the
-          # git-ignored bundle. Recreate the branch each run so it never drifts.
-          git checkout -B release
-          git add -f "$BUNDLE"
-          git commit -m "chore(release): publish canvas bundle for ${GITHUB_SHA}"
+          # releases/edge = current main commit + one commit that force-adds the
+          # git-ignored dist/. Recreate the branch each run so it never drifts.
+          git checkout -B releases/edge
+          git add -f "$DIST"
+          git commit -m "chore(release): publish plugin dist for ${GITHUB_SHA}"
 
-          git push --force origin release
-          git tag -f latest
-          git push --force origin latest
+          git push --force origin releases/edge
+          git tag -f edge
+          git push --force origin edge

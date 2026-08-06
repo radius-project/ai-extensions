@@ -1,5 +1,5 @@
 ---
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Fix the Deploy button being stuck greyed out after a failed deployment. Deploy status is now derived from the deploy workflow run's completion rather than the GitHub deployment-status record, which often stays `pending`/`in_progress` when a run fails (the workflow never posts a terminal `failure` status) — so a failed deploy was mis-reported as pending and kept the button disabled. A completed run now resolves to `success` or `failed` by its conclusion, falling back to the deployment record only when there is no linked run.
