@@ -55,11 +55,46 @@ const outfile = join(distDir, "extension.mjs");
 // complete plugin. node_modules is a pnpm workspace symlink and never shipped.
 const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
 
+// CHANGELOG.md is written by `changeset version`, so it exists in a release
+// build but not in a plain local one.
+const optionalPluginSources = ["CHANGELOG.md"];
+
+// CI stamps an edge version (e.g. 0.1.0-edge-20260807020902) so a published
+// build is distinguishable from a release. A local build leaves the version in
+// the source manifests alone.
+const stampedVersion = process.env.PLUGIN_VERSION?.trim();
+
 function assembleDist() {
   for (const entry of pluginSources) {
-    cpSync(join(pluginDir, entry), join(distDir, entry), { recursive: true });
+    const from = join(pluginDir, entry);
+    if (!existsSync(from)) {
+      throw new Error(`Missing required plugin source: ${from}`);
+    }
+    cpSync(from, join(distDir, entry), { recursive: true });
+  }
+  for (const entry of optionalPluginSources) {
+    const from = join(pluginDir, entry);
+    if (!existsSync(from)) continue;
+    cpSync(from, join(distDir, entry), { recursive: true });
   }
   resolveCatalogSpecifiers(join(distDir, "package.json"));
+  for (const manifest of ["package.json", "plugin.json"]) {
+    stampVersion(join(distDir, manifest));
+  }
+}
+
+function stampVersion(manifestPath) {
+  if (!stampedVersion) return;
+  const raw = readFileSync(manifestPath, "utf8");
+  // Non-global: only the top-level "version" key, never a dependency range.
+  const versionKey = /("version":\s*")[^"]*(")/;
+  if (!versionKey.test(raw)) {
+    throw new Error(`${manifestPath} has no "version" field to stamp.`);
+  }
+  // A no-op replace is fine: `changeset version` may already have written this
+  // exact version into the source manifest.
+  const next = raw.replace(versionKey, `$1${stampedVersion}$2`);
+  if (next !== raw) writeFileSync(manifestPath, next);
 }
 
 // The shipped manifest is read outside this workspace, where pnpm's "catalog:"

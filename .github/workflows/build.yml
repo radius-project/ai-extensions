@@ -2,10 +2,19 @@
 ---
 name: Build
 
+# Runs the full check suite and produces the installable plugin at
+# plugins/radius/dist, uploaded as the `plugin-dist` artifact.
+#
+# Triggered directly for pull requests, and called by publish.yml on pushes to
+# main so a merge builds exactly once instead of duplicating this job.
+
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+    outputs:
+      version:
+        description: Version stamped into the built plugin manifests.
+        value: ${{ jobs.build.outputs.version }}
 
 permissions: {}
 
@@ -15,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.edge_version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +54,35 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
+      # Changesets owns versioning, so ask it what the next release will be
+      # instead of guessing from the manifest: --snapshot stamps the calculated
+      # version (see snapshot.useCalculatedVersion in .changeset/config.json)
+      # with an `edge` prerelease tag, e.g. 0.1.0-edge-20260807014054. That
+      # sorts below the release it precedes and above anything already shipped.
+      # This rewrites plugins/radius/package.json in the CI workspace only —
+      # nothing is committed.
+      - name: Compute edge version
+        id: edge_version
+        run: |
+          set -euo pipefail
+          pnpm exec changeset version --snapshot edge
+          version="$(node -p "require('./plugins/radius/package.json').version")"
+          case "$version" in
+            *-edge-*) ;;
+            *)
+              # No pending changesets, so Changesets had nothing to bump. Label
+              # the current version as an edge build of itself so a publish is
+              # never mistaken for a real release.
+              core="${version%%+*}"
+              version="${core%%-*}-edge-$(date -u +%Y%m%d%H%M%S)"
+              ;;
+          esac
+          echo "Stamping plugin dist as ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Build
+        env:
+          PLUGIN_VERSION: ${{ steps.edge_version.outputs.version }}
         run: pnpm run build
 
       - name: Upload plugin dist artifact
