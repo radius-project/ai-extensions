@@ -4,7 +4,7 @@
     "description": "Radius plugins for the GitHub Copilot app and CLI. Model, visualize, and deploy applications with Radius.",
     "version": "0.1.0"
   },
-  "author": {
+  "owner": {
     "name": "Radius",
     "url": "https://radapp.io"
   },
