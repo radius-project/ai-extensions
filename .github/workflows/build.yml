@@ -2,10 +2,19 @@
 ---
 name: Build
 
+# Runs the full check suite and produces the installable plugin at
+# plugins/radius/dist, uploaded as the `plugin-dist` artifact.
+#
+# Triggered directly for pull requests, and called by publish.yml on pushes to
+# main so a merge builds exactly once instead of duplicating this job.
+
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+    outputs:
+      version:
+        description: Version stamped into the built plugin manifests.
+        value: ${{ jobs.build.outputs.version }}
 
 permissions: {}
 
@@ -15,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.edge_version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +54,30 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
+      # Builds are stamped as a prerelease of the NEXT patch:
+      # released 0.1.0 -> 0.1.1-edge.<run>.g<sha>. That sorts above the release
+      # it follows and below the one it precedes. The run number keeps builds
+      # ordered (shas sort lexically, not by time) and the "g" prefix is
+      # required, not cosmetic — a bare all-digit sha with a leading zero is
+      # invalid semver.
+      - name: Compute edge version
+        id: edge_version
+        run: |
+          set -euo pipefail
+          base="$(node -p "require('./plugins/radius/package.json').version")"
+          core="${base%%+*}"   # drop build metadata, then any prerelease
+          core="${core%%-*}"
+          major="${core%%.*}"
+          rest="${core#*.}"
+          minor="${rest%%.*}"
+          patch="${rest##*.}"
+          version="${major}.${minor}.$((patch + 1))-edge.${GITHUB_RUN_NUMBER}.g$(git rev-parse --short=7 HEAD)"
+          echo "Stamping plugin dist as ${version} (released base ${base})"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Build
+        env:
+          PLUGIN_VERSION: ${{ steps.edge_version.outputs.version }}
         run: pnpm run build
 
       - name: Upload plugin dist artifact

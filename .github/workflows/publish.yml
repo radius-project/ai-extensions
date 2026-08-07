@@ -4,72 +4,72 @@ name: Publish
 
 # Publishes the radius plugin to a generated `releases/edge` branch so installs
 # get the whole plugin — skills, plugin.json, and the compiled canvas bundle —
-# without committing the git-ignored build output to main. On every push to main
-# (i.e. after a PR merges) this rebuilds `plugins/radius/dist` from the merged
-# source and force-recreates `releases/edge` as an ORPHAN branch holding only
-# that directory — one root commit, no source, no history — then moves the
-# `edge` tag onto it.
-# .github/plugin/marketplace.json pins `path: plugins/radius/dist` and
-# `ref: releases/edge`, so installs resolve the skills and a matching canvas
-# from that branch.
+# without committing the git-ignored build output to main.
+#
+# The build itself is not repeated here: this reuses build.yml (same checks,
+# same artifact) and downloads its `plugin-dist` output. On every push to main
+# it force-recreates `releases/edge` as an ORPHAN branch holding only that
+# directory plus the marketplace catalog — one root commit, no source, no
+# history — then moves the `edge` tag onto it.
+#
+# The catalog ships on both refs: on `releases/edge` so
+# `marketplace add OWNER/REPO#releases/edge` is self-consistent, and on main
+# (synced by the last step) because a plain `marketplace add OWNER/REPO` clones
+# the default branch. Both advertise the version that was just published.
 #
 # See docs/design/2026-07-canvas-bundle-publishing.md for the full design.
 
 on:
   push:
     branches: [main]
+    # The last step pushes a marketplace.json-only commit back to main; ignoring
+    # that path stops it from re-triggering this workflow.
+    paths-ignore:
+      - .github/plugin/marketplace.json
   workflow_dispatch:
 
 permissions: {}
 
-# Only one publish may run at a time; a newer run supersedes an in-flight one so
-# `releases/edge` always reflects the most recent main it observed.
-concurrency:
-  group: publish
-  cancel-in-progress: false
-
 jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+
   publish:
-    name: Build and publish to edge
+    name: Publish to edge
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Only one publish may run at a time; a newer run supersedes an in-flight
+    # one so `releases/edge` always reflects the most recent main it observed.
+    concurrency:
+      group: publish
+      cancel-in-progress: false
+    env:
+      DIST: plugins/radius/dist
+      MANIFEST: .github/plugin/marketplace.json
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Download plugin dist
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          node-version-file: .node-version
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Run unit tests
-        run: pnpm run test
-
-      - name: Build
-        run: pnpm run build
+          name: plugin-dist
+          path: plugins/radius/dist
 
       - name: Publish plugin dist to releases/edge branch and edge tag
-        env:
-          DIST: plugins/radius/dist
         run: |
           set -euo pipefail
 
           for f in "$DIST/plugin.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
             if [ ! -f "$f" ]; then
-              echo "::error::Expected build artifact $f was not produced."
+              echo "::error::Expected build artifact $f was missing from plugin-dist."
               exit 1
             fi
           done
@@ -77,20 +77,36 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # releases/edge is an ORPHAN branch carrying only the built plugin: no
-          # source, no history, one root commit per publish. --orphan starts an
-          # unborn branch with the old tree still staged, so clear the index and
-          # re-add just the (git-ignored) artifact. The source commit it was
+          # Ship the catalog alongside the plugin so `marketplace add
+          # OWNER/REPO#releases/edge` advertises exactly what is published here.
+          node -e '
+            const fs = require("node:fs");
+            const file = process.env.MANIFEST;
+            const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+            const plugin = manifest.plugins.find((p) => p.name === "radius");
+            if (!plugin) {
+              console.error("No radius plugin entry in " + file);
+              process.exit(1);
+            }
+            plugin.version = process.env.VERSION;
+            fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+          '
+
+          # releases/edge is an ORPHAN branch carrying only the built plugin and
+          # its catalog: no source, no history, one root commit per publish.
+          # --orphan starts an unborn branch with the old tree still staged, so
+          # clear the index and re-add just what ships. The source commit it was
           # built from is recorded in the commit message.
           git branch -D releases/edge 2>/dev/null || true
           git checkout --orphan releases/edge
           git rm -rfq --cached .
-          git add -f "$DIST"
-          git commit -m "chore(release): publish plugin dist for ${GITHUB_SHA}"
+          git add -f "$DIST" "$MANIFEST"
+          git commit -m "chore(release): publish ${VERSION} for ${GITHUB_SHA}"
 
-          if git ls-tree -r --name-only HEAD | grep -qv "^$DIST/"; then
-            echo "::error::releases/edge must contain only $DIST; found:"
-            git ls-tree -r --name-only HEAD | grep -v "^$DIST/"
+          unexpected="$(git ls-tree -r --name-only HEAD | grep -v "^$DIST/" | grep -vFx "$MANIFEST" || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::releases/edge must contain only $DIST and $MANIFEST; found:"
+            echo "$unexpected"
             exit 1
           fi
 
