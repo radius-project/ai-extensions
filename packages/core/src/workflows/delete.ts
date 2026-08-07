@@ -1,4 +1,4 @@
-import { fillTemplate } from "./template.js";
+import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
 // The ref of radius-project/radius that hosts the delete workflow templates and
@@ -49,7 +49,7 @@ export function generateDeleteWorkflow(
     }
     return body;
   };
-  return {
+  const files: DeleteWorkflowFiles = {
     [DELETE_APP_DISPATCHER_FILE]: fillTemplate(
       pick(DELETE_APP_DISPATCHER_FILE),
       { ENV: env }
@@ -63,6 +63,10 @@ export function generateDeleteWorkflow(
       RADIUS_REF: DELETE_RADIUS_REF
     })
   };
+  for (const [file, body] of Object.entries(files)) {
+    assertNoUnresolvedPlaceholders(body, `delete workflow "${file}"`);
+  }
+  return files;
 }
 
 // Re-export so callers can pin template fetches to the same ref.
