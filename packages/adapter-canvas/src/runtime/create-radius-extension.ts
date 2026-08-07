@@ -134,65 +134,70 @@ export function createRadiusExtension(
 
   // ─── Shutdown (idempotent) ─────────────────────────────────────────────────
   let shuttingDown = false;
-  async function shutdown(signal = "shutdown"): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    try {
-      console.error(
-        `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`
-      );
-    } catch {}
+  let shutdownPromise: Promise<void> | undefined;
 
-    const closes: Array<Promise<void>> = [];
-    for (const [id, entry] of deps.servers) {
+  function shutdown(signal = "shutdown"): Promise<void> {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      shuttingDown = true;
       try {
-        entry.server.closeAllConnections?.();
-        closes.push(
-          new Promise<void>((resolve) => {
-            try {
-              entry.server.close(() => resolve());
-            } catch {
-              resolve();
-            }
-          })
+        console.error(
+          `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`
         );
-      } catch {
-        /* ignore */
-      }
-      deps.servers.delete(id);
-    }
-    await Promise.race([
-      Promise.all(closes),
-      new Promise<void>((resolve) => setTimeout(resolve, 2000))
-    ]);
+      } catch {}
 
-    try {
-      const session = deps.session.tryGet();
-      if (session) {
-        for (const name of [
-          "close",
-          "dispose",
-          "leave",
-          "stop",
-          "disconnect"
-        ]) {
-          const candidate = Reflect.get(session, name);
-          if (typeof candidate === "function") {
-            await Reflect.apply(candidate, session, []);
-            break;
+      const closes: Array<Promise<void>> = [];
+      for (const [id, entry] of deps.servers) {
+        try {
+          entry.server.closeAllConnections?.();
+          closes.push(
+            new Promise<void>((resolve) => {
+              try {
+                entry.server.close(() => resolve());
+              } catch {
+                resolve();
+              }
+            })
+          );
+        } catch {
+          /* ignore */
+        }
+        deps.servers.delete(id);
+      }
+      await Promise.race([
+        Promise.all(closes),
+        new Promise<void>((resolve) => setTimeout(resolve, 2000))
+      ]);
+
+      try {
+        const session = deps.session.tryGet();
+        if (session) {
+          for (const name of [
+            "close",
+            "dispose",
+            "leave",
+            "stop",
+            "disconnect"
+          ]) {
+            const candidate = Reflect.get(session, name);
+            if (typeof candidate === "function") {
+              await Reflect.apply(candidate, session, []);
+              break;
+            }
+          }
+          const asyncDispose = Reflect.get(session, Symbol.asyncDispose);
+          if (typeof asyncDispose === "function") {
+            await Reflect.apply(asyncDispose, session, []);
           }
         }
-        const asyncDispose = Reflect.get(session, Symbol.asyncDispose);
-        if (typeof asyncDispose === "function") {
-          await Reflect.apply(asyncDispose, session, []);
-        }
+      } catch (e) {
+        try {
+          console.error(`[radius] session teardown error: ${errorMessage(e)}`);
+        } catch {}
       }
-    } catch (e) {
-      try {
-        console.error(`[radius] session teardown error: ${errorMessage(e)}`);
-      } catch {}
-    }
-    stopKeepalive();
+      stopKeepalive();
+    })();
+    return shutdownPromise;
   }
 
   // ─── Keepalive ─────────────────────────────────────────────────────────────

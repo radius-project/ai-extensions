@@ -335,6 +335,15 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("returns the same in-flight promise for concurrent shutdown calls", async () => {
+    const { ext } = setup();
+    const promise1 = ext.shutdown("SIGTERM");
+    const promise2 = ext.shutdown("SIGINT");
+    expect(promise1).toBe(promise2);
+    await Promise.all([promise1, promise2]);
+    expect(ext.isShutDown()).toBe(true);
+  });
+
   it("marks isShutDown() true after shutdown and stays true", async () => {
     const { ext } = setup();
     expect(ext.isShutDown()).toBe(false);
