@@ -29,7 +29,7 @@ export const RADIUS_CANVAS_DESCRIPTION =
 // The 7 pages the canvas can render. Kept here (not just in hooks.ts's
 // GRAPH_PAGES) because the canvas's own inputSchema enum is the contract the
 // SDK/agent sees; hooks.ts separately owns which of these are graph-generating.
-export const RADIUS_CANVAS_PAGES = [
+export const RADIUS_CANVAS_PAGES = deepFreeze([
   "credentials",
   "graph",
   "planned",
@@ -37,7 +37,7 @@ export const RADIUS_CANVAS_PAGES = [
   "deployed",
   "environment",
   "deploying"
-] as const;
+] as const);
 
 export type RadiusCanvasPage = (typeof RADIUS_CANVAS_PAGES)[number];
 
