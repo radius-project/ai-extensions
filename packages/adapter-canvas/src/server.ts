@@ -95,7 +95,7 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
+import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
 import {
   radArtifactsDirForSelection,
   radArtifactsFingerprint
