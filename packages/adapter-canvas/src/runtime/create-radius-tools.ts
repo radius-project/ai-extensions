@@ -32,7 +32,7 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
     {
       ...declarationByName.get("radius_configure_oidc")!,
       handler: async (_args: ToolArgs) => {
-        return "Open the radius canvas with page 'environment' to configure OIDC and deploy. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
+        return "Open the radius canvas with page 'credentials' to configure OIDC. Use open_canvas with canvasId 'radius' and input { page: 'credentials' }."
       }
     },
     {
