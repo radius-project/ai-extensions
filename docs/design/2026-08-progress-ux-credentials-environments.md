@@ -65,7 +65,9 @@ The design succeeds when:
 ### Non-goals
 
 - **Percentage complete or ETA.** The number of steps varies by provider, existing resources, warnings, retries, and pull-request fallback. The UI shows observed state rather than estimating a percentage.
-- **Automatic repair.** Copilot may propose a remedy, but this design does not let it run a mutating repair command.
+- **Automatic repair or deployment from chat.** Copilot may propose a remedy, but this design does not let it run a mutating repair or deployment command.
+- **Chat-driven setup control in this release.** The proposed release does not let a chat answer resume a waiting environment operation, satisfy a blocked form question, retry verification, or start deployment.
+- **Per-step chat narration.** The panel carries live state. Chat may add only sparse phase-boundary notes in a later release.
 - **Stopping a command midway.** A future cooperative stop may halt before the next command. This design never kills an active cloud command. Automatic rollback applies only to artifacts that the current setup ledger proves this operation created before the commit point.
 - **AWS environment creation.** The record and UI should not prevent a future AWS implementation, but this work does not add one.
 - **Automatic navigation on completion.** The product offers a link and never moves focus unless the user chooses it.
@@ -415,7 +417,41 @@ Environment setup uses the same classification but stops after proposing a respo
 
 The classification works across providers, but the explanation must use provider-specific terms. Azure may report a missing User Access Administrator role; AWS may report missing `iam:CreateOpenIDConnectProvider`. The prompt should combine one shared classification rule with provider-specific guidance.
 
-**Layer 6 v1 scope:** one user-initiated **Ask Copilot** action after setup fails. It does not send kickoff messages, narrate phase changes in chat, announce success, or answer blocked form questions. A chat reply cannot resume a server operation without new tools and continuation handling.
+**Layer 6 v1 scope:** one user-initiated **Ask Copilot** action after setup fails on an unfamiliar or under-explained error. It proposes a response and cites the record. It does not send kickoff messages, narrate phase changes in chat, announce success, or answer blocked form questions. A chat reply cannot resume a server operation without new tools and continuation handling.
+
+#### Long-term Canvas and chat interaction
+
+**The panel reports facts; chat handles judgment, explanation, and follow-up.**
+
+##### Near term
+
+The proposed release keeps chat narrow. It offers one user-initiated, failure-only, propose-only **Ask Copilot** handoff for unfamiliar failures. Copilot reads a redacted operation record, explains what likely happened, and proposes the next step. It does not execute the fix, resume the operation, or narrate routine progress. Known deterministic guidance stays in the panel, because the server can already present it exactly.
+
+##### Long term
+
+Later, Radius can add a second surface around the same operation record. Chat can offer an optional kickoff orientation, sparse phase-boundary narration, conversational escalation when the operation needs user input, unfamiliar-failure diagnosis, a pull-request handoff, and an optional success close-out. Chat still does not own the workflow. The panel, chip, and timeline remain authoritative for operation state.
+
+##### Interaction walkthrough
+
+1. **Kickoff.** Copilot may open with a short orientation such as: "I am creating `dev` for `org/repo`. I am setting up the cloud credentials and the GitHub environment. The Radius panel shows the live steps. I will flag anything that needs you." This is optional. The panel still starts immediately and remains the primary live surface.
+2. **Phase boundary.** Chat speaks only at major transitions, not for every step. For example: "Identity setup is complete. Next I am configuring the GitHub environment and workflows." The panel continues to show the exact step list and timing.
+3. **Mid-flight question.** If Radius needs a Service Management Reference, the panel should enter **Needs input** and preserve the running record. In the long-term model, chat may explain why that value is needed and ask the user for it. That path requires resume and tool plumbing that can bind the chat reply back to the waiting operation safely. It is future work and is not part of the proposed release.
+4. **Recoverable failure.** Suppose Azure rejects the AKS RBAC Cluster Admin assignment. The panel keeps the exact deterministic warning, the verified object ID, the verified cluster scope, and the exact remediation command that `server.ts` already knows how to build. Chat explains who must act and answers follow-up questions, but it must quote either that exact command or a trusted template filled from verified record fields. It must not paraphrase the command or invent IDs, scopes, subscriptions, or role names.
+5. **Hard failure.** Chat distinguishes bad input from external action. If the user picked the wrong subscription or omitted a required value, chat points to the exact field and tells them to retry from the panel. If the failure comes from missing entitlement, tenant policy, branch protection, quota, or missing infrastructure, chat says who must act, cites the evidence, and stops. It does not blur a user-fixable input problem into an administrator repair, and it does not invent a privileged command when the scope is unverified.
+6. **PR handoff.** If Radius commits workflows to a setup branch and opens a pull request, chat says what happened and what comes next. Merging the pull request installs the workflows. The user then returns to Radius and retries credential verification. Deployment remains a separate, user-initiated action after verification succeeds. This corrects the current failure mode without pretending that a merge completes the whole journey.
+7. **Optional success close-out.** Chat may eventually send a short completion note that names what Radius provisioned and where the user can go next. That remains a notification-policy decision, because the panel, chip, and timeline entry may already make the outcome clear enough.
+
+##### Safety and UX constraints
+
+- The panel never depends on chat delivery. If a chat turn is delayed, dropped, or never sent, the operation still completes and the panel still shows the truth.
+- Chat does not narrate every step. Step-level facts belong in the panel, where they stay ordered, compact, and tied to the record.
+- Injected turns can queue or reorder chat traffic. Any narration must therefore stay sparse and be gated by user choice or explicit product policy.
+- Chat never executes cloud mutations in this design. It explains, proposes, and points back to the panel.
+- Raw logs remain fenced and untrusted. Chat treats them as evidence, not instructions.
+- Every diagnosis cites evidence, states uncertainty, uses placeholders for unverified values, and never proposes a destructive or privilege-expanding command without verified scope.
+- Proposed commands must cite verified record fields. When the server already knows the exact command, chat reuses that deterministic output instead of regenerating it.
+- Canvas and chat input synchronization is future work. The extension needs safe resume plumbing before a chat answer can unblock a waiting operation.
+- Draft PR #244 does not implement this long-term flow. It prototypes the panel, chip, timeline entry, and pull-request-path terminal state, but not kickoff narration, chat-based input handling, or success close-out.
 
 #### Release boundaries
 
@@ -914,16 +950,19 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 
 ## Development plan
 
-| Release unit   | Included work                                                                                           | Prototype status in draft PR #244 |
-|----------------|---------------------------------------------------------------------------------------------------------|-----------------------------------|
-| **Record**     | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes | Built                             |
-| **Panel**      | Inline progress panel, retained failure context, pull-request `action_required`, verification activity  | Built                             |
-| **Return**     | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                     | Built                             |
-| **Background** | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence               | Not built                         |
-| **Control**    | Cooperative stop, partial-state summary, in-panel input questions                                       | Not built                         |
-| **Diagnosis**  | User-initiated Copilot explanation with fenced evidence and propose-only constraints                    | Not built                         |
+| Release unit     | Included work                                                                                                               | Prototype status in draft PR #244 |
+|------------------|-----------------------------------------------------------------------------------------------------------------------------|-----------------------------------|
+| **Record**       | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes                     | Built                             |
+| **Panel**        | Inline progress panel, retained failure context, pull-request `action_required`, verification activity                      | Built                             |
+| **Return**       | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                                         | Built                             |
+| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Not built                         |
+| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Not built                         |
+| **Diagnosis**    | User-initiated **Ask Copilot** explanation for unfamiliar failures with fenced evidence and propose-only constraints        | Not built                         |
+| **Conversation** | Optional kickoff orientation, sparse phase-boundary narration, input escalation, PR handoff, and optional success close-out | Not built                         |
 
 The minimum coherent release is **Record + Panel + Return**. Shipping the panel without the pull-request fix or status chip would replace one confusing experience with another.
+
+**Diagnosis** can follow as a separate failure-only addition. The broader conversation layer stays future work until the extension can resume a waiting operation safely from chat and define a notification policy for kickoff and close-out messages.
 
 ## Findings from draft PR #244
 
@@ -977,13 +1016,14 @@ For this feature, unit tests verify state transitions and the demo verifies that
 
 ## Open questions
 
-1. **Where should interactive setup questions appear?** App Registration selection and Service Management Reference input currently use browser modals. Options are an in-panel **Needs input** state or host dialogs through `session.ui` when the host supports elicitation. Any host-dialog design needs an in-panel fallback.
+1. **Where should interactive setup questions appear?** App Registration selection and Service Management Reference input currently use browser modals. Options are an in-panel **Needs input** state or host dialogs through `session.ui` when the host supports elicitation. Any host-dialog design needs an in-panel fallback, and any future chat-based answer path needs safe resume plumbing back into the operation.
 2. **Are stage-level updates enough?** Usability testing should determine whether long stages need live per-command updates. If users cannot tell whether setup is making progress, build layer 5.
 3. **Should records survive an extension restart?** Persistence would preserve completed outcomes and warnings across sessions, but it requires a storage format, retention period, and privacy policy for subscription and repository identifiers.
 4. **Where can cooperative stop safely pause?** Define the command boundaries, the final partial-state summary, and whether the UI should include cleanup commands.
-5. **Should the timeline announce every final outcome?** Success and `action_required` are useful when the panel is closed. An operation already visible in the panel may not need a duplicate entry.
+5. **Should the product announce any final outcome outside the panel?** Success and `action_required` are useful when the panel is closed. An operation already visible in the panel may not need a duplicate timeline entry, and a future chat close-out may be redundant.
 6. **What should follow setup when no planned graph exists?** The environment page can offer **View planned graph** only when the repository has or can derive an application model.
 7. **Should a redacted record be attachable to a GitHub issue?** Any export must reuse the evidence fencing and omit raw secrets.
+8. **How should future canvas and chat input stay synchronized?** If the panel shows **Needs input** and chat also explains the question, the product needs one owner for the waiting state, one resume token, and one source of truth for whether the answer has been consumed.
 
 ## Alternatives considered
 
@@ -994,6 +1034,9 @@ For this feature, unit tests verify state transitions and the demo verifies that
 - **Show percentage complete or ETA.** Rejected because the number of commands varies by existing resources, retries, warnings, provider, and pull-request fallback.
 - **Put step inventory on `ComputePlatform`.** Rejected until a second provider implements setup. The adapter owns the current steps and returns them as record data.
 - **Ship Copilot diagnosis without the panel.** Rejected because chat cannot show live progress next to the operation.
+- **Use chat as the primary progress surface.** Rejected because chat turns can queue, reorder, or scroll away, while the panel stays attached to the running operation.
+- **Narrate every setup step in chat.** Rejected because turns can queue or reorder, flood the session, and lag behind the panel. The panel already owns ordered step facts.
+- **Let a chat answer resume setup in this release.** Rejected because the extension does not yet have the resume and synchronization plumbing to bind a reply safely to the waiting operation.
 - **Let Copilot execute repairs.** Deferred. The user currently reviews and runs any proposed mutating command.
 - **Terminate an active command when the user clicks Stop.** Rejected because it can leave cloud resources in an unknown state. A future stop waits for the current command to finish.
 - **Focus the canvas automatically on completion.** Rejected because it interrupts whatever the user chose to do while waiting.
