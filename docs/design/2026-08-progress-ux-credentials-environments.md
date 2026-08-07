@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Draft — **prototyped, not production-ready**. The operation record, inline panel, ambient chip, best-effort timeline announcement, and PR-path terminal state are implemented on this branch. The prototype deliberately retains the existing two synchronous POST handlers rather than implementing the proposed `POST /api/operations` background-start API, and cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
+- **Status**: Draft — **prototyped in draft PR #244, not production-ready**. The operation record, inline panel, ambient chip, best-effort timeline announcement, and PR-path terminal state are implemented in the prototype PR (not in this design-only change). The prototype deliberately retains the existing two synchronous POST handlers rather than implementing the proposed `POST /api/operations` background-start API, and cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
 
 ## Overview
 
