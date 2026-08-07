@@ -72,21 +72,21 @@ Keep a connection alongside native variables when the source consumes generic va
 
 ## Container-to-container (service-to-service) addressing
 
-A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host by referencing the peer's read-only **`host`** output property (its in-cluster Service DNS name, published by the containers recipe) over in-cluster DNS:
+A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host by referencing the peer's read-only **`hosts`** output (a map of container name to its in-cluster Service DNS name, published by the containers recipe) over in-cluster DNS:
 
 ```bicep
 env: {
-  // peer resource is `resource orderingApi 'Radius.Compute/containers@...' = { name: 'ordering-api' ... }`
+  // peer resource is `resource orderingApi 'Radius.Compute/containers@...' = { name: 'ordering-api', properties: { containers: { ordering: {...} } } }`
   ORDERING_URL: {
-    value: 'http://${orderingApi.properties.host}:8080'
+    value: 'http://${orderingApi.properties.hosts.ordering}:8080'
   }
 }
 ```
 
-- Host is the peer's `properties.host` output (e.g. `orderingApi.properties.host`), never a literal built from the resource `name`, the `containers`-map key, or `<resource-name>-<containerKey>`. The containers recipe populates `host` with the peer's actual Service FQDN for a single-container resource, so this reference is stable, predictable, and creates a deploy-time dependency edge.
-- `host` is read-only — reference it, never set it, and only a single-container resource emits it; for a multi-container peer use the `hosts` map (below).
+- Host is an entry of the peer's `properties.hosts` output (e.g. `orderingApi.properties.hosts.ordering`, where `ordering` is the peer's key in its own `containers` map), never a literal built from the resource `name` or `<resource-name>-<containerKey>`. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so this reference is stable, predictable, and creates a deploy-time dependency edge.
+- `hosts` is read-only — reference it, never set it. It has one entry per port-exposing container, so a multi-container peer publishes all of its Service hosts.
 - Port is the peer container's published `containerPort` number from source.
-- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, `host` is not emitted — reference the read-only `hosts` map keyed by container name (`<peer>.properties.hosts.<containerKey>`, e.g. `multiServer.properties.hosts.alpha`).
+- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule.
 
 ## Rules
 

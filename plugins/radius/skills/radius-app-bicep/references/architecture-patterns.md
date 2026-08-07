@@ -21,7 +21,7 @@ Distributed services communicating via APIs or messages.
 - **Signals**: multiple app services (e.g. several services in compose); inter-service HTTP/gRPC; messaging clients (Kafka, RabbitMQ).
 - **Typical components**: multiple containers + a message broker + shared databases/caches + ingress.
 - **Radius types**: multiple `Radius.Compute/containers` + `Radius.Messaging/kafka` or `Radius.Messaging/rabbitMQ` + `Radius.Data/*` + `Radius.Compute/routes`.
-- **Runtime check**: model each web, worker, producer, consumer, and init role separately; verify inter-service names, ports, protocols, and startup behavior from source. Address a peer container by referencing its `host` output (`http://${<peer>.properties.host}:<containerPort>`), or `<peer>.properties.hosts.<containerKey>` for a multi-container peer — see service-to-service addressing in [connection-conventions.md](connection-conventions.md).
+- **Runtime check**: model each web, worker, producer, consumer, and init role separately; verify inter-service names, ports, protocols, and startup behavior from source. Address a peer container by referencing an entry of its `hosts` output (`http://${<peer>.properties.hosts.<containerKey>}:<containerPort>`) — see service-to-service addressing in [connection-conventions.md](connection-conventions.md).
 
 ### Data Pipeline
 

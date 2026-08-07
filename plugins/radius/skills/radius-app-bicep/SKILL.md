@@ -242,19 +242,18 @@ Rules:
 
 ## Service-to-service addressing
 
-When one container calls another `Radius.Compute/containers` resource in the same application (inter-service HTTP/gRPC in a microservices app), address the peer by referencing its read-only **`host`** output property — the peer's in-cluster Service DNS name, published by the containers recipe — never a hand-composed Service name:
+When one container calls another `Radius.Compute/containers` resource in the same application (inter-service HTTP/gRPC in a microservices app), address the peer by referencing its read-only **`hosts`** output — a map of container name to that container's in-cluster Service DNS name, published by the containers recipe — never a hand-composed Service name:
 
 ```text
-http://${<peerSymbolicName>.properties.host}:<containerPort>
+http://${<peerSymbolicName>.properties.hosts.<containerKey>}:<containerPort>
 ```
 
 Rules:
 
-- Reference `<peer>.properties.host`, NOT the `containers`-map key, the resource `name`, or a literal `<resource-name>-<containerKey>` string. The containers recipe populates `host` with the peer's actual Service FQDN, so the reference is the stable, predictable host and it also creates a deploy-time dependency edge. (`identityApi.properties.host` → `'http://${identityApi.properties.host}:8080'`, never a hardcoded `http://identity-api:8080` or `http://identity-api-identity:8080`.)
-- `host` is a read-only output — reference it, never set it. It exists only for a **single-container** resource (unambiguous Service); for a multi-container peer use the `hosts` map (see below). Compose the full URL in a bicep string interpolation and assign it to the consuming `env.value`.
+- Reference `<peer>.properties.hosts.<containerKey>`, NOT the resource `name` or a literal `<resource-name>-<containerKey>` string. `<containerKey>` is the peer's key in its own `containers` map. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so the reference is the stable, predictable host and it also creates a deploy-time dependency edge. (`identityApi.properties.hosts.identity` → `'http://${identityApi.properties.hosts.identity}:8080'`, never a hardcoded `http://identity-api:8080` or `http://identity-api-identity:8080`.)
+- `hosts` is a read-only output — reference it, never set it. It has one entry per port-exposing container, so a multi-container peer publishes all of its Service hosts. Compose the full URL in a bicep string interpolation and assign it to the consuming `env.value`.
 - `<containerPort>` is the peer container's published port number from source, not the `ports`-map key.
 - Put the composed URL/host into the exact inter-service variable, config field, or CLI flag the calling source consumes (e.g. a `*_URL`/`*Url` env var, a config-file host, or .NET service discovery `services__<peer-resource-name>__http__0`). Derive the variable name, scheme (`http`/`https`/`grpc`), and any path from source — only the host portion follows this rule.
-- When the peer resource declares **more than one** container with ports, `host` is not emitted (ambiguous). Reference the read-only **`hosts`** map instead, keyed by container name: `<peer>.properties.hosts.<containerKey>` (e.g. `'http://${multiServer.properties.hosts.alpha}:8080'`). The recipe populates `hosts` with every port-exposing container's Service FQDN.
 - This addressing is required only for container-to-container calls. Backing services (databases, caches, brokers) use their resource `host`/endpoint outputs per [connection-conventions.md](references/connection-conventions.md).
 
 ## Secrets
