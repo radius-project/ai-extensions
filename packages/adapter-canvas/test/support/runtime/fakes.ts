@@ -1,6 +1,5 @@
-// Shared test fakes for the runtime factory test suites (canvas.test.ts,
-// tools.test.ts, extension.test.ts). NOT a test file itself (no *.test.ts
-// suffix) — vitest's `src/**/*.test.ts` include glob skips it.
+// Shared test fakes for the runtime factory unit suites. This file lives outside
+// src/ so test infrastructure cannot be counted as production coverage.
 //
 // Every fake here is in-memory only: no port is bound, no CLI is spawned, no
 // network call is made, and no real filesystem is mutated. Pure, already
@@ -17,27 +16,27 @@ import {
   validateDeployPayload,
   validateDeployAttempt,
   summarizeDeployStatus
-} from "../../deploy-tools.js";
+} from "../../../src/deploy-tools.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
   setSourceRefResources,
   updateSourceRefs
-} from "../../source-refs.js";
+} from "../../../src/source-refs.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
-} from "../../publish-targets.js";
-import { renderPrDiffMarkdown } from "../../pr-diff-markdown.js";
-import { createSessionHolder } from "../session.js";
-import type { SessionPort } from "../session.js";
+} from "../../../src/publish-targets.js";
+import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
+import { createSessionHolder } from "../../../src/runtime/session.js";
+import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
   WorkspaceContext
-} from "../dependencies.js";
-import type { CanvasServerEntry } from "../../server.js";
-import type { CanvasGraphResource } from "../../shared.js";
+} from "../../../src/runtime/dependencies.js";
+import type { CanvasServerEntry } from "../../../src/server.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 
 export interface FakeServer {
   close: Mock;

@@ -3,7 +3,7 @@ import { bootstrapRadiusExtension } from "./bootstrap.js";
 import {
   createFakeDependencies,
   createFakeSession
-} from "./test-support/fakes.js";
+} from "../../test/support/runtime/fakes.js";
 
 describe("RU-20: production bootstrap", () => {
   it("joins exactly once with the factory declaration and attaches the result", async () => {

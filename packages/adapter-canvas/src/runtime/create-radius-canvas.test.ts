@@ -3,7 +3,7 @@ import { createRadiusCanvas } from "./create-radius-canvas.js";
 import {
   createFakeDependencies,
   createFakeSession
-} from "./test-support/fakes.js";
+} from "../../test/support/runtime/fakes.js";
 
 interface CanvasContext {
   extensionId: string;

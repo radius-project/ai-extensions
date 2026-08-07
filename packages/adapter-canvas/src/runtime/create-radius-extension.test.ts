@@ -8,7 +8,7 @@ import {
 import {
   createFakeDependencies,
   createFakeSession
-} from "./test-support/fakes.js";
+} from "../../test/support/runtime/fakes.js";
 
 // RU-20: the composition factory never calls joinSession — only the
 // production thin entry (src/extension.ts) does, exactly once. The real

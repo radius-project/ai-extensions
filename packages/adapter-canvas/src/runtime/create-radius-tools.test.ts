@@ -3,7 +3,7 @@ import { createRadiusTools } from "./create-radius-tools.js";
 import {
   createFakeDependencies,
   createFakeSession
-} from "./test-support/fakes.js";
+} from "../../test/support/runtime/fakes.js";
 
 function findTool(
   tools: ReturnType<typeof createRadiusTools>,
