@@ -202,7 +202,11 @@ ensureRadBinary({
 // gracefully via radiusExtension.shutdown() — closing every canvas server and
 // leaving the session so the host can release the tool names before any
 // replacement process registers them.
+let gracefulShutdownStarted = false;
+
 async function gracefulShutdown(signal: string): Promise<void> {
+  if (gracefulShutdownStarted) return;
+  gracefulShutdownStarted = true;
   await radiusExtension.shutdown(signal);
   // Give async close callbacks a tick, then exit cleanly.
   setTimeout(() => process.exit(0), 50);
