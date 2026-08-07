@@ -2,27 +2,27 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Draft — **prototyped in draft PR #244, not production-ready**. The operation record, inline panel, ambient chip, best-effort timeline announcement, and PR-path terminal state are implemented in the prototype PR (not in this design-only change). The prototype deliberately retains the existing two synchronous POST handlers rather than implementing the proposed `POST /api/operations` background-start API, and cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
+- **Status**: Draft. **Prototype status lives in draft PR #244 and is not production-ready.** That prototype contains the operation record, inline panel, ambient chip, best-effort timeline announcement, and pull-request-path terminal state. It deliberately keeps the existing two synchronous POST handlers instead of the proposed `POST /api/operations` background-start API, and cooperative stop remains modeled but unwired. See [Findings from draft PR #244](#findings-from-draft-pr-244).
 
 ## Overview
 
 Creating a Radius environment takes roughly one to eight minutes. During that time Radius may create or reuse an Entra App Registration, verify its owner, apply Radius provenance tags, assign Azure roles, publish a GHCR state package, create a GitHub environment and its settings, commit GitHub Actions workflows, and verify the new credentials.
 
-Before this PR, the canvas covers the page with a modal for the whole operation. The modal shows a spinner and one line of text that changes only three times. A user cannot see which identity Radius created, which role it is assigning, whether GitHub workflows were committed, or where a failure occurred. Demo feedback captured the problem: **the wait cursor should do more than spin.**
+Today, the canvas covers the page with a modal for the whole operation. The modal shows a spinner and one line of text that changes only three times. A user cannot see which identity Radius created, which role it is assigning, whether GitHub workflows were committed, or where a failure occurred. Demo feedback captured the problem: **the wait cursor should do more than spin.**
 
-The server already produces useful messages such as **Creating App Registration**, **Assigning Contributor**, and **Federated credential created**. Before this PR, the page receives those messages only after each request finishes and uses them mainly to show warnings. The information exists, but the user cannot see it while the work is running.
+The server already produces useful messages such as **Creating App Registration**, **Assigning Contributor**, and **Federated credential created**. Today, the page receives those messages only after each request finishes and uses them mainly to show warnings. The information exists, but the user cannot see it while the work is running.
 
-This PR replaces the modal with an inline progress panel and records setup in an `OperationRecord`. The panel shows major stages, elapsed time, completed steps, warnings, and final outcomes. A small chip shows the same operation from every canvas page, and a best-effort session timeline entry announces completion.
+The design replaces the modal with an inline progress panel and records setup in an `OperationRecord`. The panel shows major stages, elapsed time, completed steps, warnings, and final outcomes. A small chip shows the same operation from every canvas page, and a best-effort session timeline entry announces completion.
 
 Environment creation is usually one step in a larger task: _plan the app → create an environment → deploy_. Once the page stops blocking navigation, the user can leave while setup runs and forget to return. The operation record therefore includes the repository, branch, and next page needed to continue the task.
 
 Today, environment creation is tied to the page that started it. The page sends `/api/azure-auto-setup`, waits for that request to finish, then sends `/api/create-environment` and waits again. A full-screen modal prevents the user from navigating elsewhere during those requests. Separately, every canvas page calls the local `/api/ping` endpoint every five seconds. Each request updates `lastWebviewActivityAt`; every two minutes, the extension checks that timestamp and calls `session.metadata.snapshot()` when the page was recently active. That host RPC call resets the host's idle timer and keeps the extension process alive.
 
-This PR changes two parts of that arrangement. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The PR therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
+The design changes two parts of that arrangement, and draft PR #244 prototypes both. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The prototype therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
 
 The proposed background-start API would make the final change. The server would accept one request, return `202 Accepted` with an operation ID, and continue setup after the request has ended. The user could then close the canvas entirely, which would stop `/api/ping` and remove recent page activity from the keepalive decision. At that point `setupInFlight()` becomes the only reason the two-minute timer continues calling `session.metadata.snapshot()`, so it is what prevents the host from stopping the extension halfway through setup.
 
-The branch contains a working prototype of the operation record, inline panel, status chip, completion entry, and pull-request outcome. It does not yet implement detached background execution, cooperative stop, live updates for every individual cloud action, or Copilot diagnosis. [Implementation findings](#implementation-findings) records what building and testing the prototype changed.
+Prototype status in draft PR #244: the operation record, inline panel, status chip, completion entry, and pull-request outcome are working there. Detached background execution, cooperative stop, live updates for every individual cloud action, and Copilot diagnosis are still future work. [Findings from draft PR #244](#findings-from-draft-pr-244) records what building and testing the prototype changed.
 
 ## Terms and definitions
 
@@ -31,7 +31,7 @@ The branch contains a working prototype of the operation record, inline panel, s
 | **Auto-setup**           | The `/api/azure-auto-setup` request. It creates or reuses the Azure deploy identity and assigns the Azure roles needed by GitHub Actions.                                                                        |
 | **Environment creation** | The `/api/create-environment` request. It creates the GHCR state package, GitHub environment, secrets, variables, and workflow files.                                                                            |
 | **Verify run**           | The `radius-verify-credentials.yml` GitHub Actions run that signs in with the new federated credentials and confirms they work.                                                                                  |
-| **Operation**            | One attempt to prepare credentials and create an environment. In this PR, auto-setup and environment creation share one operation ID.                                                                            |
+| **Operation**            | One attempt to prepare credentials and create an environment. In the current prototype, auto-setup and environment creation share one operation ID.                                                              |
 | **Operation record**     | The in-memory record for one operation: target repo and environment, stages, steps, safe cloud identifiers, warnings, final outcome, and any next action. Raw command output is kept separate from display text. |
 | **Stage**                | One major phase: `authorize_identity`, `configure_environment`, or `verify`. A stage may be omitted when it does not apply.                                                                                      |
 | **Step**                 | One named action within a stage, such as creating an App Registration or committing a workflow.                                                                                                                  |
@@ -90,23 +90,23 @@ The repository already has a deploy identity, so the developer supplies its clie
 
 #### User story 3 — A failure partway through setup
 
-The developer lacks permission to grant AKS RBAC Cluster Admin. Before this PR, Radius places a warning in the final response and shows it after setup, separate from the role-assignment step. The new record keeps the warning with that step, explains that deployment may fail at **Verify AKS Access**, preserves the exact remediation command, and keeps any later verification failure from undoing the committed workflows or GHCR package.
+The developer lacks permission to grant AKS RBAC Cluster Admin. Today, Radius places a warning in the final response and shows it after setup, separate from the role-assignment step. The design keeps that warning with the role-assignment step, explains that deployment may fail at **Verify AKS Access**, preserves the exact remediation command, and keeps any later verification failure from undoing the committed workflows or GHCR package.
 
 #### User story 4 — The workflows land on a pull request
 
-The developer lacks push access to the repository's `main` branch, so Radius commits the workflows to a setup branch and tries to open a pull request. **Before this PR, this path contains a live bug.** The server returns `pullRequestUrl` and deliberately skips credential verification because the new workflow is not yet available from the default branch. The client now treats that PR branch handoff as the commit point, stops before starting the verification poll, preserves the completed setup steps, and shows the pull request as the next action. If Radius committed the setup branch but could not open the pull request automatically, the operation still reaches `action_required` and the panel tells the developer which branch to merge into the default branch. Merging installs the workflows; it does not automatically start credential verification or deployment. The developer returns to Radius to retry verification, then starts deployment after verification succeeds. The presence or absence of a PR URL no longer determines the state, and later verification failures keep the committed workflows and GHCR package instead of rewinding the setup.
+The developer lacks push access to the repository's `main` branch, so Radius commits the workflows to a setup branch and tries to open a pull request. Today, this path contains a live bug. The design treats the pull-request branch handoff as the commit point, stops before starting the verification poll, preserves the completed setup steps, and shows the pull request as the next action. Prototype status in draft PR #244: the server returns `pullRequestUrl`, deliberately skips credential verification because the new workflow is not yet available from the default branch, and no longer lets the presence or absence of a PR URL determine the final state. If Radius committed the setup branch but could not open the pull request automatically, the operation still reaches `action_required` and the panel tells the developer which branch to merge into the default branch. Merging installs the workflows; it does not automatically start credential verification or deployment. The developer returns to Radius to retry verification, then starts deployment after verification succeeds. Later verification failures keep the committed workflows and GHCR package instead of rewinding the setup.
 
 #### User story 5 — The user leaves the environment page
 
 The developer opened the canvas to plan an application, discovered they needed an environment, and started setup. They then open another canvas page. The status chip must continue showing that setup is active and link back to the environment panel. When setup finishes, the terminal panel must offer **View planned graph** for the same repository and branch.
 
-If the user closes the canvas but keeps the Copilot session open, the prototype also attempts to write a completion entry to the session timeline. Detached setup that continues after the browser request ends remains future work; this PR does not yet support closing the page during an interactive setup prompt.
+If the user closes the canvas but keeps the Copilot session open, the prototype in draft PR #244 also attempts to write a completion entry to the session timeline. Detached setup that continues after the browser request ends remains future work; the prototype does not yet support closing the page during an interactive setup prompt.
 
 ## User experience
 
 The panel keeps the existing form and changes what appears after the user clicks **Create Environment**.
 
-The PR removes `env-creating-modal` and renders an inline panel on the environments page. The panel shows a named stage, elapsed time, a collapsible step list, and distinct glyphs for pending, running, successful, warning, skipped, and failed work.
+The design replaces `env-creating-modal` with an inline panel on the environments page. Prototype status in draft PR #244: the panel already shows a named stage, elapsed time, a collapsible step list, and distinct glyphs for pending, running, successful, warning, skipped, and failed work.
 
 **Sample input:** the user completes the existing Create Environment form on the environment page and clicks **Create Environment**. The form fields are unchanged by this design — profile, environment name, target repository, branch, resource group, AKS cluster, and namespace (`packages/adapter-canvas/src/pages.ts:3098-3122`). The only interaction change is what happens next.
 
@@ -192,59 +192,40 @@ The graph page already implements the visual pattern this feature needs, and it 
 
 That is a progress bar that is mostly guessing, driven by parsing display copy. **Take the visual vocabulary; leave the elapsed-time percentage and the string parsing behind.** The events this design emits are structured and typed, which is the entire point of defining a record contract.
 
-### Prior art: how comparable products handle long-running work
+### Prior art: documented patterns for long-running work
 
-The Radius canvas shares a basic shape with Cursor, Windsurf, and Claude Code: a persistent surface where a user can watch an agent work. The comparison below uses primary documentation where available. Product details change quickly, so the design takes the common patterns rather than copying one product's current layout.
+The products below publish enough detail to ground a few specific Radius decisions. This section stays close to what their docs actually say.
 
-#### Cursor keeps the editor usable while the agent works
+#### Cursor keeps work moving
 
-Cursor does not show percentage complete, an elapsed timer, or a live checklist in the local agent panel. Instead, it keeps the editor usable and lets the user queue or interrupt work.
+[Cursor Agent overview](https://cursor.com/docs/agent/overview) and [Agent mode](https://cursor.com/help/ai-features/agent) document queued follow-up messages, immediate send with Cmd+Enter, drag reordering, the Stop button, diff-view updates, checkpoints, and the fact that the agent keeps reading files, making edits, or running commands while it waits for the user's answer. [Auto-review](https://cursor.com/blog/agent-autonomy-auto-review) says about 7% of chats in that mode lead to at least one user interruption. [Cloud Agent capabilities](https://cursor.com/docs/cloud-agent/capabilities) caps CI auto-fix at 10 follow-ups. [Cloud-agent lessons](https://cursor.com/blog/cloud-agent-lessons) describes unattended cloud agents that can sit for hours before a person checks back.
 
-- **The panel is never blocked, and work can be queued into a running agent.** Enter queues a message that executes when the agent is ready, Cmd+Enter injects immediately, and queued messages can be drag-reordered. [verified — `cursor.com/docs/agent/overview`]
-- **Stop is always available.** "Click the Stop button to stop Agent mid-task. This lets you redirect or start a different approach." [verified — `cursor.com/help/ai-features/agent`]
-- **The artifact is the progress display.** "Watch edits appear in the diff view as they happen." [verified — `cursor.com/help/ai-features/agent`]
-- **Checkpoints make the wait low-stakes.** Cursor auto-snapshots before significant changes; any checkpoint can be previewed and restored. Reversibility substitutes for certainty. [verified — `cursor.com/docs/agent/overview`]
-- **Asking the user a question does not stop the work.** "While waiting for your response, the agent continues reading files, making edits, or running commands." [verified — `cursor.com/docs/agent/overview`]
-- **Blocking prompts are a cost to minimize.** Only ~7% of chats hit even one user interruption, and the auto-review classifier prefers having the agent try another approach over prompting. [verified — `cursor.com/blog/agent-autonomy-auto-review`]
-- **Failure retries are capped, not infinite.** Cloud agents auto-fix CI failures up to a hard cap of 10 follow-ups, stopping early if a human pushes a commit. [verified — `cursor.com/docs/cloud-agent/capabilities`]
-- **Tool calls render inline as they happen.** Whether rows are collapsed by default, expandable to raw output, or carry running/done/failed glyphs is **[unconfirmed]** — the docs demonstrate this with video embeds rather than text.
+#### Devin Desktop's Cascade uses a live checklist
 
-Cursor also names our exact failure mode: "Locally, you know when an agent has stopped and is waiting for permission, but **in the cloud, it could sit there for hours before you go back and check on it.**" [verified — `cursor.com/blog/cloud-agent-lessons`]
-
-#### Windsurf uses a live checklist
-
-Cascade "will create a **Todo list within the conversation** to track progress on complex tasks", the user can ask it to revise that list mid-run, and a **separate background planning agent continuously refines the long-term plan** while the main model executes. [verified — `docs.devin.ai/desktop/cascade`] It also supports queued messages and caps tool calls per prompt with an explicit "continue" affordance.
+[Devin Desktop's Cascade overview](https://docs.devin.ai/desktop/cascade) says Cascade creates a Todo list inside the conversation for complex tasks, lets the user ask for changes to that list, runs a specialized planning agent in the background, queues messages while work is in progress, and stops after 20 tool calls per prompt unless the user presses Continue.
 
 #### Claude Code groups activity by state
 
-For the "many long operations, tell me which need me" problem, Claude Code's Agent View is the most complete published model. [verified — `code.claude.com/docs/en/agent-view`]
-
-- Sessions are **grouped by state: Needs input / Working / Completed / Failed / Stopped**, with per-row icons.
-- Each row carries a **generated one-line summary of what is happening right now**, refreshed roughly every 15 seconds while working.
-- Each row shows **session age**, freezing at total run duration on completion.
-- A **footer count badge** ("← 2 agents", "← 2 done") surfaces pending work from inside an unrelated session, refreshing roughly every 10 seconds.
-- **Notifications fire when a session starts needing input, finishes, or fails.**
+[Claude Code's Agent View](https://code.claude.com/docs/en/agent-view) shows Ready for review, Needs input, Working, and Completed groups. The same page says each row carries a generated one-line summary, working-row text refreshes from session output at most every 15 seconds, each row shows session age, the footer count refreshes about every 10 seconds, and notifications fire when a background session needs input, finishes, or fails. The grouped view uses one Completed bucket, while the state table on the page distinguishes completed, failed, and stopped terminal states.
 
 #### The infrastructure-console tier
 
-Our operation is also literally a cloud provisioning job, so the consoles that do this for a living are directly relevant.
+Our operation is also a cloud provisioning job, so the consoles that handle those jobs are useful precedents.
 
-| Product                       | Pattern                                                                             | Relevance                                              |
-|-------------------------------|-------------------------------------------------------------------------------------|--------------------------------------------------------|
-| GitHub Actions run view       | Job → step tree, per-step duration, live-tailing collapsible logs                   | Our verify stage _is_ an Actions run; mirror it        |
-| Vercel / Netlify deploy       | Named build stages with durations, streaming log, status chip, navigate away freely | Model for the stage list plus detail log               |
-| Azure Portal deployment blade | Per-resource operation list with status and timestamp; a page, not a modal          | Model for "which identity, which role, which scope"    |
-| AWS CloudFormation events     | Append-only event stream: resource, status, status reason                           | Failure reason attaches to the _resource_, not the job |
-| VS Code long operations       | Notification with progress and cancel, plus "Show output"; never blocks the editor  | The desktop convention our canvas lives inside         |
+| Product                                                                                                                                                                                                                                                                                                                                                 | Documented pattern                                                                                                               | Radius takeaway                                                                                                                             |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| [GitHub Actions visualization graph](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-the-visualization-graph), [workflow run logs](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-workflow-run-logs), and [job execution time](https://docs.github.com/en/actions/how-tos/monitor-workflows/view-job-execution-time) | Workflow runs show job status in the graph; job pages expose step logs and step duration; job summaries show job execution time. | Credential verification already lives in Actions, so the panel should reuse that mental model and deep-link to the run when detail matters. |
+| [Vercel deployment troubleshooting](https://vercel.com/docs/deployments/troubleshoot-a-build), [Vercel build logs](https://vercel.com/docs/deployments/logs), and [Netlify troubleshooting tips](https://docs.netlify.com/build/configure-builds/troubleshooting-tips/)                                                                                 | Vercel documents deployment summary state plus build logs. Netlify's build troubleshooting starts from the deploy log.           | Radius should keep a short stage summary in the panel and leave deeper logs to an explicit detail view or external link.                    |
+| [Azure Resource Manager deployment history](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/deployment-history)                                                                                                                                                                                                                | Azure documents deployment history, specific deployment details, deployed resources, errors, and correlation IDs.                | Radius should preserve cloud identifiers and correlation handles so failure details stay tied to the real operation.                        |
+| [AWS CloudFormation stack events](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/view-stack-events.html)                                                                                                                                                                                                                                | CloudFormation events list the resource, status, and status reason, and the console refreshes as new events arrive.              | Radius should attach failure detail to the step or resource that produced it, not bury it in a generic final error.                         |
+| [VS Code `window.withProgress`](https://code.visualstudio.com/api/references/vscode-api#window.withProgress) and [OutputChannel](https://code.visualstudio.com/api/references/vscode-api#OutputChannel)                                                                                                                                                 | VS Code gives extensions cancellable progress plus a separate output surface for detailed text.                                  | Radius should separate compact progress from raw evidence and make the detailed channel opt-in.                                             |
 
-#### What this converges on
+#### Radius design conclusions from the prior art
 
-1. **Never a modal.** Not one of these products blocks its surface for a long job. This is the only unanimous finding, and it is the one we violate.
-2. **Agency during the wait beats reporting about the wait.** Cursor's entire strategy is queue-while-running, Stop, progressive artifact, reversible checkpoints — none of which is a progress indicator.
-3. **A mid-flight question should not halt the work.** We stack a second modal at z-index 1001 over the progress modal at 1000 (`pages.ts:2006`, `2022`), which is the opposite.
-4. **The named-step checklist is Windsurf's, not Cursor's**, and it exists there because Cascade runs a dedicated planning agent to maintain it.
-5. **State grouping plus a generated activity line plus age beats a percentage** (Claude Code).
-6. **Percentages are conspicuously absent** across all three agent products. Only the infra-console tier uses them, and only where the work is genuinely enumerable.
+1. Radius should replace the blocking modal with an inline panel and let the user keep moving through the canvas.
+2. Radius should keep questions and failures attached to the operation instead of dismissing the UI and forcing the user to reconstruct what happened.
+3. Radius should show named stages, named cloud actions, and terminal states. It should not invent a percentage for work that is not truly enumerable.
+4. Radius should pair a short status view with drill-down detail and links to the systems that own the underlying logs.
 
 #### How Radius differs
 
@@ -252,16 +233,13 @@ Radius knows its major setup stages in advance because `server.ts` executes them
 
 Code editors can stop between file edits and often restore a checkpoint. Radius may be halfway through creating an identity, role assignment, GHCR package, or workflow commit. It can stop only between those commands and must report the resources that already exist. See [Stop and cancellation](#stop-and-cancellation).
 
-### What expert UX designers would say
+### Radius design conclusions
 
-1. **A spinner is the wrong control past ~10 seconds.** The classic response-time thresholds that Fluent, Material, Primer, and Carbon all inherited say: under 1s no indicator, 1–10s an indeterminate spinner, **over 10s a determinate indicator plus an indication of what is happening**. Provisioning cloud identity is minutes. An indeterminate spinner over a multi-minute job also makes the wait _feel_ longer and drives duplicate clicks.
-2. **A blocking modal is the wrong container for a background job.** It trades a few seconds of "don't touch anything" safety for minutes of trapping the user, and when it fails the modal is dismissed and the context of _where_ it failed is destroyed.
-3. **Narrate in the user's domain.** "Assigning Contributor on `rg-prod`" is meaningful; "Working…" is not. For a security-sensitive operation this is not merely reassurance — the user needs to see which identity was created and which roles were granted.
-4. **Progressive disclosure.** A short summary and a step list for everyone; a collapsible raw log for whoever is debugging.
-5. **Prefer honest signals over invented percentages.** Where the work is enumerable, show it. Where it is not — the Actions verify run — show a current-activity line, elapsed time, a typical duration, and a link to the run.
-6. **Failure is a first-class state, in place.**
-7. **Accessibility.** The active step needs `role="status"` and `aria-live="polite"`; state must not be conveyed by colour alone; honour `prefers-reduced-motion`; manage focus sanely once the modal stops being a focus trap.
-8. **Never leak secrets** into a step log that is rendered, copied, and possibly pasted into an issue.
+1. [Carbon's loading guidance](https://carbondesignsystem.com/components/loading/usage/) says to use a loading indicator when the expected wait exceeds three seconds. Radius setup takes minutes, so a spinner can be the opening signal but not the whole experience. The user needs named stages, elapsed time, and the next action.
+2. Radius should keep the user in the domain of the job. "Assigning Contributor on `rg-prod`" tells the user what changed. "Working…" does not.
+3. Radius should use progressive disclosure. The default view should show the stage, current action, completed history, warnings, and next step. Raw evidence should stay behind an explicit expand or external link.
+4. Radius should prefer honest signals over invented ones. Where the work is enumerable, show the completed steps. Where it is not, show the current activity, elapsed time, and the run or resource that owns the detail.
+5. Radius should leave failure in place, preserve the work that already completed, and keep accessibility and secret redaction in the contract for every rendered field.
 
 ### High-level design
 
@@ -277,7 +255,7 @@ The panel and Copilot read the same operation record independently. Copilot diag
 
 ### Architecture diagram
 
-The first diagram shows what this PR implements. The browser still drives the existing two-request setup sequence. The operation registry records what those requests are doing and gives the panel, status chip, and completion announcement one source of truth.
+The first diagram shows the current prototype in draft PR #244. The browser still drives the existing two-request setup sequence. The operation registry records what those requests are doing and gives the panel, status chip, and completion announcement one source of truth.
 
 ```mermaid
 flowchart LR
@@ -319,7 +297,7 @@ flowchart LR
   PANEL -->|after setup finishes| NEXT
 ```
 
-The operation registry in this PR observes work that still belongs to the browser requests. The proposed background API moves ownership of that work to the server:
+In the prototype in draft PR #244, the operation registry observes work that still belongs to the browser requests. The proposed background API moves ownership of that work to the server:
 
 ```mermaid
 sequenceDiagram
@@ -347,14 +325,14 @@ sequenceDiagram
 
 The six layers build on one operation record. Each layer adds a user-visible capability without replacing the layers below it.
 
-| Layer | What it adds                    | What the user can newly do                                                    | Depends on | Status                    |
-|-------|---------------------------------|-------------------------------------------------------------------------------|------------|---------------------------|
-| **1** | The operation record            | Nothing directly — it gives the existing two-request flow one shared identity | —          | **Prototype built**       |
-| **2** | An inline, non-blocking panel   | Read what is happening; leave the page and come back to it                    | 1          | **Built**                 |
-| **3** | A status chip in the page shell | See a running operation from any page and return to its environment panel     | 1          | **Prototype built**       |
-| **4** | A session-timeline announcement | Learn it finished after leaving the canvas entirely                           | 1          | **Best-effort prototype** |
-| **5** | Live per-step narration         | Watch individual steps resolve instead of coarse stages                       | 1, 2       | Designed, not built       |
-| **6** | Agent diagnosis of a failure    | Ask why it failed and get a proposed fix                                      | 1          | Designed, not built       |
+| Layer | What it adds                    | What the user can newly do                                                    | Depends on | Prototype status in draft PR #244 |
+|-------|---------------------------------|-------------------------------------------------------------------------------|------------|-----------------------------------|
+| **1** | The operation record            | Nothing directly — it gives the existing two-request flow one shared identity | —          | **Built**                         |
+| **2** | An inline, non-blocking panel   | Read what is happening; leave the page and come back to it                    | 1          | **Built**                         |
+| **3** | A status chip in the page shell | See a running operation from any page and return to its environment panel     | 1          | **Built**                         |
+| **4** | A session-timeline announcement | Learn it finished after leaving the canvas entirely                           | 1          | **Best-effort built**             |
+| **5** | Live per-step narration         | Watch individual steps resolve instead of coarse stages                       | 1, 2       | Designed, not built               |
+| **6** | Agent diagnosis of a failure    | Ask why it failed and get a proposed fix                                      | 1          | Designed, not built               |
 
 #### Layer 1: the operation becomes a thing
 
@@ -372,7 +350,7 @@ The server records the target repository, environment, GitHub identity, and clou
 
 The environments page replaces the blocking overlay with an inline panel. It shows the current stage, elapsed time, completed steps, warnings, and failure details. A failure leaves the completed work on screen.
 
-The user can read the progress, reload the page, or visit another canvas page and then return to the same in-memory record. The browser still owns the two setup requests, and App Registration or Service Management Reference questions still require the original page. This PR does not yet implement detached background execution.
+The user can read the progress, reload the page, or visit another canvas page and then return to the same in-memory record. The browser still owns the two setup requests, and App Registration or Service Management Reference questions still require the original page. The prototype does not yet implement detached background execution.
 
 The panel may show only the stage name during a long command. For example, `authorize_identity` can run for more than a minute before the next step appears. Layer 5 addresses that gap if stage-level progress proves too sparse.
 
@@ -511,7 +489,7 @@ The announced state uses a **timeline log entry rather than a conversation turn*
 
 The canvas input schema accepts a page, repository, and branch. The operation record stores the same values for the next-page link.
 
-This PR declares `branch` in `inputSchema`; the open handler already reads it. The terminal panel currently uses a normal Radius URL such as `/?page=planned&repo=contoso/store&branch=feature/cart`.
+The prototype in draft PR #244 declares `branch` in `inputSchema`; the open handler already reads it. The terminal panel currently uses a normal Radius URL such as `/?page=planned&repo=contoso/store&branch=feature/cart`.
 
 Opening `page: "planned"` does not restore a snapshot. It opens the correct repository and branch, then the page reuses or recomputes the planned graph. The copy therefore says **View planned graph**, not **Return to where you left off**.
 
@@ -552,27 +530,27 @@ These are not polish items. Two of them can lose or corrupt a real cloud operati
 
 #### Keep the extension alive during setup
 
-Before this PR, the extension keeps itself alive only when the canvas was recently active or an application deployment is running. Every two minutes, it checks whether the local server handled a canvas request in the last three minutes or `deployInFlight()` reports an active deployment. If either is true, it calls the read-only host method `session.metadata.snapshot()`, which resets the host's idle timer. Environment setup is not checked directly. Without recent canvas activity or an active deployment, the host may stop the extension after roughly ten idle minutes.
+Today, the extension keeps itself alive only when the canvas was recently active or an application deployment is running. Every two minutes, it checks whether the local server handled a canvas request in the last three minutes or `deployInFlight()` reports an active deployment. If either is true, it calls the read-only host method `session.metadata.snapshot()`, which resets the host's idle timer. Environment setup is not checked directly. Without recent canvas activity or an active deployment, the host may stop the extension after roughly ten idle minutes.
 
-Before this PR, environment setup stays protected indirectly because the modal keeps the page open and the page calls `/api/ping` every five seconds. Those pings refresh `lastWebviewActivityAt`, so the two-minute timer continues sending `session.metadata.snapshot()` while setup runs. The reap window is longer than it first appears: after canvas traffic stops, the active-window check can remain true for three minutes, the next keepalive decision can take up to two more minutes, and the host then waits roughly ten minutes of RPC silence. The earliest reap after all page activity stops is therefore about **3 + 2 + 10 ≈ 15 minutes**, not three.
+Today, environment setup stays protected indirectly because the modal keeps the page open and the page calls `/api/ping` every five seconds. Those pings refresh `lastWebviewActivityAt`, so the two-minute timer continues sending `session.metadata.snapshot()` while setup runs. The reap window is longer than it first appears: after canvas traffic stops, the active-window check can remain true for three minutes, the next keepalive decision can take up to two more minutes, and the host then waits roughly ten minutes of RPC silence. The earliest reap after all page activity stops is therefore about **3 + 2 + 10 ≈ 15 minutes**, not three.
 
-**This PR adds a direct setup signal.** `operations.anyRunning()` reports whether a non-stale setup record is live, and `setupInFlight()` exposes that answer to the extension entry point. The keepalive timer now sends `session.metadata.snapshot()` when recent page activity, a deploy, **or setup** is present. The process no longer relies solely on the page's health checks to prove that setup is active.
+**Prototype status in draft PR #244:** `operations.anyRunning()` reports whether a non-stale setup record is live, and `setupInFlight()` exposes that answer to the extension entry point. The keepalive timer now sends `session.metadata.snapshot()` when recent page activity, a deploy, **or setup** is present. The process no longer relies solely on the page's health checks to prove that setup is active.
 
-**The PR does not yet move setup into the background.** The browser still waits for `/api/azure-auto-setup` and `/api/create-environment`, and interactive questions such as App Registration selection still depend on that page. The operation record gives the UI a durable in-process view of the work, but it does not own or schedule the work.
+**The prototype does not yet move setup into the background.** The browser still waits for `/api/azure-auto-setup` and `/api/create-environment`, and interactive questions such as App Registration selection still depend on that page. The operation record gives the UI a durable in-process view of the work, but it does not own or schedule the work.
 
-**The background-start API is the next boundary.** It would return `202 Accepted` immediately and let setup continue independently. The user could then close the canvas, ending `/api/ping` traffic and removing the page-activity reason for host keepalives. `setupInFlight()` would become the remaining signal that keeps `session.metadata.snapshot()` running until setup reaches a terminal state. The signal is useful insurance in this PR and a safety requirement once setup is detached.
+**The background-start API is the next boundary.** It would return `202 Accepted` immediately and let setup continue independently. The user could then close the canvas, ending `/api/ping` traffic and removing the page-activity reason for host keepalives. `setupInFlight()` would become the remaining signal that keeps `session.metadata.snapshot()` running until setup reaches a terminal state. The signal is useful insurance in the prototype and a safety requirement once setup is detached.
 
 #### Give concurrent callers separate operation identities
 
-Before this PR, `/api/verify-status` accepts an `environment` query parameter but reads singleton `deployDispatchedAt` and `verifyRunId` values from the canvas instance. A second setup can overwrite the first setup's verification state.
+Today, `/api/verify-status` accepts an `environment` query parameter but reads singleton `deployDispatchedAt` and `verifyRunId` values from the canvas instance. A second setup can overwrite the first setup's verification state.
 
 The collision is reachable because the agent's `create_environment` tool can call `/api/create-environment` while the user is creating an environment in the page.
 
-This PR gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
+The prototype in draft PR #244 gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
 
 #### Record the target and acting identity before permission checks
 
-Before this PR, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. This PR records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
+Today, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. The prototype in draft PR #244 records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
 
 ### Stop and cancellation
 
@@ -738,7 +716,7 @@ Rules:
 10. **`finish` fires the completion hook once.** A failed timeline call never changes the setup outcome.
 11. **Legacy step markers have defined meanings.** `✅`, `⚠️`, `❌`, `⏭️`, `👉`, and a trailing ellipsis map existing `steps.push` messages into structured states. A source-reading test rejects unmarked non-observation steps.
 
-### Implementation details
+### Prototype details in draft PR #244
 
 #### Core package
 
@@ -910,7 +888,7 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 4. Prefer a trusted remediation template over free-form command generation for anything mutating. The AKS command in `server.ts` is already exact and should be surfaced verbatim rather than regenerated.
 5. Never propose a destructive or privilege-expanding command unless the scope is verified in the record.
 
-**Least privilege is unchanged.** The PR does not request new roles or create a different credential type.
+**Least privilege is unchanged.** The design does not request new roles or create a different credential type.
 
 **Next-page targets are untrusted.** Validate the page against the canvas enum and validate repository and branch values before passing them to a host canvas-open call.
 
@@ -918,7 +896,7 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 
 ## Compatibility
 
-- `/api/azure-auto-setup` and `/api/create-environment` keep their existing response fields, including `steps[]`. The PR adds `operationId` and explicit action-required fields.
+- `/api/azure-auto-setup` and `/api/create-environment` keep their existing response fields, including `steps[]`. The prototype adds `operationId` and explicit action-required fields.
 - `/api/verify-status` keeps its current response shape. Rekeying it by operation ID remains future work.
 - The `create_environment` agent tool keeps its input contract. A conflicting setup now returns `409` instead of racing the UI.
 - No `packages/core` API changes.
@@ -931,25 +909,25 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 - Stage and step timestamps show where setup spent time.
 - Final-outcome counts can distinguish `action_required` from true failures.
 - The completion timeline call is best effort; the prototype records whether the call was accepted, not whether the user acted on it.
-- The PR adds no external telemetry service or log sink.
+- The design adds no external telemetry service or log sink.
 - Comprehension still requires usability testing. A metric cannot prove that a user understands the current action or failure.
 
 ## Development plan
 
-| Release unit   | Included work                                                                                           | Status    |
-|----------------|---------------------------------------------------------------------------------------------------------|-----------|
-| **Record**     | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes | Built     |
-| **Panel**      | Inline progress panel, retained failure context, pull-request `action_required`, verification activity  | Built     |
-| **Return**     | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                     | Built     |
-| **Background** | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence               | Not built |
-| **Control**    | Cooperative stop, partial-state summary, in-panel input questions                                       | Not built |
-| **Diagnosis**  | User-initiated Copilot explanation with fenced evidence and propose-only constraints                    | Not built |
+| Release unit   | Included work                                                                                           | Prototype status in draft PR #244 |
+|----------------|---------------------------------------------------------------------------------------------------------|-----------------------------------|
+| **Record**     | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes | Built                             |
+| **Panel**      | Inline progress panel, retained failure context, pull-request `action_required`, verification activity  | Built                             |
+| **Return**     | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                     | Built                             |
+| **Background** | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence               | Not built                         |
+| **Control**    | Cooperative stop, partial-state summary, in-panel input questions                                       | Not built                         |
+| **Diagnosis**  | User-initiated Copilot explanation with fenced evidence and propose-only constraints                    | Not built                         |
 
 The minimum coherent release is **Record + Panel + Return**. Shipping the panel without the pull-request fix or status chip would replace one confusing experience with another.
 
-## Implementation findings
+## Findings from draft PR #244
 
-Building the prototype exposed several cases where a correct backend outcome produced the wrong user message. The fixes below are part of this branch.
+Building the prototype in draft PR #244 exposed several cases where a correct backend outcome produced the wrong user message. The fixes below belong there, not in this design-only PR.
 
 | Finding                                              | Failure before the fix                                                                                                   | Fix                                                                                                                                             |
 |------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -972,7 +950,7 @@ Building the prototype exposed several cases where a correct backend outcome pro
 
 ### Reuse the existing step messages
 
-The two setup routes contain 57 `steps.push(...)` calls. The branch wraps each array's `push` method and passes the same message to `addLegacyStep`. This keeps the HTTP response and operation record synchronized with one write.
+The two setup routes contain 57 `steps.push(...)` calls. The prototype branch in draft PR #244 wraps each array's `push` method and passes the same message to `addLegacyStep`. This keeps the HTTP response and operation record synchronized with one write.
 
 `addLegacyStep` maps the existing message convention to structured state:
 
