@@ -84,9 +84,9 @@ env: {
 ```
 
 - Host is the peer's `properties.host` output (e.g. `orderingApi.properties.host`), never a literal built from the resource `name`, the `containers`-map key, or `<resource-name>-<containerKey>`. The containers recipe populates `host` with the peer's actual Service FQDN for a single-container resource, so this reference is stable, predictable, and creates a deploy-time dependency edge.
-- `host` is read-only — reference it, never set it, and only a single-container resource emits it.
+- `host` is read-only — reference it, never set it, and only a single-container resource emits it; for a multi-container peer use the `hosts` map (below).
 - Port is the peer container's published `containerPort` number from source.
-- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, `host` is not emitted — use `<peer-resource-name>-<containerKey>` and confirm that Service exists.
+- Set the exact variable name, scheme, and path the calling source consumes; only the host follows this rule. For a peer with more than one container exposing ports, `host` is not emitted — reference the read-only `hosts` map keyed by container name (`<peer>.properties.hosts.<containerKey>`, e.g. `multiServer.properties.hosts.alpha`).
 
 ## Rules
 
