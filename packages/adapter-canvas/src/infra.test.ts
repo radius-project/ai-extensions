@@ -47,6 +47,8 @@ vi.mock("./gh.js", () => ({
       : { content: body, error: null };
   },
   getDefaultBranch: async () => "main",
+  getBranchHeadSha: async (_repo: string, branch: string) =>
+    branch in h.committed ? `sha-${branch}` : "",
   fetchFileFromRepo: async (_repo: string, path: string, branch = "main") => {
     const files = h.committed[branch];
     return files && path in files ? files[path] : null;
@@ -310,5 +312,73 @@ describe("syncRepoWorkflows", () => {
     expect(res.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
     expect(h.commits).toHaveLength(1);
     expect(h.commits[0].path).toBe(".github/workflows/run-rad-commands.yml");
+  });
+
+  it("with `create`, authors a missing workflow on the default branch", async () => {
+    // Repo has the deploy + verify files but is missing the delete workflows.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"],
+        create: true
+      }
+    );
+
+    expect(res.updated.sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    const created = h.commits.map((c) => c.path).sort();
+    expect(created).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    expect(h.commits.every((c) => c.branch === "main")).toBe(true);
+    const expected = await generateDeleteWorkflow("dev");
+    const dispatcher = h.commits.find(
+      (c) => c.path === ".github/workflows/delete-application.yml"
+    );
+    expect(dispatcher?.content).toBe(expected["delete-application.yml"]);
+  });
+
+  it("without `create`, still skips a missing workflow (no authoring)", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"]
+      }
+    );
+
+    expect(res.updated).toEqual([]);
+    expect(h.commits).toEqual([]);
+  });
+
+  it("with `create`, does NOT author onto an unpushed working branch", async () => {
+    // Default branch is fully in sync; the working branch isn't pushed, so its
+    // missing files must not be authored even though `create` is set.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    // No `h.committed.feature` — branch absent on the remote.
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        workingBranch: "feature",
+        create: true
+      }
+    );
+
+    expect(res.updated).toEqual([]);
+    expect(h.commits).toEqual([]);
   });
 });

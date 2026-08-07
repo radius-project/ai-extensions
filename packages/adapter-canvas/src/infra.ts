@@ -27,6 +27,7 @@ import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
   getDefaultBranch,
+  getBranchHeadSha,
   commitFileToRepo
 } from "./gh.js";
 import type { CanvasState } from "./shared.js";
@@ -65,6 +66,11 @@ interface SyncWorkflowOptions {
   log?: (message: string) => void;
   only?: string[];
   workingBranch?: string;
+  // When set, a workflow file that is missing on a branch is authored (created)
+  // rather than skipped — but only on branches that already exist on the remote
+  // (an unpushed working branch is never authored onto). Used by the
+  // pre-dispatch sync so a workflow is always present on the branch it runs from.
+  create?: boolean;
 }
 
 interface WorkflowCandidate {
@@ -386,7 +392,7 @@ export async function generateDeployWorkflow(
  * job is stripped.
  *
  * The templates + the `delete-resource` composite action they reference live in
- * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
+ * radius-project/radius `.github/extension`, so both the fetch and the
  * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
  */
 export async function generateDeleteWorkflow(
@@ -511,11 +517,15 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
  * lets a caller cheaply ensure just the workflow it is about to dispatch is
  * current, instead of syncing every committed workflow file.
  *
- * Only files that already exist on a branch are updated; missing files are left
- * to environment creation to author. Best-effort and non-throwing per file: a
- * protected branch (or any commit failure) is reported via `log` and skipped
- * rather than aborting the pass. Returns `{ updated, branches, skipped }` where
- * `updated` is the de-duplicated set of paths changed on any branch.
+ * By default only files that already exist on a branch are updated; missing
+ * files are left to environment creation to author. When `opts.create` is set
+ * (the pre-dispatch sync), a missing file is instead authored on any branch that
+ * exists on the remote, so the workflow is always present on the branch it will
+ * run from — an unpushed working branch is still skipped. Best-effort and
+ * non-throwing per file: a protected branch (or any commit failure) is reported
+ * via `log` and skipped rather than aborting the pass. Returns
+ * `{ updated, branches, skipped }` where `updated` is the de-duplicated set of
+ * paths changed on any branch.
  */
 export async function syncRepoWorkflows(
   repo: string,
@@ -602,13 +612,49 @@ export async function syncRepoWorkflows(
   }
 
   const updated = new Set<string>();
+  // Cache branch-existence lookups so authoring missing files doesn't re-query
+  // the same branch for every candidate path. A branch that isn't on the remote
+  // (e.g. an unpushed working branch) must never be authored onto.
+  const branchExists = new Map<string, boolean>();
+  const remoteHasBranch = async (branch: string): Promise<boolean> => {
+    if (branchExists.has(branch)) return branchExists.get(branch) as boolean;
+    const exists = !!(await getBranchHeadSha(repo, branch));
+    branchExists.set(branch, exists);
+    return exists;
+  };
+
   for (const branch of branches) {
     for (const [path, candidates] of byPath.entries()) {
       const committed = await fetchFileFromRepo(repo, path, branch);
-      // Only update files the extension previously committed on this branch;
-      // don't author missing ones here (environment creation owns that), and
-      // an unpushed working branch simply reads as "missing" and is skipped.
-      if (committed == null || committed === "") continue;
+      const missing = committed == null || committed === "";
+      if (missing) {
+        // By default don't author missing files here (environment creation owns
+        // that), and an unpushed working branch simply reads as "missing" and is
+        // skipped. When `opts.create` is set, author the file so the workflow is
+        // present on the branch it will run from — but only if the branch exists
+        // on the remote, so we never author onto an unpushed working branch.
+        if (!opts.create) continue;
+        if (!(await remoteHasBranch(branch))) {
+          log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
+          continue;
+        }
+        const choice = candidates[0];
+        const fileName = path.split("/").pop();
+        try {
+          await commitFileToRepo(
+            repo,
+            path,
+            choice.content,
+            branch,
+            `Add ${fileName} from upstream Radius workflow templates`
+          );
+          updated.add(path);
+          log(`created ${path} on "${branch}"`);
+        } catch (e) {
+          log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
+        }
+        continue;
+      }
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;
