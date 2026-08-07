@@ -3,10 +3,9 @@
   "private": true,
   "type": "module",
   "description": "Deploy with Radius - Copilot canvas extension",
-  "packageManager": "pnpm@11.20.0",
+  "packageManager": "pnpm@11.19.0",
   "engines": {
-    "node": ">=24 <25",
-    "pnpm": ">=11"
+    "node": ">=24 <25"
   },
   "scripts": {
     "build": "pnpm --filter @radius-project/adapter-canvas run build",
