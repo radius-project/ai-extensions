@@ -54,25 +54,30 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
-      # Builds are stamped as a prerelease of the NEXT patch:
-      # released 0.1.0 -> 0.1.1-edge.<run>.g<sha>. That sorts above the release
-      # it follows and below the one it precedes. The run number keeps builds
-      # ordered (shas sort lexically, not by time) and the "g" prefix is
-      # required, not cosmetic — a bare all-digit sha with a leading zero is
-      # invalid semver.
+      # Changesets owns versioning, so ask it what the next release will be
+      # instead of guessing from the manifest: --snapshot stamps the calculated
+      # version (see snapshot.useCalculatedVersion in .changeset/config.json)
+      # with an `edge` prerelease tag, e.g. 0.1.0-edge-20260807014054. That
+      # sorts below the release it precedes and above anything already shipped.
+      # This rewrites plugins/radius/package.json in the CI workspace only —
+      # nothing is committed.
       - name: Compute edge version
         id: edge_version
         run: |
           set -euo pipefail
-          base="$(node -p "require('./plugins/radius/package.json').version")"
-          core="${base%%+*}"   # drop build metadata, then any prerelease
-          core="${core%%-*}"
-          major="${core%%.*}"
-          rest="${core#*.}"
-          minor="${rest%%.*}"
-          patch="${rest##*.}"
-          version="${major}.${minor}.$((patch + 1))-edge.${GITHUB_RUN_NUMBER}.g$(git rev-parse --short=7 HEAD)"
-          echo "Stamping plugin dist as ${version} (released base ${base})"
+          pnpm exec changeset version --snapshot edge
+          version="$(node -p "require('./plugins/radius/package.json').version")"
+          case "$version" in
+            *-edge-*) ;;
+            *)
+              # No pending changesets, so Changesets had nothing to bump. Label
+              # the current version as an edge build of itself so a publish is
+              # never mistaken for a real release.
+              core="${version%%+*}"
+              version="${core%%-*}-edge-$(date -u +%Y%m%d%H%M%S)"
+              ;;
+          esac
+          echo "Stamping plugin dist as ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build
