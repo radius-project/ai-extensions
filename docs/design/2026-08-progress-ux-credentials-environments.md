@@ -182,7 +182,7 @@ Five behaviors define the experience:
 2. **Failure renders in place.** The failing step is marked, everything above it stays on screen, and the next action sits next to it. The current `failEnv` handler (`pages.ts:3132-3136`) does the opposite: it hides the modal and writes one string into a status bar.
 3. **Warnings pin to their step.** `showEnvSetupWarnings` (`pages.ts:2336`) currently rakes the whole `steps[]` for `⚠️` lines after the fact. Those lines belong on the step that produced them.
 4. **Another canvas page still shows setup status.** The chip is visible from every page, and the final outcome produces one best-effort timeline entry.
-5. **Nothing ever seizes the user's attention.** The return route is offered, never taken on the user's behalf. See [Journey continuity](#journey-continuity-environment-creation-is-a-subroutine-not-the-journey).
+5. **Nothing ever seizes the user's attention.** The return route is offered, never taken on the user's behalf. See [Journey continuity](#journey-continuity).
 
 ## Design
 
@@ -253,7 +253,7 @@ The design starts by recording the operation correctly, then adds the surfaces t
 4. **Keep the user connected to the task (layers 3 and 4).** Show a small status chip on every canvas page, write a completion entry to the session timeline, and preserve a link to the planned graph for the same repository and branch. These surfaces let the user leave the environment page without losing track of why they started setup.
 5. **Explain failures with Copilot (layer 6).** Give Copilot the same redacted operation record when setup fails. Copilot may explain the failure and propose a remedy, but it does not run a repair command in this version.
 
-The panel and Copilot read the same operation record independently. Copilot diagnosis does not depend on live step streaming, and the panel does not depend on Copilot. The cross-page chip is also part of the usable minimum: once the panel stops blocking navigation, the product must show that setup is still running and provide a route back. See [Journey continuity](#journey-continuity-environment-creation-is-a-subroutine-not-the-journey).
+The panel and Copilot read the same operation record independently. Copilot diagnosis does not depend on live step streaming, and the panel does not depend on Copilot. The cross-page chip is also part of the usable minimum: once the panel stops blocking navigation, the product must show that setup is still running and provide a route back. See [Journey continuity](#journey-continuity).
 
 ### Architecture diagram
 
@@ -466,70 +466,24 @@ The operation must record its next-page target when it starts. Once the user has
 
 Copilot diagnosis needs the operation record, not live streaming. The server can collect steps, safe identifiers, error codes, and fenced evidence during the existing requests and finalize them when a failure occurs. Layer 5 changes when the panel sees each step; it does not change whether layer 6 has enough evidence to explain a failure.
 
-### Journey continuity: environment creation is a subroutine, not the journey
+### Journey continuity
 
-Almost nobody wants an environment for its own sake. They want to deploy an application, and an environment is one required step. The typical sequence is _plan the app → discover there is no environment → create one → deploy_. The operation record therefore includes the repository, branch, and next page needed to continue that task.
+Users create an environment so they can deploy an application. Radius must preserve that larger task when setup takes them away from the planned graph.
 
-Two things follow. The operation must **record where the user came from**, and the product must **make the outcome findable and the way back one click** — for a user who returns to the canvas at all, and, if the host permits it, for a user who does not.
+The operation record stores the originating page, repository, branch, and next-page target. While setup runs, the canvas shows an ambient status chip. When setup finishes, Radius writes one best-effort timeline entry with the outcome and return target. Neither surface changes focus.
 
-#### What the host actually provides
+The user decides when to return. A click reuses the existing Radius panel and opens the recorded page, repository, and branch. Radius never focuses the panel automatically.
 
-The Copilot SDK ships with the CLI and includes TypeScript declarations and a generated RPC schema. Those files define the host calls available to the extension.
+The planned graph link reconstructs context rather than restoring a snapshot. It opens the recorded repository and branch, then loads or recomputes the graph. The copy therefore says **View planned graph**, not **Return to where you left off**.
 
-| Capability                                       | Status                              | Evidence                                                                                                                                                                         |
-|--------------------------------------------------|-------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Host-negotiated capability flags                 | **Verified — SDK type**             | `SessionCapabilities` (`types.d.ts`) declares exactly `ui.elicitation`, `ui.mcpApps`, `ui.canvases`, read via `session.capabilities`                                             |
-| A dedicated notification API                     | **Verified absent**                 | No notification, toast, badge, or alert member exists on `CopilotSession`, `SessionUiApi`, or `CanvasHostContextCapabilities` (which declares only `canvases`)                   |
-| Submit a conversation turn                       | **Verified — SDK type**             | `session.send(prompt \| MessageOptions): Promise<string>` resolves with the response message ID; `sendAndWait` additionally waits for session idle (`session.d.ts:107-133`)      |
-| Write to the session timeline **without** a turn | **Verified — SDK type**             | `session.log(message, { level?: "info" \| "warning" \| "error", ephemeral?: boolean })`; non-ephemeral entries persist to the session event log (`session.d.ts:280-299`)         |
-| Whether a timeline log is **user-visible**       | **Verified — RPC schema**           | The generated schema describes `session.log` as emitting a user-visible session log event                                                                                        |
-| Focus an existing panel                          | **Verified — SDK doc**              | "Re-opening with an existing `instanceId` **is how the host focuses an existing panel**; reload is a renderer-only concern" (`canvas.d.ts:10-11`)                                |
-| `placement` on a canvas open                     | **Verified absent from the type**   | `CanvasOpenRequest` declares only `extensionId`, `canvasId`, `instanceId`, and `input`. The `placement: { focus: true, surface: "side" }` passed by `extension.ts` is undeclared |
-| Schema validation of canvas `input`              | **Verified — permissive**           | `CanvasProviderOpenRequest.input` is `{ [k: string]: unknown }` (`generated/rpc.d.ts`). Undeclared fields are not stripped                                                       |
-| Interactive dialogs from the extension           | **Verified — SDK type, host-gated** | `session.ui.confirm / select / input / elicitation`, guarded by `session.capabilities.ui?.elicitation === true`; each "@throws if the host does not support elicitation"         |
-| Call `session.log` from a setup completion hook  | **Prototype built, best effort**    | The operation terminal hook calls `session.log`; failure does not change the completed operation and is not retried                                                              |
+This design depends on four verified host behaviors:
 
-The host has no dedicated toast or system-notification API. Two session channels are relevant: `session.send` and `session.log`.
+- `session.log` writes a user-visible timeline entry without submitting a conversation turn.
+- Reusing a canvas `instanceId` focuses the existing panel.
+- Canvas input can carry page, repository, and branch.
+- Host dialogs are optional and require a capability check.
 
-**`session.send` submits a message for the agent to process.** A completion notice sent this way may prompt the agent to answer while the user is doing unrelated work. Layer 4 therefore does not use it.
-
-**`session.log` writes a user-visible timeline event without asking the agent to respond.** It accepts a severity level, an external URL, and an informational tip. The prototype uses it once when setup reaches a final outcome. Delivery is best effort and is not retried.
-
-**Reusing a canvas `instanceId` focuses the existing panel.** A return action can therefore open the recorded page, repository, and branch in the existing Radius panel instead of creating another panel.
-
-**`session.ui` provides host dialogs when `session.capabilities.ui?.elicitation` is true.** These dialogs may eventually replace the Service Management Reference and App Registration picker modals. This design does not depend on them and must keep an in-panel fallback.
-
-The chip and panel remain the authoritative status surfaces. The timeline entry improves discoverability, but setup completion does not depend on the host displaying it.
-
-#### The existing deploy precedent is the right policy, already written down
-
-The deploy route in `server.ts` already follows the policy this feature needs:
-
-> While a deployment is actively in progress, an **implicit** landing on the environment / credentials page (a bare `/` load with no `?page=`) is redirected to the live deploying page so the user lands on the in-flight run. An **explicit** navigation — a top-nav click or any URL that carries `?page=` — is always honored, so the user can freely leave the deploying view while a deploy is still being monitored.
-
-That is exactly the discipline this feature needs, and the second half is what stops the return mechanism from becoming a new modal: **the product steers a default, and never overrides an explicit choice.** The work is to extend the same rule to cover a running environment operation rather than to design a new one.
-
-#### Three tiers of notification, escalating only with user consent
-
-| Tier             | Trigger                                                                    | Mechanism                                                                                                              | Steals focus                 | Verified?                                                                                        |
-|------------------|----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------|
-| **1. Ambient**   | An operation is running or has finished unseen                             | A status chip in the canvas top nav and a row in the environments table; implicit landings route to the operation page | No                           | Yes — entirely our own pages                                                                     |
-| **2. Announced** | The operation reaches a terminal state                                     | One non-ephemeral `session.log` entry naming the outcome and the resume target                                         | No — not a turn              | Call verified in the SDK; **user-visibility and background delivery gated on the Phase 0 spike** |
-| **3. Invoked**   | The user clicks the resume affordance, or asks the agent to take them back | `session.rpc.canvas.open` reusing the existing `instanceId` with the recorded resume target                            | Yes — because the user asked | Yes — routing in production, focus per `canvas.d.ts:10-11`                                       |
-
-The announced state uses a **timeline log entry rather than a conversation turn**. A turn asks the agent to respond and may interrupt unrelated work. `session.log` records the outcome without prompting the agent. The chip and panel remain authoritative; the timeline entry makes completion easier to notice.
-
-**Tier 3 is never automatic.** Auto-focusing the canvas on completion would re-create the modal's central sin — seizing the user's attention on the product's schedule — with worse timing, because now it interrupts unrelated work. The user came back on their own terms or they did not come back; the product's job is to make coming back trivial, not mandatory.
-
-#### Address the next page with page, repository, and branch
-
-The canvas input schema accepts a page, repository, and branch. The operation record stores the same values for the next-page link.
-
-The prototype in draft PR #244 declares `branch` in `inputSchema`; the open handler already reads it. The terminal panel currently uses a normal Radius URL such as `/?page=planned&repo=contoso/store&branch=feature/cart`.
-
-Opening `page: "planned"` does not restore a snapshot. It opens the correct repository and branch, then the page reuses or recomputes the planned graph. The copy therefore says **View planned graph**, not **Return to where you left off**.
-
-If the repository or branch is no longer available, the page should show a clear load error rather than silently falling back to another branch.
+If the repository or branch no longer exists, the target page shows a load error rather than choosing another branch.
 
 ### The state model: a branching flow, not a fixed checklist
 
