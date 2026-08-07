@@ -512,17 +512,19 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
             baseResources,
             headResources
           );
-          deps.sourceRefs.setSourceRefResources(
+          const committed = deps.sourceRefs.setSourceRefResources(
             entry,
             "diff",
             diffResources,
             { repo, baseBranch, headBranch },
             sourceRefContext.token
           );
-          const hasChanges = diffResources.some(
-            (r) => r.diffStatus !== "unchanged"
-          );
-          entry.state.diffNoChanges = !hasChanges;
+          if (committed) {
+            const hasChanges = diffResources.some(
+              (r) => r.diffStatus !== "unchanged"
+            );
+            entry.state.diffNoChanges = !hasChanges;
+          }
         } catch (e) {
           if (
             isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)
