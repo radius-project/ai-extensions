@@ -594,6 +594,7 @@ export function graphPage(state: CanvasState = {}): string {
       "Application Graph",
       `
 ${graphHeader("graph")}
+<p class="rad-lede" id="modeled-subtitle" style="margin:0 0 24px;">The modeled application graph shows the high-level architecture of your application as it is designed in code.<span id="modeled-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -607,7 +608,7 @@ ${graphHeader("graph")}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Deploy Application</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Plan Deployment</button>
 </div>
 <div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
 <div id="graph-container-wrapper"></div>
@@ -664,24 +665,24 @@ var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
 })();
 
 // Auto-generate the graph as soon as a branch is chosen, and enable the
-// Deploy Application button (greyed out until a branch is selected).
+// primary button (greyed out until a branch is selected, unless it is the
+// branch-independent "Create Environment" action).
 document.getElementById('graph-branch').addEventListener('change', function() {
     var deployBtn = document.getElementById('deploy-app-btn');
     if (this.value) {
         if (deployBtn) deployBtn.disabled = false;
         generateGraph();
-    } else if (deployBtn) {
+    } else if (deployBtn && deployBtn.dataset.mode !== 'create-env') {
         deployBtn.disabled = true;
     }
 });
 
-// Deploy Application → go to the Deployments page with the app preselected.
+// Primary action → Create Environment or Plan Deployment, depending on setup.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
-    if (this.disabled) return;
-    var appSel = document.getElementById('graph-app');
-    var app = appSel ? (appSel.value || '') : '';
-    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+    radiusModeledPrimaryAction(this);
 });
+
+radiusLoadModeledEnvState(CONTEXT_REPO);
 
 function generateGraph() {
     var repo = CONTEXT_REPO;
@@ -936,6 +937,7 @@ ${graphHeaderClose()}`
     "Application Graph",
     `
 ${graphHeader("graph")}
+<p class="rad-lede" id="modeled-subtitle" style="margin:0 0 24px;">The modeled application graph shows the high-level architecture of your application as it is designed in code.<span id="modeled-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
   <div class="rad-field">
@@ -950,7 +952,7 @@ ${graphHeader("graph")}
       <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch || "main")}</option>
     </select>
   </div>
-  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
 </div>
 <div id="graph-container"></div>
 <div id="graph-refresh-status" class="status error" style="display:none;"></div>
@@ -1019,12 +1021,12 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
 });
 
-// Deploy Application → go to the Deployments page with the app preselected.
+// Primary action → Create Environment or Plan Deployment, depending on setup.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
-    var appSel = document.getElementById('graph-app');
-    var app = appSel ? (appSel.value || '') : '';
-    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+    radiusModeledPrimaryAction(this);
 });
+
+radiusLoadModeledEnvState(CONTEXT_REPO);
 
 var resources = ${resourcesJson};
 var repoUrl = 'https://github.com/' + document.getElementById('graph-repo').value.trim();
@@ -3791,8 +3793,8 @@ function loadApplications() {
             HAS_APPS = apps.length > 0;
             if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; refreshDeployBtn(); return; }
             appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
-            // Pre-select the application passed via ?app= (e.g. from the
-            // "Deploy Application" button on the Application Graph page).
+            // Pre-select the application passed via ?app= (e.g. from a redirect
+            // that resumes an in-flight deployment).
             try {
                 var preApp = new URLSearchParams(window.location.search).get('app');
                 if (preApp) {
