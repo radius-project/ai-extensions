@@ -1123,7 +1123,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim();
     var env = document.getElementById('planned-env').value;
@@ -1226,7 +1226,7 @@ var ENV_PROVIDERS = {};
 radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
 document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
     var env = document.getElementById('planned-env').value;
@@ -3534,6 +3534,17 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
 
 // ============================ Init =============================
 if (document.getElementById('pane-credentials').style.display !== 'none') { loadCredTable(); } else { loadEnvTable(); }
+
+// Deep link: '/?page=environment&new=1' opens the creation form directly
+// (used by the Modeled graph's "Create Environment" call to action) rather
+// than landing on the environments table.
+(function() {
+    var wantsNew = false;
+    try { wantsNew = new URLSearchParams(window.location.search).get('new') === '1'; } catch (e) { /* URLSearchParams unavailable */ }
+    if (!wantsNew) return;
+    switchSubtab('environments');
+    showEnvForm({ name: '' });
+})();
 <\/script>`
   );
 }
@@ -4150,7 +4161,7 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, ha
 deployBtn.addEventListener('click', function() {
     var mode = deployBtn.dataset.mode || 'deploy';
     if (mode === 'create-app') { window.location.href = '/?page=graph'; return; }
-    if (mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    if (mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
     var env = envSelect.value;
     var app = appSelect.value;
     if (!CTX_REPO || !env || !app) return;

@@ -201,7 +201,7 @@ function radiusApplyModeledEnvState(hasEnv) {
 // the Planned graph, depending on the adaptive mode set above.
 function radiusModeledPrimaryAction(btn) {
     if (!btn || btn.disabled) return;
-    if (btn.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    if (btn.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
     var appSel = document.getElementById('graph-app');
     var app = appSel ? (appSel.value || '') : '';
     window.location.href = '/?page=planned' + (app ? '&app=' + encodeURIComponent(app) : '');

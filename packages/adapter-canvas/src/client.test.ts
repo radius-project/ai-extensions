@@ -206,7 +206,7 @@ describe("CLIENT_REPO_BRANCH_JS — Modeled graph adaptive primary action", () =
       act({ dataset: { mode }, disabled: false });
       return location.href;
     }
-    expect(navigate("create-env")).toBe("/?page=environment");
+    expect(navigate("create-env")).toBe("/?page=environment&new=1");
     expect(navigate("plan")).toBe("/?page=planned&app=demo");
   });
 });

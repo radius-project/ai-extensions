@@ -327,6 +327,14 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain("Create Credential Profile");
   });
 
+  it("opens the creation form directly when deep-linked with ?new=1", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    // The "Create Environment" call to action on the graph pages links to
+    // /?page=environment&new=1 and must land on the form, not the table.
+    expect(html).toContain("get('new') === '1'");
+    expect(html).toContain("showEnvForm({ name: '' })");
+  });
+
   it("drives environment creation from a saved credential profile, not inline tenant/sub", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
     expect(html).toContain('id="env-profile-select"');
