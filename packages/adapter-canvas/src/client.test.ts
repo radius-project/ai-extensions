@@ -153,6 +153,64 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
   });
 });
 
+describe("CLIENT_REPO_BRANCH_JS — Modeled graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string; planLabel?: string };
+    textContent: string;
+    disabled: boolean;
+  }
+
+  function runApply(hasEnv: boolean) {
+    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
+    const hint = { textContent: "" };
+    const elements: Record<string, unknown> = {
+      "deploy-app-btn": btn,
+      "modeled-subtitle-hint": hint
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const apply = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyModeledEnvState;`
+    )(document);
+    apply(hasEnv);
+    return { btn, hint };
+  }
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint } = runApply(false);
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("offers Plan Deployment when the repo has an environment", () => {
+    const { btn, hint } = runApply(true);
+    expect(btn.textContent).toBe("Plan Deployment");
+    expect(btn.dataset.mode).toBe("plan");
+    expect(hint.textContent).toContain("Plan Deployment");
+  });
+
+  it("routes the primary button to the environment form or the planned graph", () => {
+    function navigate(mode: string) {
+      const location = { href: "" };
+      const elements: Record<string, unknown> = {
+        "graph-app": { value: "demo" }
+      };
+      const document = { getElementById: (id: string) => elements[id] || null };
+      const act = new Function(
+        "document",
+        "window",
+        `${CLIENT_REPO_BRANCH_JS}; return radiusModeledPrimaryAction;`
+      )(document, { location });
+      act({ dataset: { mode }, disabled: false });
+      return location.href;
+    }
+    expect(navigate("create-env")).toBe("/?page=environment");
+    expect(navigate("plan")).toBe("/?page=planned&app=demo");
+  });
+});
+
 describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () => {
   it("defaults each node's definition file to the committed .radius/app.bicep", () => {
     expect(CLIENT_GRAPH_JS).toContain(

@@ -109,6 +109,11 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                     return;
                 }
                 apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+                // Honor ?app= (e.g. from the Modeled graph's "Plan Deployment").
+                try {
+                    var preApp = new URLSearchParams(window.location.search).get('app');
+                    if (preApp && apps.some(function(a) { return a.name === preApp; })) appSel.value = preApp;
+                } catch (e) { /* URLSearchParams unavailable */ }
             })
             .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
     }
@@ -166,6 +171,50 @@ function radiusApplyPlanEnvState(hasEnv) {
         }
     }
     if (note) note.style.display = hasEnv ? 'none' : '';
+}
+
+// Toggle the Modeled-graph primary button between "Create Environment" (when
+// the repo has no Radius-managed environment) and "Plan Deployment". The
+// subtitle hint under the sub-tabs is updated to match so the next step is
+// always spelled out.
+function radiusApplyModeledEnvState(hasEnv) {
+    var btn = document.getElementById('deploy-app-btn');
+    var hint = document.getElementById('modeled-subtitle-hint');
+    if (btn) {
+        if (hasEnv) {
+            btn.dataset.mode = 'plan';
+            btn.textContent = 'Plan Deployment';
+        } else {
+            btn.dataset.mode = 'create-env';
+            btn.textContent = 'Create Environment';
+            btn.disabled = false;
+        }
+    }
+    if (hint) {
+        hint.textContent = hasEnv ?
+            ' To see how this application would be deployed to one of your existing environments, click "Plan Deployment".' :
+            ' To plan the deployment of this application, you must first create an environment.';
+    }
+}
+
+// Route the Modeled-graph primary button to the environment creation form or to
+// the Planned graph, depending on the adaptive mode set above.
+function radiusModeledPrimaryAction(btn) {
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=planned' + (app ? '&app=' + encodeURIComponent(app) : '');
+}
+
+// Resolve whether the repo has any Radius-managed environment and adapt the
+// Modeled pane accordingly.
+function radiusLoadModeledEnvState(repo) {
+    if (!repo) return;
+    fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
+        .then(function(r) { return r.json(); })
+        .then(function(d) { radiusApplyModeledEnvState(!!(((d && d.environments) || []).length)); })
+        .catch(function() {});
 }
 
 // Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
