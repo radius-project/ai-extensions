@@ -85,9 +85,12 @@ function radiusSetupRepoBranch(repoSelectId, branchSelectIds, defaultRepo, defau
 // Populate the Application / Branch / Environment selectors on the Planned
 // Graph pane. The repository is assumed from the workspace, so it is not a
 // selectable field. Fills the passed envProviders map so the caller can derive
-// the cloud provider from the chosen environment. When defaultBranch is given
-// (loaded state) it is pre-selected; otherwise no branch is pre-selected.
-function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
+// the cloud provider from the chosen environment. When defaultBranch/defaultEnv
+// are given (loaded state) they are pre-selected; otherwise the first available
+// option is left to the browser's default selection. Returns a promise that
+// resolves once all three selectors have settled, so callers can auto-render
+// the planned graph as soon as sensible defaults are in place.
+function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defaultEnv) {
     var appSel = document.getElementById('planned-app');
     var branchSel = document.getElementById('planned-branch');
     var envSel = document.getElementById('planned-env');
@@ -95,9 +98,9 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
         if (appSel) appSel.innerHTML = '<option value="">No repository</option>';
         if (branchSel) branchSel.innerHTML = '<option value="">No repository</option>';
         if (envSel) envSel.innerHTML = '<option value="">No repository</option>';
-        return;
+        return Promise.resolve();
     }
-    if (appSel) {
+    var appPromise = appSel ?
         fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -115,9 +118,9 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                     if (preApp && apps.some(function(a) { return a.name === preApp; })) appSel.value = preApp;
                 } catch (e) { /* URLSearchParams unavailable */ }
             })
-            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
-    }
-    if (branchSel) {
+            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; })
+        : Promise.resolve();
+    var branchPromise = branchSel ?
         fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -131,9 +134,9 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                     branchSel.appendChild(o);
                 });
             })
-            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
-    }
-    if (envSel) {
+            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; })
+        : Promise.resolve();
+    var envPromise = envSel ?
         fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -146,31 +149,76 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
-                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
+                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name;
+                    if (defaultEnv && e.name === defaultEnv) o.selected = true;
+                    envSel.appendChild(o);
                 });
                 radiusApplyPlanEnvState(true);
             })
-            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
-    }
+            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; radiusApplyPlanEnvState(false); })
+        : Promise.resolve();
+    return Promise.all([appPromise, branchPromise, envPromise]);
 }
 
-// Toggle the planned-graph primary button between "Create Environment" (when the
-// repo has no Radius-managed environment) and its normal plan label. When there
-// is no environment the button navigates to the environment page instead of
-// planning, and an explanatory note is shown.
+// Tracks the last-known environment state for the Planned pane so selector
+// change handlers can refresh the subtitle hint (which names the selected
+// application/environment) without re-querying /api/list-environments.
+var RADIUS_PLAN_HAS_ENV = false;
+
+// Toggle the planned-graph primary button between "Create Environment" (when
+// the repo has no Radius-managed environment) and "Deploy Application" (which
+// deploys the selected application/branch to the selected environment). The
+// subtitle hint under the sub-tabs is updated to match, naming the currently
+// selected application and environment so the next step is always spelled out.
 function radiusApplyPlanEnvState(hasEnv) {
+    RADIUS_PLAN_HAS_ENV = !!hasEnv;
     var btn = document.getElementById('plan-btn');
-    var note = document.getElementById('plan-env-note');
+    var hint = document.getElementById('planned-subtitle-hint');
+    var appSel = document.getElementById('planned-app');
+    var envSel = document.getElementById('planned-env');
     if (btn) {
         if (hasEnv) {
-            btn.dataset.mode = 'plan';
-            btn.textContent = btn.dataset.planLabel || 'Plan Deployment';
+            btn.dataset.mode = 'deploy';
+            btn.textContent = 'Deploy Application';
         } else {
             btn.dataset.mode = 'create-env';
             btn.textContent = 'Create Environment';
         }
+        btn.disabled = false;
     }
-    if (note) note.style.display = hasEnv ? 'none' : '';
+    if (hint) {
+        if (hasEnv) {
+            var appName = (appSel && appSel.value) || 'this application';
+            var envName = (envSel && envSel.value) || 'the selected environment';
+            hint.textContent = ' To deploy this application (' + appName + ') to the environment (' + envName + '), click "Deploy Application".';
+        } else {
+            hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
+        }
+    }
+}
+
+// Trigger a deployment of the currently-selected application/branch to the
+// currently-selected environment on the Planned pane, then redirect to the
+// Deployments tab so the user can monitor progress. Mirrors the Deployments
+// pane's own deploy dispatch (see deployLandingView), but does not need to
+// pass an application name since a repo hosts a single Radius application.
+function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
+    if (!btn || btn.disabled) return;
+    var branchSel = document.getElementById('planned-branch');
+    var envSel = document.getElementById('planned-env');
+    var branch = (branchSel && branchSel.value.trim()) || '';
+    var env = envSel ? envSel.value : '';
+    if (!repo || !env) return;
+    var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
+    btn.disabled = true;
+    btn.textContent = 'Starting deployment…';
+    fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: branch, appFile: '.radius/app.bicep' })
+    }).then(function(r) { return r.json().catch(function() { return {}; }); })
+      .then(function() { window.location.href = '/?page=deploying'; })
+      .catch(function() { window.location.href = '/?page=deploying'; });
 }
 
 // Toggle the Modeled-graph primary button between "Create Environment" (when

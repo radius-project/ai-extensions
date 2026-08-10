@@ -1158,6 +1158,10 @@ export function plannedGraphPage(state: CanvasState = {}): string {
   const provider = state?.plannedProvider || state?.deployProvider || "azure";
   const plannedResources = state?.plannedResources || [];
   const graphBranch = state?.plannedBranch || state?.contextBranch || "main";
+  // Default the Environment selector to the one last used for planning/deploying
+  // this repo, so re-opening the tab (or refreshing after a plan) keeps the
+  // same environment selected instead of falling back to the first option.
+  const defaultEnvironment = state?.plannedEnvironment || state?.envName || "";
   // Same provenance rule as graphPage: open local files in the editor canvas
   // when the planned graph was resolved against the local workspace checkout.
   // Prefer the authoritative persisted flag; fall back to repo+branch matching.
@@ -1173,6 +1177,7 @@ export function plannedGraphPage(state: CanvasState = {}): string {
       "Planned Graph",
       `
 ${graphHeader("planned")}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1192,31 +1197,27 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
-<div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
+<div id="plan-status" class="status info">Generating the planned application graph…</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
+var CONTEXT_ENV = '${escapeHtml(defaultEnvironment)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
-document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+function runPlan(isInitial) {
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim();
     var env = document.getElementById('planned-env').value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
-    if (!repo) return;
     var statusEl0 = document.getElementById('plan-status');
-    if (!branch) { if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to plan the deployment.'; statusEl0.className='status info'; } return; }
-    this.textContent = '⏳ Planning...';
-    this.disabled = true;
-    var btn = this;
-    var statusEl = document.getElementById('plan-status');
-    if (statusEl) statusEl.style.display = 'none';
+    if (!repo || !branch) {
+        if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to preview the planned deployment.'; statusEl0.className='status info'; }
+        return;
+    }
+    if (statusEl0) statusEl0.style.display = 'none';
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
@@ -1248,8 +1249,6 @@ document.getElementById('plan-btn').addEventListener('click', function() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
-            btn.textContent = 'Plan Deployment';
-            btn.disabled = false;
             if (d.reload) {
                 var prev = stepsEl.querySelector('.step-active');
                 if (prev) prev.className = 'step-done';
@@ -1261,10 +1260,26 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             } else if (d.error) {
                 clearInterval(pollInterval);
                 container.innerHTML = '';
-                if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; }
+                if (statusEl0) { statusEl0.style.display = ''; statusEl0.textContent = 'Error: ' + d.error; statusEl0.className = 'status error'; }
             }
         })
-        .catch(function() { clearInterval(pollInterval); btn.textContent = 'Plan Deployment'; btn.disabled = false; });
+        .catch(function() { clearInterval(pollInterval); });
+}
+
+// Auto-generate the planned graph as soon as sensible defaults settle, then
+// re-generate it whenever the Application, Branch, or Environment selection
+// changes so the graph always reflects what's currently selected.
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV).then(function() {
+    runPlan(true);
+});
+['planned-app', 'planned-branch', 'planned-env'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', function() { radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV); runPlan(false); });
+});
+
+document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+    radiusDeployPlannedApp(this, CONTEXT_REPO, ENV_PROVIDERS, '${provider}');
 });
 <\/script>
 ${graphHeaderClose()}`
@@ -1276,6 +1291,7 @@ ${graphHeaderClose()}`
     "Planned Graph",
     `
 ${graphHeader("planned")}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1295,39 +1311,44 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
 <div id="graph-container"></div>
 
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
+var CONTEXT_ENV = '${escapeHtml(defaultEnvironment)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV);
 
-document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+// Re-generate the planned graph whenever the Application, Branch, or
+// Environment selection changes, so the graph always reflects what's
+// currently selected without requiring a separate "Re-Plan" click.
+function runPlan() {
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
     var env = document.getElementById('planned-env').value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
-    this.textContent = 'Planning...';
-    this.disabled = true;
-    var btn = this;
-    // Clear existing graph
     var container = document.getElementById('graph-container');
     container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--rad-text-tertiary);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-primary);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
     fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Re-Plan';
-            btn.disabled = false;
             if (d.reload) { window.location.reload(); }
             else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
             else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
         });
+}
+['planned-app', 'planned-branch', 'planned-env'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', function() { radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV); runPlan(); });
+});
+
+document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+    radiusDeployPlannedApp(this, CONTEXT_REPO, ENV_PROVIDERS, '${provider}');
 });
 
 var resources = ${resourcesJson};

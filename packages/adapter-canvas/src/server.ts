@@ -6626,6 +6626,10 @@ function createRequestHandler(instanceId: string) {
         }
         const branch = data.branch || defaultBranchForState(entry.state);
         const provider = data.provider || "azure";
+        // Persist the selected environment so re-opening (or reloading) the
+        // Planned tab re-selects it by default, matching the graph just shown.
+        entry.state.plannedEnvironment =
+          typeof data.environment === "string" ? data.environment : "";
         const sourceRefContext =
           entry ?
             prepareSourceRefResources(entry, "planned", { repo, branch })

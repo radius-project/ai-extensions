@@ -292,9 +292,13 @@ describe("plannedGraphPage", () => {
       contextRepo: "octo/app",
       contextBranch: "main"
     });
-    expect(html).toContain("Plan Deployment");
+    expect(html).toContain("id=\"planned-subtitle\"");
     expect(html).toContain(
-      "radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH)"
+      "The planned application graph previews the infrastructure"
+    );
+    expect(html).toContain(">Loading…</button>");
+    expect(html).toContain(
+      "radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV)"
     );
     for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
   });

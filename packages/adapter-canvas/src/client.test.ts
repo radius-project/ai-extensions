@@ -213,6 +213,127 @@ describe("CLIENT_REPO_BRANCH_JS — Modeled graph adaptive primary action", () =
   });
 });
 
+describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string };
+    textContent: string;
+    disabled: boolean;
+  }
+  interface FakeSelect {
+    value: string;
+  }
+
+  function runApply(
+    hasEnv: boolean,
+    appValue = "web-app",
+    envValue = "prod"
+  ) {
+    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
+    const hint = { textContent: "" };
+    const appSel: FakeSelect = { value: appValue };
+    const envSel: FakeSelect = { value: envValue };
+    const elements: Record<string, unknown> = {
+      "plan-btn": btn,
+      "planned-subtitle-hint": hint,
+      "planned-app": appSel,
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const apply = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyPlanEnvState;`
+    )(document);
+    apply(hasEnv);
+    return { btn, hint };
+  }
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint } = runApply(false);
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("offers Deploy Application and names the app/environment when one exists", () => {
+    const { btn, hint } = runApply(true, "web-app", "prod");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("web-app");
+    expect(hint.textContent).toContain("prod");
+    expect(hint.textContent).toContain("Deploy Application");
+  });
+
+  it("triggers a deployment and redirects to the Deployments tab", async () => {
+    const btn: FakeBtn & { textContent: string } = {
+      dataset: {},
+      textContent: "Deploy Application",
+      disabled: false
+    };
+    const branchSel: FakeSelect = { value: "main" };
+    const envSel: FakeSelect = { value: "prod" };
+    const elements: Record<string, unknown> = {
+      "planned-branch": branchSel,
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    let requestedUrl = "";
+    let requestedBody: Record<string, unknown> = {};
+    const fetch = (url: string, init: { body: string }) => {
+      requestedUrl = url;
+      requestedBody = JSON.parse(init.body);
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", { prod: "azure" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestedUrl).toBe("/api/deploy");
+    expect(requestedBody).toMatchObject({
+      environment: "prod",
+      provider: "azure",
+      targetRepo: "octo/app",
+      branch: "main",
+      appFile: ".radius/app.bicep"
+    });
+    expect(btn.disabled).toBe(true);
+    expect(location.href).toBe("/?page=deploying");
+  });
+
+  it("does nothing when there is no selected environment", () => {
+    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: false };
+    const envSel: FakeSelect = { value: "" };
+    const elements: Record<string, unknown> = {
+      "planned-branch": { value: "main" },
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+});
+
 describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () => {
   it("defaults each node's definition file to the committed .radius/app.bicep", () => {
     expect(CLIENT_GRAPH_JS).toContain(

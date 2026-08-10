@@ -131,6 +131,7 @@ export interface CanvasState {
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
+  plannedEnvironment?: string;
   plannedFromWorkspace?: boolean;
   deployProvider?: string;
   diffResources?: CanvasGraphResource[] | null;
