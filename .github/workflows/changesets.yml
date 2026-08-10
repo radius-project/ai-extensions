@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      checks: write
     outputs:
       comment-body: ${{ steps.status.outputs.comment-body }}
     steps:
