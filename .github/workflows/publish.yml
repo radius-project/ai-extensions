@@ -10,43 +10,50 @@ name: Publish
 # same artifact) and downloads its `plugin-dist` output. On every push to main
 # it force-recreates `releases/edge` as an ORPHAN branch holding only that
 # directory plus the marketplace catalog — one root commit, no source, no
-# history — then moves the `edge` tag onto it.
+# history — then atomically moves the branch and `edge` tag onto it. A stale
+# manual rerun is skipped when a newer main commit is already published.
 #
-# The catalog ships on both refs: on `releases/edge` so
-# `marketplace add OWNER/REPO#releases/edge` is self-consistent, and on main
-# (synced by the last step) because a plain `marketplace add OWNER/REPO` clones
-# the default branch. Both advertise the version that was just published.
+# The catalog ships alongside the plugin on `releases/edge` so
+# `marketplace add OWNER/REPO#releases/edge` advertises exactly what is
+# published there. Nothing is pushed back to main: the main ruleset grants
+# GitHub Actions no bypass, so this workflow only writes refs that carry no
+# rules.
+#
+# This is the rolling prerelease channel. Immutable, versioned releases are cut
+# on demand by release.yml.
 #
 # See docs/design/2026-07-canvas-bundle-publishing.md for the full design.
 
 on:
   push:
     branches: [main]
-    # The last step pushes a marketplace.json-only commit back to main; ignoring
-    # that path stops it from re-triggering this workflow.
-    paths-ignore:
-      - .github/plugin/marketplace.json
-  workflow_dispatch:
 
 permissions: {}
+
+# Queue complete runs, including their builds, in arrival order. The
+# full-workflow queue preserves normal push order; the publish-time ancestry
+# check also rejects an older run that is manually rerun later.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  queue: max
 
 jobs:
   build:
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
+    with:
+      channel: edge
+      ref: ${{ github.sha }}
 
   publish:
     name: Publish to edge
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    # Only one publish may run at a time; a newer run supersedes an in-flight
-    # one so `releases/edge` always reflects the most recent main it observed.
-    concurrency:
-      group: publish
-      cancel-in-progress: false
+      contents: write # force-update releases/edge and the edge tag
+      id-token: write # OIDC token used to sign the build provenance
+      attestations: write # record the provenance attestation for the bundle
     env:
       DIST: plugins/radius/dist
       MANIFEST: .github/plugin/marketplace.json
@@ -56,6 +63,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download plugin dist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -63,34 +71,71 @@ jobs:
           name: plugin-dist
           path: plugins/radius/dist
 
-      - name: Publish plugin dist to releases/edge branch and edge tag
+      - name: Verify the build artifacts are present
         run: |
           set -euo pipefail
-
-          for f in "$DIST/plugin.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
+          for f in "$DIST/plugin.json" "$DIST/package.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
             if [ ! -f "$f" ]; then
               echo "::error::Expected build artifact $f was missing from plugin-dist."
               exit 1
             fi
           done
 
+      # build.yml ran in this same workflow run, so the provenance this records
+      # describes the run that actually produced the bundle. Attesting before
+      # the first push means a failure never leaves an unattested publish.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.DIST }}/extension.mjs
+
+      - name: Publish plugin dist to releases/edge branch and edge tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+          # A manually rerun workflow keeps its original GITHUB_SHA and may run
+          # after newer pushes have already published. Permit same-source retries
+          # and forward progress, but never roll the channel back or cross a
+          # rewritten/divergent main history.
+          if git ls-remote --exit-code --heads origin "refs/heads/releases/edge" >/dev/null 2>&1; then
+            git fetch --no-tags origin \
+              "+refs/heads/releases/edge:refs/remotes/origin/releases/edge"
+            current_message="$(git log -1 --format=%s refs/remotes/origin/releases/edge)"
+            if [[ "$current_message" != *" for "* ]]; then
+              echo "::error::releases/edge does not record its source commit: $current_message"
+              exit 1
+            fi
+            current_source="${current_message##* for }"
+            if [[ ! "$current_source" =~ ^[0-9a-f]{40}$ ]] || \
+               ! git cat-file -e "$current_source^{commit}"; then
+              echo "::error::releases/edge records an invalid source commit: $current_source"
+              exit 1
+            fi
+
+            if [ "$current_source" != "$GITHUB_SHA" ]; then
+              if git merge-base --is-ancestor "$current_source" "$GITHUB_SHA"; then
+                : # This run moves edge forward.
+              elif git merge-base --is-ancestor "$GITHUB_SHA" "$current_source"; then
+                echo "::notice::releases/edge already publishes newer source $current_source; skipping stale rerun for $GITHUB_SHA."
+                echo "Skipped stale edge rerun for \`$GITHUB_SHA\`; \`releases/edge\` already publishes \`$current_source\`." >>"$GITHUB_STEP_SUMMARY"
+                exit 0
+              else
+                echo "::error::Published edge source $current_source and candidate $GITHUB_SHA have divergent histories."
+                exit 1
+              fi
+            fi
+          fi
 
           # Ship the catalog alongside the plugin so `marketplace add
           # OWNER/REPO#releases/edge` advertises exactly what is published here.
-          node -e '
-            const fs = require("node:fs");
-            const file = process.env.MANIFEST;
-            const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
-            const plugin = manifest.plugins.find((p) => p.name === "radius");
-            if (!plugin) {
-              console.error("No radius plugin entry in " + file);
-              process.exit(1);
-            }
-            plugin.version = process.env.VERSION;
-            fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-          '
+          # This also rewrites the source manifests, which are never staged below.
+          node scripts/version.mjs --set "$VERSION" --channel edge
 
           # releases/edge is an ORPHAN branch carrying only the built plugin and
           # its catalog: no source, no history, one root commit per publish.
@@ -110,8 +155,9 @@ jobs:
             exit 1
           fi
 
-          git push --force origin releases/edge
-          # Tag the commit just published so `edge` always resolves to the
-          # current releases/edge head.
-          git tag -f edge releases/edge
-          git push --force origin edge
+          # Move the branch and tag atomically so both names always resolve to
+          # the same artifact commit.
+          git tag -f edge HEAD
+          git push --atomic --force origin \
+            HEAD:refs/heads/releases/edge \
+            refs/tags/edge
