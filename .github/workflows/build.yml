@@ -99,18 +99,8 @@ jobs:
           if [ "$CHANNEL" = "release" ]; then
             version="$(node scripts/version.mjs)"
           elif [ "$CHANNEL" = "edge" ]; then
-            snapshot_changeset=".changeset/edge-snapshot.md"
-            if [ -e "$snapshot_changeset" ]; then
-              echo "::error::$snapshot_changeset is reserved for edge CI."
-              exit 1
-            fi
-            printf '%s\n' \
-              '---' \
-              '"radius": patch' \
-              '---' \
-              '' \
-              'Publish the current commit to the rolling edge channel.' \
-              >"$snapshot_changeset"
+            pnpm exec changeset add --patch radius \
+              --message 'Publish the current commit to the rolling edge channel.'
             pnpm exec changeset version --snapshot edge
             version="$(node scripts/version.mjs)"
           else

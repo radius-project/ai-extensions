@@ -40,7 +40,7 @@ graph TD
 - **`plugins/radius/`** — the tracked plugin source: `plugin.json`, `package.json`, `README.md`, and `skills/`.
 - **`plugins/radius/dist/`** — the generated, installable plugin: the tracked source above plus the built `extension.mjs`. Git-ignored on `main`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius/dist` on `releases/edge`.
-- **`.changeset/config.json`** — Changesets owns the released version. `privatePackages: { version: true, tag: true }` lets it version and tag `radius` even though nothing is published to a registry.
+- **`.changeset/config.json`** — Changesets owns the released version. `privatePackages: true` lets it version and tag `radius` even though nothing is published to a registry.
 - **`scripts/version.mjs`** — derives every other version string from `plugins/radius/package.json`, the version Changesets owns; `--check` fails CI on drift, `--set --channel edge` restamps only the rolling edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads the current Changesets changelog entry.
 - **`.github/workflows/build.yml`** — the reusable build: checks, version resolution, and the `plugin-dist` artifact. Runs directly on pull requests and is called with an immutable source SHA by both publishing workflows so a publish builds exactly once.
 - **`.github/workflows/changesets.yml`** — non-blocking pull request feedback from the Changesets Action v2 `pr-status` and `pr-comment` sub-actions. The read-only status job inspects pull request files; a separate job owns the pull request write token and only publishes the generated comment.
