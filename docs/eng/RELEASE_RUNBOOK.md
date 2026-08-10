@@ -26,7 +26,7 @@ Each of these is enforced by the workflow, so a mistake here fails fast rather t
 
 1. **Start it.** GitHub → **Actions** → **Release** → **Run workflow**, from `main`.
 2. **Wait for the release pull request.** It is titled `chore(release): version packages` on the `changeset-release/main` branch, and its body lists everything that will ship.
-3. **Review it** like any other pull request. It should contain only the version bump, the changelog entry and the derived manifests. Read the changelog the way a user would and fix the wording here if it needs it. To include one more change, land it on `main` with its changeset and re-run step 1 - the same pull request updates in place.
+3. **Review it** like any other pull request. It should contain only the version bump, the changelog entry, the derived manifests, and deletion of the consumed `.changeset/*.md` files. Read the changelog the way a user would and fix the wording here if it needs it. To include one more change, land it on `main` with its changeset and re-run step 1 - the same pull request updates in place.
 4. **Merge it.** This is the point of no return: merging is what publishes.
 5. **Watch the Release run** that the merge triggers. It rebuilds and re-checks that exact commit before it touches anything public.
 

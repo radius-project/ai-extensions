@@ -38,7 +38,7 @@ const EDGE_PLUGIN_NAME = "radius-edge";
 // CI stamps prerelease versions such as 0.1.0-edge-20260807014054, so this must
 // accept the full semver grammar rather than a bare MAJOR.MINOR.PATCH.
 const SEMVER =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -87,7 +87,7 @@ function targets(channel = "stable") {
 
   // An edge publish owns nothing but its own rolling catalog entry: the plugin
   // manifest and the stable entry keep the released version.
-  if (channel === "edge") return [metadata, catalogEntry(EDGE_PLUGIN_NAME)];
+  if (channel === "edge") return [catalogEntry(EDGE_PLUGIN_NAME)];
 
   return [
     {
