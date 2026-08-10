@@ -18,16 +18,18 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
-    "lint": "eslint eslint.config.mjs \"packages/**/*.{ts,mjs}\" vitest.config.ts",
-    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.mjs \"packages/**/*.{ts,mjs}\" vitest.config.ts",
-    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.mjs \"packages/**/*.{ts,mjs}\" vitest.config.ts",
+    "lint": "eslint eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
+    "format": "prettier --config .github/linters/.prettierrc.yml --write eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
+    "format:check": "prettier --config .github/linters/.prettierrc.yml --check eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"scripts/**/*.mjs\" vitest.config.ts",
     "lint:md": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml \"**/*.md\"",
     "lint:md:fix": "markdownlint-cli2 --config ./.github/linters/.markdownlint-cli2.yaml --fix \"**/*.md\"",
     "changeset": "changeset",
-    "version": "changeset version"
+    "version": "changeset version && pnpm run version:sync",
+    "version:sync": "node scripts/version.mjs --sync",
+    "version:check": "node scripts/version.mjs --check"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.1",
+    "@changesets/cli": "3.0.0-next.11",
     "@babel/core": "^8.0.1",
     "@babel/eslint-parser": "^8.0.1",
     "@babel/plugin-syntax-typescript": "^8.0.3",
