@@ -214,6 +214,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
+      pull-requests: read
     with:
       channel: release
       ref: ${{ needs.release-state.outputs.source-sha }}

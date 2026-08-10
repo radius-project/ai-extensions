@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read # @changesets/changelog-github resolves each entry's PR
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -94,6 +95,9 @@ jobs:
         id: version
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
+          # `changelog: @changesets/changelog-github` turns every entry into a
+          # GraphQL lookup, and it reads the token from the environment only.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = "release" ]; then
