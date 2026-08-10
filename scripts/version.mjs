@@ -20,6 +20,9 @@
 //   node scripts/version.mjs --set <version> --channel edge
 //                                                stamp only the edge catalog entry
 //   node scripts/version.mjs --release-notes    print the current changelog entry
+//   node scripts/version.mjs --compare <version>
+//                                                print 1, 0 or -1 for how the
+//                                                source version ranks against it
 //
 // Only the resolved version goes to stdout, so callers can do
 // `VERSION="$(node scripts/version.mjs)"`; everything else goes to stderr.
@@ -136,6 +139,50 @@ function releaseNotes(version) {
   return notes;
 }
 
+// Semver precedence (semver.org rule 11), which shell tooling gets wrong:
+// `sort -V` ranks 0.3.0-rc.0 above 0.3.0. Build metadata is ignored, as the
+// specification requires.
+function precedence(version) {
+  const [core, prerelease] = version.split("+")[0].split(/-(.*)/s);
+  return {
+    core: core.split(".").map(Number),
+    prerelease: prerelease ? prerelease.split(".") : []
+  };
+}
+
+function compare(a, b) {
+  const left = precedence(a);
+  const right = precedence(b);
+
+  for (let i = 0; i < 3; i++) {
+    if (left.core[i] !== right.core[i]) {
+      return left.core[i] > right.core[i] ? 1 : -1;
+    }
+  }
+
+  // A release outranks any prerelease of the same core version.
+  if (!left.prerelease.length || !right.prerelease.length) {
+    if (left.prerelease.length === right.prerelease.length) return 0;
+    return left.prerelease.length ? -1 : 1;
+  }
+
+  const numeric = /^\d+$/;
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let i = 0; i < length; i++) {
+    const l = left.prerelease[i];
+    const r = right.prerelease[i];
+    if (l === r) continue;
+    // A shorter set of identifiers loses when all the earlier ones matched.
+    if (l === undefined) return -1;
+    if (r === undefined) return 1;
+    if (numeric.test(l) && numeric.test(r)) return +l > +r ? 1 : -1;
+    if (numeric.test(l)) return -1;
+    if (numeric.test(r)) return 1;
+    return l > r ? 1 : -1;
+  }
+  return 0;
+}
+
 function apply(version, channel) {
   const touched = new Set();
   for (const target of targets(channel)) {
@@ -154,12 +201,20 @@ const sync = args.includes("--sync");
 const printReleaseNotes = args.includes("--release-notes");
 const setIndex = args.indexOf("--set");
 const explicit = setIndex === -1 ? undefined : args[setIndex + 1];
+const compareIndex = args.indexOf("--compare");
+const other = compareIndex === -1 ? undefined : args[compareIndex + 1];
 const channelIndex = args.indexOf("--channel");
 const channel = channelIndex === -1 ? "stable" : args[channelIndex + 1];
 
 if (setIndex !== -1 && (!explicit || !SEMVER.test(explicit))) {
   fail(
     `--set requires a semver version, got ${JSON.stringify(explicit ?? "")}`
+  );
+}
+
+if (compareIndex !== -1 && (!other || !SEMVER.test(other))) {
+  fail(
+    `--compare requires a semver version, got ${JSON.stringify(other ?? "")}`
   );
 }
 
@@ -171,6 +226,8 @@ if (!["stable", "edge"].includes(channel)) {
 
 if (printReleaseNotes) {
   console.log(releaseNotes(sourceVersion()));
+} else if (other) {
+  console.log(compare(sourceVersion(), other));
 } else if (explicit) {
   if (channel === "edge") {
     apply(explicit, channel);

@@ -33,12 +33,14 @@ jobs:
     outputs:
       comment-body: ${{ steps.status.outputs.comment-body }}
     steps:
-      # This job reads untrusted PR files but never executes repository code or
-      # receives a write token. The workflow and pinned action come from main.
-      - name: Checkout pull request
+      # Deliberately the trusted base checkout. `pr-status` fetches the base and
+      # head refs itself into a throwaway detached worktree, so no fork-authored
+      # file is ever written into this workflow's workspace, and no repository
+      # code is executed. It also expects the shallow default clone, which it
+      # deepens only as far as the merge base.
+      - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/head
           persist-credentials: false
 
       - name: Generate changeset status

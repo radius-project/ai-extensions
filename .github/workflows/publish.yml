@@ -74,7 +74,7 @@ jobs:
       - name: Verify the build artifacts are present
         run: |
           set -euo pipefail
-          for f in "$DIST/plugin.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
+          for f in "$DIST/plugin.json" "$DIST/package.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
             if [ ! -f "$f" ]; then
               echo "::error::Expected build artifact $f was missing from plugin-dist."
               exit 1
