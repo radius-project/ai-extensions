@@ -29,8 +29,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'pr/no-changeset')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      checks: write
+      contents: read # actions/checkout; pr-status itself needs no token
     outputs:
       comment-body: ${{ steps.status.outputs.comment-body }}
     steps:
@@ -39,10 +38,15 @@ jobs:
       # file is ever written into this workflow's workspace, and no repository
       # code is executed. It also expects the shallow default clone, which it
       # deepens only as far as the merge base.
+      #
+      # Those fetches are the reason the checkout credential is left in place:
+      # this repository is internal, and `pr-status` takes no token input, so
+      # dropping it fails the fetch with git exit 128. Nothing untrusted runs
+      # here, and the job only holds `contents: read`.
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+        # with:
+        #   persist-credentials: false
 
       - name: Generate changeset status
         id: status
