@@ -28,7 +28,7 @@ Three things follow from that, and they are the things to understand before rele
 
 All four are `private: true` and none is published to a registry. The three `packages/*` entries are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range.
 
-Because every package is private, [`privatePackages`](https://changesets.dev/guide/config#privatepackages) is set to `true` - shorthand for `{ "version": true, "tag": true }`, the [Beyond npm](https://changesets.dev/guide/beyond-npm) setup that lets Changesets version and tag packages it will never publish to a registry. Changesets v3 versions no private package unless asked, so that opt-in plus the `ignore` list is what makes `radius` the only package that is versioned, changelogged and tagged.
+Because every package is private, [`privatePackages`](https://changesets.dev/guide/config#privatepackages) is set to `{ "version": true, "tag": true }` - the [Beyond npm](https://changesets.dev/guide/beyond-npm) setup that lets Changesets version and tag packages it will never publish to a registry. Changesets v3 versions no private package unless asked, so that opt-in plus the `ignore` list is what makes `radius` the only package that is versioned, changelogged and tagged.
 
 ## Where the version lives
 
