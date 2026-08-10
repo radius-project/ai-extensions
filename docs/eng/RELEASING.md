@@ -6,7 +6,7 @@ This repo ships exactly one artifact: the **`radius` plugin** under [`plugins/ra
 
 Three things follow from that, and they are the things to understand before releasing:
 
-1. **[Changesets v3](https://changesets.dev/) owns the release.** It decides the version, writes the changelog, opens the release pull request and creates the canonical package tag. Nothing in this repo picks a version. The flow is the standard [versioning and publishing](https://changesets.dev/guide/versioning-and-publishing) loop: the v3-compatible [Changesets GitHub Action v2](https://github.com/changesets/action) prepares the version PR, and the CLI performs [tag-only publishing](https://changesets.dev/guide/automating#publish-git-tags-only) because this repo ships a git branch rather than an npm package.
+1. **[Changesets v3](https://changesets.dev/) owns the release.** It decides the version, writes the changelog, opens the release pull request, and creates the canonical package tag and the GitHub release. Nothing in this repo picks a version, names a tag, or writes release notes. The flow is the standard [versioning and publishing](https://changesets.dev/guide/versioning-and-publishing) loop: the v3-compatible [Changesets GitHub Action v2](https://github.com/changesets/action) prepares the version PR, then performs [tag-only publishing](https://changesets.dev/guide/automating#publish-git-tags-only) because this repo ships a git branch rather than an npm package.
 2. **There are two channels.** Every merge to `main` refreshes the rolling **edge** channel automatically. A **stable** release is cut deliberately: a maintainer runs the Release workflow, and merging the pull request it opens publishes the release.
 3. **Every published bundle is attested.** Both channels record signed [build provenance](https://github.com/actions/attest), so a consumer can verify which workflow, repository and commit produced the canvas bundle.
 
@@ -72,26 +72,27 @@ graph LR
   Merge --> Q{"expected bot PR<br/>branch?"}
   Q -->|no| Skip["do nothing"]
   Q -->|yes| Build["build exact merge commit<br/>checks + package + attest"]
-  Build --> Art["publish immutable branch<br/>push radius@version<br/>create release + upload asset<br/>atomically move latest refs"]
+  Build --> Tag["Changesets tags radius@version<br/>+ GitHub release from changelog"]
+  Tag --> Art["publish immutable branch<br/>upload asset<br/>atomically move latest refs"]
   Art --> Done["push radius/v&lt;version&gt;<br/>completion marker"]
 ```
 
 1. Land ordinary pull requests, each carrying a changeset. Nothing ships; every merge only refreshes the [edge channel](#what-the-edge-channel-does).
 2. When you want a stable release, run **Actions → Release → Run workflow** from `main`. `changeset version` applies the pending changesets, writes `plugins/radius/CHANGELOG.md`, syncs the derived manifests, and opens a pull request titled `chore(release): version packages` on the `changeset-release/main` branch. Its body lists everything that will ship.
 3. Review it like any other pull request and merge it.
-4. The merged event for that bot-authored `changeset-release/main` pull request builds the exact merge commit and runs the complete check suite before publishing anything. The workflow publishes the immutable install branch, uses `changeset git-tag` for `radius@<version>`, creates the GitHub release from the matching changelog entry and uploads its asset, atomically activates `releases/latest` plus `latest`, and finally pushes `radius/v<version>` as the completion marker. Newer pending changesets do not hide the prepared release.
+4. The merged event for that bot-authored `changeset-release/main` pull request builds the exact merge commit and runs the complete check suite before publishing anything. The Changesets action then tags that commit `radius@<version>` and publishes its changelog entry as the GitHub release; the workflow publishes the immutable install branch, uploads the release asset, atomically activates `releases/latest` plus `latest`, and finally pushes `radius/v<version>` as the completion marker. Newer pending changesets do not hide the prepared release.
 
 Re-running the dispatch before step 3 updates the same pull request rather than opening a second one. To preview the changelog locally without touching `main`, run `pnpm run version` and inspect the result.
 
 ### Prerequisites and constraints
 
 - The repository automation GitHub App identified by `DEPENDABOT_MANAGER_BOT_CLIENT_ID` and `DEPENDABOT_MANAGER_BOT_PRIVATE_KEY` must have Contents and Pull requests write permissions. Its short-lived token authors the release PR, so the normal `pull_request` build runs against the versioned branch.
-- The version-only action uses the GitHub API by default, so GitHub creates and signs the version commit through the API. The stable job later runs `changeset git-tag` locally and verifies that `radius@<version>` points at the exact commit it built before pushing it.
-- Only `workflow_dispatch` invokes the version action. Stable publication only accepts a merged, same-repository, bot-authored pull request from `changeset-release/main`, so an ordinary version/changelog edit on `main` cannot cut a release.
+- The version-only action uses the GitHub API by default, so GitHub creates and signs the version commit through the API. The publish step is the exception: it sets `push-with-git-cli: true`, because the API path tags `github.sha`, which on a `pull_request` event is the ephemeral `refs/pull/<n>/merge` commit rather than the merge commit on `main`. Over the Git CLI it pushes the tag Changesets created at the checked-out source commit.
+- Only `workflow_dispatch` invokes the version action. Stable publication only accepts a merged, same-repository, bot-authored pull request from `changeset-release/main` whose commit still matches the version and changelog and carries no leftover changesets, so an ordinary version/changelog edit on `main` cannot cut a release.
 - Complete workflow runs are queued with `queue: max`; a later dispatch or release-PR merge cannot cancel an earlier run. The stable build receives the pull request's explicit merge SHA, so retries never bundle later unreleased changes.
 - The publish checkout does not persist its write credential. Dependency installation runs without Git authentication, and `gh auth setup-git` configures the short-lived job token only inside the final ref-publishing step.
 - Neither release job compiles anything - the bundle arrives as a build artifact and the only dependency they run is the Changesets CLI - so both install with `--ignore-scripts`. Dependency lifecycle scripts therefore never execute in a job holding the GitHub App token or the ability to move published refs. `build.yml` keeps them enabled because it does build the bundle.
-- `radius/v<version>` is pushed last. Until that completion tag exists, rerun the original failed workflow; it rebuilds the expected orphan tree and reuses an existing immutable branch only when every published byte matches, then restores the rolling refs, recreates or updates the GitHub release, and retries the asset upload. The original run is required because signed provenance records its event SHA and cannot substitute a later push's SHA. A rerun never moves `releases/latest` or `latest` backwards: if a newer release already published them, the rerun finishes its own immutable refs and leaves the rolling ones alone.
+- `radius/v<version>` is pushed last. Until that completion tag exists, rerun the original failed workflow; it rebuilds the expected orphan tree and reuses an existing immutable branch only when every published byte matches, then restores the rolling refs and retries the asset upload. Changesets creates the tag and the GitHub release exactly once and skips both on a rerun, because the tag it would create already exists. The original run is required because signed provenance records its event SHA and cannot substitute a later push's SHA. A rerun never moves `releases/latest` or `latest` backwards: if a newer release already published them, the rerun finishes its own immutable refs and leaves the rolling ones alone.
 
 ## If a package is ever published
 
@@ -120,13 +121,13 @@ Complete edge workflow runs are queued FIFO with `queue: max`, including the bui
 
 | Artifact                               | Created by          | Mutable? | Purpose                                                                        |
 |----------------------------------------|---------------------|----------|--------------------------------------------------------------------------------|
-| `radius@<version>` tag                 | `changeset git-tag` | **no**   | Canonical Changesets tag pointing at the released source commit on `main`.     |
-| GitHub release                         | `release.yml`       | no       | Body is the Changesets `CHANGELOG.md` entry; carries the attested tarball.     |
+| `radius@<version>` tag                 | `changesets/action` | **no**   | Canonical Changesets tag pointing at the released source commit on `main`.     |
+| GitHub release                         | `changesets/action` | no       | Body is the Changesets `CHANGELOG.md` entry; carries the attested tarball.     |
 | `releases/radius/v<version>` branch    | `release.yml`       | **no**   | Pinned install target: the same orphan layout as `releases/edge`, one version. |
 | `radius/v<version>` tag                | `release.yml`       | **no**   | Points at the pinned artifact branch and marks publication complete.           |
 | `releases/latest` branch, `latest` tag | `release.yml`       | yes      | Stable install target: force-moved to the newest release.                      |
 
-Everything local that can fail - checks, build, packaging, changelog extraction, canonical tag verification and attestation - happens before the first push. The pinned branch is immutable and pushed without `--force`; a retry constructs the expected artifact tree from its rebuilt files and reuses an existing branch only when its tree ID matches exactly. The canonical tag, GitHub release and asset complete before `releases/latest` and `latest` move atomically, and the immutable `radius/v<version>` artifact tag is pushed last.
+Everything local that can fail - checks, build, packaging and attestation - happens before the first push. Changesets then tags the source commit and publishes the release notes; the pinned branch is immutable and pushed without `--force`, and a retry constructs the expected artifact tree from its rebuilt files and reuses an existing branch only when its tree ID matches exactly. The GitHub release and its asset complete before `releases/latest` and `latest` move atomically, and the immutable `radius/v<version>` artifact tag is pushed last.
 
 The two branches carry an identical `plugins/radius/dist/`; they differ only in the catalog's `source.ref`, which each one points at itself. So `marketplace add radius-project/ai-extensions#releases/radius/v0.1.0` pins that exact release, and `#releases/latest` tracks stable - neither redirects to edge.
 

@@ -41,11 +41,11 @@ graph TD
 - **`plugins/radius/dist/`** — the generated, installable plugin: the tracked source above plus the built `extension.mjs`. Git-ignored on `main`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius/dist` on `releases/edge`.
 - **`.changeset/config.json`** — Changesets owns the released version. `privatePackages: { version: true, tag: true }` lets it version and tag `radius` even though nothing is published to a registry.
-- **`scripts/version.mjs`** — derives every other version string from `plugins/radius/package.json`, the version Changesets owns; `--check` fails CI on drift, `--set --channel edge` restamps only the rolling edge catalog entry, and `--release-notes` extracts the current Changesets changelog entry.
+- **`scripts/version.mjs`** — derives every other version string from `plugins/radius/package.json`, the version Changesets owns; `--check` fails CI on drift, `--set --channel edge` restamps only the rolling edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads the current Changesets changelog entry.
 - **`.github/workflows/build.yml`** — the reusable build: checks, version resolution, and the `plugin-dist` artifact. Runs directly on pull requests and is called with an immutable source SHA by both publishing workflows so a publish builds exactly once.
 - **`.github/workflows/changesets.yml`** — non-blocking pull request feedback from the Changesets Action v2 `pr-status` and `pr-comment` sub-actions. The read-only status job inspects pull request files; a separate job owns the pull request write token and only publishes the generated comment.
 - **`.github/workflows/publish.yml`** — the rolling **edge** channel: on every push to `main`, publishes `dist/` to the `releases/edge` branch and `edge` tag.
-- **`.github/workflows/release.yml`** — the **stable** channel: a manual dispatch runs `changesets/action` to open the release pull request; merging it validates the exact version commit, tags its source as `radius@<version>`, and publishes the immutable `releases/radius/v<version>` branch and `radius/v<version>` artifact tag plus the rolling `releases/latest` branch and `latest` tag.
+- **`.github/workflows/release.yml`** — the **stable** channel: a manual dispatch runs `changesets/action` to open the release pull request; merging it validates the exact version commit, has `changesets/action` tag its source as `radius@<version>` and publish the changelog entry as the GitHub release, and publishes the immutable `releases/radius/v<version>` branch and `radius/v<version>` artifact tag plus the rolling `releases/latest` branch and `latest` tag.
 
 ## How it works
 

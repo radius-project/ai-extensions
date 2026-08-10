@@ -15,9 +15,10 @@ name: Release
 #   2. validate + publish  (the bot-authored release pull request merges)
 #      The committed version and changelog identify the release even if newer
 #      changesets have already landed. The exact version commit is built and
-#      attested before any public ref moves. The immutable artifact branch is
-#      published first, the canonical tag/release/asset are reconciled, and only
-#      then do the rolling stable refs move; the completion tag is pushed last.
+#      attested before any public ref moves. Changesets then tags that commit and
+#      publishes its changelog as the GitHub release, the immutable artifact
+#      branch and release asset follow, and only then do the rolling stable refs
+#      move; the completion tag is pushed last.
 #
 # Versioning is never automatic: only workflow_dispatch runs the Changesets
 # version action. Stable publication only accepts the merged
@@ -192,6 +193,16 @@ jobs:
             exit 1
           fi
 
+          # `changeset version` consumes every changeset it applies, so a leftover
+          # one means this is not the commit it produced. It would also flip the
+          # publish job's Changesets action into versioning mode, where it would
+          # open another release pull request instead of shipping this one.
+          pending="$(git ls-tree --name-only "$source_sha:.changeset" | grep -E '^[^.][^/]*\.md$' | grep -vFx README.md || true)"
+          if [ -n "$pending" ]; then
+            echo "::error::$source_sha still carries pending changesets: $(echo "$pending" | tr '\n' ' ')"
+            exit 1
+          fi
+
           echo "publish=true" >&3
           echo "version=$version" >&3
           echo "source-sha=$source_sha" >&3
@@ -213,7 +224,7 @@ jobs:
     if: needs.release-state.outputs.publish == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the artifact branches, move latest, upload the asset
+      contents: write # tag and release the source, publish the artifact branches
       id-token: write # OIDC token used to sign the build provenance
       attestations: write # record the provenance attestation for the artifacts
     env:
@@ -270,25 +281,6 @@ jobs:
           tar -czf "$tarball" -C "$RUNNER_TEMP" radius
           echo "tarball=$tarball" >>"$GITHUB_OUTPUT"
 
-      - name: Prepare Changesets metadata
-        id: changesets
-        run: |
-          set -euo pipefail
-          notes="$RUNNER_TEMP/release-notes.md"
-          node scripts/version.mjs --release-notes >"$notes"
-          pnpm exec changeset git-tag
-
-          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
-            echo "::error::Changesets did not create $TAG."
-            exit 1
-          fi
-          tag_target="$(git rev-list -n 1 "$TAG")"
-          if [ "$tag_target" != "$SOURCE_SHA" ]; then
-            echo "::error::$TAG points to $tag_target instead of $SOURCE_SHA."
-            exit 1
-          fi
-          echo "notes=$notes" >>"$GITHUB_OUTPUT"
-
       # build.yml ran in this same workflow run, so the provenance this records
       # describes the run that actually produced these artifacts. Attesting
       # before the first push means a failure never leaves an unattested install
@@ -300,11 +292,27 @@ jobs:
             ${{ env.DIST }}/extension.mjs
             ${{ steps.package.outputs.tarball }}
 
+      # Changesets owns the canonical tag and the release notes, so neither is
+      # reconstructed here: `changeset git-tag` names the tag, and the action
+      # publishes the package's CHANGELOG.md entry as the GitHub release body.
+      # This is the "publish git tags only" setup - every package is private and
+      # `privatePackages.tag` makes tagging the whole of publishing.
+      #
+      # `push-with-git-cli` is required rather than preferred: the GitHub API
+      # path tags `github.sha`, which on a pull_request event is the ephemeral
+      # refs/pull/<n>/merge commit rather than the merge commit on main. The Git
+      # CLI pushes the tag Changesets created locally at HEAD, which this job
+      # checked out at the exact source commit it built and attested.
+      - name: Tag the release and publish its notes
+        uses: changesets/action@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        with:
+          publish-script: pnpm exec changeset git-tag
+          push-with-git-cli: true
+
       - name: Publish the install branches and release asset
         env:
           GH_TOKEN: ${{ github.token }}
           TARBALL: ${{ steps.package.outputs.tarball }}
-          NOTES: ${{ steps.changesets.outputs.notes }}
         run: |
           set -euo pipefail
 
@@ -388,19 +396,11 @@ jobs:
             fi
           fi
 
-          # Changesets owns the canonical source tag. The GitHub release uses
-          # its exact changelog entry and remains safe to reconcile on a retry.
-          git push origin "refs/tags/$TAG"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES"
-          else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
-          fi
           gh release upload "$TAG" "$TARBALL" --clobber
 
-          # Activate the rolling stable channel only after the canonical tag,
-          # GitHub release and asset are complete. Move its branch and tag
-          # atomically so consumers cannot observe two different artifacts.
+          # Activate the rolling stable channel only after the release Changesets
+          # created is complete and the pinned branch exists. Move its branch and
+          # tag atomically so consumers cannot observe two different artifacts.
           if [ "$publish_latest" = 1 ]; then
             commit_orphan releases/latest
             git tag -f latest
