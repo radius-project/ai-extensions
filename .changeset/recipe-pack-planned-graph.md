@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": minor
-"@radius-project/canvas": patch
+"radius": minor
 ---
 
 Derive the planned graph's concrete resources from the default recipe pack instead of individual recipe files.

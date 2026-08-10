@@ -16,14 +16,12 @@
     "./workflows": "./src/workflows/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "coverage": "vitest run --coverage --coverage.provider=v8",
     "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "catalog:",
     "vitest": "catalog:"
   }
 }

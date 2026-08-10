@@ -27,7 +27,7 @@ import {
   stateRegistryForEnvironment,
   buildEnvironmentSuffix
 } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/shared";
+import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
@@ -485,7 +485,7 @@ async function resolveGraphAppName(
 ): Promise<string> {
   const ref = branch || "main";
   for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw = "";
+    let raw: string;
     try {
       raw = await ghOrThrow([
         "api",
@@ -497,7 +497,7 @@ async function resolveGraphAppName(
       raw = "";
     }
     if (!raw) continue;
-    let decoded = "";
+    let decoded: string;
     try {
       decoded = Buffer.from(raw, "base64").toString("utf8");
     } catch {
@@ -912,7 +912,7 @@ async function resolveRepoAppName(
   let appName = repo.split("/").pop() || repo;
   const ref = branch || "main";
   for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw = "";
+    let raw: string;
     try {
       raw = await ghOrThrow([
         "api",
@@ -924,7 +924,7 @@ async function resolveRepoAppName(
       raw = "";
     }
     if (!raw) continue;
-    let decoded = "";
+    let decoded: string;
     try {
       decoded = Buffer.from(raw, "base64").toString("utf8");
     } catch {
@@ -1151,7 +1151,7 @@ async function resolveEnvDeployment(
     if (rec.isDelete && rec.runConclusion === "success") return null;
     if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success")
       return "skip";
-    let status = "pending";
+    let status: string;
     if (rec.isDelete) {
       status = "deleting"; // delete still in progress
     } else {
@@ -1451,11 +1451,11 @@ function createRequestHandler(instanceId: string) {
       for await (const chunk of req) body += chunk;
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-store");
-      let relPath = "";
+      let relPath: string;
       // `line` is reserved: the editor canvas has no line-selection input
       // yet, so it is validated and threaded through but not acted on. When
       // the canvas gains line support, the handler can start honoring it.
-      let line = 0;
+      let line: number;
       try {
         const data = JSON.parse(body || "{}");
         relPath = toSafeRepoRelPath(data.path);
@@ -6511,7 +6511,6 @@ function createRequestHandler(instanceId: string) {
                     const t = lines[i].replace(/\s+$/, "");
                     if (t) addLog("    │ " + t);
                   }
-                  liveLogShown = lines.length;
                   parsed = parseRadDeployLog(live, resources, {
                     stripPrefix: false
                   });
@@ -7065,7 +7064,7 @@ async function startServer(
   // self-healing, so a failure here just means the next caller re-primes.
   primeGhIdentity().catch(() => {});
   const server = createServer(handler);
-  let port = 0;
+  let port: number;
   // Try the stable, instanceId-derived port first; fall back to an ephemeral
   // port (listen(0)) only if it's already taken/unavailable.
   const preferred = await preferredPortForInstance(instanceId);

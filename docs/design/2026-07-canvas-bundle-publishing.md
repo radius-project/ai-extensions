@@ -3,6 +3,8 @@
 - **Author**: Brooke Hamilton (@brooke-hamilton)
 - **Date**: 2026-07
 
+> **Superseded in part.** This doc records the design as accepted. The mechanism still stands, but three specifics have since changed: the plugin is assembled into `plugins/radius/dist/` (rather than shipping from the plugin root), the publish branch is `releases/edge` (not `release`), and the moving tag is `edge` (not `latest`). See [`docs/architecture/plugin-packaging-and-publishing.md`](../architecture/plugin-packaging-and-publishing.md) for the current behaviour; read the rest of this doc for the rationale.
+
 ## Overview
 
 The `radius` plugin ships two things to GitHub Copilot: agentic **skills** (plain files under `plugins/radius/skills/`) and a **canvas extension** whose runtime entry point is `plugins/radius/extension.mjs`. The skills are committed source, but the canvas entry point is a **build artifact**: it is bundled from TypeScript/ESM source (`packages/adapter-canvas/src` plus the `packages/core` package) by `packages/adapter-canvas/build.mjs` (esbuild) into a single file.

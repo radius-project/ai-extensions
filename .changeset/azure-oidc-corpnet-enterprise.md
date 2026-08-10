@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": patch
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Make Azure OIDC deploy work end-to-end from locked-down enterprise
