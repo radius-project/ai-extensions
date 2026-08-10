@@ -118,7 +118,7 @@ pnpm changeset
 
 Select the affected packages, the bump level (`patch` / `minor` / `major`), and
 write a user-facing summary. Commit the generated `.changeset/*.md` file with
-your PR. See [`RELEASING.md`](./RELEASING.md) for the version/tag convention and
+your PR. Do not hand-edit any version: Changesets bumps `plugins/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
 
 ## Developer Certificate of Origin

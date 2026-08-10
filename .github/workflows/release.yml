@@ -1,0 +1,426 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Release
+
+# The stable channel. Releases are cut deliberately in the two phases described
+# by https://changesets.dev/guide/versioning-and-publishing. Changesets owns the
+# version, changelog, release PR, and canonical package tag; this workflow adds
+# the install branches and artifact tags used by the Copilot plugin marketplace.
+#
+#   1. prepare  (manual: Actions > Release > Run workflow)
+#      `changeset version` applies the pending changesets, writes CHANGELOG.md
+#      and syncs the derived manifests on `changeset-release/main`, then opens or
+#      updates the release pull request. Nothing ships.
+#
+#   2. validate + publish  (the bot-authored release pull request merges)
+#      The committed version and changelog identify the release even if newer
+#      changesets have already landed. The exact version commit is built and
+#      attested before any public ref moves. The immutable artifact branch is
+#      published first, the canonical tag/release/asset are reconciled, and only
+#      then do the rolling stable refs move; the completion tag is pushed last.
+#
+# Versioning is never automatic: only workflow_dispatch runs the Changesets
+# version action. Stable publication only accepts the merged
+# `changeset-release/main` pull request created by that action.
+#
+# Published refs:
+#
+#   radius@<version>              tag, immutable, created by Changesets
+#   releases/radius/v<version>    orphan artifact branch, immutable
+#   radius/v<version>             immutable tag pointing at that artifact branch
+#   releases/latest + latest      orphan artifact branch and tag, force-moved to
+#                                 the newest stable release
+#
+# Rolling prereleases are a separate concern: publish.yml refreshes
+# `releases/edge` and the `edge` tag on every push to main.
+#
+# The repository automation GitHub App creates the version PR so it triggers
+# normal pull_request CI. The token is scoped to this repository and requests
+# only Contents and Pull requests write permissions.
+#
+# See docs/eng/RELEASING.md and docs/architecture/plugin-packaging-and-publishing.md.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  queue: max
+
+jobs:
+  prepare:
+    name: Prepare the release pull request
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout; the GitHub App token writes the release PR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # Only the Changesets CLI is used here; nothing is compiled. Skipping
+      # lifecycle scripts keeps dependency code from running in a job that holds
+      # the GitHub App token.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify the previous release is complete
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Releases are prepared from main, but this run is on ${GITHUB_REF}."
+            exit 1
+          fi
+
+          version="$(node scripts/version.mjs)"
+          artifact_tag="radius/v${version}"
+          if node scripts/version.mjs --release-notes >/dev/null 2>&1 && \
+             ! git show-ref --verify --quiet "refs/tags/$artifact_tag"; then
+            echo "::error::radius@$version has not finished publishing. Re-run its failed Release workflow before preparing another version."
+            exit 1
+          fi
+
+      - name: Verify there is something to release
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/changeset-status.json"
+          pnpm exec changeset status --output "$status"
+          node -e '
+            const status = require(process.argv[1]);
+            if (!Array.isArray(status.releases) || status.releases.length === 0) {
+              console.error("::error::There are no pending package releases.");
+              process.exit(1);
+            }
+          ' "$status"
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DEPENDABOT_MANAGER_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.DEPENDABOT_MANAGER_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # The version-only v2 action cannot publish. It uses the GitHub API by
+      # default, so GitHub creates and signs the version commit; this is also why
+      # the checkout above does not persist git credentials.
+      - name: Version packages
+        uses: changesets/action/version@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: pnpm run version
+          commit-message: "chore(release): version packages"
+          pr-title: "chore(release): version packages"
+
+  release-state:
+    name: Detect a stable release
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'changeset-release/main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type == 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+      source-sha: ${{ steps.release.outputs.source-sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Resolve release state
+        id: release
+        env:
+          RELEASE_PR: ${{ github.event.pull_request.number }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version="$(node scripts/version.mjs)"
+          canonical_tag="radius@$version"
+          artifact_tag="radius/v$version"
+          source_sha="$MERGE_SHA"
+          exec 3>>"$GITHUB_OUTPUT"
+          echo "publish=false" >&3
+
+          if git show-ref --verify --quiet "refs/tags/$artifact_tag"; then
+            echo "Artifact tag $artifact_tag already exists; nothing to publish." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if git show-ref --verify --quiet "refs/tags/$canonical_tag"; then
+            # The provenance predicate records the workflow event SHA and does
+            # not allow overriding it with a checkout ref. Recover only by
+            # rerunning this release-PR event so the attested source stays
+            # truthful even if main has moved since the merge.
+            tag_target="$(git rev-list -n 1 "$canonical_tag")"
+            if [ "$tag_target" != "$source_sha" ]; then
+              echo "::error::$canonical_tag points to $tag_target, not release PR #$RELEASE_PR merge $source_sha."
+              exit 1
+            fi
+          fi
+
+          source_version="$(git show "$source_sha:plugins/radius/package.json" | jq -r .version)"
+          if [ "$source_version" != "$version" ] || \
+             ! git show "$source_sha:plugins/radius/CHANGELOG.md" | grep -Fxq "## $version"; then
+            echo "::error::$source_sha is not a Changesets version commit for radius@$version."
+            exit 1
+          fi
+
+          echo "publish=true" >&3
+          echo "version=$version" >&3
+          echo "source-sha=$source_sha" >&3
+          echo "Preparing **radius@$version** from release PR #$RELEASE_PR merge \`$source_sha\`." >>"$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: release-state
+    if: needs.release-state.outputs.publish == 'true'
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+    with:
+      channel: release
+      ref: ${{ needs.release-state.outputs.source-sha }}
+
+  publish:
+    name: Publish the release artifact
+    needs: [release-state, build]
+    if: needs.release-state.outputs.publish == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the artifact branches, move latest, upload the asset
+      id-token: write # OIDC token used to sign the build provenance
+      attestations: write # record the provenance attestation for the artifacts
+    env:
+      DIST: plugins/radius/dist
+      MANIFEST: .github/plugin/marketplace.json
+      VERSION: ${{ needs.release-state.outputs.version }}
+      SOURCE_SHA: ${{ needs.release-state.outputs.source-sha }}
+      TAG: radius@${{ needs.release-state.outputs.version }}
+      ARTIFACT_TAG: radius/v${{ needs.release-state.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.release-state.outputs.source-sha }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # The bundle arrives as a build artifact, so the only dependency this job
+      # runs is the Changesets CLI. Skipping lifecycle scripts keeps dependency
+      # code from running in the job that can move the published refs.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download plugin dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: plugin-dist
+          path: plugins/radius/dist
+
+      - name: Verify the build artifacts are present
+        run: |
+          set -euo pipefail
+          for f in "$DIST/plugin.json" "$DIST/package.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Expected build artifact $f was missing from plugin-dist."
+              exit 1
+            fi
+          done
+
+      - name: Package the plugin
+        id: package
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/radius-plugin-$VERSION.tar.gz"
+          cp -R "$DIST" "$RUNNER_TEMP/radius"
+          tar -czf "$tarball" -C "$RUNNER_TEMP" radius
+          echo "tarball=$tarball" >>"$GITHUB_OUTPUT"
+
+      - name: Prepare Changesets metadata
+        id: changesets
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          node scripts/version.mjs --release-notes >"$notes"
+          pnpm exec changeset git-tag
+
+          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
+            echo "::error::Changesets did not create $TAG."
+            exit 1
+          fi
+          tag_target="$(git rev-list -n 1 "$TAG")"
+          if [ "$tag_target" != "$SOURCE_SHA" ]; then
+            echo "::error::$TAG points to $tag_target instead of $SOURCE_SHA."
+            exit 1
+          fi
+          echo "notes=$notes" >>"$GITHUB_OUTPUT"
+
+      # build.yml ran in this same workflow run, so the provenance this records
+      # describes the run that actually produced these artifacts. Attesting
+      # before the first push means a failure never leaves an unattested install
+      # branch.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ env.DIST }}/extension.mjs
+            ${{ steps.package.outputs.tarball }}
+
+      - name: Publish the install branches and release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          NOTES: ${{ steps.changesets.outputs.notes }}
+        run: |
+          set -euo pipefail
+
+          pinned="releases/radius/v$VERSION"
+          catalog="$RUNNER_TEMP/marketplace.json"
+          cp "$MANIFEST" "$catalog"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+          # Each install branch is an ORPHAN carrying only the built plugin and a
+          # catalog that points at that same branch, so
+          # `marketplace add OWNER/REPO#<branch>` installs exactly what is
+          # published there. --orphan starts an unborn branch with the old tree
+          # still staged, so clear the index and re-add just what ships.
+          verify_artifact_commit() {
+            commit="$1"
+            branch="$2"
+            published_version="$(git show "$commit:$DIST/package.json" | jq -r .version)"
+            published_message="$(git log -1 --format=%s "$commit")"
+            if [ "$published_version" != "$VERSION" ] || \
+               [ "$published_message" != "chore(release): ${TAG} for ${SOURCE_SHA}" ]; then
+              echo "::error::$branch already exists but is not the $TAG artifact from $SOURCE_SHA."
+              exit 1
+            fi
+
+            unexpected="$(git ls-tree -r --name-only "$commit" | grep -v "^$DIST/" | grep -vFx "$MANIFEST" || true)"
+            if [ -n "$unexpected" ]; then
+              echo "::error::$branch must contain only $DIST and $MANIFEST; found:"
+              echo "$unexpected"
+              exit 1
+            fi
+          }
+
+          commit_orphan() {
+            branch="$1"
+            jq --arg ref "$branch" \
+              '.plugins |= map(if .name == "radius" then .source.ref = $ref else . end)' \
+              "$catalog" >"$MANIFEST"
+
+            git branch -D "$branch" 2>/dev/null || true
+            git checkout --orphan "$branch"
+            git rm -rfq --cached .
+            git add -f "$DIST" "$MANIFEST"
+            git commit -m "chore(release): ${TAG} for ${SOURCE_SHA}"
+            verify_artifact_commit HEAD "$branch"
+          }
+
+          # Always construct the expected immutable artifact tree from this
+          # run's downloaded build. A retry may reuse an existing branch only
+          # when its bytes match this exact tree.
+          commit_orphan "$pinned"
+          expected_pinned_commit="$(git rev-parse HEAD)"
+          expected_pinned_tree="$(git rev-parse "HEAD^{tree}")"
+
+          if git ls-remote --exit-code --heads origin "refs/heads/$pinned" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$pinned:refs/remotes/origin/$pinned"
+            pinned_commit="$(git rev-parse "refs/remotes/origin/$pinned")"
+            verify_artifact_commit "$pinned_commit" "$pinned"
+            published_tree="$(git rev-parse "$pinned_commit^{tree}")"
+            if [ "$published_tree" != "$expected_pinned_tree" ]; then
+              echo "::error::$pinned contains tree $published_tree, but this run rebuilt $expected_pinned_tree."
+              exit 1
+            fi
+          else
+            git push origin "HEAD:refs/heads/$pinned"
+            pinned_commit="$expected_pinned_commit"
+          fi
+
+          # Never move the rolling stable refs backwards. Reruns of an older
+          # failed release are the documented recovery path, and one must not
+          # undo a newer release that shipped in the meantime.
+          publish_latest=1
+          if git ls-remote --exit-code --heads origin "refs/heads/releases/latest" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/releases/latest:refs/remotes/origin/releases/latest"
+            current="$(git show "refs/remotes/origin/releases/latest:$DIST/package.json" | jq -r .version)"
+            if [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+              echo "::notice::releases/latest already publishes $current; leaving the rolling stable refs alone."
+              publish_latest=0
+            fi
+          fi
+
+          # Changesets owns the canonical source tag. The GitHub release uses
+          # its exact changelog entry and remains safe to reconcile on a retry.
+          git push origin "refs/tags/$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
+          fi
+          gh release upload "$TAG" "$TARBALL" --clobber
+
+          # Activate the rolling stable channel only after the canonical tag,
+          # GitHub release and asset are complete. Move its branch and tag
+          # atomically so consumers cannot observe two different artifacts.
+          if [ "$publish_latest" = 1 ]; then
+            commit_orphan releases/latest
+            git tag -f latest
+            git push --atomic --force origin \
+              HEAD:refs/heads/releases/latest \
+              refs/tags/latest
+          fi
+
+          # This immutable tag is the completion marker and is deliberately
+          # pushed last. If anything above fails, a rerun reconciles the release.
+          git tag "$ARTIFACT_TAG" "$pinned_commit"
+          git push origin "refs/tags/$ARTIFACT_TAG"
+
+          {
+            echo "- pinned install branch \`$pinned\`"
+            echo "- pinned artifact tag \`$ARTIFACT_TAG\`"
+            if [ "$publish_latest" = 1 ]; then
+              echo "- stable install branch \`releases/latest\` and tag \`latest\`"
+            else
+              echo "- \`releases/latest\` and \`latest\` left on the newer \`$current\`"
+            fi
+            echo "- tag \`$TAG\` (created by Changesets)"
+          } >>"$GITHUB_STEP_SUMMARY"

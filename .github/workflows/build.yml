@@ -5,12 +5,24 @@ name: Build
 # Runs the full check suite and produces the installable plugin at
 # plugins/radius/dist, uploaded as the `plugin-dist` artifact.
 #
-# Triggered directly for pull requests, and called by publish.yml on pushes to
-# main so a merge builds exactly once instead of duplicating this job.
+# Triggered directly for pull requests, and called by publish.yml (edge channel,
+# on every push to main) and release.yml (release channel, on demand) so a
+# publish builds exactly once instead of duplicating this job.
 
 on:
   pull_request:
   workflow_call:
+    inputs:
+      channel:
+        description: >-
+          `edge` stamps a throwaway prerelease version computed by Changesets;
+          `release` ships the version already committed to the manifests.
+        type: string
+        default: edge
+      ref:
+        description: Git ref or commit to build. Defaults to the triggering ref.
+        type: string
+        default: ""
     outputs:
       version:
         description: Version stamped into the built plugin manifests.
@@ -25,10 +37,17 @@ jobs:
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.edge_version.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # `changeset version` looks up the commit that added each changeset. In
+          # a shallow clone it recovers by running `git fetch --deepen`, which
+          # cannot authenticate once the checkout credential is dropped below.
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -42,6 +61,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Must run before the version is resolved below, which rewrites
+      # plugins/radius/package.json in the workspace.
+      - name: Check derived versions
+        run: pnpm run version:check
+
       - name: Typecheck
         run: pnpm run typecheck
 
@@ -54,35 +78,51 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
-      # Changesets owns versioning, so ask it what the next release will be
-      # instead of guessing from the manifest: --snapshot stamps the calculated
-      # version (see snapshot.useCalculatedVersion in .changeset/config.json)
-      # with an `edge` prerelease tag, e.g. 0.1.0-edge-20260807014054. That
-      # sorts below the release it precedes and above anything already shipped.
-      # This rewrites plugins/radius/package.json in the CI workspace only —
-      # nothing is committed.
-      - name: Compute edge version
-        id: edge_version
+      # edge:    Changesets owns versioning, so ask it what the next release
+      #          will be instead of guessing from the manifest. --snapshot
+      #          stamps the calculated version (see snapshot.useCalculatedVersion
+      #          in .changeset/config.json) with an `edge` prerelease tag, e.g.
+      #          0.1.0-edge-20260807014054. That sorts below the release it
+      #          precedes and above anything already shipped. This rewrites
+      #          plugins/radius/package.json in the CI workspace only — nothing
+      #          is committed. An ephemeral patch changeset makes documentation-
+      #          only pushes snapshot the next patch when no package changeset is
+      #          pending; an existing minor or major changeset still takes precedence.
+      # release: `changeset version` already committed the version to main, so
+      #          ship it verbatim. The release workflow tags it after checks.
+      - name: Resolve version
+        id: version
+        env:
+          CHANNEL: ${{ inputs.channel || 'edge' }}
         run: |
           set -euo pipefail
-          pnpm exec changeset version --snapshot edge
-          version="$(node -p "require('./plugins/radius/package.json').version")"
-          case "$version" in
-            *-edge-*) ;;
-            *)
-              # No pending changesets, so Changesets had nothing to bump. Label
-              # the current version as an edge build of itself so a publish is
-              # never mistaken for a real release.
-              core="${version%%+*}"
-              version="${core%%-*}-edge-$(date -u +%Y%m%d%H%M%S)"
-              ;;
-          esac
+          if [ "$CHANNEL" = "release" ]; then
+            version="$(node scripts/version.mjs)"
+          elif [ "$CHANNEL" = "edge" ]; then
+            snapshot_changeset=".changeset/edge-snapshot.md"
+            if [ -e "$snapshot_changeset" ]; then
+              echo "::error::$snapshot_changeset is reserved for edge CI."
+              exit 1
+            fi
+            printf '%s\n' \
+              '---' \
+              '"radius": patch' \
+              '---' \
+              '' \
+              'Publish the current commit to the rolling edge channel.' \
+              >"$snapshot_changeset"
+            pnpm exec changeset version --snapshot edge
+            version="$(node scripts/version.mjs)"
+          else
+            echo "::error::Unsupported build channel: $CHANNEL"
+            exit 1
+          fi
           echo "Stamping plugin dist as ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build
         env:
-          PLUGIN_VERSION: ${{ steps.edge_version.outputs.version }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
         run: pnpm run build
 
       - name: Upload plugin dist artifact

@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Changesets
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  status:
+    name: Check changesets
+    if: github.event.pull_request.head.ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      comment-body: ${{ steps.status.outputs.comment-body }}
+    steps:
+      # This job reads untrusted PR files but never executes repository code or
+      # receives a write token. The workflow and pinned action come from main.
+      - name: Checkout pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          persist-credentials: false
+
+      - name: Generate changeset status
+        id: status
+        uses: changesets/action/pr-status@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+
+  comment:
+    name: Report changeset status
+    needs: status
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # Keep the write token isolated from the checkout and untrusted PR files.
+      - name: Create or update pull request comment
+        uses: changesets/action/pr-comment@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        with:
+          body: ${{ needs.status.outputs.comment-body }}
