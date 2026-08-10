@@ -29,7 +29,7 @@
     "version:check": "node scripts/version.mjs --check"
   },
   "devDependencies": {
-    "@changesets/cli": "3.0.0-next.10",
+    "@changesets/cli": "3.0.0-next.11",
     "@babel/core": "^8.0.1",
     "@babel/eslint-parser": "^8.0.1",
     "@babel/plugin-syntax-typescript": "^8.0.3",
