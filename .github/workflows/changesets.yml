@@ -29,7 +29,8 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'pr/no-changeset')
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      pull-requests: write
     outputs:
       comment-body: ${{ steps.status.outputs.comment-body }}
     steps:
