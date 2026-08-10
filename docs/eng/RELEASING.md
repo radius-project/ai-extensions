@@ -28,7 +28,7 @@ Three things follow from that, and they are the things to understand before rele
 
 All four are `private: true` and none is published to a registry. The three `packages/*` entries are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range.
 
-Because every package is private, [`privatePackages`](https://changesets.dev/guide/config#privatepackages) is set to `{ "version": true, "tag": true }` - the [Beyond npm](https://changesets.dev/guide/beyond-npm) setup that lets Changesets version and tag packages it will never publish to a registry. `radius` is therefore the only package that is versioned, changelogged and tagged.
+Because every package is private, [`privatePackages`](https://changesets.dev/guide/config#privatepackages) is set to `{ "version": true, "tag": true }` - the [Beyond npm](https://changesets.dev/guide/beyond-npm) setup that lets Changesets version and tag packages it will never publish to a registry. Changesets v3 versions no private package unless asked, so that opt-in plus the `ignore` list is what makes `radius` the only package that is versioned, changelogged and tagged.
 
 ## Where the version lives
 
@@ -93,6 +93,7 @@ Re-running the dispatch before step 3 updates the same pull request rather than 
 - The publish checkout does not persist its write credential. Dependency installation runs without Git authentication, and `gh auth setup-git` configures the short-lived job token only inside the final ref-publishing step.
 - Neither release job compiles anything - the bundle arrives as a build artifact and the only dependency they run is the Changesets CLI - so both install with `--ignore-scripts`. Dependency lifecycle scripts therefore never execute in a job holding the GitHub App token or the ability to move published refs. `build.yml` keeps them enabled because it does build the bundle.
 - `radius/v<version>` is pushed last. Until that completion tag exists, rerun the original failed workflow; it rebuilds the expected orphan tree and reuses an existing immutable branch only when every published byte matches, then restores the rolling refs and retries the asset upload. Changesets creates the tag and the GitHub release exactly once and skips both on a rerun, because the tag it would create already exists. The original run is required because signed provenance records its event SHA and cannot substitute a later push's SHA. A rerun never moves `releases/latest` or `latest` backwards: if a newer release already published them, the rerun finishes its own immutable refs and leaves the rolling ones alone.
+- The rolling stable refs only ever carry a stable version. A version with a semver prerelease part - `0.3.0-rc.0` - still gets its immutable `releases/radius/v<version>` branch, `radius/v<version>` tag and GitHub release, but never becomes `releases/latest` or `latest`.
 
 ## If a package is ever published
 
@@ -125,7 +126,7 @@ Complete edge workflow runs are queued FIFO with `queue: max`, including the bui
 | GitHub release                         | `changesets/action` | no       | Body is the Changesets `CHANGELOG.md` entry; carries the attested tarball.     |
 | `releases/radius/v<version>` branch    | `release.yml`       | **no**   | Pinned install target: the same orphan layout as `releases/edge`, one version. |
 | `radius/v<version>` tag                | `release.yml`       | **no**   | Points at the pinned artifact branch and marks publication complete.           |
-| `releases/latest` branch, `latest` tag | `release.yml`       | yes      | Stable install target: force-moved to the newest release.                      |
+| `releases/latest` branch, `latest` tag | `release.yml`       | yes      | Stable install target: force-moved to the newest stable release.               |
 
 Everything local that can fail - checks, build, packaging and attestation - happens before the first push. Changesets then tags the source commit and publishes the release notes; the pinned branch is immutable and pushed without `--force`, and a retry constructs the expected artifact tree from its rebuilt files and reuses an existing branch only when its tree ID matches exactly. The GitHub release and its asset complete before `releases/latest` and `latest` move atomically, and the immutable `radius/v<version>` artifact tag is pushed last.
 
