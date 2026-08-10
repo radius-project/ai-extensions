@@ -2,9 +2,18 @@
 ---
 name: Changesets
 
+# Changeset feedback for pull requests. This workflow only comments; it never
+# fails a pull request, following the Changesets project's own recommendation
+# against blocking contributions over a missing changeset.
+#
+# Label a pull request `pr/no-changeset` to record that the omission is
+# deliberate. The reminder is then replaced by a note saying so, rather than
+# left behind to look unaddressed. `labeled`/`unlabeled` are triggers so the
+# label takes effect immediately instead of waiting for the next push.
+
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions: {}
 
@@ -15,7 +24,9 @@ concurrency:
 jobs:
   status:
     name: Check changesets
-    if: github.event.pull_request.head.ref != 'changeset-release/main'
+    if: >-
+      github.event.pull_request.head.ref != 'changeset-release/main' &&
+      !contains(github.event.pull_request.labels.*.name, 'pr/no-changeset')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,6 +48,12 @@ jobs:
   comment:
     name: Report changeset status
     needs: status
+    # Also runs when the status job was skipped by the label, so the comment can
+    # be rewritten. A genuine status failure is left alone rather than reported
+    # as a deliberate waiver.
+    if: >-
+      !cancelled() && needs.status.result != 'failure' &&
+      github.event.pull_request.head.ref != 'changeset-release/main'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -45,4 +62,7 @@ jobs:
       - name: Create or update pull request comment
         uses: changesets/action/pr-comment@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
         with:
-          body: ${{ needs.status.outputs.comment-body }}
+          body: >-
+            ${{ needs.status.outputs.comment-body || 'Changeset check skipped:
+            this pull request is labelled `pr/no-changeset`, so it is not
+            expected to ship anything releasable.' }}

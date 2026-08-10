@@ -59,7 +59,7 @@ Changesets offers only `radius`, because that is the only thing this repo ships.
 
 Describing the change in terms of the internal package that happened to change is the failure mode to avoid: those packages have no changelog, so that detail lands nowhere a user will see it.
 
-The non-blocking Changesets workflow creates or updates a pull request comment showing whether a release changeset is present. Documentation, tests, and build-only changes may intentionally omit one or use `pnpm changeset --empty`; the release pull request itself is exempt because `changeset version` has already consumed its changesets.
+The non-blocking Changesets workflow creates or updates a pull request comment showing whether a release changeset is present. Documentation, tests, and build-only changes may intentionally omit one or use `pnpm changeset --empty`; the release pull request itself is exempt because `changeset version` has already consumed its changesets. Labelling a pull request `pr/no-changeset` records the omission as deliberate and swaps the reminder for a note that it was waived - nothing is blocked either way, so the label is documentation for reviewers rather than an override.
 
 ## Cutting a release
 
