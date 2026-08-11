@@ -29,9 +29,30 @@ export interface OwnedAppRegistration {
 export interface AppSelectionInput {
   ownedMatches?: readonly OwnedAppRegistration[];
   hasUnownedMatch?: boolean;
+  radiusProvenance?: RadiusAppProvenanceInput;
   existingClientId?: string;
   explicitAppId?: string;
   createNew?: boolean;
+}
+
+export interface RadiusAppProvenanceInput {
+  tags?: Iterable<unknown>;
+  repo?: string;
+  environment?: string;
+}
+
+export interface RadiusAppProvenance {
+  managed: boolean;
+  repo?: string;
+  environment?: string;
+  operationId?: string;
+}
+
+export interface RadiusAppOwnershipDecision {
+  action: "reuse" | "error";
+  code?: string;
+  reason?: string;
+  radiusOrphan?: boolean;
 }
 
 export interface FederatedCredential {
@@ -111,6 +132,10 @@ export const RESOURCE_GROUP_NAME_RE =
 // `use_immutable_subject` / `sub_claim_prefix`) is stable across gh/GitHub
 // upgrades.
 export const GITHUB_API_VERSION = "2022-11-28";
+export const RADIUS_MANAGED_APP_TAG = "radius-managed";
+export const RADIUS_REPO_APP_TAG_PREFIX = "radius-repo:";
+export const RADIUS_ENVIRONMENT_APP_TAG_PREFIX = "radius-environment:";
+export const RADIUS_OPERATION_APP_TAG_PREFIX = "radius-operation:";
 
 export function isUuid(value: unknown): boolean {
   return typeof value === "string" && UUID_RE.test(value.trim());
@@ -131,6 +156,19 @@ export function isResourceGroupName(value: unknown): boolean {
 /** Attach a machine-readable `code` to an Error for the JSON error response. */
 export function oidcError(code: string, message: string): OidcError {
   return Object.assign(new Error(message), { code });
+}
+
+function uniqueTrimmedStrings(values: Iterable<unknown> = []): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of Array.from(values || [])) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 /** Build the argv for `az ad app create`, adding SMR only when supplied. */
@@ -161,6 +199,207 @@ export function buildAppCreateArgs({
   return args;
 }
 
+/** Build the argv for `az ad app owner add`. */
+export function buildAppOwnerAddArgs({
+  appId,
+  ownerObjectId
+}: {
+  appId: string;
+  ownerObjectId: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "owner",
+    "add",
+    "--id",
+    appId,
+    "--owner-object-id",
+    ownerObjectId
+  ];
+}
+
+/** Build the argv for `az ad app owner list`, returning owner object ids as TSV. */
+export function buildAppOwnerListArgs({ appId }: { appId: string }): string[] {
+  return [
+    "ad",
+    "app",
+    "owner",
+    "list",
+    "--id",
+    appId,
+    "--query",
+    "[].id",
+    "-o",
+    "tsv"
+  ];
+}
+
+// Creating an app commonly auto-assigns the creator as owner. The explicit
+// post-create owner add can therefore legitimately report "already exists"; that
+// is benign only when the later owner-list verification confirms the user.
+const APP_OWNER_ALREADY_ASSIGNED_RE =
+  /added object references already exist|object reference already exists/i;
+
+export function isAppOwnerAlreadyAssignedError(stderr: unknown): boolean {
+  return APP_OWNER_ALREADY_ASSIGNED_RE.test(String(stderr || ""));
+}
+
+export function parseDirectoryObjectIds(stdout: unknown): string[] {
+  return uniqueTrimmedStrings(String(stdout || "").split(/\s+/)).map((value) =>
+    value.toLowerCase()
+  );
+}
+
+export function buildRadiusAppProvenanceTags({
+  repo,
+  environment,
+  operationId
+}: {
+  repo?: string;
+  environment?: string;
+  operationId?: string;
+}): string[] {
+  return uniqueTrimmedStrings([
+    RADIUS_MANAGED_APP_TAG,
+    repo ? `${RADIUS_REPO_APP_TAG_PREFIX}${repo}` : "",
+    environment ? `${RADIUS_ENVIRONMENT_APP_TAG_PREFIX}${environment}` : "",
+    operationId ? `${RADIUS_OPERATION_APP_TAG_PREFIX}${operationId}` : ""
+  ]);
+}
+
+/** Build the argv for a Graph PATCH that updates application tags by appId. */
+export function buildAppTagPatchArgs({
+  appId,
+  tags
+}: {
+  appId: string;
+  tags: Iterable<unknown>;
+}): string[] {
+  return [
+    "rest",
+    "--method",
+    "PATCH",
+    "--url",
+    `https://graph.microsoft.com/v1.0/applications(appId='${appId}')`,
+    "--body",
+    JSON.stringify({ tags: uniqueTrimmedStrings(tags) })
+  ];
+}
+
+/** Build the argv for `az ad app show`, reading only tags. */
+export function buildAppTagShowArgs({ appId }: { appId: string }): string[] {
+  return ["ad", "app", "show", "--id", appId, "--query", "tags", "-o", "json"];
+}
+
+export function parseAppTags(stdout: unknown): string[] | null {
+  try {
+    const parsed = JSON.parse(String(stdout || "null"));
+    if (!Array.isArray(parsed)) return null;
+    return uniqueTrimmedStrings(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse Radius provenance tags into a structured object that can drive reuse
+ * and manual-cleanup guidance without mutating anything.
+ */
+export function parseRadiusAppProvenanceTags(
+  tags: Iterable<unknown> = []
+): RadiusAppProvenance {
+  const parsed = uniqueTrimmedStrings(tags);
+  const out: RadiusAppProvenance = { managed: false };
+  for (const tag of parsed) {
+    if (tag === RADIUS_MANAGED_APP_TAG) {
+      out.managed = true;
+      continue;
+    }
+    if (tag.startsWith(RADIUS_REPO_APP_TAG_PREFIX)) {
+      out.repo = tag.slice(RADIUS_REPO_APP_TAG_PREFIX.length);
+      continue;
+    }
+    if (tag.startsWith(RADIUS_ENVIRONMENT_APP_TAG_PREFIX)) {
+      out.environment = tag.slice(RADIUS_ENVIRONMENT_APP_TAG_PREFIX.length);
+      continue;
+    }
+    if (tag.startsWith(RADIUS_OPERATION_APP_TAG_PREFIX)) {
+      out.operationId = tag.slice(RADIUS_OPERATION_APP_TAG_PREFIX.length);
+    }
+  }
+  return out;
+}
+
+/**
+ * Pure ownership classification for the Radius-tagged-app reuse path.
+ *
+ * - Owned apps always reuse, regardless of any Radius tags.
+ * - Radius-tagged repo/environment matches that the signed-in user does not
+ *   own get a dedicated orphaning message with manual cleanup guidance.
+ * - Everything else falls back to the precise "signed-in user is not listed as
+ *   an owner" message.
+ */
+export function decideRadiusAppOwnership({
+  ownedBySignedInUser,
+  radiusProvenance
+}: {
+  ownedBySignedInUser: boolean;
+  radiusProvenance?: RadiusAppProvenanceInput;
+}): RadiusAppOwnershipDecision {
+  if (ownedBySignedInUser) return { action: "reuse" };
+
+  const provenance = parseRadiusAppProvenanceTags(radiusProvenance?.tags || []);
+  const expectedRepo = String(radiusProvenance?.repo || "")
+    .trim()
+    .toLowerCase();
+  const expectedEnvironment = String(radiusProvenance?.environment || "")
+    .trim()
+    .toLowerCase();
+  const repoMatches =
+    !!provenance.repo &&
+    !!expectedRepo &&
+    provenance.repo.trim().toLowerCase() === expectedRepo;
+  const environmentMatches =
+    !!provenance.environment &&
+    !!expectedEnvironment &&
+    provenance.environment.trim().toLowerCase() === expectedEnvironment;
+
+  if (provenance.managed && repoMatches && environmentMatches) {
+    return {
+      action: "error",
+      code: "app-registration-radius-orphaned",
+      reason:
+        "A Radius-tagged App Registration already exists for this repository/environment, but the current signed-in user is not listed as one of its owners. " +
+        "It may be a leftover from a previous Radius setup that was orphaned. Ask an administrator or current owner to review the owners and Radius tags and clean it up manually if needed. " +
+        "This flow will not reclaim, delete, or add owners.",
+      radiusOrphan: true
+    };
+  }
+
+  return {
+    action: "error",
+    code: "app-registration-not-owned",
+    reason:
+      "The current signed-in user is not listed as one of this App Registration's owners. " +
+      "Setup will not reuse it. " +
+      "Choose an owned application or create a new one."
+  };
+}
+
+export function missingRequiredAppTags(
+  actualTags: Iterable<unknown> = [],
+  requiredTags: Iterable<unknown> = []
+): string[] {
+  const have = new Set(uniqueTrimmedStrings(actualTags));
+  return uniqueTrimmedStrings(requiredTags).filter((tag) => !have.has(tag));
+}
+
+/** Build the argv for `az ad app delete`. */
+export function buildAppDeleteArgs({ appId }: { appId: string }): string[] {
+  return ["ad", "app", "delete", "--id", appId];
+}
+
 /**
  * Pure disambiguation for Step 3b that supports an interactive picker and an
  * explicit opt-in choice, using the same lookup-then-create ownership heuristic
@@ -175,12 +414,13 @@ export function buildAppCreateArgs({
  * - when >1 owned name-matches exist and the user hasn't chosen, we return
  *   `needs-selection` so the caller can prompt (never silently consolidate).
  *
- * @param {{ownedMatches?: {appId:string,displayName?:string,createdDateTime?:string}[], hasUnownedMatch?: boolean, existingClientId?: string, explicitAppId?: string, createNew?: boolean}} input
+ * @param {{ownedMatches?: {appId:string,displayName?:string,createdDateTime?:string}[], hasUnownedMatch?: boolean, radiusProvenance?: {tags?: Iterable<unknown>, repo?: string, environment?: string}, existingClientId?: string, explicitAppId?: string, createNew?: boolean}} input
  * @returns {{action:'reuse'|'create'|'error'|'needs-selection', appId?:string, code?:string, reason?:string, duplicates?:boolean, candidates?:object[], defaultAppId?:string}}
  */
 export function decideAppSelection({
   ownedMatches = [],
   hasUnownedMatch = false,
+  radiusProvenance,
   existingClientId,
   explicitAppId,
   createNew = false
@@ -190,6 +430,7 @@ export function decideAppSelection({
   code?: string;
   reason?: string;
   duplicates?: boolean;
+  radiusOrphan?: boolean;
   candidates?: OwnedAppRegistration[];
   defaultAppId?: string;
 } {
@@ -207,12 +448,15 @@ export function decideAppSelection({
   if (explicitAppId && String(explicitAppId).trim()) {
     const picked = owned.find((m) => norm(m.appId) === norm(explicitAppId));
     if (picked) return { action: "reuse", appId: picked.appId };
+    const decision = decideRadiusAppOwnership({
+      ownedBySignedInUser: false,
+      radiusProvenance
+    });
     return {
       action: "error",
-      code: "app-registration-not-owned",
-      reason:
-        "The selected App Registration is not owned by the signed-in user (or no longer exists). " +
-        "Choose an owned application or create a new one."
+      code: decision.code,
+      reason: decision.reason,
+      radiusOrphan: decision.radiusOrphan
     };
   }
 
@@ -221,13 +465,15 @@ export function decideAppSelection({
 
   if (owned.length === 0) {
     if (hasUnownedMatch) {
+      const decision = decideRadiusAppOwnership({
+        ownedBySignedInUser: false,
+        radiusProvenance
+      });
       return {
         action: "error",
-        code: "app-registration-not-owned",
-        reason:
-          "An App Registration with this name already exists but is owned by another user. " +
-          "Reusing it would fail (federated-credential and role writes require ownership). " +
-          "Coordinate with the owner or rename, then retry."
+        code: decision.code,
+        reason: decision.reason,
+        radiusOrphan: decision.radiusOrphan
       };
     }
     return { action: "create" };
@@ -415,11 +661,15 @@ export function discoverStatusText(
     const errMsg =
       data.error || errs.vpcs || errs.clusters || errs.subnets || "";
     if (errMsg) return "Discovery failed: " + errMsg;
-    return `Found ${(data.clusters || []).length} cluster(s), ${(data.vpcs || []).length} VPC(s)`;
+    return `Found ${(data.clusters || []).length} cluster(s), ${
+      (data.vpcs || []).length
+    } VPC(s)`;
   }
   const errMsg = data.error || errs.resourceGroups || errs.clusters || "";
   if (errMsg) return "Discovery failed: " + errMsg;
-  return `Found ${(data.clusters || []).length} cluster(s), ${(data.resourceGroups || []).length} resource group(s)`;
+  return `Found ${(data.clusters || []).length} cluster(s), ${
+    (data.resourceGroups || []).length
+  } resource group(s)`;
 }
 
 // Classify an `az ad app show --id <appId>` stderr as a genuine Graph
@@ -451,34 +701,46 @@ export function isAzResourceNotFound(stderr: unknown): boolean {
  * so a repo rename or a hand-made app (whose display name isn't the canonical
  * `radius-deploy-<owner>-<repo>`) is never silently repointed to a name match.
  *
- * @param {{clientId?: string, showStatus?: 'found'|'not-found'|'lookup-failed', owned?: boolean}} input
+ * @param {{clientId?: string, showStatus?: 'found'|'not-found'|'lookup-failed', owned?: boolean, radiusProvenance?: {tags?: Iterable<unknown>, repo?: string, environment?: string}}} input
  *   `showStatus` is the classified result of `az ad app show --id <clientId>`.
- * @returns {{action:'reuse'|'error'|'fallthrough'|'fatal', code?:string}}
+ * @returns {{action:'reuse'|'error'|'fallthrough'|'fatal', code?:string, reason?:string, radiusOrphan?:boolean}}
  *   - reuse: the wired app exists and is owned — use it directly.
- *   - error `client-id-not-owned`: exists but owned by someone else — do NOT repoint.
+ *   - error: exists but the current signed-in user is not listed as an owner — do NOT repoint.
  *   - fatal `client-id-lookup-failed`: a real lookup failure (not a not-found).
  *   - fallthrough: no clientId, or a not-found (stale var) — use the name lookup.
  */
 export function decideExistingClientId({
   clientId,
   showStatus,
-  owned = false
+  owned = false,
+  radiusProvenance
 }: {
   clientId?: string;
   showStatus?: string;
   owned?: boolean;
+  radiusProvenance?: RadiusAppProvenanceInput;
 } = {}): {
   action: "reuse" | "error" | "fallthrough" | "fatal";
   code?: string;
+  reason?: string;
+  radiusOrphan?: boolean;
 } {
   if (!clientId || !String(clientId).trim()) return { action: "fallthrough" };
   if (showStatus === "not-found") return { action: "fallthrough" };
   if (showStatus === "lookup-failed")
     return { action: "fatal", code: "client-id-lookup-failed" };
   if (showStatus === "found") {
-    return owned ?
-        { action: "reuse" }
-      : { action: "error", code: "client-id-not-owned" };
+    if (owned) return { action: "reuse" };
+    const decision = decideRadiusAppOwnership({
+      ownedBySignedInUser: false,
+      radiusProvenance
+    });
+    return {
+      action: "error",
+      code: decision.code,
+      reason: decision.reason,
+      radiusOrphan: decision.radiusOrphan
+    };
   }
   // Unknown status — be conservative and treat as a lookup failure.
   return { action: "fatal", code: "client-id-lookup-failed" };
@@ -575,7 +837,9 @@ export async function resolveOidcSubject(
   if (!repoRes?.ok) {
     throw oidcError(
       "repo-access",
-      `Could not read repository "${targetRepo}" from GitHub (${statusText(repoRes)}). ` +
+      `Could not read repository "${targetRepo}" from GitHub (${statusText(
+        repoRes
+      )}). ` +
         `Verify the repository exists and that you have access, then retry.`
     );
   }
@@ -639,8 +903,9 @@ export async function resolveOidcSubject(
   } else {
     throw oidcError(
       "customization-access",
-      `Could not read OIDC subject customization for "${fullName}" (${statusText(custRes)}). ` +
-        `Refusing to guess the subject; resolve GitHub access and retry.`
+      `Could not read OIDC subject customization for "${fullName}" (${statusText(
+        custRes
+      )}). ` + `Refusing to guess the subject; resolve GitHub access and retry.`
     );
   }
 

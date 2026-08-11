@@ -14,7 +14,7 @@ The Radius canvas runs only in the
 so install the plugin from the app: open app settings, click **Plugins**, add the
 `radius-project/ai-extensions` marketplace, and install the `radius` plugin.
 
-The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to a generated `release` branch, and the marketplace manifest points the plugin at that branch, so installing from the app pulls the skills and canvas automatically. See [`docs/design/2026-07-canvas-bundle-publishing.md`](./docs/design/2026-07-canvas-bundle-publishing.md) for how this works.
+The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to generated `releases/*` branches, and the marketplace manifest points each channel at its matching artifact, so installing from the app pulls the skills and canvas automatically. See [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md) for how this works.
 
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
@@ -71,13 +71,13 @@ The repository also ships a set of agentic skills under
 to drive a part of the Radius workflow, and pairs with the matching canvas
 actions and tools:
 
-| Skill | What it does |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md) | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies. |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md) | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes. |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions. |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md) | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow. |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md) | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment. |
+| Skill                                                                                               | What it does                                                                                                                                                                    |
+|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)                             | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                                                      |
+| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)                             | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                                                         |
+| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
+| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
+| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment.                                                   |
 | [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ## Architecture
@@ -127,9 +127,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-Packages are versioned and changelogged with
-[Changesets](https://github.com/changesets/changesets). See
-[`RELEASING.md`](./RELEASING.md) for the version/tag convention and release flow.
+[Changesets](https://changesets.dev/) drives the release: add a changeset with your pull request, and every merge to `main` refreshes the rolling `edge` channel. When a maintainer runs the **Release** workflow, Changesets opens a release pull request; merging it validates and publishes the exact source commit, creates the canonical `radius@<version>` source tag and immutable `radius/v<version>` artifact tag, and moves the stable `latest` channel. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full release flow.
 
 ## Code of conduct
 

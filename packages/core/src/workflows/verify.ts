@@ -1,5 +1,6 @@
 import type { ComputePlatform } from "../platforms/index.js";
-import { fillTemplate } from "./template.js";
+import { RADIUS_REF } from "./deploy.js";
+import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 
 // Upstream verify-template file names in radius-project/radius/.github/extension.
 // The extension fetches these from the radius repo at commit time so user repos
@@ -21,9 +22,15 @@ export function verifyTemplateFile(
 
 /**
  * Build the credential-verification GitHub Actions workflow YAML by filling the
- * `{{ENV}}` (dispatch default) placeholder of the provider-specific verify
- * template. `template` is the raw body fetched from `radius-project/radius`;
- * there is no bundled fallback, so the caller must supply it.
+ * `{{ENV}}` (dispatch default) and `{{RADIUS_REF}}` (the `verify-ghcr-push`
+ * composite-action ref) placeholders of the provider-specific verify template.
+ * `RADIUS_REF` matches the ref the template itself is fetched at, so the pinned
+ * action reference stays consistent with the fetched upstream template.
+ *
+ * `template` is the raw body fetched from `radius-project/radius`; there is no
+ * bundled fallback, so the caller must supply it. Generation fails if any
+ * `{{...}}` placeholder remains unresolved, so a broken workflow is never
+ * committed.
  */
 export function generateVerifyWorkflow(
   env: string,
@@ -35,7 +42,13 @@ export function generateVerifyWorkflow(
       `Missing verify template for platform "${platform.id}". It must be fetched from radius-project/radius/.github/extension.`
     );
   }
-  return fillTemplate(template, {
-    ENV: env
+  const workflow = fillTemplate(template, {
+    ENV: env,
+    RADIUS_REF
   });
+  assertNoUnresolvedPlaceholders(
+    workflow,
+    `verify workflow for platform "${platform.id}"`
+  );
+  return workflow;
 }
