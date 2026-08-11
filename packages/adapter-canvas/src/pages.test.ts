@@ -770,6 +770,42 @@ describe("deployedGraphPage", () => {
     expect(html).toContain("renderGraph(liveRes, true)");
     expect(html).toContain("renderGraph(resources, false)");
   });
+
+  it("renders the subtitle and wires the adaptive primary button", () => {
+    const html = deployedGraphPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    expect(html).toContain('id="deployed-subtitle"');
+    expect(html).toContain(
+      "The deployed application graph depicts the selected application"
+    );
+    expect(html).toContain('id="deployed-subtitle-hint"');
+    expect(html).toContain(
+      "radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env))"
+    );
+    expect(html).toContain("radiusDeployDeployedApp(");
+    expect(html).toContain("/api/list-deployments?repo=");
+    expect(html).toContain('var CONTEXT_BRANCH = "feature-x"');
+  });
+
+  it("places the primary button inline with the selectors", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    const controls = html.match(
+      /<div class="rad-deployed-controls">([\s\S]*?)<\/div>\n/
+    )?.[0];
+    // The button must live INSIDE the controls row so it sits on the same
+    // line as the Application/Environment dropdowns.
+    expect(html).toMatch(
+      /<div class="rad-deployed-controls">[\s\S]*id="deployed-delete-btn"[\s\S]*?<\/div>/
+    );
+    expect(controls).toBeTruthy();
+  });
+
+  it("treats a failed deployment as not deployed so a retry is offered", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("return !!status && status !== 'failed';");
+  });
 });
 
 describe("remaining pages smoke-render without removed tokens", () => {

@@ -1612,10 +1612,21 @@ export function deployedGraphPage(state: CanvasState = {}): string {
     state?.plannedRepo ||
     state?.graphTargetRepo ||
     "";
+  // Branch the "Deploy Application" mode dispatches against. The Deployed pane
+  // has no branch selector (it shows what's already running), so fall back to
+  // the session/worktree branch the rest of the canvas is pinned to.
+  const deployBranch =
+    state?.contextBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
+  const deployProvider =
+    state?.plannedProvider || state?.deployProvider || "azure";
   return pageShell(
     "Deployed Graph",
     `
 ${graphHeader("deployed")}
+<p class="rad-lede" id="deployed-subtitle" style="margin:0 0 20px;">The deployed application graph depicts the selected application as it is currently deployed and running in a given environment.<span id="deployed-subtitle-hint"></span></p>
 <div class="rad-deployed-controls">
   <div class="rad-field">
     <label for="deployed-app-select">Application:</label>
@@ -1625,8 +1636,8 @@ ${graphHeader("deployed")}
     <label for="deployed-env-select">Environment:</label>
     <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
+  <button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0;" disabled>Delete Deployment</button>
 </div>
-<button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0 0 18px;" disabled>Delete Deployment</button>
 
 <div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 
@@ -1667,9 +1678,15 @@ ${graphHeader("deployed")}
 <style>
   .rad-deployed-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:8px 0 16px; }
   .rad-deployed-controls .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
+  /* Keep the adaptive primary button baseline-aligned with the selects it sits
+     beside, rather than stretching to the row's full height. */
+  .rad-deployed-controls .rad-btn { align-self:flex-end; flex:0 0 auto; }
 </style>
 <script>
 var CONTEXT_REPO = ${JSON.stringify(targetRepo)};
+var CONTEXT_BRANCH = ${JSON.stringify(deployBranch)};
+var FALLBACK_PROVIDER = ${JSON.stringify(deployProvider)};
+var ENV_PROVIDERS = {};
 
 function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
@@ -1690,6 +1707,22 @@ function escapeHtmlClient(s) {
     var container = document.getElementById('graph-container');
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
+
+    // Adaptive primary-button state. HAS_ENVS gates "Create Environment";
+    // DEPLOYMENTS_BY_ENV (env name → status from /api/list-deployments) decides
+    // between "Deploy Application" and "Delete Deployment" for the selection.
+    var HAS_ENVS = false;
+    var DEPLOYMENTS_BY_ENV = {};
+
+    // A deployment "exists" for the selection when the environment has an
+    // active row. A failed deploy is intentionally NOT treated as deployed, so
+    // the button offers "Deploy Application" to retry rather than a delete of
+    // something that never came up.
+    function deploymentExists(app, env) {
+        if (!CONTEXT_REPO || !app || !env) return false;
+        var status = DEPLOYMENTS_BY_ENV[env];
+        return !!status && status !== 'failed';
+    }
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
@@ -1736,7 +1769,7 @@ function escapeHtmlClient(s) {
 
     function refreshControls() {
         var app = appSelect.value, env = envSelect.value;
-        deleteBtn.disabled = !(CONTEXT_REPO && app && env);
+        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env));
         labelEl.innerHTML = (app && env)
             ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
             : '';
@@ -1802,11 +1835,27 @@ function escapeHtmlClient(s) {
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var envs = (d && d.environments) || [];
-                if (!envs.length) { envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+                if (!envs.length) { HAS_ENVS = false; envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+                HAS_ENVS = true;
+                envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || FALLBACK_PROVIDER; });
                 envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
                 if (wantEnv) { envSelect.value = wantEnv; }
             })
-            .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+            .catch(function() { HAS_ENVS = false; envSelect.innerHTML = '<option value="">Could not load</option>'; });
+    }
+
+    // Resolve which environments currently hold a deployment, so the primary
+    // button can choose between deploying and deleting for the selection.
+    function loadDeploymentStates() {
+        return fetch('/api/list-deployments?repo=' + encodeURIComponent(CONTEXT_REPO))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                DEPLOYMENTS_BY_ENV = {};
+                ((d && d.deployments) || []).forEach(function(dep) {
+                    if (dep && dep.environment) DEPLOYMENTS_BY_ENV[dep.environment] = dep.status || '';
+                });
+            })
+            .catch(function() { DEPLOYMENTS_BY_ENV = {}; });
     }
 
     appSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
@@ -1819,6 +1868,14 @@ function escapeHtmlClient(s) {
     var delCancel = document.getElementById('deployed-delete-cancel');
 
     deleteBtn.addEventListener('click', function() {
+        // The primary button is adaptive — route by the mode the current
+        // environment/deployment state selected.
+        var mode = this.dataset.mode;
+        if (mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+        if (mode === 'deploy') {
+            radiusDeployDeployedApp(this, CONTEXT_REPO, CONTEXT_BRANCH, ENV_PROVIDERS, FALLBACK_PROVIDER);
+            return;
+        }
         var app = appSelect.value, env = envSelect.value;
         if (!app || !env) return;
         delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong>?';
@@ -1845,7 +1902,7 @@ function escapeHtmlClient(s) {
             });
     });
 
-    Promise.all([loadApplications(), loadEnvironments()]).then(function() {
+    Promise.all([loadApplications(), loadEnvironments(), loadDeploymentStates()]).then(function() {
         refreshControls();
         loadGraph();
     });

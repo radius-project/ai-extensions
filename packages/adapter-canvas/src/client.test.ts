@@ -337,6 +337,160 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
   });
 });
 
+describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string };
+    textContent: string;
+    className: string;
+    disabled: boolean;
+  }
+
+  function runApply(
+    hasEnv: boolean,
+    hasDeployment: boolean,
+    appValue = "web-app",
+    envValue = "prod"
+  ) {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: true
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const elements: Record<string, unknown> = {
+      "deployed-delete-btn": btn,
+      "deployed-subtitle-hint": hint,
+      "deployed-app-select": { value: appValue },
+      "deployed-env-select": { value: envValue }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const apply = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyDeployedEnvState;`
+    )(document);
+    const mode = apply(hasEnv, hasDeployment);
+    return { btn, hint, mode };
+  }
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint, mode } = runApply(false, false);
+    expect(mode).toBe("create-env");
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.className).toContain("rad-btn--primary");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("offers Deploy Application when an environment exists but nothing is deployed", () => {
+    const { btn, hint, mode } = runApply(true, false, "web-app", "prod");
+    expect(mode).toBe("deploy");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.className).toContain("rad-btn--primary");
+    expect(btn.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  it("offers Delete Deployment when a deployment already exists", () => {
+    const { btn, hint, mode } = runApply(true, true, "web-app", "prod");
+    expect(mode).toBe("delete");
+    expect(btn.textContent).toBe("Delete Deployment");
+    expect(btn.dataset.mode).toBe("delete");
+    expect(btn.className).toContain("rad-btn--danger-outline");
+    expect(btn.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("deep link into the cloud portal");
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Delete Deployment");
+  });
+
+  it("disables deploy/delete until an application and environment are selected", () => {
+    expect(runApply(true, false, "", "").btn.disabled).toBe(true);
+    expect(runApply(true, true, "web-app", "").btn.disabled).toBe(true);
+    // Creating an environment never depends on a selection.
+    expect(runApply(false, false, "", "").btn.disabled).toBe(false);
+  });
+
+  it("HTML-escapes app/environment names in the hint", () => {
+    const { hint } = runApply(true, true, "<img>", "prod\"'");
+    expect(hint.innerHTML).not.toContain("<img>");
+    expect(hint.innerHTML).toContain("&lt;img&gt;");
+    expect(hint.innerHTML).toContain("prod&quot;&#39;");
+  });
+
+  it("dispatches a deployment and redirects to the Deployments tab", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    let requestedUrl = "";
+    let requestedBody: Record<string, unknown> = {};
+    const fetch = (url: string, init: { body: string }) => {
+      requestedUrl = url;
+      requestedBody = JSON.parse(init.body);
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", "feature-x", { prod: "aws" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestedUrl).toBe("/api/deploy");
+    expect(requestedBody).toMatchObject({
+      environment: "prod",
+      provider: "aws",
+      targetRepo: "octo/app",
+      branch: "feature-x",
+      appFile: ".radius/app.bicep"
+    });
+    expect(location.href).toBe("/?page=deploying");
+  });
+
+  it("does not dispatch a deployment without a selected environment", () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-env-select": { value: "" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", "main", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+});
+
 describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () => {
   it("defaults each node's definition file to the committed .radius/app.bicep", () => {
     expect(CLIENT_GRAPH_JS).toContain(

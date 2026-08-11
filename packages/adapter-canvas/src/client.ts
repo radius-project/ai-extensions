@@ -239,6 +239,81 @@ function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
       .catch(function() { window.location.href = '/?page=deploying'; });
 }
 
+// ─── Deployed graph adaptive primary action ──────────────────────────────────
+// Tracks the last-known environment/deployment state for the Deployed pane so
+// selector change handlers can refresh the button + subtitle hint without
+// re-querying the environment and deployment listings.
+var RADIUS_DEPLOYED_HAS_ENV = false;
+var RADIUS_DEPLOYED_HAS_DEPLOYMENT = false;
+
+// Adapt the Deployed-graph primary button to the user's actual setup, in three
+// escalating states:
+//   • no environment at all      → "Create Environment" (links to the form)
+//   • environment but no deploy  → "Deploy Application" (dispatches a deploy)
+//   • an existing deployment     → "Delete Deployment"  (existing modal flow)
+// The subtitle hint under the sub-tabs names the selected application and
+// environment so the next step is always spelled out.
+function radiusApplyDeployedEnvState(hasEnv, hasDeployment) {
+    RADIUS_DEPLOYED_HAS_ENV = !!hasEnv;
+    RADIUS_DEPLOYED_HAS_DEPLOYMENT = !!hasDeployment;
+    var btn = document.getElementById('deployed-delete-btn');
+    var hint = document.getElementById('deployed-subtitle-hint');
+    var appSel = document.getElementById('deployed-app-select');
+    var envSel = document.getElementById('deployed-env-select');
+    var app = (appSel && appSel.value) || '';
+    var env = (envSel && envSel.value) || '';
+    var mode = !hasEnv ? 'create-env' : (hasDeployment ? 'delete' : 'deploy');
+    if (btn) {
+        btn.dataset.mode = mode;
+        if (mode === 'create-env') {
+            btn.textContent = 'Create Environment';
+            btn.className = 'rad-btn rad-btn--primary';
+            btn.disabled = false;
+        } else if (mode === 'deploy') {
+            btn.textContent = 'Deploy Application';
+            btn.className = 'rad-btn rad-btn--primary';
+            btn.disabled = !(app && env);
+        } else {
+            btn.textContent = 'Delete Deployment';
+            btn.className = 'rad-btn rad-btn--danger-outline';
+            btn.disabled = !(app && env);
+        }
+    }
+    if (hint) {
+        var appLabel = '<strong>' + radiusEscapeHtml(app || 'this application') + '</strong>';
+        var envLabel = '<strong>' + radiusEscapeHtml(env || 'the selected environment') + '</strong>';
+        if (mode === 'create-env') {
+            hint.textContent = ' To deploy this application, you must first create an environment.';
+        } else if (mode === 'deploy') {
+            hint.innerHTML = ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
+        } else {
+            hint.innerHTML = ' Click the name of any application component to deep link into the cloud portal for its infrastructure. To delete the application (' + appLabel + ') currently deployed to the environment (' + envLabel + '), click "Delete Deployment".';
+        }
+    }
+    return mode;
+}
+
+// Dispatch a deployment of the currently-selected application/environment from
+// the Deployed pane, then redirect to the Deployments tab so the user can
+// monitor progress. Mirrors radiusDeployPlannedApp, but sources its selection
+// from the Deployed pane's own selectors.
+function radiusDeployDeployedApp(btn, repo, branch, envProviders, fallbackProvider) {
+    if (!btn || btn.disabled) return;
+    var envSel = document.getElementById('deployed-env-select');
+    var env = envSel ? envSel.value : '';
+    if (!repo || !env) return;
+    var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
+    btn.disabled = true;
+    btn.textContent = 'Starting deployment…';
+    fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: branch || '', appFile: '.radius/app.bicep' })
+    }).then(function(r) { return r.json().catch(function() { return {}; }); })
+      .then(function() { window.location.href = '/?page=deploying'; })
+      .catch(function() { window.location.href = '/?page=deploying'; });
+}
+
 // Toggle the Modeled-graph primary button between "Create Environment" (when
 // the repo has no Radius-managed environment) and "Plan Deployment". The
 // subtitle hint under the sub-tabs is updated to match so the next step is
