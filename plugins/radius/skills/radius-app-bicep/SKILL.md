@@ -240,6 +240,23 @@ Rules:
 - An explicit request for Radius relationship metadata is a valid reason to retain a connection. Use the exact requested connection key and `source`; explicit native wiring may still be required for the workload.
 - Explicit native variables may coexist with generic projection. Avoid conflicting values, and use `disableDefaultEnvVars` only when the exact container schema supports it and the generic variables would be harmful.
 
+## Service-to-service addressing
+
+When one container calls another `Radius.Compute/containers` resource in the same application (inter-service HTTP/gRPC in a microservices app), address the peer by referencing its read-only **`hosts`** output — a map of container name to that container's in-cluster Service DNS name, published by the containers recipe — never a hand-composed Service name:
+
+```text
+http://${<peerSymbolicName>.properties.hosts['<containerKey>']}:<containerPort>
+```
+
+Rules:
+
+- Reference the peer's host with **indexed access**, `<peer>.properties.hosts['<containerKey>']`, NOT the resource `name` or a literal `<resource-name>-<containerKey>` string. `<containerKey>` is the peer's key in its own `containers` map. Use indexed (`['...']`) rather than dot access because a container key may contain hyphens or other characters that are not valid Bicep identifiers; indexed access works for every key. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so the reference is the stable, predictable host and it also creates a deploy-time dependency edge. (`identityApi.properties.hosts['identity']` → `'http://${identityApi.properties.hosts['identity']}:8080'`, never a hardcoded `http://identity-api:8080` or `http://identity-api-identity:8080`.)
+- `hosts` is a read-only output — reference it, never set it. It has one entry per port-exposing container, so a multi-container peer publishes all of its Service hosts. Compose the full URL in a bicep string interpolation and assign it to the consuming `env.value`.
+- **Do not create a dependency cycle.** Referencing `<peer>.properties.hosts[...]` creates a deploy-time dependency edge from the caller to the peer, so a pair (or ring) of containers that each reference the other's `hosts` forms a circular dependency that fails deployment. When two services genuinely need to call each other, break the cycle: address only one direction through `hosts` and give the other direction a value that carries no dependency edge — the peer's Service DNS name composed as a plain string literal `<peer-resource-name>-<containerKey>.<namespace>` (the exact name the recipe assigns), or route one side through a `Radius.Compute/routes`/gateway. Report the cycle and the chosen resolution rather than emitting mutual `hosts` references or silently guessing a Service name.
+- `<containerPort>` is the peer container's published port number from source, not the `ports`-map key.
+- Put the composed URL/host into the exact inter-service variable, config field, or CLI flag the calling source consumes (e.g. a `*_URL`/`*Url` env var, a config-file host, or .NET service discovery `services__<peer-resource-name>__http__0`). Derive the variable name, scheme (`http`/`https`/`grpc`), and any path from source — only the host portion follows this rule.
+- This addressing is required only for container-to-container calls. Backing services (databases, caches, brokers) use their resource `host`/endpoint outputs per [connection-conventions.md](references/connection-conventions.md).
+
 ## Secrets
 
 See [secrets-handling.md](references/secrets-handling.md). Secret contracts are version- and type-specific:
