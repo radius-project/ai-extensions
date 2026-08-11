@@ -223,11 +223,7 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     value: string;
   }
 
-  function runApply(
-    hasEnv: boolean,
-    appValue = "web-app",
-    envValue = "prod"
-  ) {
+  function runApply(hasEnv: boolean, appValue = "web-app", envValue = "prod") {
     const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
     const hint = { textContent: "" };
     const appSel: FakeSelect = { value: appValue };

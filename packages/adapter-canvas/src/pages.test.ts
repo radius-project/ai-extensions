@@ -292,7 +292,7 @@ describe("plannedGraphPage", () => {
       contextRepo: "octo/app",
       contextBranch: "main"
     });
-    expect(html).toContain("id=\"planned-subtitle\"");
+    expect(html).toContain('id="planned-subtitle"');
     expect(html).toContain(
       "The planned application graph previews the infrastructure"
     );
