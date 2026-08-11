@@ -60,9 +60,9 @@ function operation(overrides = {}) {
 
 afterEach(async () => {
   await Promise.all(
-    directories.splice(0).map((directory) =>
-      fs.rm(directory, { recursive: true, force: true })
-    )
+    directories
+      .splice(0)
+      .map((directory) => fs.rm(directory, { recursive: true, force: true }))
   );
 });
 
@@ -115,16 +115,24 @@ describe("operation restart functional coverage", () => {
   });
 
   it.each([
-    ["azure app", (op) => recordAzureApp(op, {
-      state: "created",
-      appId: "app-1",
-      displayName: "radius-contoso-store"
-    })],
-    ["GitHub Environment", (op) => recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    })]
+    [
+      "azure app",
+      (op) =>
+        recordAzureApp(op, {
+          state: "created",
+          appId: "app-1",
+          displayName: "radius-contoso-store"
+        })
+    ],
+    [
+      "GitHub Environment",
+      (op) =>
+        recordGitHubEnvironment(op, {
+          state: "created_candidate",
+          repo: "contoso/store",
+          name: "dev"
+        })
+    ]
   ])("retains a post-mutation %s after restart", async (_name, mutate) => {
     const { first, restart } = await persistedRegistries();
     const op = operation();
@@ -156,9 +164,9 @@ describe("operation restart functional coverage", () => {
         branch: "feature/cart"
       }
     });
-    expect(
-      sanitizeResumeTarget(recovered.journey.resumeTarget)
-    ).toEqual(recovered.journey.resumeTarget);
+    expect(sanitizeResumeTarget(recovered.journey.resumeTarget)).toEqual(
+      recovered.journey.resumeTarget
+    );
   });
 
   it("preserves a terminal outcome across restart", async () => {

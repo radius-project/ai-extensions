@@ -6444,8 +6444,7 @@ function createRequestHandler(instanceId: string) {
             verifyOp.verification = {
               ...verifyOp.verification,
               runId: String(runId),
-              runUrl:
-                "https://github.com/" + repo + "/actions/runs/" + runId
+              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
             };
             await operations.persist();
           } else if (runId && entry) entry.state.verifyRunId = runId;
