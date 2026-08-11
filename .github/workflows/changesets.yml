@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Changesets
+
+# Changeset feedback for pull requests. This workflow only comments; it never
+# fails a pull request, following the Changesets project's own recommendation
+# against blocking contributions over a missing changeset.
+#
+# Label a pull request `pr/no-changeset` to record that the omission is
+# deliberate. The reminder is then replaced by a note saying so, rather than
+# left behind to look unaddressed. `labeled`/`unlabeled` are triggers so the
+# label takes effect immediately instead of waiting for the next push.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  status:
+    name: Check changesets
+    if: >-
+      github.event.pull_request.head.ref != 'changeset-release/main' &&
+      !contains(github.event.pull_request.labels.*.name, 'pr/no-changeset')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/checkout; pr-status itself needs no token
+    outputs:
+      comment-body: ${{ steps.status.outputs.comment-body }}
+    steps:
+      # Deliberately the trusted base checkout. `pr-status` fetches the base and
+      # head refs itself into a throwaway detached worktree, so no fork-authored
+      # file is ever written into this workflow's workspace, and no repository
+      # code is executed. It also expects the shallow default clone, which it
+      # deepens only as far as the merge base.
+      #
+      # Those fetches are the reason the checkout credential is left in place:
+      # this repository is internal, and `pr-status` takes no token input, so
+      # dropping it fails the fetch with git exit 128. Nothing untrusted runs
+      # here, and the job only holds `contents: read`.
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # with:
+        #   persist-credentials: false
+
+      - name: Generate changeset status
+        id: status
+        uses: changesets/action/pr-status@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+
+  comment:
+    name: Report changeset status
+    needs: status
+    # Also runs when the status job was skipped by the label, so the comment can
+    # be rewritten. A genuine status failure is left alone rather than reported
+    # as a deliberate waiver.
+    if: >-
+      !cancelled() && needs.status.result != 'failure' &&
+      github.event.pull_request.head.ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # Keep the write token isolated from the checkout and untrusted PR files.
+      - name: Create or update pull request comment
+        uses: changesets/action/pr-comment@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        with:
+          body: >-
+            ${{ needs.status.outputs.comment-body || 'Changeset check skipped:
+            this pull request is labelled `pr/no-changeset`, so it is not
+            expected to ship anything releasable.' }}
