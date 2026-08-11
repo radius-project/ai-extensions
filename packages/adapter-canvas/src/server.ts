@@ -657,7 +657,10 @@ async function ensureWorkflowsCurrent(
         log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
       }
     );
-    if (r && ((r.updated && r.updated.length) || (r.created && r.created.length))) {
+    if (
+      r &&
+      ((r.updated && r.updated.length) || (r.created && r.created.length))
+    ) {
       const changed = [...(r.updated || []), ...(r.created || [])];
       console.error(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
