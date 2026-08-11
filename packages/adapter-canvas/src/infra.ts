@@ -359,7 +359,54 @@ export async function generateVerifyWorkflow(
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
   const upstream = await fetchRadiusTemplate(fileName);
-  return coreGenerateVerifyWorkflow(env, platform, upstream);
+  return configureVerifyGhcrProbe(
+    coreGenerateVerifyWorkflow(env, platform, upstream)
+  );
+}
+
+/**
+ * Replace the upstream GHCR token-claim decoder with the registry's real
+ * authorization check.
+ *
+ * GHCR may return an opaque bearer token, so decoding a JWT `access` claim can
+ * report no actions even when GITHUB_TOKEN can push. Starting a blob upload is
+ * non-destructive until content is uploaded and returns HTTP 202 only when the
+ * token has push permission.
+ */
+export function configureVerifyGhcrProbe(workflow: string): string {
+  const lines = workflow.split("\n");
+  const index = lines.findIndex((line) =>
+    /^\s*-\s+name:\s*Verify GHCR package push permission\s*$/.test(line)
+  );
+  if (index < 0) return workflow;
+  const indent = lines[index].match(/^\s*/)?.[0] ?? "";
+  let end = index + 1;
+  while (end < lines.length && !lines[end].startsWith(`${indent}- name:`)) {
+    end++;
+  }
+  const replacement = `${indent}- name: Verify GHCR package push permission
+${indent}  shell: bash
+${indent}  env:
+${indent}    GH_ACTOR: \${{ github.actor }}
+${indent}    GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+${indent}    STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
+${indent}  run: |
+${indent}    set -euo pipefail
+${indent}    repo_path="\${STATE_REGISTRY#ghcr.io/}"
+${indent}    bearer="$(curl -fsS -u "\${GH_ACTOR}:\${GHCR_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:\${repo_path}:pull,push" | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).token || ""));')"
+${indent}    if [[ -z "\${bearer}" ]]; then
+${indent}      echo "::error::Could not obtain a GHCR token for \${STATE_REGISTRY}."
+${indent}      exit 1
+${indent}    fi
+${indent}    status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer \${bearer}" "https://ghcr.io/v2/\${repo_path}/blobs/uploads/")"
+${indent}    if [[ "\${status}" != "202" ]]; then
+${indent}      echo "::error::GITHUB_TOKEN cannot start a GHCR upload for \${STATE_REGISTRY} (HTTP \${status})."
+${indent}      exit 1
+${indent}    fi
+${indent}    echo "GHCR_PUSH_CHECK=ok" >> "$GITHUB_ENV"
+${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
+  lines.splice(index, end - index, ...replacement.split("\n"));
+  return lines.join("\n");
 }
 
 /**

@@ -5,6 +5,7 @@ import globals from "globals";
 const sourceFiles = [
   "eslint.config.mjs",
   "packages/**/*.{ts,mjs}",
+  "scripts/**/*.mjs",
   "vitest.config.ts"
 ];
 const restrictedCoreImports = [

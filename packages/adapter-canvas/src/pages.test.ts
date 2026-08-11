@@ -16,7 +16,8 @@ import {
   graphDiffPage,
   deployedGraphPage,
   environmentPage,
-  deployingPage
+  deployingPage,
+  serializeBrowserFunction
 } from "./pages.js";
 
 const REMOVED_TOKENS = [
@@ -350,6 +351,13 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain("runAzureAutoSetupInteractive");
   });
 
+  it("keeps interactive prompt errors separate from cleanup narration", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("err.steps = data.steps");
+    expect(html).toContain("err.cleanup = data.cleanup");
+    expect(html).not.toContain("data.steps.join('; ')");
+  });
+
   it("renders the app-registration picker + editable name + use-existing action", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
     // Editable deploy-identity name prefilled from the repo.
@@ -427,6 +435,13 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     // profile-change paths so a stale pin can't leak into the wrong context.
     expect(html).toContain("function clearSharedAppPin");
     expect(html).toMatch(/clearSharedAppPin\(\)/);
+    expect(html).toContain('data-default-name="radius-deploy-octo-app"');
+    expect(html).toContain(
+      "nameEl.value = (picked && picked.displayName) || choice.appId"
+    );
+    expect(html).toContain(
+      "nameEl.value = nameEl.getAttribute('data-default-name') || ''"
+    );
   });
 
   it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
@@ -475,6 +490,26 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain(
       "window.addEventListener('focus', envGhAutoRecheck)"
     );
+  });
+
+  it("gates credential profiles on GitHub Packages access with explicit remediation", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain('id="cred-ghcr-section"');
+    expect(html).toContain('id="cred-ghcr-command"');
+    expect(html).toContain('id="cred-ghcr-copy"');
+    expect(html).toContain('id="cred-ghcr-retry"');
+    expect(html).toContain("I’ve updated permissions — retry");
+    expect(html).toContain(
+      "' && gh auth refresh -h github.com -s read:packages -s write:packages'"
+    );
+    expect(html).toContain("function loadCredGitHubAccess(fresh)");
+    expect(html).toContain(
+      "'/api/github-identity' + (fresh ? '?fresh=1' : '')"
+    );
+    expect(html).toContain(
+      "document.getElementById('save-cred-btn').disabled = !(credVerified && credPackagesVerified)"
+    );
+    expect(html).toContain("navigator.clipboard.writeText(command)");
   });
 
   it("scopes the AKS grant to the cluster's own resource group and surfaces setup warnings on success", () => {
@@ -581,13 +616,29 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     // into the client bundle, so the shipping client runs the exact tested
     // code and the call sites reference the real functions.
     const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("function formatServesReposLabel(");
-    expect(html).toContain("function discoverStatusText(");
+    expect(html).toContain(
+      "var formatServesReposLabel = function formatServesReposLabel("
+    );
+    expect(html).toContain(
+      "var discoverStatusText = function discoverStatusText("
+    );
     expect(html).toContain("discoverStatusText(data, 'azure')");
     expect(html).toContain("discoverStatusText(data, 'aws')");
     expect(html).toContain("formatServesReposLabel(serves)");
     // The hand-copied twins must be gone.
     expect(html).not.toContain("formatServesReposLabelClient");
+  });
+
+  it("keeps stable browser helper names when the bundled function name is mangled", () => {
+    function Fi(data: unknown): unknown {
+      return data;
+    }
+    expect(serializeBrowserFunction("discoverStatusText", Fi)).toMatch(
+      /^var discoverStatusText = function Fi\(data\)/
+    );
+    expect(() => serializeBrowserFunction("bad-name", Fi)).toThrow(
+      'Invalid browser function name "bad-name".'
+    );
   });
 
   it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
@@ -811,5 +862,327 @@ describe("remaining pages smoke-render without removed tokens", () => {
     );
     const undefinedTokens = [...referenced].filter((t) => !defined.has(t));
     expect(undefinedTokens).toEqual([]);
+  });
+});
+
+describe("environmentPage — non-blocking setup progress", () => {
+  it("no longer renders a full-screen blocking overlay for creation", () => {
+    // The blocking modal is the one thing every comparable agent-canvas
+    // product avoids, and it trapped the user for up to eight minutes.
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).not.toContain('id="env-creating-modal"');
+    expect(html).toContain('id="env-progress-panel"');
+  });
+
+  it("renders the panel inline on the environments landing, not as an overlay", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    const panel = html.slice(html.indexOf('id="env-progress-panel"'));
+    expect(panel.slice(0, 200)).not.toContain("position:fixed");
+    const landing = html.indexOf('<div id="env-landing">');
+    expect(html.indexOf('id="env-progress-panel"')).toBeGreaterThan(landing);
+    expect(html.indexOf('id="env-progress-panel"')).toBeLessThan(
+      html.indexOf('id="new-env-btn"')
+    );
+    expect(html).toContain(
+      'role="region" aria-label="Environment setup progress" tabindex="-1"'
+    );
+  });
+
+  it("focuses and scrolls the progress panel into view when setup starts", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("function focusEnvProgressPanel()");
+    expect(html).toContain("panel.focus({ preventScroll: true })");
+    expect(html).toContain("panel.scrollIntoView({ behavior: reduceMotion");
+    const start = html.indexOf("summary: 'Creating ' + env + '…'");
+    const focus = html.indexOf("focusEnvProgressPanel();", start);
+    const tracking = html.indexOf(
+      "trackEnvProgress(targetRepo, env, provider);",
+      start
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(focus).toBeGreaterThan(start);
+    expect(tracking).toBeGreaterThan(focus);
+  });
+
+  it("offers dismissal only after setup reaches a terminal state", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain('id="env-progress-dismiss"');
+    expect(html).toContain(
+      'aria-label="Dismiss completed environment setup progress"'
+    );
+    expect(html).toContain(
+      "if (dismiss) dismiss.style.display = op.terminalState ? '' : 'none';"
+    );
+    expect(html).toContain(
+      "if (actions) actions.style.display = op.terminalState ? 'flex' : 'none';"
+    );
+    expect(html).toContain(
+      "envProgressDismiss.addEventListener('click', function() {\n    hideEnvProgress();"
+    );
+  });
+
+  it("keeps the journey action beside dismissal when a return target exists", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "var canResume = op.terminalState && target && target.page === 'planned' && target.repo;"
+    );
+    expect(html).toContain(
+      "if (resume) resume.style.display = canResume ? '' : 'none';"
+    );
+  });
+
+  it("clears stale terminal banners before showing progress for a new setup", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("function hideEnvTerminalBanners()");
+    expect(html).toContain(
+      "['env-success-banner', 'env-error-banner', 'env-warning-banner', 'env-action-banner']"
+    );
+    const start = html.indexOf("showEnvLanding();");
+    const clear = html.indexOf("hideEnvTerminalBanners();", start);
+    const render = html.indexOf("renderEnvProgress({", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(start);
+    expect(render).toBeGreaterThan(clear);
+  });
+
+  it("shows stage, current activity and elapsed time instead of a percentage", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain('id="env-progress-stages"');
+    expect(html).toContain('id="env-progress-activity"');
+    expect(html).toContain('id="env-progress-elapsed"');
+    // The step count varies with branching (credentials can be skipped,
+    // verification can never run), so a percentage could only be fiction.
+    expect(html).not.toContain("env-progress__bar");
+  });
+
+  it("announces the activity line and does not rely on colour alone for state", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      'id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"'
+    );
+    expect(html).toContain("ENV_STAGE_GLYPH");
+    expect(html).toContain("prefers-reduced-motion");
+  });
+
+  it("renders one inline failure card that covers cleanup results and retry readiness", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain('id="env-progress-failure"');
+    expect(html).toContain('id="env-progress-cleanup-removed"');
+    expect(html).toContain('id="env-progress-cleanup-retained"');
+    expect(html).toContain('id="env-progress-cleanup-warnings"');
+    expect(html).toContain("function renderEnvFailureCard(op)");
+    expect(html).toContain("Retry starts cleanly:");
+  });
+
+  it("describes commit-point retention, cleanup warnings, and retry readiness in the failure card copy", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    const failureCard = html.slice(
+      html.indexOf("function renderEnvFailureCard(op)")
+    );
+    expect(failureCard).toContain(
+      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+    );
+    expect(failureCard).toContain("Cleanup finished with warnings.");
+    expect(failureCard).toContain(
+      "Retry starts cleanly: ' + (retry.startsCleanly ? 'Yes' : 'No') + '. '"
+    );
+  });
+
+  it("polls the operation record rather than the request that started it", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("/api/operations?repo=");
+    // Rejoining on load is what makes navigating away safe.
+    expect(html).toContain("resumeEnvProgress(CTX_REPO)");
+  });
+
+  it("falls back to verification status when the process-local operation record disappears", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "function trackEnvProgress(repo, environment, provider, onTerminal)"
+    );
+    expect(html).toContain("if (!op) {");
+    expect(html).toContain(
+      "// Verification is tracked separately from the process-local"
+    );
+    expect(html).toContain(
+      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment)"
+    );
+    expect(html).toContain(
+      "if (v.state === 'success') {\n                                hideEnvProgress();"
+    );
+    expect(html).toContain(
+      "else hideEnvProgress();\n                                    })"
+    );
+  });
+
+  it("does not treat a previous verification run as success before the new operation appears", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("var observedOperation = false;");
+    expect(html).toContain(
+      "if (!observedOperation) {\n                        envProgressTimer = setTimeout(tick, 1500);"
+    );
+    expect(html).toContain("observedOperation = true;");
+    const noOperation = html.indexOf("if (!observedOperation)");
+    const verifyFallback = html.indexOf(
+      "fetch('/api/verify-status?repo='",
+      noOperation
+    );
+    expect(noOperation).toBeGreaterThan(-1);
+    expect(verifyFallback).toBeGreaterThan(noOperation);
+  });
+
+  it("does not replace a fresh setup panel with the previous terminal operation", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "if (!observedOperation && op && (op.environment !== environment || op.terminalState))"
+    );
+    const staleGuard = html.indexOf(
+      "if (!observedOperation && op && (op.environment !== environment || op.terminalState))"
+    );
+    const observed = html.indexOf("observedOperation = true;", staleGuard);
+    const render = html.indexOf("renderEnvProgress(op);", staleGuard);
+    expect(staleGuard).toBeGreaterThan(-1);
+    expect(observed).toBeGreaterThan(staleGuard);
+    expect(render).toBeGreaterThan(observed);
+  });
+
+  it("polls verification while the live operation is in the verify stage", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    const liveVerify = html.indexOf(
+      "if (op.currentStage === 'verify' && environment)"
+    );
+    const verifyRequest = html.indexOf(
+      "fetch('/api/verify-status?repo='",
+      liveVerify
+    );
+    expect(liveVerify).toBeGreaterThan(-1);
+    expect(verifyRequest).toBeGreaterThan(liveVerify);
+    expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
+      "v.state === 'success' || v.state === 'failed' ? 0 : 1500"
+    );
+  });
+
+  it("re-hydrates terminal request failures from the shared operation record", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("function syncEnvFailureOperation(data)");
+    expect(html).toContain("syncEnvFailureOperation(envResult)");
+    expect(html).toContain("syncEnvFailureOperation(err)");
+  });
+});
+
+describe("environmentPage — pull-request terminal state", () => {
+  it("renders an action-required outcome instead of polling for a verify run that was never dispatched", () => {
+    // The server deliberately skips the verify dispatch on the PR path, so
+    // the old client polled for eight minutes and then reported a correct
+    // outcome as "Timed out waiting for credential verification".
+    //
+    // The branch keys off the server's stated `actionRequired` flag, not off
+    // the presence of a pull-request URL. Once the server learned to dispatch
+    // verification from a PR branch, a URL could accompany a run that was
+    // genuinely verifying — and inferring "do not poll" from it would have
+    // reintroduced #247 from the other direction.
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("if (envResult.actionRequired) {");
+    const prBranch = html.slice(
+      html.indexOf("if (envResult.actionRequired) {")
+    );
+    const untilPoll = prBranch.slice(
+      0,
+      prBranch.indexOf("function pollVerify")
+    );
+    expect(untilPoll).toContain("showEnvActionRequired");
+    expect(untilPoll).toContain("return;");
+  });
+
+  it("has a dedicated banner that reads as informational, not as a failure", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain('id="env-action-banner"');
+    expect(html).toContain("is set up, but one step is left for you");
+    expect(html).toContain("Review the pull request");
+  });
+
+  it("only links a pull request URL it recognises", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "pullRequestUrl.indexOf('https://github.com/') === 0"
+    );
+  });
+
+  it("can explain manual PR creation when automatic PR creation failed", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("could not open a pull request automatically");
+    expect(html).toContain("terminal.branch");
+    expect(html).toContain("terminal.baseBranch");
+  });
+
+  it("continues both setup POSTs with the same operation id", () => {
+    const html = environmentPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature"
+    });
+    expect(html).toContain(
+      "if (params.operationId) payload.operationId = params.operationId"
+    );
+    expect(html).toContain(
+      "operationId: setupResult && setupResult.operationId"
+    );
+    expect(html).toContain(
+      "operationId: err.operationId || params.operationId"
+    );
+  });
+
+  it("captures and renders a planned-graph resume target", () => {
+    const html = environmentPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature"
+    });
+    expect(html).toContain(
+      "resumeTarget: { page: 'planned', repo: targetRepo, branch: CTX_BRANCH }"
+    );
+    expect(html).toContain('id="env-progress-resume"');
+    expect(html).toContain("target.page === 'planned'");
+    expect(html).toContain("resumeReason: 'View planned graph'");
+  });
+});
+
+describe("operation status chip in the top navigation", () => {
+  const shell = pageShell("Environments", "<div></div>", "environments");
+
+  it("ships the chip on every page, hidden until it has something to report", () => {
+    // It renders in the shell rather than on the environments page because
+    // the whole point is to reach a user who has navigated away from there.
+    const html = pageShell("Applications", "<div></div>", "applications");
+    expect(html).toContain('id="rad-opchip"');
+    expect(html).toContain('id="rad-opchip-label"');
+    expect(html).toMatch(
+      /<a class="rad-opchip" id="rad-opchip" href="\/\?page=environment" hidden/
+    );
+    expect(shell).toContain('id="rad-opchip"');
+  });
+
+  it("routes back to environments rather than opening anything on its own", () => {
+    // Auto-focus on completion was rejected: it re-creates the modal's sin
+    // with worse timing. The chip is a link the user chooses to follow.
+    expect(shell).toContain('href="/?page=environment"');
+    expect(shell).not.toContain('rad-opchip" onclick');
+  });
+
+  it("announces itself politely to assistive technology", () => {
+    expect(shell).toMatch(/id="rad-opchip"[^>]*aria-live="polite"/);
+    expect(shell).toContain(
+      'class="rad-opchip__dot" id="rad-opchip-dot" aria-hidden="true"'
+    );
+  });
+
+  it("carries the poller that fills it in", () => {
+    expect(shell).toContain("/api/operations");
+    expect(shell).toContain("radiusOpChipAck");
+  });
+
+  it("stops the pulse for anyone who has asked for less motion", () => {
+    expect(shell).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(shell).toMatch(
+      /prefers-reduced-motion[\s\S]*rad-opchip--running \.rad-opchip__dot \{ animation: none; \}/
+    );
   });
 });
