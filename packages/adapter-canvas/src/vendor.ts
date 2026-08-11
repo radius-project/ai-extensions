@@ -96,7 +96,11 @@ export function getInlineVendorScripts(): string {
   return `<script>${react}</script>\n<script>${reactDom}</script>\n<script>${reactFlow}</script>\n<script>${dagre}</script>`;
 }
 
-// Pre-fetch all vendor assets at extension startup
-(async () => {
-  await ensureVendorScripts();
-})();
+// Artifact smoke loads the complete production bundle in an isolated,
+// network-denied subprocess. It skips only this eager cache warm-up; any later
+// attempt to fetch, spawn, or bind still fails closed in that harness.
+if (process.env.RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH !== "1") {
+  (async () => {
+    await ensureVendorScripts();
+  })();
+}

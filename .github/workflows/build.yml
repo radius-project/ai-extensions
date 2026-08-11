@@ -76,7 +76,7 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Run unit tests
+      - name: Run Node tests
         run: pnpm run test
 
       - name: Check progress demo bundle
@@ -121,6 +121,11 @@ jobs:
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
         run: pnpm run build
+
+      # Runs against the exact bundle uploaded below. This intentionally stays
+      # after Build rather than relying on a pre-existing workspace artifact.
+      - name: Run built-artifact smoke tests
+        run: pnpm run test:integration:artifact
 
       - name: Upload plugin dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
