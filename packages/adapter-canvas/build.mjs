@@ -148,6 +148,26 @@ function installToLocal() {
       copyFileSync(from, tmp);
       renameSync(tmp, to);
     }
+    const checkerFrom = join(
+      distDir,
+      "skills",
+      "radius-app-bicep",
+      "scripts",
+      "check.mjs"
+    );
+    if (existsSync(checkerFrom)) {
+      const checkerTo = join(
+        installDir,
+        "skills",
+        "radius-app-bicep",
+        "scripts",
+        "check.mjs"
+      );
+      mkdirSync(dirname(checkerTo), { recursive: true });
+      const tmp = `${checkerTo}.tmp-${process.pid}`;
+      copyFileSync(checkerFrom, tmp);
+      renameSync(tmp, checkerTo);
+    }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.
     try {

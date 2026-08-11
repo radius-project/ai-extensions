@@ -15,6 +15,9 @@
 // cross-skill reference it links to
 // (plugins/radius/skills/radius-app-graph/references/source-code-references.md).
 
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import skillMd from "../../../plugins/radius/skills/radius-app-bicep/SKILL.md";
 import runtimeContract from "../../../plugins/radius/skills/radius-app-bicep/references/runtime-contract.md";
 import componentCatalog from "../../../plugins/radius/skills/radius-app-bicep/references/component-catalog.md";
@@ -66,9 +69,26 @@ function sanitizeRepoPath(repoPath: unknown): string {
   return cleaned || FALLBACK;
 }
 
+function bundledSkillBase(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const installed = path.join(moduleDir, "skills", "radius-app-bicep");
+  if (existsSync(path.join(installed, "scripts", "check.mjs"))) {
+    return installed;
+  }
+  const source = path.resolve(
+    moduleDir,
+    "../../../plugins/radius/skills/radius-app-bicep"
+  );
+  if (existsSync(path.join(source, "scripts", "check.mjs"))) {
+    return source;
+  }
+  return installed;
+}
+
 // Returns the full skill and every referenced file as one standalone prompt.
 export function radiusAppBicepSkill(repoPath?: string): string {
   const target = sanitizeRepoPath(repoPath);
+  const skillBase = bundledSkillBase();
   const intro =
     `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +
     `Model the repository at ${target} by following the skill below. This is ` +
@@ -78,14 +98,17 @@ export function radiusAppBicepSkill(repoPath?: string): string {
     `plus the app-graph \`source-code-references.md\` it links to) are appended ` +
     `after SKILL.md under matching \`--- Reference: ... ---\` headers instead of ` +
     `being opened separately.\n\n` +
-    `Do not stop at "looks correct": the skill requires compiling the ` +
-    `generated \`.radius/app.bicep\` with the configured Radius extension ` +
-    `(e.g. \`rad app graph\`) and closing every validation-checklist item ` +
-    `before reporting success.\n`;
+    `Do not stop at "looks correct": the skill requires running its bundled ` +
+    `Bicep checker against the generated \`.radius/app.bicep\` and closing every ` +
+    `validation-checklist item before reporting success.\n`;
 
-  const refs = REFERENCES.map(
-    ([name, body]) => `\n\n--- Reference: ${name} ---\n\n${body.trim()}`
-  ).join("");
+  const instructions = skillMd
+    .trim()
+    .replaceAll("<loaded-skill-base>", skillBase);
+  const refs = REFERENCES.map(([name, body]) => {
+    const resolved = body.trim().replaceAll("<loaded-skill-base>", skillBase);
+    return `\n\n--- Reference: ${name} ---\n\n${resolved}`;
+  }).join("");
 
-  return `${intro}\n---\n\n${skillMd.trim()}${refs}\n`;
+  return `${intro}\n---\n\n${instructions}${refs}\n`;
 }
