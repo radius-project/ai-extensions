@@ -1378,8 +1378,6 @@ radiusPlannedSelectorsReady.then(function() {
         if (container0) container0.innerHTML = '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
     }
 });
-
-});
 <\/script>
 ${graphHeaderClose()}`
   );
