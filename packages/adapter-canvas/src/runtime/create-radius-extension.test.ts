@@ -271,9 +271,9 @@ describe("RU-19: keepalive", () => {
     const session = createFakeSession();
     ext.attachSession(session);
     setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
-    (
-      deps.operations.setupInFlight as ReturnType<typeof vi.fn>
-    ).mockReturnValue(true);
+    (deps.operations.setupInFlight as ReturnType<typeof vi.fn>).mockReturnValue(
+      true
+    );
 
     await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
     expect(session.metadata!.snapshot).toHaveBeenCalled();
