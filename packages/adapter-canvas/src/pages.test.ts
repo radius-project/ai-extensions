@@ -809,6 +809,24 @@ describe("deployedGraphPage", () => {
   });
 });
 
+describe("graphDiffPage", () => {
+  it("renders the subtitle on both the empty and rendered paths", () => {
+    const empty = graphDiffPage({
+      branches: ["main", "dev"],
+      diffBase: "main",
+      diffHead: "dev"
+    });
+    const rendered = graphDiffPage({ diffResources: sampleResources });
+    for (const html of [empty, rendered]) {
+      expect(html).toContain('id="graph-diff-subtitle"');
+      expect(html).toContain(
+        "The application graph diff compares the application model on two branches"
+      );
+      expect(html).toContain("added, removed, or modified");
+    }
+  });
+});
+
 describe("remaining pages smoke-render without removed tokens", () => {
   const cases: Array<readonly [string, () => string, (() => string) | null]> = [
     ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],

@@ -1383,6 +1383,10 @@ ${graphHeaderClose()}`
   );
 }
 
+// Shared by both render paths of the Diff pane (empty selection and rendered
+// graph) so the two copies of the markup cannot drift apart.
+const GRAPH_DIFF_SUBTITLE = `<p class="rad-lede" id="graph-diff-subtitle" style="margin:0 0 20px;">The application graph diff compares the application model on two branches, highlighting the infrastructure that would be added, removed, or modified. Use it to review the impact of a pull request before it is merged.</p>`;
+
 export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
   const baseBranch = state?.diffBase || "main";
@@ -1413,6 +1417,7 @@ export function graphDiffPage(state: CanvasState = {}): string {
       "Graph Diff",
       `
 ${graphHeader("graph-diff")}
+${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1499,6 +1504,7 @@ ${graphHeaderClose()}`
     "Graph Diff",
     `
 ${graphHeader("graph-diff")}
+${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
