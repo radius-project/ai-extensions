@@ -61,7 +61,12 @@ export function topNav(active: string): string {
       );
     })
     .join("");
-  return `<nav class="rad-topnav">${items}</nav>`;
+  const chip =
+    `<a class="rad-opchip" id="rad-opchip" href="/?page=environment" hidden` +
+    ` aria-live="polite" title="View environment setup">` +
+    `<span class="rad-opchip__dot" id="rad-opchip-dot" aria-hidden="true"></span>` +
+    `<span class="rad-opchip__label" id="rad-opchip-label"></span></a>`;
+  return `<nav class="rad-topnav">${items}${chip}</nav>`;
 }
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).
@@ -85,7 +90,11 @@ export function subTabs(
     .map((it) => {
       const cls =
         it.id === active ? "rad-subtab rad-subtab--active" : "rad-subtab";
-      return `<a href="?page=${it.id}" data-page="${it.id}" class="${cls}" onclick="${onNav}(event, '${it.id}')">${escapeHtml(it.label)}</a>`;
+      return `<a href="?page=${it.id}" data-page="${
+        it.id
+      }" class="${cls}" onclick="${onNav}(event, '${it.id}')">${escapeHtml(
+        it.label
+      )}</a>`;
     })
     .join("");
   return `<nav class="rad-subtabs" id="graph-nav">${links}</nav>`;
@@ -94,12 +103,16 @@ export function subTabs(
 // Page heading with the brand mark.
 export function heading(title: string, subtitleHtml = ""): string {
   const sub = subtitleHtml ? `<p class="rad-lede">${subtitleHtml}</p>` : "";
-  return `<div class="rad-heading"><h1>${radiusMark(26)}<span>${escapeHtml(title)}</span></h1>${sub}</div>`;
+  return `<div class="rad-heading"><h1>${radiusMark(26)}<span>${escapeHtml(
+    title
+  )}</span></h1>${sub}</div>`;
 }
 
 // Labeled form field wrapper.
 export function field(label: string, controlHtml: string): string {
-  return `<div class="rad-field"><label>${escapeHtml(label)}</label>${controlHtml}</div>`;
+  return `<div class="rad-field"><label>${escapeHtml(
+    label
+  )}</label>${controlHtml}</div>`;
 }
 
 // Native select. `options` = [{ value, label }] or a raw <option> string.
@@ -113,7 +126,9 @@ export function select(
       options
         .map(
           (o) =>
-            `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`
+            `<option value="${escapeHtml(o.value)}">${escapeHtml(
+              o.label
+            )}</option>`
         )
         .join("")
     : String(options);
@@ -127,7 +142,9 @@ export function button(
   variant = "primary",
   attrs = ""
 ): string {
-  return `<button id="${id}" class="rad-btn rad-btn--${variant}" ${attrs}>${escapeHtml(label)}</button>`;
+  return `<button id="${id}" class="rad-btn rad-btn--${variant}" ${attrs}>${escapeHtml(
+    label
+  )}</button>`;
 }
 
 // Status banner. `kind`: 'info' | 'success' | 'error'.
@@ -180,7 +197,9 @@ export function nodeCard(
 ): string {
   return (
     `<div class="rad-node">` +
-    `<div class="rad-node__head"><span class="rad-node__icon">${iconHtml || ""}</span>` +
+    `<div class="rad-node__head"><span class="rad-node__icon">${
+      iconHtml || ""
+    }</span>` +
     `<span class="rad-node__title">${escapeHtml(title)}</span></div>` +
     `<div class="rad-node__type">${escapeHtml(typeLabel)}</div>` +
     `</div>`

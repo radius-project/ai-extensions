@@ -239,6 +239,10 @@ export interface ProcessDependencies {
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
+export interface OperationsDependencies {
+  setupInFlight(): boolean;
+}
+
 // The single dependency object shared by createRadiusCanvas, createRadiusTools,
 // and createRadiusExtension. Every I/O boundary the runtime touches is named
 // here, so a test can construct a complete fake without importing any adapter
@@ -262,6 +266,7 @@ export interface RadiusExtensionDependencies {
   hostCallbacks: HostCallbackDependencies;
   process: ProcessDependencies;
   deploy: DeployRunnerDependencies;
+  operations: OperationsDependencies;
   radiusAppBicepSkill(repoPath?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],

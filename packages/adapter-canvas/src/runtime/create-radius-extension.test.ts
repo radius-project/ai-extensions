@@ -266,6 +266,19 @@ describe("RU-19: keepalive", () => {
     expect(session.metadata!.snapshot).toHaveBeenCalled();
   });
 
+  it("pings when environment setup is in flight even if the panel is not recently active", async () => {
+    const { ext, deps, setLastWebviewActivityAt } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
+    (
+      deps.operations.setupInFlight as ReturnType<typeof vi.fn>
+    ).mockReturnValue(true);
+
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
+    expect(session.metadata!.snapshot).toHaveBeenCalled();
+  });
+
   it("never throws even when session.metadata.snapshot rejects", async () => {
     const { ext, setLastWebviewActivityAt } = setup();
     const session = createFakeSession({

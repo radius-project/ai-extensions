@@ -64,6 +64,12 @@ import {
   setSourceRefResources,
   updateSourceRefs
 } from "./source-refs.js";
+import {
+  announcementOptions,
+  onOperationTerminal,
+  setupInFlight,
+  summarize
+} from "./operations.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
@@ -148,6 +154,9 @@ const dependencies: RadiusExtensionDependencies = {
   deploy: {
     fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
+  operations: {
+    setupInFlight
+  },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,
   withGhcrDockerConfig
@@ -157,6 +166,17 @@ const radiusExtension = await bootstrapRadiusExtension(dependencies, {
   createCanvas,
   joinSession: async (declaration) =>
     (await joinSession(declaration)) as unknown as SessionPort
+});
+
+onOperationTerminal((op: any) => {
+  try {
+    const message = summarize(op);
+    if (!message) return false;
+    sessionHolder.get().log?.(`Radius: ${message}`, announcementOptions(op));
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 function isShuttingDown(): boolean {

@@ -218,7 +218,13 @@ export function createRadiusExtension(
       const panelRecentlyActive =
         Date.now() - deps.getLastWebviewActivityAt() <
         KEEPALIVE_ACTIVE_WINDOW_MS;
-      if (!panelRecentlyActive && !deployInFlight()) return;
+      let settingUp = false;
+      try {
+        settingUp = deps.operations.setupInFlight();
+      } catch {
+        /* never let the predicate break the keepalive */
+      }
+      if (!panelRecentlyActive && !deployInFlight() && !settingUp) return;
       keepaliveBusy = true;
       try {
         const session = deps.session.tryGet();

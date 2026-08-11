@@ -273,6 +273,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           })
       )
     },
+    operations: {
+      setupInFlight: vi.fn(() => false)
+    },
     radiusAppBicepSkill: vi.fn(
       (repoPath?: string) => `SKILL.md content for ${repoPath || "."}`
     ),
