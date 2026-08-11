@@ -274,6 +274,19 @@ describe("GET /api/operations/{id}", () => {
     expect(body.operation.operationId).toBe(op.operationId);
   });
 
+  describe("GET /api/verify-status operation identity", () => {
+    it("rejects an unknown operation id instead of adopting a repository run", async () => {
+      const { status, body } = await getJson(
+        "/api/verify-status?repo=contoso%2Fstore&environment=dev&operationId=op_missing"
+      );
+      expect(status).toBe(200);
+      expect(body).toEqual({
+        state: "unknown",
+        error: "The verification operation does not match this request."
+      });
+    });
+  });
+
   it("404s an unknown id instead of inventing an empty record", async () => {
     const { status, body } = await getJson("/api/operations/op_does-not-exist");
     expect(status).toBe(404);

@@ -25,6 +25,11 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { randomUUID } from "node:crypto";
+import {
+  disabledOperationStore,
+  PERSISTED_OPERATIONS_VERSION,
+  type OperationStore
+} from "./operation-store.js";
 
 export const OPERATION_SCHEMA_VERSION = 1;
 
@@ -1034,17 +1039,127 @@ const STALE_AFTER_MS = 15 * 60 * 1000;
 /** Whether a non-terminal record has gone quiet long enough to be abandoned. */
 export function isStale(op: any, now = Date.now()): boolean {
   if (!op || isTerminalState(op.state)) return false;
+  if (
+    op.recoveryState === "waiting_input" ||
+    op.recoveryState === "verification_pending"
+  )
+    return false;
   return (
     now - new Date(op.lastActivityAt || op.startedAt).getTime() > STALE_AFTER_MS
   );
 }
 
-export function createRegistry(): any {
+const PERSISTED_OPERATION_KEYS = new Set([
+  "operationId",
+  "schemaVersion",
+  "provider",
+  "repo",
+  "environment",
+  "startedAt",
+  "lastActivityAt",
+  "endedAt",
+  "state",
+  "currentStage",
+  "stages",
+  "steps",
+  "context",
+  "setupArtifacts",
+  "journey",
+  "terminal",
+  "failure",
+  "inputRequired",
+  "verification"
+]);
+
+function persistedFailure(failure: any): any {
+  if (!failure) return null;
+  return {
+    code: String(failure.code || ""),
+    stage: failure.stage == null ? null : String(failure.stage),
+    stepSeq:
+      Number.isFinite(Number(failure.stepSeq)) ? Number(failure.stepSeq) : null,
+    message: String(failure.message || ""),
+    classification: String(failure.classification || "")
+  };
+}
+
+export function toPersistedOperation(op: any): any {
+  if (!op || typeof op !== "object") {
+    throw new Error("Operation record is required.");
+  }
+  const record: any = {};
+  for (const key of PERSISTED_OPERATION_KEYS) {
+    if (key === "failure") continue;
+    if (op[key] !== undefined) record[key] = structuredClone(op[key]);
+  }
+  record.failure = persistedFailure(op.failure);
+  if (
+    typeof record.operationId !== "string" ||
+    !record.operationId.startsWith("op_") ||
+    typeof record.repo !== "string" ||
+    typeof record.state !== "string" ||
+    record.schemaVersion !== OPERATION_SCHEMA_VERSION
+  ) {
+    throw new Error("Invalid operation record.");
+  }
+  return record;
+}
+
+export function fromPersistedOperation(value: any): any {
+  const op = toPersistedOperation(value);
+  if (!Array.isArray(op.stages) || !Array.isArray(op.steps)) {
+    throw new Error("Invalid persisted operation stages or steps.");
+  }
+  if (op.verification?.runId != null) {
+    op.verification.runId = String(op.verification.runId);
+  }
+  return op;
+}
+
+export function reconcileRestoredOperation(op: any): any {
+  if (!op || isTerminalState(op.state)) return op;
+  if (op.inputRequired) {
+    op.recoveryState = "waiting_input";
+    return op;
+  }
+  if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {
+    op.recoveryState = "verification_pending";
+    return op;
+  }
+  const now = nowIso();
+  op.state = "failed_partial";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.failure = {
+    code: "operation-interrupted",
+    stage: op.currentStage,
+    stepSeq: null,
+    message:
+      "The Radius extension restarted before this operation reached a durable terminal state. Existing resources were retained for a safe retry.",
+    classification: "user-fixable"
+  };
+  const ledger = getSetupArtifactLedger(op);
+  if (ledger) ledger.cleanup.state = "not_needed";
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "failed";
+    else if (stage.state === "pending") stage.state = "skipped";
+  }
+  op.recoveryState = "interrupted";
+  return op;
+}
+
+export function createRegistry({
+  store = disabledOperationStore(),
+  clock = () => Date.now()
+}: {
+  store?: OperationStore;
+  clock?: () => number;
+} = {}): any {
   /** @type {Map<string, object>} */
   const byId = new Map();
 
   function prune() {
-    const now = Date.now();
+    const now = clock();
     const terminal = [];
     for (const [id, op] of byId) {
       if (!isTerminalState(op.state)) continue;
@@ -1067,7 +1182,31 @@ export function createRegistry(): any {
     }
   }
 
+  function snapshot() {
+    prune();
+    return {
+      schemaVersion: PERSISTED_OPERATIONS_VERSION,
+      operations: [...byId.values()].map(toPersistedOperation)
+    };
+  }
+
   return {
+    async hydrate() {
+      const envelope = await store.load();
+      if (!envelope) return [];
+      const restored = [];
+      for (const value of envelope.operations) {
+        const op = reconcileRestoredOperation(fromPersistedOperation(value));
+        byId.set(op.operationId, op);
+        restored.push(op);
+      }
+      prune();
+      return restored;
+    },
+    async persist() {
+      await store.save(snapshot());
+    },
+    snapshot,
     /** The operation still running for a repo, if any. */
     running(repo) {
       for (const op of byId.values()) {
@@ -1168,7 +1307,23 @@ export function createRegistry(): any {
 }
 
 // The process-wide registry the routes and the keepalive share.
-export const operations = createRegistry();
+export let operations = createRegistry();
+
+export async function configureOperationStore(
+  store: OperationStore
+): Promise<void> {
+  const existing = operations.all();
+  const registry = createRegistry({ store });
+  await registry.hydrate();
+  for (const op of existing) {
+    if (!registry.get(op.operationId)) registry.put(op);
+  }
+  operations = registry;
+}
+
+export async function persistOperations(): Promise<void> {
+  await operations.persist();
+}
 
 /**
  * Whether any setup operation is in flight.
@@ -1191,23 +1346,36 @@ export function setupInFlight(): boolean {
  */
 export function toClientView(op: any): any {
   if (!op) return null;
-  const { failure, ...rest } = op;
-  delete rest.setupArtifacts;
   const cleanup = projectCleanupSummary(op);
   return {
-    ...rest,
+    operationId: op.operationId,
+    schemaVersion: op.schemaVersion,
+    provider: op.provider,
+    repo: op.repo,
+    environment: op.environment,
+    startedAt: op.startedAt,
+    lastActivityAt: op.lastActivityAt,
+    endedAt: op.endedAt,
+    state: op.state,
+    currentStage: op.currentStage,
+    stages: op.stages,
+    steps: op.steps,
+    context: op.context,
+    journey: op.journey,
+    terminal: op.terminal,
+    inputRequired: op.inputRequired || null,
     summary: summarize(op),
     terminalState: isTerminalState(op.state) ? op.state : null,
     hasWarnings: hasWarnings(op),
     cleanup,
     failure:
-      failure ?
+      op.failure ?
         {
-          code: failure.code,
-          stage: failure.stage,
-          stepSeq: failure.stepSeq,
-          message: failure.message,
-          classification: failure.classification
+          code: op.failure.code,
+          stage: op.failure.stage,
+          stepSeq: op.failure.stepSeq,
+          message: op.failure.message,
+          classification: op.failure.classification
         }
       : null
   };

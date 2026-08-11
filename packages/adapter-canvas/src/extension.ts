@@ -8,7 +8,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
@@ -28,6 +29,7 @@ import {
   fetchWorkspaceBicep,
   isWorkspaceSelection,
   parseRepoFromRemote,
+  resolveSessionId,
   toSafeRepoRelPath,
   workspaceFileExists
 } from "./workspace.js";
@@ -69,10 +71,15 @@ import { radiusAppBicepSkill } from "./skill.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import {
   announcementOptions,
+  configureOperationStore,
   onOperationTerminal,
   setupInFlight,
   summarize
 } from "./operations.js";
+import {
+  createFileOperationStore,
+  disabledOperationStore
+} from "./operation-store.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
 import {
@@ -444,6 +451,7 @@ const session = await joinSession({
                 baseBranch: optionalString(input.baseBranch),
                 headBranch: optionalString(input.headBranch)
               });
+
               entry.state.diffTargetRepo = optionalString(input.repo);
               entry.state.diffBase = optionalString(input.baseBranch);
               entry.state.diffHead = optionalString(input.headBranch);
@@ -1417,6 +1425,31 @@ When planned graph resolution cannot resolve a resource type, distinguish two ca
     }
   }
 });
+
+const operationSessionId = await resolveSessionId();
+if (operationSessionId) {
+  const operationPath = join(
+    process.env.USERPROFILE || os.homedir(),
+    ".copilot",
+    "session-state",
+    operationSessionId,
+    "radius",
+    "operations",
+    "operations.json"
+  );
+  await configureOperationStore(
+    createFileOperationStore({
+      filePath: operationPath,
+      report: (diagnostic) => {
+        try {
+          console.error(`[radius] ${diagnostic.code}: ${diagnostic.message}`);
+        } catch {}
+      }
+    })
+  );
+} else {
+  await configureOperationStore(disabledOperationStore());
+}
 
 // Prepare the `rad` binary once per extension load. This is the preferred place
 // to download/reconcile rad and run the `rad version --cli` check; doing it here

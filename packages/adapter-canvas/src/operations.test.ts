@@ -29,6 +29,7 @@ import {
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  reconcileRestoredOperation,
   resumeAfterInput,
   sanitizeResumeTarget,
   setCloudContext,
@@ -36,6 +37,7 @@ import {
   shouldStop,
   summarize,
   toClientView,
+  toPersistedOperation,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -530,6 +532,27 @@ describe("client projection", () => {
     expect(JSON.stringify(view)).not.toContain("IGNORE-SETUP-LEDGER");
   });
 
+  it("never persists raw failure evidence", () => {
+    const op = newOp();
+    finish(op, "failed", {
+      failure: {
+        code: "az-failed",
+        message: "Azure failed",
+        classification: "user-fixable",
+        evidence: "SECRET RAW STDERR"
+      }
+    });
+    const persisted = toPersistedOperation(op);
+    expect(persisted.failure).toEqual({
+      code: "az-failed",
+      stage: null,
+      stepSeq: null,
+      message: "Azure failed",
+      classification: "user-fixable"
+    });
+    expect(JSON.stringify(persisted)).not.toContain("SECRET RAW STDERR");
+  });
+
   it("exposes a terminal marker so the panel does not re-derive it", () => {
     const op = newOp();
     expect(toClientView(op).terminalState).toBeNull();
@@ -781,6 +804,70 @@ describe("registry", () => {
     expect(reg.anyRunning()).toBe(true);
     finishSucceeded(op);
     expect(reg.anyRunning()).toBe(false);
+  });
+
+  it("hydrates and persists through an injected store", async () => {
+    let envelope = null;
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+    const first = createRegistry({ store });
+    const op = newOp();
+    requireInput(op, { code: "choose-app", message: "Choose an app." });
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    expect(restored.get(op.operationId)).toMatchObject({
+      operationId: op.operationId,
+      recoveryState: "waiting_input"
+    });
+  });
+});
+
+describe("startup reconciliation", () => {
+  it("restores input-required operations without stale filtering", () => {
+    const op = newOp();
+    requireInput(op, { code: "choose-app", message: "Choose an app." });
+    op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    reconcileRestoredOperation(op);
+    expect(op.recoveryState).toBe("waiting_input");
+    expect(isStale(op)).toBe(false);
+  });
+
+  it("keeps dispatched verification pending", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    reconcileRestoredOperation(op);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_pending");
+  });
+
+  it("latches interrupted work without scheduling automatic cleanup", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-app"
+    });
+    reconcileRestoredOperation(op);
+    expect(op.state).toBe("failed_partial");
+    expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+    expect(op.failure.code).toBe("operation-interrupted");
   });
 });
 

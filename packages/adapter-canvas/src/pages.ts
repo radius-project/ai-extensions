@@ -2881,6 +2881,7 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
     stopEnvProgress();
     var startedAtMs = Date.now();
     var observedOperation = false;
+    var operationId = '';
     var elapsedEl = document.getElementById('env-progress-elapsed');
     envProgressElapsedTimer = setInterval(function() {
         if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - startedAtMs);
@@ -2944,6 +2945,7 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                     return;
                 }
                 observedOperation = true;
+                operationId = op.operationId || operationId;
                 startedAtMs = new Date(op.startedAt).getTime();
                 if (elapsedEl) {
                     elapsedEl.textContent = formatElapsed((op.endedAt ? new Date(op.endedAt).getTime() : Date.now()) - startedAtMs);
@@ -2960,7 +2962,7 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                     // Keep doing it while the record exists; limiting this read
                     // to restart recovery leaves a successful operation spinning
                     // forever even though the environment list is already green.
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment))
+                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId))
                         .then(function(r) { return r.json(); })
                         .then(function(v) {
                             if (v.activity) envVerifyActivity = v.activity;
@@ -3925,7 +3927,7 @@ deployBtn.addEventListener('click', function() {
                 var pollStart = Date.now();
                 var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
                 function pollVerify() {
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env))
+                    fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env) + '&operationId=' + encodeURIComponent(envResult.operationId || ''))
                         .then(function(r) { return r.json(); })
                         .then(function(v) {
                             if (v.state === 'success') {

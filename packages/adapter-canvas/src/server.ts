@@ -3095,6 +3095,7 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
+          await operations.persist();
         }
         enterStage(op, STAGE_AUTHORIZE_IDENTITY);
 
@@ -3556,6 +3557,8 @@ function createRequestHandler(instanceId: string) {
               appId: clientId,
               displayName: null
             });
+            await operations.persist();
+            await operations.persist();
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
@@ -3780,6 +3783,7 @@ function createRequestHandler(instanceId: string) {
                 appId: clientId,
                 displayName: appName
               });
+              await operations.persist();
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
@@ -3825,6 +3829,7 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
+              await operations.persist();
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -3974,6 +3979,7 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
+        await operations.persist();
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -4131,6 +4137,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
+            await operations.persist();
           }
         }
 
@@ -4234,6 +4241,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         recordServicePrincipal(op, { objectId: spObjectId });
+        await operations.persist();
 
         const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
         steps.push(`Assigning Contributor role on ${resourceGroup}...`);
@@ -4258,6 +4266,7 @@ function createRequestHandler(instanceId: string) {
             scope: contributorScope,
             principalObjectId: spObjectId
           });
+          await operations.persist();
         }
 
         // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
@@ -4304,6 +4313,7 @@ function createRequestHandler(instanceId: string) {
               scope: clusterScope,
               principalObjectId: spObjectId
             });
+            await operations.persist();
           }
         } else {
           // Non-fatal: control-plane access is already in place, and
@@ -4652,6 +4662,7 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
+          await operations.persist();
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
@@ -5004,6 +5015,7 @@ function createRequestHandler(instanceId: string) {
           repo: targetRepo,
           name: envName
         });
+        await operations.persist();
         // Tag the environment as Radius-managed so the listing can filter
         // out environments created outside this extension.
         await setEnvironmentVariable("RADIUS_MANAGED", "true");
@@ -5125,6 +5137,7 @@ function createRequestHandler(instanceId: string) {
           branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
           mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
         });
+        await operations.persist();
 
         // Step 4: Also commit the deploy workflows (dispatcher + both
         // provider workflows). The dispatcher references both provider
@@ -5175,6 +5188,7 @@ function createRequestHandler(instanceId: string) {
               deployCommit.viaPr ? prState?.branch || null : defaultBranch,
             mode: deployCommit.viaPr ? "pull_request" : "default_branch"
           });
+          await operations.persist();
         }
         // Best-effort: remove the legacy monolithic deploy workflow so it
         // does not double-trigger alongside the new dispatcher. Skipped in
@@ -5218,6 +5232,7 @@ function createRequestHandler(instanceId: string) {
                   delCommit.viaPr ? prState?.branch || null : defaultBranch,
                 mode: delCommit.viaPr ? "pull_request" : "default_branch"
               });
+              await operations.persist();
             }
           }
           steps.push("✅ Delete workflows committed.");
@@ -5392,6 +5407,15 @@ function createRequestHandler(instanceId: string) {
         // Record dispatch markers so the deploy monitor can track the
         // correct (newly-triggered) runs rather than any stale runs.
         {
+          op.verification = {
+            dispatchedAt,
+            workflow: VERIFY_WORKFLOW_FILE,
+            ref: verifyPlan.ref || defaultBranch,
+            environment: envName,
+            runId: verifyRunId == null ? null : String(verifyRunId),
+            runUrl: verifyRunUrl || null
+          };
+          await operations.persist();
           const entry = servers.get(instanceId);
           if (entry) {
             entry.state.deployDispatchedAt = dispatchedAt;
@@ -5435,6 +5459,7 @@ function createRequestHandler(instanceId: string) {
                   }" to finish setup.`
             }
           });
+          await operations.persist();
         } else {
           recordCommitState(op, {
             mode: prState ? "pull_request" : "default_branch",
@@ -6374,6 +6399,7 @@ function createRequestHandler(instanceId: string) {
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
+      const operationId = url.searchParams.get("operationId") || "";
       const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -6387,8 +6413,26 @@ function createRequestHandler(instanceId: string) {
 
       try {
         const entry = servers.get(instanceId);
-        const dispatchedAt = entry?.state?.deployDispatchedAt || 0;
-        let runId = entry?.state?.verifyRunId || null;
+        const verifyOp = operationId ? operations.get(operationId) : null;
+        if (
+          operationId &&
+          (!verifyOp ||
+            verifyOp.repo !== repo ||
+            verifyOp.environment !==
+              (url.searchParams.get("environment") || verifyOp.environment))
+        ) {
+          respond({
+            state: "unknown",
+            error: "The verification operation does not match this request."
+          });
+          return;
+        }
+        const dispatchedAt =
+          verifyOp?.verification?.dispatchedAt ||
+          entry?.state?.deployDispatchedAt ||
+          0;
+        let runId =
+          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
         if (!runId) {
           runId = await findWorkflowRun(
             repo,
@@ -6396,7 +6440,15 @@ function createRequestHandler(instanceId: string) {
             dispatchedAt,
             null
           );
-          if (runId && entry) entry.state.verifyRunId = runId;
+          if (runId && verifyOp) {
+            verifyOp.verification = {
+              ...verifyOp.verification,
+              runId: String(runId),
+              runUrl:
+                "https://github.com/" + repo + "/actions/runs/" + runId
+            };
+            await operations.persist();
+          } else if (runId && entry) entry.state.verifyRunId = runId;
         }
         if (!runId) {
           respond({ state: "pending", runId: null });
@@ -6428,10 +6480,11 @@ function createRequestHandler(instanceId: string) {
           });
           return;
         }
-        const verifyOp = operations.running(repo);
         if (detail.conclusion === "success") {
-          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY)
+          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
             finishSucceeded(verifyOp);
+            await operations.persist();
+          }
           respond({ state: "success", runId, runUrl });
           return;
         }
@@ -6475,6 +6528,7 @@ function createRequestHandler(instanceId: string) {
               evidence: errMsg
             }
           });
+          await operations.persist();
         }
         respond({ state: "failed", runId, runUrl, error: errMsg });
       } catch (e) {
