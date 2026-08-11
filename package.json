@@ -26,10 +26,12 @@
     "changeset": "changeset",
     "version": "changeset version && pnpm run version:sync",
     "version:sync": "node scripts/version.mjs --sync",
-    "version:check": "node scripts/version.mjs --check"
+    "version:check": "node scripts/version.mjs --check",
+    "demo:progress": "node packages/adapter-canvas/dev/run-demo.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.0-next.11",
+    "@changesets/changelog-github": "1.0.0-next.9",
     "@babel/core": "^8.0.1",
     "@babel/eslint-parser": "^8.0.1",
     "@babel/plugin-syntax-typescript": "^8.0.3",

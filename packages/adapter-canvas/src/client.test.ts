@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Tests for the embedded webview client JS strings. These validate that the
 // dead singleton-recipe / on-demand-bicep UI was removed and that the graph's
 // source-code and "View app definition" links are worktree-aware: a local
@@ -9,7 +10,8 @@ import { describe, it, expect } from "vitest";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
-  CLIENT_HEARTBEAT_JS
+  CLIENT_HEARTBEAT_JS,
+  CLIENT_OPCHIP_JS
 } from "./client.js";
 
 describe("client.ts exports", () => {
@@ -743,5 +745,186 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
     expect(CLIENT_GRAPH_JS).toContain(
       "var shortType = resolvedMode && resolvedResource"
     );
+  });
+});
+
+// The chip is the only part of the progress work that renders on every page, so
+// it is also the only part a user can be looking at when they have forgotten the
+// operation exists. These drive the real client source through a hand-rolled DOM
+// so the assertions are about behaviour, not about the presence of a substring.
+describe("CLIENT_OPCHIP_JS — the ambient operation chip", () => {
+  function makeEl() {
+    return {
+      hidden: true,
+      className: "",
+      textContent: "",
+      style: {},
+      dataset: {},
+      attrs: {},
+      offsetParent: {},
+      listeners: {},
+      setAttribute(k, v) {
+        this.attrs[k] = v;
+      },
+      addEventListener(type, fn) {
+        this.listeners[type] = fn;
+      }
+    };
+  }
+
+  // Runs the chip script against a fake page and returns the handles a test
+  // needs: the chip element, and a way to feed it the next server response.
+  function mount({
+    operation = null,
+    panelVisible = false,
+    stored = null
+  } = {}) {
+    const chip = makeEl();
+    const label = makeEl();
+    const panel = makeEl();
+    panel.style.display = panelVisible ? "" : "none";
+    if (!panelVisible) panel.offsetParent = null;
+    let current = operation;
+    const store = { value: stored };
+    const doc = {
+      getElementById(id) {
+        if (id === "rad-opchip") return chip;
+        if (id === "rad-opchip-label") return label;
+        if (id === "env-progress-panel") return panel;
+        return null;
+      },
+      addEventListener() {},
+      visibilityState: "visible"
+    };
+    const win = {
+      sessionStorage: {
+        getItem: () => store.value,
+        setItem: (_k, v) => {
+          store.value = v;
+        }
+      }
+    };
+    const fetchStub = () =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ operation: current })
+      });
+    // Capturing the interval callback lets a test advance the poll loop
+    // deliberately instead of waiting on a real timer.
+    let tick = () => {};
+    new Function(
+      "document",
+      "window",
+      "fetch",
+      "setInterval",
+      CLIENT_OPCHIP_JS
+    )(doc, win, fetchStub, (fn) => {
+      tick = fn;
+      return 0;
+    });
+    async function settle() {
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    }
+    return {
+      chip,
+      label,
+      store,
+      settle,
+      async feed(next) {
+        current = next;
+        tick();
+        await settle();
+      }
+    };
+  }
+
+  const running = {
+    operationId: "op_1",
+    state: "running",
+    environment: "dev",
+    summary: "Creating dev — configure environment…"
+  };
+
+  it("stays out of the way until there is something to say", async () => {
+    const h = mount({ operation: null });
+    await h.feed(null);
+    expect(h.chip.hidden).toBe(true);
+  });
+
+  it("announces a running setup in a few words, with the full sentence available", async () => {
+    const h = mount({ operation: running });
+    await h.feed(running);
+    expect(h.chip.hidden).toBe(false);
+    expect(h.label.textContent).toBe("Setting up dev…");
+    expect(h.chip.className).toContain("rad-opchip--running");
+    // The three-word chip is never the only thing on offer.
+    expect(h.chip.attrs["aria-label"]).toBe(running.summary);
+    expect(h.chip.attrs.title).toBe(running.summary);
+  });
+
+  it("keeps quiet while the panel is on screen, because two narrations is noise", async () => {
+    const h = mount({ operation: running, panelVisible: true });
+    await h.feed(running);
+    expect(h.chip.hidden).toBe(true);
+  });
+
+  it("distinguishes ready, needs-you, and failed rather than flattening them", async () => {
+    const cases = [
+      ["succeeded", "dev ready", "rad-opchip--done"],
+      ["succeeded_with_warnings", "dev ready · warnings", "rad-opchip--warn"],
+      ["action_required", "dev needs you", "rad-opchip--warn"],
+      ["failed", "dev setup failed", "rad-opchip--failed"],
+      ["failed_partial", "dev setup failed", "rad-opchip--failed"],
+      ["cancelled", "dev setup stopped", ""]
+    ];
+    for (const [state, text, tone] of cases) {
+      const h = mount({
+        operation: { operationId: "op_" + state, state, environment: "dev" }
+      });
+      await h.feed({ operationId: "op_" + state, state, environment: "dev" });
+      expect(h.chip.hidden).toBe(false);
+      expect(h.label.textContent).toBe(text);
+      if (tone) expect(h.chip.className).toContain(tone);
+    }
+  });
+
+  it("stops nagging once the user has clicked through to the result", async () => {
+    const done = {
+      operationId: "op_1",
+      state: "succeeded",
+      environment: "dev"
+    };
+    const h = mount({ operation: done });
+    await h.feed(done);
+    expect(h.chip.hidden).toBe(false);
+    h.chip.listeners.click();
+    expect(h.store.value).toBe("op_1");
+    await h.feed(done);
+    expect(h.chip.hidden).toBe(true);
+  });
+
+  it("still speaks up for a new operation after an earlier one was dismissed", async () => {
+    const first = {
+      operationId: "op_1",
+      state: "succeeded",
+      environment: "dev"
+    };
+    const second = {
+      operationId: "op_2",
+      state: "failed",
+      environment: "stage"
+    };
+    const h = mount({ operation: first, stored: "op_1" });
+    await h.feed(first);
+    expect(h.chip.hidden).toBe(true);
+    await h.feed(second);
+    expect(h.chip.hidden).toBe(false);
+    expect(h.label.textContent).toBe("stage setup failed");
+  });
+
+  it("never dismisses a running operation, however long it runs", async () => {
+    const h = mount({ operation: running, stored: "op_1" });
+    await h.feed(running);
+    expect(h.chip.hidden).toBe(false);
   });
 });

@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read # @changesets/changelog-github resolves each entry's PR
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -78,6 +79,9 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
+      - name: Check progress demo bundle
+        run: pnpm --filter @radius-project/adapter-canvas run demo:check
+
       # edge:    Changesets owns versioning, so ask it what the next release
       #          will be instead of guessing from the manifest. --snapshot
       #          stamps the calculated version (see snapshot.useCalculatedVersion
@@ -94,23 +98,16 @@ jobs:
         id: version
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
+          # `changelog: @changesets/changelog-github` turns every entry into a
+          # GraphQL lookup, and it reads the token from the environment only.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = "release" ]; then
             version="$(node scripts/version.mjs)"
           elif [ "$CHANNEL" = "edge" ]; then
-            snapshot_changeset=".changeset/edge-snapshot.md"
-            if [ -e "$snapshot_changeset" ]; then
-              echo "::error::$snapshot_changeset is reserved for edge CI."
-              exit 1
-            fi
-            printf '%s\n' \
-              '---' \
-              '"radius": patch' \
-              '---' \
-              '' \
-              'Publish the current commit to the rolling edge channel.' \
-              >"$snapshot_changeset"
+            pnpm exec changeset add --patch radius \
+              --message 'Publish the current commit to the rolling edge channel.'
             pnpm exec changeset version --snapshot edge
             version="$(node scripts/version.mjs)"
           else

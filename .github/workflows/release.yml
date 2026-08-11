@@ -214,6 +214,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
+      pull-requests: read
     with:
       channel: release
       ref: ${{ needs.release-state.outputs.source-sha }}
@@ -383,11 +384,14 @@ jobs:
             pinned_commit="$expected_pinned_commit"
           fi
 
-          # Never move the rolling stable refs backwards. Reruns of an older
-          # failed release are the documented recovery path, and one must not
-          # undo a newer release that shipped in the meantime.
+          # The rolling stable refs only ever carry a stable release, and only
+          # ever move forwards: a prerelease is never `latest`, and a rerun of an
+          # older failed release must not undo a newer one that shipped since.
           publish_latest=1
-          if git ls-remote --exit-code --heads origin "refs/heads/releases/latest" >/dev/null 2>&1; then
+          if [ "$VERSION" != "${VERSION%%-*}" ]; then
+            echo "::notice::$VERSION is a prerelease; leaving the rolling stable refs alone."
+            publish_latest=0
+          elif git ls-remote --exit-code --heads origin "refs/heads/releases/latest" >/dev/null 2>&1; then
             git fetch --no-tags origin "refs/heads/releases/latest:refs/remotes/origin/releases/latest"
             current="$(git show "refs/remotes/origin/releases/latest:$DIST/package.json" | jq -r .version)"
             if [ "$(node scripts/version.mjs --compare "$current")" -lt 0 ]; then
@@ -420,7 +424,7 @@ jobs:
             if [ "$publish_latest" = 1 ]; then
               echo "- stable install branch \`releases/latest\` and tag \`latest\`"
             else
-              echo "- \`releases/latest\` and \`latest\` left on the newer \`$current\`"
+              echo "- \`releases/latest\` and \`latest\` left unchanged"
             fi
             echo "- tag \`$TAG\` (created by Changesets)"
           } >>"$GITHUB_STEP_SUMMARY"

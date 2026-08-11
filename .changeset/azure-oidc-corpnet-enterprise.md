@@ -34,11 +34,7 @@ environments (e.g. Microsoft Corpnet):
   preventing tenant sprawl and orphaned `AZURE_CLIENT_ID`s. Federated
   credentials are deduplicated by subject to stay under Azure's per-app cap.
 
-- Preflight repository access and admin permission before any Azure/GitHub
-  mutation, turning GitHub's bare `HTTP 404`s into actionable guidance
-  (wrong active `gh` account vs. insufficient permission), and surface the
-  Entra enterprise-claim rejection (`AADSTS7002381`) with a tenant-agnostic
-  explanation when a personal-account repo cannot satisfy the policy.
+- Preflight repository access and admin permission before any Azure/GitHub mutation, turning GitHub's bare `HTTP 404`s into actionable guidance (wrong active `gh` account vs. insufficient permission), and surface an Entra enterprise-claim rejection only when the actual Azure Login step contains `AADSTS7002381`. Advisory workflow text cannot turn an unrelated failure such as `No subscriptions found` into an enterprise-claim diagnosis.
 
 - Validate every value that reaches an `az`/`gh` argv (repo slug, resource
   group, cluster, tenant/subscription/SMR GUIDs, App Registration name) and
