@@ -1217,6 +1217,12 @@ function runPlan(isInitial) {
         if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to preview the planned deployment.'; statusEl0.className='status info'; }
         return;
     }
+    if (!RADIUS_PLAN_HAS_ENV || !env) {
+        if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Create an environment to preview the planned deployment for this application.'; statusEl0.className='status info'; }
+        var wrapper0 = document.getElementById('graph-container-wrapper');
+        if (wrapper0) wrapper0.innerHTML = '';
+        return;
+    }
     if (statusEl0) statusEl0.style.display = 'none';
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
@@ -1320,7 +1326,7 @@ var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
 var CONTEXT_ENV = '${escapeHtml(defaultEnvironment)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV);
+var radiusPlannedSelectorsReady = radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV);
 
 // Re-generate the planned graph whenever the Application, Branch, or
 // Environment selection changes, so the graph always reflects what's
@@ -1332,6 +1338,10 @@ function runPlan() {
     var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return;
     var container = document.getElementById('graph-container');
+    if (!RADIUS_PLAN_HAS_ENV || !env) {
+        container.innerHTML = '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
+        return;
+    }
     container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--rad-text-tertiary);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-primary);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
     fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
@@ -1357,6 +1367,18 @@ radiusRenderGraph('graph-container', resources, {
     branch: CONTEXT_BRANCH,
     localSource: ${localSource ? "true" : "false"},
     plannedMode: true
+});
+// The graph above reflects the last-persisted plan. If it turns out the repo
+// no longer has (or never had) a Radius-managed environment, replace it with
+// the "create an environment first" message rather than leaving a stale or
+// misleading plan on screen.
+radiusPlannedSelectorsReady.then(function() {
+    if (!RADIUS_PLAN_HAS_ENV) {
+        var container0 = document.getElementById('graph-container');
+        if (container0) container0.innerHTML = '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
+    }
+});
+
 });
 <\/script>
 ${graphHeaderClose()}`
