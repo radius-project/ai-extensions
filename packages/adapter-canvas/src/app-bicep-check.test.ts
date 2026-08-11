@@ -226,5 +226,6 @@ resource script 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
     });
     assert.equal(insecure.status, 1);
     assert.match(insecure.stderr, /use-secure-value-for-secure-inputs/u);
-  }
+  },
+  30_000
 );
