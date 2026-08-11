@@ -734,14 +734,26 @@ describe("deployingPage — Deployments landing", () => {
     // The delete poll keeps the row showing "Deleting…" via a quiet refresh, so
     // the table no longer flashes a loading placeholder every ~4s during a
     // delete (matching the deploy flow's in-flight polling).
-    expect(html).toContain('loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)');
+    expect(html).toContain(
+      'loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)'
+    );
     // The initial optimistic "deleting" refresh is also quiet so the existing
     // row flips in place without a flash.
-    expect(html).toContain("OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';");
+    expect(html).toContain(
+      "OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';"
+    );
     // A synthetic row is only created for a not-yet-recorded op (deploy's
     // "pending"), never for "deleting" — a delete acts on an existing record, so
     // once it's gone there must be no phantom "Deleting…" row.
-    expect(html).toContain("if (present[k] || OP_STATUS[k] === 'deleting') return;");
+    expect(html).toContain(
+      "if (present[k] || OP_STATUS[k] === 'deleting') return;"
+    );
+    // The delete is acknowledged immediately with a banner (mirroring the deploy
+    // flow) so the button click isn't left looking like it did nothing while the
+    // workflow spins up.
+    expect(html).toContain(
+      "'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app)"
+    );
   });
 });
 

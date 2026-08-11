@@ -4793,19 +4793,34 @@ function runDelete() {
     if (!pendingDelete) return;
     var dep = pendingDelete;
     closeDeleteModal();
+    // Acknowledge the action immediately: the delete workflow takes a moment to
+    // start, so without an instant cue the button click looks like it did
+    // nothing. Mirror the deploy flow — flip the row to "Deleting…" and show a
+    // banner right away, before the dispatch round-trip resolves. The delete
+    // run's deployment record doesn't exist yet, so the OP_STATUS override keeps
+    // the row showing "Deleting…" until it clears; refresh quietly so the
+    // existing row flips in place instead of flashing a loading placeholder.
+    OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
+    loadDeployments(true, true);
+    showInline('success', 'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app) + '</strong> in environment <strong>' + escapeHtmlClient(dep.environment) + '</strong> has started.', true);
     fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
-            if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            // Optimistically show "Deleting…" right away (the delete run's
-            // deployment record doesn't exist yet), and keep it until the row
-            // clears. Refresh quietly so the existing row flips to "Deleting…"
-            // in place instead of flashing the table to a loading placeholder.
-            OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
-            loadDeployments(true, true);
+            if (!res.ok) {
+                // Dispatch failed — clear the optimistic override so the row
+                // reverts to its real status, then surface the error.
+                delete OP_STATUS[opKey(dep.app, dep.environment)];
+                loadDeployments(true, true);
+                showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.');
+                return;
+            }
             pollDeleteCompletion(dep.app, dep.environment, 0);
         })
-        .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
+        .catch(function() {
+            delete OP_STATUS[opKey(dep.app, dep.environment)];
+            loadDeployments(true, true);
+            showInline('error', 'Could not delete the deployment. Please try again.');
+        });
 }
 
 // Poll the deployments listing until the target app/env is gone (a successful
