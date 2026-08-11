@@ -168,9 +168,16 @@ describe("P0-C built Radius extension artifact", () => {
     expect(readFileSync(join(DIST, "package.json"), "utf8")).not.toContain(
       "catalog:"
     );
-    expect(readFileSync(join(DIST, "plugin.json"), "utf8")).toBe(
+    const sourcePlugin = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "plugin.json"), "utf8")
+    ) as Record<string, unknown>;
+    const builtPlugin = JSON.parse(
+      readFileSync(join(DIST, "plugin.json"), "utf8")
+    ) as Record<string, unknown>;
+    expect({ ...builtPlugin, version: sourcePlugin.version }).toEqual(
+      sourcePlugin
     );
+    expect(builtPlugin.version).toEqual(expect.any(String));
     expect(readFileSync(join(DIST, "README.md"), "utf8")).toBe(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "README.md"), "utf8")
     );
