@@ -1714,14 +1714,13 @@ function escapeHtmlClient(s) {
     var HAS_ENVS = false;
     var DEPLOYMENTS_BY_ENV = {};
 
-    // A deployment "exists" for the selection when the environment has an
-    // active row. A failed deploy is intentionally NOT treated as deployed, so
-    // the button offers "Deploy Application" to retry rather than a delete of
-    // something that never came up.
+    // A deployment "exists" for the selection when the environment has any
+    // row at all, including a failed one: a failed deploy can leave partially
+    // provisioned infrastructure behind, so the user still needs "Delete
+    // Deployment" to clean it up.
     function deploymentExists(app, env) {
         if (!CONTEXT_REPO || !app || !env) return false;
-        var status = DEPLOYMENTS_BY_ENV[env];
-        return !!status && status !== 'failed';
+        return !!DEPLOYMENTS_BY_ENV[env];
     }
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
@@ -1852,7 +1851,7 @@ function escapeHtmlClient(s) {
             .then(function(d) {
                 DEPLOYMENTS_BY_ENV = {};
                 ((d && d.deployments) || []).forEach(function(dep) {
-                    if (dep && dep.environment) DEPLOYMENTS_BY_ENV[dep.environment] = dep.status || '';
+                    if (dep && dep.environment) DEPLOYMENTS_BY_ENV[dep.environment] = dep.status || 'unknown';
                 });
             })
             .catch(function() { DEPLOYMENTS_BY_ENV = {}; });

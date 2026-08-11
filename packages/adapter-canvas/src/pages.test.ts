@@ -802,9 +802,10 @@ describe("deployedGraphPage", () => {
     expect(controls).toBeTruthy();
   });
 
-  it("treats a failed deployment as not deployed so a retry is offered", () => {
+  it("treats a failed deployment as deployed so it can be cleaned up", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
-    expect(html).toContain("return !!status && status !== 'failed';");
+    expect(html).toContain("return !!DEPLOYMENTS_BY_ENV[env];");
+    expect(html).toContain("dep.status || 'unknown'");
   });
 });
 
