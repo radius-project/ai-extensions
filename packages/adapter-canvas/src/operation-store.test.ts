@@ -38,6 +38,12 @@ describe("file operation store", () => {
     await store.save(envelope);
 
     await expect(store.load()).resolves.toEqual(envelope);
+    const replacement = {
+      schemaVersion: PERSISTED_OPERATIONS_VERSION as 1,
+      operations: [{ operationId: "op_2" }]
+    };
+    await store.save(replacement);
+    await expect(store.load()).resolves.toEqual(replacement);
     expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
     expect(
       (await fs.readdir(path.dirname(filePath))).filter((name) =>

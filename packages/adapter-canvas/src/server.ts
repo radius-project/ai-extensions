@@ -6435,7 +6435,7 @@ function createRequestHandler(instanceId: string) {
         if (!runId) {
           runId = await findWorkflowRun(
             repo,
-            "radius-verify-credentials.yml",
+            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
             dispatchedAt,
             null
           );

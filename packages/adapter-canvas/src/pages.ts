@@ -2915,7 +2915,7 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                     // dispatch, the record can disappear while the Actions run
                     // still reaches a terminal result.
                     if (!environment) { envProgressTimer = setTimeout(tick, 1500); return; }
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment))
+                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId))
                         .then(function(r) { return r.json(); })
                         .then(function(v) {
                             if (v.state === 'success') {

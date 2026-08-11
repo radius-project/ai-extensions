@@ -1005,7 +1005,7 @@ describe("environmentPage — non-blocking setup progress", () => {
       "// Verification is tracked separately from the process-local"
     );
     expect(html).toContain(
-      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment)"
+      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId)"
     );
     expect(html).toContain(
       "if (v.state === 'success') {\n                                hideEnvProgress();"

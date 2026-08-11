@@ -285,6 +285,30 @@ describe("GET /api/operations/{id}", () => {
         error: "The verification operation does not match this request."
       });
     });
+
+    it("keeps the persisted workflow identity on an operation-bound lookup", async () => {
+      const op = seed("contoso/workflow-identity");
+      enterStage(op, STAGE_VERIFY);
+      op.verification = {
+        dispatchedAt: Date.now(),
+        workflow: "renamed-verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "12345",
+        runUrl:
+          "https://github.com/contoso/workflow-identity/actions/runs/12345"
+      };
+
+      const { status, body } = await getJson(
+        `/api/verify-status?repo=contoso%2Fworkflow-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+      );
+
+      expect(status).toBe(200);
+      expect(body.runId).toBe("12345");
+      expect(body.runUrl).toBe(
+        "https://github.com/contoso/workflow-identity/actions/runs/12345"
+      );
+    });
   });
 
   it("404s an unknown id instead of inventing an empty record", async () => {
