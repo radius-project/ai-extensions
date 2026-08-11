@@ -1385,7 +1385,7 @@ ${graphHeaderClose()}`
 
 // Shared by both render paths of the Diff pane (empty selection and rendered
 // graph) so the two copies of the markup cannot drift apart.
-const GRAPH_DIFF_SUBTITLE = `<p class="rad-lede" id="graph-diff-subtitle" style="margin:0 0 20px;">The application graph diff compares the application model on two branches, highlighting the infrastructure that would be added, removed, or modified. Use it to review the impact of a pull request before it is merged.</p>`;
+const GRAPH_DIFF_SUBTITLE = `<p class="rad-lede" id="graph-diff-subtitle" style="margin:0 0 20px;">The application graph diff compares the application model between branches, allowing you to visualize changes in your application to reveal added, removed, or modified components. Use it to review the impact of a pull request before it is merged.</p>`;
 
 export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
