@@ -3558,7 +3558,6 @@ function createRequestHandler(instanceId: string) {
               displayName: null
             });
             await operations.persist();
-            await operations.persist();
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
