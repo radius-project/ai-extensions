@@ -23,9 +23,9 @@ const h = vi.hoisted<InfraMockState>(() => ({
   upstream: {
     // Minimal stand-ins for radius-project/radius/.github/extension templates.
     "verify-azure.yml":
-      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    run: echo ${{ vars.AZURE_CLIENT_ID }}\n",
+      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    run: echo ${{ vars.AWS_ROLE_ARN }}\n",
+      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "run-rad-commands-azure.yml":
@@ -68,7 +68,8 @@ const {
   syncRepoWorkflows,
   generateVerifyWorkflow,
   generateDeployWorkflow,
-  generateDeleteWorkflow
+  generateDeleteWorkflow,
+  configureVerifyGhcrProbe
 } = await import("./infra.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
@@ -98,6 +99,21 @@ const STALE_AZURE_VERIFY =
   "name: verify\njobs:\n  v:\n    run: echo STALE ${{ vars.AZURE_CLIENT_ID }}\n";
 const STALE_AWS_VERIFY =
   "name: verify\njobs:\n  v:\n    run: echo STALE ${{ vars.AWS_ROLE_ARN }}\n";
+
+describe("GHCR verification probe", () => {
+  it("checks push permission with a non-mutating upload session", () => {
+    const workflow = configureVerifyGhcrProbe(
+      "steps:\n  - name: Verify GHCR package push permission\n    uses: action\n  - name: Summary\n    run: echo done\n"
+    );
+    expect(workflow).toContain("secrets.GITHUB_TOKEN");
+    expect(workflow).toContain("/blobs/uploads/");
+    expect(workflow).toContain('status}" != "202"');
+    expect(workflow).toContain("| node -e");
+    expect(workflow).not.toContain("| jq ");
+    expect(workflow).not.toContain("uses: action");
+    expect(workflow).toContain("- name: Summary");
+  });
+});
 
 describe("syncRepoWorkflows", () => {
   beforeEach(() => {

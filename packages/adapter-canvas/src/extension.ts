@@ -67,6 +67,12 @@ import {
 } from "./hooks.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
+import {
+  announcementOptions,
+  onOperationTerminal,
+  setupInFlight,
+  summarize
+} from "./operations.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
 import {
@@ -231,6 +237,11 @@ const session = await joinSession({
             type: "string",
             description:
               "Repository in owner/repo format to pre-select in dropdowns"
+          },
+          branch: {
+            type: "string",
+            description:
+              "Branch to read app.bicep and the graph from (e.g. 'main'). Defaults to the workspace branch, or 'main' for a repository that is not checked out locally."
           },
           baseBranch: {
             type: "string",
@@ -674,7 +685,9 @@ const session = await joinSession({
             const result = updateSourceRefs(entry, contextToken, parsedRefs);
             if (result.error) return result;
             const page = result.view === "diff" ? "graph-diff" : result.view;
-            entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
+            entry.url = `${
+              entry.baseUrl
+            }/?page=${page}&sourceRefs=${Date.now()}`;
             await reloadCanvasInstance(session, ctx, { page });
             return {
               ...result,
@@ -973,7 +986,13 @@ const session = await joinSession({
         // Compute diff using the shared algorithm (see computeGraphDiff).
         const diffResources = computeGraphDiff(baseResources, headResources);
         return JSON.stringify({
-          message: `Diff computed: ${diffResources.filter((r) => r.diffStatus === "added").length} added, ${diffResources.filter((r) => r.diffStatus === "removed").length} removed, ${diffResources.filter((r) => r.diffStatus === "modified").length} modified`,
+          message: `Diff computed: ${
+            diffResources.filter((r) => r.diffStatus === "added").length
+          } added, ${
+            diffResources.filter((r) => r.diffStatus === "removed").length
+          } removed, ${
+            diffResources.filter((r) => r.diffStatus === "modified").length
+          } modified`,
           resources: diffResources,
           instruction: `Use invoke_canvas_action with actionName 'render_graph_diff' and pass these resources with repo '${args.repo}', baseBranch '${args.baseBranch}', and headBranch '${args.headBranch}'.`
         });
@@ -1265,9 +1284,15 @@ const session = await joinSession({
           });
           const result = record(await response.json().catch(() => ({})));
           if (!response.ok || result.error) {
-            return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
+            return `⚠️ Could not start the deploy: ${
+              result.error || `HTTP ${response.status}`
+            }`;
           }
-          return `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started. It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed. Poll the radius_deploy_status tool until it reports success or failed.`;
+          return `Deploy of ${payload.targetRepo}${
+            payload.branch ? ` (branch ${payload.branch})` : ""
+          } to environment "${payload.environment}" started. It deploys ${
+            payload.branch || "that branch"
+          } as it exists on GitHub, so confirm any repair was pushed. Poll the radius_deploy_status tool until it reports success or failed.`;
         } catch (err) {
           return `⚠️ Could not start the deploy: ${errorMessage(err)}`;
         }
@@ -1410,7 +1435,9 @@ ensureRadBinary({
 }).catch((e) => {
   try {
     console.error(
-      `[radius] rad binary preparation failed (will retry on first use): ${e?.message || e}`
+      `[radius] rad binary preparation failed (will retry on first use): ${
+        e?.message || e
+      }`
     );
   } catch {
     /* ignore */
@@ -1443,6 +1470,36 @@ setSessionPromptHandler((prompt) => session.send(String(prompt || "")));
 // canvas.open({createIfMissing:false}) SILENTLY resolves for a file that isn't on
 // the worktree (a dead click with no error), so we first verify the file exists on
 // this session's checkout and throw NOT_ON_WORKTREE when it doesn't. Any throw is
+// Tier 2 of the notification model: say once, in the session timeline, that an
+// environment setup finished.
+//
+// This is deliberately `session.log` and not `session.send`. A sent message is a
+// directive that resolves only when the agent finishes acting on it, so a
+// completion notice would submit a turn -- interrupting whatever the user is
+// doing to announce something they may already know from the panel. A log entry
+// is level-tagged, lands on the timeline, and asks nothing of anyone.
+//
+// It is best-effort by design. Tier 1 -- the status chip and the panel -- is
+// what carries the guarantee, because it depends on nothing outside our own
+// pages. If this line never renders, nothing is lost that the user could not
+// already see.
+//
+// The host RPC documents this as a "user-visible session log event" and accepts
+// a `url` and a `tip` alongside the level, so the announcement carries the
+// pull request link on the one state where the user has to go and act on it.
+// See announcementOptions for why the tip is limited to a plain success.
+onOperationTerminal((op: any) => {
+  try {
+    const message = summarize(op);
+    if (!message) return false;
+    session.log(`Radius: ${message}`, announcementOptions(op));
+    return true;
+  } catch {
+    // The host may be gone, or between sessions. Never let it matter.
+    return false;
+  }
+});
+
 // logged and re-thrown so /api/open-source returns a non-2xx and the webview falls
 // back to the file's GitHub URL instead of dead-clicking.
 setOpenSourceHandler(async ({ path: relPath, state }) => {
@@ -1600,12 +1657,21 @@ process.on("unhandledRejection", (reason) => {
 // in-flight deploy monitor dies with the process).
 //
 // Fix: while a canvas panel is actively open (we've served a webview request
-// recently) OR a deployment is being monitored in the background, send a benign,
-// read-only request over the host channel to keep the connection warm so the
-// idle timer never elapses. session.metadata.snapshot() is a pure read with no
-// side effects (unlike session.log, which would spam the host log). The whole
-// thing is defensive: it never throws, and when the panel is closed and no
-// deploy is running it stops pinging, letting the host reap the process normally.
+// recently) OR a deployment is being monitored in the background OR an
+// environment/credential setup operation is running, send a benign, read-only
+// request over the host channel to keep the connection warm so the idle timer
+// never elapses. session.metadata.snapshot() is a pure read with no side
+// effects (unlike session.log, which would spam the host log). The whole thing
+// is defensive: it never throws, and when the panel is closed and nothing is
+// running it stops pinging, letting the host reap the process normally.
+//
+// Setup deserves its own predicate rather than riding on `panelRecentlyActive`.
+// Today setup runs inside a single awaited POST while the modal polls
+// /api/ping every 5s, so the connection stays warm by accident. Once the
+// operation runs in the background the user is free to close the panel — at
+// which point webview activity stops, and the only thing standing between a
+// half-created App Registration and a SIGTERM is this predicate. Roughly:
+// 3 min activity window + 2 min tick + ~10 min reap.
 const KEEPALIVE_INTERVAL_MS = 120000; // 2 min — comfortably under the ~10 min reaper
 const KEEPALIVE_ACTIVE_WINDOW_MS = 180000; // consider the panel "open" if seen within 3 min
 let keepaliveBusy = false;
@@ -1620,7 +1686,13 @@ const keepaliveTimer = setInterval(async () => {
   if (keepaliveBusy || shuttingDown) return;
   const panelRecentlyActive =
     Date.now() - getLastWebviewActivityAt() < KEEPALIVE_ACTIVE_WINDOW_MS;
-  if (!panelRecentlyActive && !deployInFlight()) return;
+  let settingUp = false;
+  try {
+    settingUp = setupInFlight();
+  } catch {
+    /* never let the predicate break the keepalive */
+  }
+  if (!panelRecentlyActive && !deployInFlight() && !settingUp) return;
   keepaliveBusy = true;
   try {
     const metadata = Reflect.get(session, "metadata");
@@ -1719,7 +1791,9 @@ try {
       if (deploying || (panelActive && waited < RELOAD_MAX_DEFER_MS)) {
         try {
           console.error(
-            `[radius][dev] reload deferred (${deploying ? "deploy in flight" : "canvas panel active"}); retrying in ${RELOAD_DEFER_POLL_MS}ms…`
+            `[radius][dev] reload deferred (${
+              deploying ? "deploy in flight" : "canvas panel active"
+            }); retrying in ${RELOAD_DEFER_POLL_MS}ms…`
           );
         } catch {}
         setTimeout(maybeReload, RELOAD_DEFER_POLL_MS);
