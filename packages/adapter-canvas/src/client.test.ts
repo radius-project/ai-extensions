@@ -225,7 +225,7 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
 
   function runApply(hasEnv: boolean, appValue = "web-app", envValue = "prod") {
     const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
-    const hint = { textContent: "" };
+    const hint = { textContent: "", innerHTML: "" };
     const appSel: FakeSelect = { value: appValue };
     const envSel: FakeSelect = { value: envValue };
     const elements: Record<string, unknown> = {
@@ -251,14 +251,21 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(hint.textContent).toContain("must first create an environment");
   });
 
-  it("offers Deploy Application and names the app/environment when one exists", () => {
+  it("offers Deploy Application and names the app/environment in bold when one exists", () => {
     const { btn, hint } = runApply(true, "web-app", "prod");
     expect(btn.textContent).toBe("Deploy Application");
     expect(btn.dataset.mode).toBe("deploy");
     expect(btn.disabled).toBe(false);
-    expect(hint.textContent).toContain("web-app");
-    expect(hint.textContent).toContain("prod");
-    expect(hint.textContent).toContain("Deploy Application");
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  it("HTML-escapes app/environment names in the hint to avoid injection", () => {
+    const { hint } = runApply(true, "<img>", "prod\"'");
+    expect(hint.innerHTML).not.toContain("<img>");
+    expect(hint.innerHTML).toContain("&lt;img&gt;");
+    expect(hint.innerHTML).toContain("prod&quot;&#39;");
   });
 
   it("triggers a deployment and redirects to the Deployments tab", async () => {

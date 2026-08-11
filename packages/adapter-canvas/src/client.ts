@@ -8,6 +8,17 @@ export const CLIENT_REPO_BRANCH_JS = `
 // ─── Shared Repo/Branch Library ───────────────────────────────────────────────
 // Provides consistent repo/branch dropdowns across all panes (matches diff pane style).
 
+// Minimal HTML-escaping helper for values (e.g. app/env names) interpolated
+// into innerHTML strings built from user- or repo-provided data.
+function radiusEscapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function radiusPopulateRepos(selectId, defaultRepo) {
     var sel = document.getElementById(selectId);
     if (!sel) return Promise.resolve();
@@ -136,6 +147,7 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
             })
             .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; })
         : Promise.resolve();
+    var hasEnvResult = false;
     var envPromise = envSel ?
         fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
@@ -143,7 +155,6 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
                 var envs = (d && d.environments) || [];
                 if (!envs.length) {
                     envSel.innerHTML = '<option value="">No environments</option>';
-                    radiusApplyPlanEnvState(false);
                     return;
                 }
                 envSel.innerHTML = '';
@@ -153,11 +164,18 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
                     if (defaultEnv && e.name === defaultEnv) o.selected = true;
                     envSel.appendChild(o);
                 });
-                radiusApplyPlanEnvState(true);
+                hasEnvResult = true;
             })
-            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; radiusApplyPlanEnvState(false); })
+            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; })
         : Promise.resolve();
-    return Promise.all([appPromise, branchPromise, envPromise]);
+    // Apply the button/hint state only after BOTH the application and
+    // environment selectors have finished populating, so the hint can name
+    // the actually-selected application instead of falling back to generic
+    // text (appSel.value would still be empty while its own fetch is
+    // in-flight if this ran as soon as the environment fetch settled).
+    return Promise.all([appPromise, branchPromise, envPromise]).then(function() {
+        radiusApplyPlanEnvState(hasEnvResult);
+    });
 }
 
 // Tracks the last-known environment state for the Planned pane so selector
@@ -190,7 +208,7 @@ function radiusApplyPlanEnvState(hasEnv) {
         if (hasEnv) {
             var appName = (appSel && appSel.value) || 'this application';
             var envName = (envSel && envSel.value) || 'the selected environment';
-            hint.textContent = ' To deploy this application (' + appName + ') to the environment (' + envName + '), click "Deploy Application".';
+            hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
         } else {
             hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
         }
