@@ -6,7 +6,7 @@
 
 ## Overview
 
-The Radius Canvas adapter ships a Copilot SDK extension, a per-instance loopback HTTP server, server-rendered HTML pages, and inline browser JavaScript as a single `plugins/radius/extension.mjs` artifact. It has real unit coverage — 34 test files across the three workspace packages — but that coverage stops at the boundaries where the product is most likely to break. Four files concentrate most of the risk: [`server.ts`](../../packages/adapter-canvas/src/server.ts) is 6,830 lines and owns all 35 loopback routes plus process-global maps and caches, [`pages.ts`](../../packages/adapter-canvas/src/pages.ts) is 4,045 lines and owns all seven page renderers, [`extension.ts`](../../packages/adapter-canvas/src/extension.ts) is 1,716 lines and calls `joinSession()` at module load, and [`client.ts`](../../packages/adapter-canvas/src/client.ts) is 1,419 lines of browser behavior held as JavaScript strings that are only ever asserted as source text.
+The Radius Canvas adapter ships a Copilot SDK extension, a per-instance loopback HTTP server, server-rendered HTML pages, and inline browser JavaScript as `plugins/radius/dist/extension.mjs`. It has real unit coverage — 40 test files across the three workspace packages — but that coverage stops at the boundaries where the product is most likely to break. Four files concentrate most of the risk: [`server.ts`](../../packages/adapter-canvas/src/server.ts) is 8,461 lines and owns all 37 loopback routes plus process-global maps and caches, [`pages.ts`](../../packages/adapter-canvas/src/pages.ts) is 5,032 lines and owns all seven page renderers, [`extension.ts`](../../packages/adapter-canvas/src/extension.ts) is 1,837 lines and calls `joinSession()` at module load, and [`client.ts`](../../packages/adapter-canvas/src/client.ts) is 1,588 lines of browser behavior held as JavaScript strings that are only ever asserted as source text.
 
 This document is the **architecture and technical-decisions half** of a two-part design. It covers why the current structure resists testing, what the testability goals are, which areas of the codebase need componentization, which testing approaches and frameworks were considered, and the recommended path forward. It deliberately stays at the level of decisions and trade-offs.
 
@@ -19,7 +19,7 @@ Both documents supersede the external [Radius Canvas Test Design Specification R
 | Term            | Definition                                                                                                                                                                                                                      |
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | A11Y            | Accessibility tests: automated WCAG 2.2 A/AA checks with `@axe-core/playwright`.                                                                                                                                                |
-| ART             | Artifact smoke tests that load the built `plugins/radius/extension.mjs` in a subprocess against an SDK registration stub.                                                                                                       |
+| ART             | Artifact smoke tests that load the built `plugins/radius/dist/extension.mjs` in a subprocess against an SDK registration stub.                                                                                                  |
 | BCT             | Browser component tests: one isolated browser-side unit in real Chromium.                                                                                                                                                       |
 | BFT             | Browser functional tests: a complete page fragment or cross-module browser interaction in real Chromium.                                                                                                                        |
 | E2E             | Playwright journeys through real rendered pages and the real loopback server, with external systems replaced by deterministic fakes.                                                                                            |
@@ -42,10 +42,10 @@ Both documents supersede the external [Radius Canvas Test Design Specification R
 - Componentize the four concentration points — `server.ts`, `pages.ts`, `extension.ts`, `client.ts` — along responsibility boundaries, so a failure names its owning layer instead of pointing at a multi-thousand-line file.
 - Replace source-string assertions with behavior assertions. The current [`client.test.ts`](../../packages/adapter-canvas/src/client.test.ts) and [`extension.test.ts`](../../packages/adapter-canvas/src/extension.test.ts) verify that implementation text exists, which cannot detect a runtime regression.
 - Audit the six canvas actions and ten extension tools before freezing them as permanent compatibility contracts, remove approved legacy bridges, and add explicit coverage for the retained surface.
-- Protect the highest-consequence behavior with scenario gates rather than percentage gates: worktree branch selection, stale source-reference rejection, destructive fail-closed operations, path confinement, credential handling, and external-error propagation.
+- Protect the highest-consequence behavior with scenario gates rather than percentage gates: worktree branch selection, stale source-reference rejection, destructive fail-closed operations, resumable long-running setup state, path confinement, credential handling, and external-error propagation.
 - Add real Chromium coverage for DOM behavior, keyboard operation, WCAG 2.2 A/AA automated checks, and a small set of stable visual baselines.
 - Track code coverage in CI on the existing V8 setup with text, JSON summary, and LCOV reports, an accepted no-regression baseline, higher thresholds for newly extracted modules, and machine-readable artifacts retained on every run.
-- Verify that [`build.mjs`](../../packages/adapter-canvas/build.mjs) still emits exactly one loadable `plugins/radius/extension.mjs` with the Copilot SDK externalized.
+- Verify that [`build.mjs`](../../packages/adapter-canvas/build.mjs) still emits exactly one loadable `plugins/radius/dist/extension.mjs` with the Copilot SDK externalized.
 - Keep pull-request tests deterministic, secret-free, and independent of live GitHub, Azure, AWS, GHCR, and unpkg availability.
 
 ### Non-goals
@@ -131,7 +131,7 @@ flowchart LR
     Routes --> Core[packages/core]
     Routes --> Shared[packages/adapter-shared]
     Routes --> Ports[Injected GitHub, GHCR, CLI, filesystem, credential, clock ports]
-    Build[build.mjs and esbuild] --> Artifact[plugins/radius/extension.mjs]
+    Build[build.mjs and esbuild] --> Artifact[plugins/radius/dist/extension.mjs]
 
     UT[UT] -.-> Routes
     UT -.-> Pages
@@ -174,7 +174,7 @@ Leave `extension.ts`, `server.ts`, `pages.ts`, and `client.ts` structurally inta
 ##### Disadvantages
 
 - Importing `extension.ts` still calls `joinSession()`, so the assembled canvas declaration and action handlers remain unreachable from a test.
-- Route tests stay coupled to a 6,830-line handler with direct GitHub, GHCR, CLI, filesystem, credential, cache, and workflow dependencies. Broad module mocks are the only lever, and they return success for operations the test never modeled — precisely the failure mode that lets an external error be presented as success.
+- Route tests stay coupled to an 8,461-line handler with direct GitHub, GHCR, CLI, filesystem, credential, operation-registry, cache, and workflow dependencies. Broad module mocks are the only lever, and they return success for operations the test never modeled — precisely the failure mode that lets an external error be presented as success.
 - Browser tests keep asserting implementation text. A refactor that changes a string while breaking behavior still passes; a behavior fix that changes a string fails for no reason.
 - Failures do not localize. The first practical place to exercise real behavior becomes HTTP or full-process tests, which makes the slowest and most flake-prone level carry the most responsibility.
 - Coverage percentages rise without the safety-critical scenarios actually being reachable, which is worse than a known gap.
@@ -224,14 +224,14 @@ Each extraction must preserve behavior and ship with its collocated unit tests i
 
 Four areas need componentization. The detailed file-to-target and route-to-target maps are in the [test plan](./2026-08-radius-canvas-test-plan.md); the rationale is here.
 
-| Area                                                                                    | Current state                                                                               | Why it must be split                                                                                                                    | Target seam                                                                            |
-|-----------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
-| Runtime — [`extension.ts`](../../packages/adapter-canvas/src/extension.ts), 1,716 lines | `joinSession()` at module load; canvas, six actions, ten tools, hooks, keepalive all inline | Nothing can be constructed without joining a session, so no declaration or handler is independently assertable                          | `src/runtime/` factories; `extension.ts` becomes the composition root                  |
-| Server — [`server.ts`](../../packages/adapter-canvas/src/server.ts), 6,830 lines        | 35 routes, process-global maps and caches, direct external imports                          | No injection point for GitHub, GHCR, CLI, filesystem, or credential behavior; destructive paths cannot be driven to their failure modes | `src/server/` container and dispatcher, route ownership modules, and use-case services |
-| Pages — [`pages.ts`](../../packages/adapter-canvas/src/pages.ts), 4,045 lines           | Seven renderers plus a shared shell plus inline page scripts                                | Renderer state variants are reachable only through whole-page output; executable behavior is mixed into markup                          | `src/pages/` shell and three renderer groups                                           |
-| Browser — [`client.ts`](../../packages/adapter-canvas/src/client.ts), 1,419 lines       | Three `CLIENT_*_JS` string exports plus scripts embedded in `pages.ts`                      | Behavior cannot be imported or invoked; only syntax and substrings are checkable                                                        | `src/browser/` entries and helpers, compiled to inline IIFE text                       |
+| Area                                                                                    | Current state                                                                                               | Why it must be split                                                                                                                               | Target seam                                                                            |
+|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| Runtime — [`extension.ts`](../../packages/adapter-canvas/src/extension.ts), 1,837 lines | `joinSession()` at module load; canvas, six actions, ten tools, hooks, operation-aware keepalive all inline | Nothing can be constructed without joining a session, so no declaration or handler is independently assertable                                     | `src/runtime/` factories; `extension.ts` becomes the composition root                  |
+| Server — [`server.ts`](../../packages/adapter-canvas/src/server.ts), 8,461 lines        | 37 routes, process-global maps and caches, operation-registry access, direct external imports               | No injection point for GitHub, GHCR, CLI, filesystem, credential, or operation behavior; destructive paths cannot be driven to their failure modes | `src/server/` container and dispatcher, route ownership modules, and use-case services |
+| Pages — [`pages.ts`](../../packages/adapter-canvas/src/pages.ts), 5,032 lines           | Seven renderers plus a shared shell, operation progress UI, and inline page scripts                         | Renderer state variants are reachable only through whole-page output; executable behavior is mixed into markup                                     | `src/pages/` shell and three renderer groups                                           |
+| Browser — [`client.ts`](../../packages/adapter-canvas/src/client.ts), 1,588 lines       | Four `CLIENT_*_JS` string exports, including shared operation polling, plus scripts embedded in `pages.ts`  | Behavior cannot be imported or invoked; only syntax and substrings are checkable                                                                   | `src/browser/` entries and helpers, compiled to inline IIFE text                       |
 
-The split is **by responsibility, not one module per endpoint or per page**. The seven route families assign every route to one ownership namespace, but they are not a ceiling on component granularity and do not require one production file per family. A route handler is an HTTP adapter that parses input, calls a use case, and serializes its outcome. Multi-stage Azure setup, environment, deployment, graph-build, cache, or workflow behavior moves behind independently testable use-case services when keeping it in the route module would create a replacement monolith. Files that are already independently testable — [`bicep.ts`](../../packages/adapter-canvas/src/bicep.ts), [`gh.ts`](../../packages/adapter-canvas/src/gh.ts), [`ghcr.ts`](../../packages/adapter-canvas/src/ghcr.ts), [`workspace.ts`](../../packages/adapter-canvas/src/workspace.ts), [`source-refs.ts`](../../packages/adapter-canvas/src/source-refs.ts), and their peers — stay where they are and become the production defaults supplied at the server composition root. This is a surgical testability refactor, not a repository-wide file shuffle.
+The split is **by responsibility, not one module per endpoint or per page**. Eight API route families assign every route to one ownership namespace, while page routing remains a ninth server responsibility. These ownership families are not a ceiling on component granularity and do not require one production file per family. A route handler is an HTTP adapter that parses input, calls a use case, and serializes its outcome. Multi-stage Azure setup, environment, deployment, graph-build, operation, cache, or workflow behavior moves behind independently testable use-case services when keeping it in the route module would create a replacement monolith. Files that are already independently testable — including [`operations.ts`](../../packages/adapter-canvas/src/operations.ts), [`verification-plan.ts`](../../packages/adapter-canvas/src/verification-plan.ts), [`bicep.ts`](../../packages/adapter-canvas/src/bicep.ts), [`gh.ts`](../../packages/adapter-canvas/src/gh.ts), [`ghcr.ts`](../../packages/adapter-canvas/src/ghcr.ts), [`workspace.ts`](../../packages/adapter-canvas/src/workspace.ts), [`source-refs.ts`](../../packages/adapter-canvas/src/source-refs.ts), and their peers — stay where they are and become production defaults supplied at the runtime or server composition root. The operation helpers do not create a fifth migration target, but their runtime keepalive, HTTP status, page-state, and browser-polling integrations migrate and gain boundary tests with the corresponding four phases rather than being deferred until the end. This is a surgical testability refactor, not a repository-wide file shuffle.
 
 #### Action and tool surface cleanup
 
@@ -299,8 +299,8 @@ This proposal removes four legacy actions and four legacy tools after compatibil
 - The seven page input values: `credentials`, `graph`, `planned`, `graph-diff`, `deployed`, `environment`, `deploying`.
 - The two retained canvas action names and schemas.
 - The six retained extension tool names and schemas.
-- All 35 `/api/*` paths, methods, request bodies, response bodies, streaming behavior, and status codes.
-- The `plugins/radius/extension.mjs` output path and single-file runtime artifact.
+- All 37 `/api/*` paths, methods, request bodies, response bodies, polling and streaming behavior, and status codes.
+- The `plugins/radius/dist/extension.mjs` output path and single-file runtime entry artifact.
 
 New factory, dependency, and port types are internal package APIs, exported only from their owning modules unless another workspace package demonstrates a need. Per-route request, state, and response types are internal to `src/server/`.
 
@@ -310,7 +310,7 @@ The [test plan](./2026-08-radius-canvas-test-plan.md) enumerates the full action
 
 #### Core package — packages/core (if applicable)
 
-No structural change. The graph, modeling, platform, port, and workflow suites under [`packages/core/src`](../../packages/core/src) remain authoritative. No browser, SDK, HTTP, Playwright, Testing Library, MSW, or axe dependency is added to core. Its `*_test.ts` convention is unchanged.
+No structural change. The graph, modeling, platform, port, and workflow suites under [`packages/core/src`](../../packages/core/src) remain authoritative. No browser, SDK, HTTP, Playwright, Testing Library, MSW, or axe dependency is added to core. Its `*.test.ts` convention is unchanged.
 
 #### Canvas adapter — packages/adapter-canvas (if applicable)
 
@@ -322,7 +322,7 @@ No structural change. [`rad.ts`](../../packages/adapter-shared/src/rad.ts) remai
 
 #### Plugin — plugins/radius (if applicable)
 
-No manifest or runtime-layout change. The build still emits `plugins/radius/extension.mjs`, and [`plugins/radius/package.json`](../../plugins/radius/package.json) still declares it as the entry point. Skill prose that references a removed tool — notably the `radius_render_graph_diff` data-flow reference — is corrected in Phase 0. Skills and marketplace packaging are otherwise outside this work.
+No manifest or runtime-layout change. The build still emits `plugins/radius/dist/extension.mjs` as the loadable entry inside the assembled `plugins/radius/dist/` package. Skill prose that references a removed tool — notably the `radius_render_graph_diff` data-flow reference — is corrected in Phase 0. Skills and marketplace packaging are otherwise outside this work.
 
 #### Build & packaging (if applicable)
 
