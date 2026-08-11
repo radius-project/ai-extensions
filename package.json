@@ -26,7 +26,8 @@
     "changeset": "changeset",
     "version": "changeset version && pnpm run version:sync",
     "version:sync": "node scripts/version.mjs --sync",
-    "version:check": "node scripts/version.mjs --check"
+    "version:check": "node scripts/version.mjs --check",
+    "demo:progress": "node packages/adapter-canvas/dev/run-demo.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.0-next.11",

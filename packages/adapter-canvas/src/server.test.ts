@@ -5,10 +5,14 @@ import {
   azureLoginRequiredResponse,
   buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
+  cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
+  deleteNewlyCreatedGitHubEnvironment,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
   endChildInput,
+  ensureServicePrincipal,
+  finalizeSetupFailure,
   findFederatedCredentialNameCollision,
   graphDefinitionHash,
   isCrossSiteMutation,
@@ -17,10 +21,21 @@ import {
   isReplicationLagError,
   invokeSessionPrompt,
   pickAksResourceGroup,
+  preflightGhcrPackageWriteAccess,
+  resolveGitHubEnvironmentCreateState,
   resolveDeployStatus,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
 } from "./server.js";
+import {
+  createOperation,
+  recordAzureApp,
+  recordCommittedWorkflowFile,
+  recordCreatedFederatedCredential,
+  recordCreatedRoleAssignment,
+  recordGitHubEnvironment,
+  recordServicePrincipal
+} from "./operations.js";
 import {
   buildFederatedCredentialName,
   buildEnvironmentSuffix
@@ -39,6 +54,825 @@ describe("endChildInput", () => {
         }
       })
     ).not.toThrow();
+  });
+});
+
+describe("preflightGhcrPackageWriteAccess", () => {
+  it("fails closed when the package credential username is blank", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({ token: "ghcr-token", username: "   " }),
+      async () => ({
+        actingLogin: "emuuser",
+        displayLogin: "emuuser",
+        mismatch: false,
+        actingHasWorkflow: true,
+        actingHasPackages: true,
+        preferredLogin: null,
+        reason: "user-selected-keyring-account",
+        accounts: []
+      })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.code).toBe("ghcr-auth-failed");
+    expect(result.error).toContain("Could not determine");
+  });
+
+  it("checks the specific GHCR credential login for write:packages", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({ token: "ghcr-token", username: "pubuser" }),
+      async () => ({
+        actingLogin: "emuuser",
+        displayLogin: "emuuser",
+        mismatch: false,
+        actingHasWorkflow: true,
+        actingHasPackages: true,
+        preferredLogin: null,
+        reason: "user-selected-keyring-account",
+        accounts: [
+          {
+            login: "pubuser",
+            hasWorkflow: true,
+            hasPackages: false,
+            switchable: true,
+            acting: false
+          },
+          {
+            login: "emuuser",
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true,
+            acting: true
+          }
+        ]
+      })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.code).toBe("ghcr-scope-required");
+    expect(result.error).toContain("@pubuser");
+    expect(result.error).toContain(
+      "gh auth switch -h github.com -u pubuser && gh auth refresh -h github.com -s read:packages -s write:packages"
+    );
+  });
+});
+
+describe("resolveGitHubEnvironmentCreateState", () => {
+  it("treats a successful GET as a reused environment", () => {
+    expect(
+      resolveGitHubEnvironmentCreateState({
+        code: 0,
+        stdout: '{"name":"dev"}',
+        stderr: ""
+      })
+    ).toBe("reused");
+  });
+
+  it("treats a 404 lookup as a created-candidate environment", () => {
+    expect(
+      resolveGitHubEnvironmentCreateState({
+        code: 1,
+        stdout: "",
+        stderr: "gh: Not Found (HTTP 404)"
+      })
+    ).toBe("created_candidate");
+  });
+
+  it("fails closed when the lookup error is ambiguous", () => {
+    expect(
+      resolveGitHubEnvironmentCreateState({
+        code: 1,
+        stdout: "",
+        stderr: "gh: Forbidden (HTTP 403)"
+      })
+    ).toBeNull();
+  });
+});
+
+describe("deleteNewlyCreatedGitHubEnvironment", () => {
+  it("does not delete a reused environment", async () => {
+    let called = false;
+    await expect(
+      deleteNewlyCreatedGitHubEnvironment(
+        { state: "reused", repo: "octo/app", name: "dev" },
+        async () => {
+          called = true;
+        }
+      )
+    ).resolves.toBe(false);
+    expect(called).toBe(false);
+  });
+
+  it("deletes only a newly created environment", async () => {
+    const calls: string[][] = [];
+    await expect(
+      deleteNewlyCreatedGitHubEnvironment(
+        { state: "created", repo: "octo/app", name: "dev env" },
+        async (args) => {
+          calls.push(args);
+        }
+      )
+    ).resolves.toBe(true);
+    expect(calls).toEqual([
+      ["api", "--method", "DELETE", "/repos/octo/app/environments/dev%20env"]
+    ]);
+  });
+
+  it("does not delete a created-candidate environment", async () => {
+    let called = false;
+    await expect(
+      deleteNewlyCreatedGitHubEnvironment(
+        { state: "created_candidate", repo: "octo/app", name: "dev" },
+        async () => {
+          called = true;
+        }
+      )
+    ).resolves.toBe(false);
+    expect(called).toBe(false);
+  });
+});
+
+function newAzureOp() {
+  return createOperation({
+    provider: "azure",
+    repo: "octo/app",
+    environment: "dev"
+  });
+}
+
+describe("ensureServicePrincipal", () => {
+  it("reuses an existing Service Principal without creating a new one", async () => {
+    const calls: string[][] = [];
+    const result = await ensureServicePrincipal("app-1", async (args) => {
+      calls.push(args);
+      return { code: 0, stdout: "sp-object-1\n", stderr: "" };
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      state: "reused",
+      objectId: "sp-object-1"
+    });
+    expect(calls).toEqual([
+      ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+    ]);
+  });
+
+  it("creates the Service Principal only after a not-found precheck", async () => {
+    const calls: string[][] = [];
+    const result = await ensureServicePrincipal("app-1", async (args) => {
+      calls.push(args);
+      return calls.length === 1 ?
+          {
+            code: 1,
+            stdout: "",
+            stderr:
+              "Request_ResourceNotFound: Resource 'app-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        : { code: 0, stdout: "", stderr: "" };
+    });
+
+    expect(result).toEqual({ ok: true, state: "created", objectId: null });
+    expect(calls).toEqual([
+      ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"],
+      ["ad", "sp", "create", "--id", "app-1"]
+    ]);
+  });
+
+  it("fails closed when the precheck returns an empty object id", async () => {
+    const result = await ensureServicePrincipal("app-1", async () => ({
+      code: 0,
+      stdout: "",
+      stderr: ""
+    }));
+
+    expect(result).toEqual({
+      ok: false,
+      stderr: "The Service Principal lookup returned an empty object id."
+    });
+  });
+});
+
+describe("cleanupAzureSetupArtifacts", () => {
+  it("deletes only created Azure artifacts in reverse dependency order", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev",
+      subject: "repo:octo/app:environment:dev"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev-pr",
+      subject: "repo:octo/app:pull_request"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Azure Kubernetes Service RBAC Cluster Admin",
+      scope:
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster",
+      principalObjectId: "sp-1"
+    });
+
+    const calls: string[][] = [];
+    const cleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    expect(calls).toEqual([
+      [
+        "role",
+        "assignment",
+        "delete",
+        "--assignee-object-id",
+        "sp-1",
+        "--assignee-principal-type",
+        "ServicePrincipal",
+        "--role",
+        "Azure Kubernetes Service RBAC Cluster Admin",
+        "--scope",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster",
+        "--output",
+        "none"
+      ],
+      [
+        "role",
+        "assignment",
+        "delete",
+        "--assignee-object-id",
+        "sp-1",
+        "--assignee-principal-type",
+        "ServicePrincipal",
+        "--role",
+        "Contributor",
+        "--scope",
+        "/subscriptions/sub/resourceGroups/rg",
+        "--output",
+        "none"
+      ],
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "delete",
+        "--id",
+        "app-1",
+        "--federated-credential-id",
+        "radius-dev-pr"
+      ],
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "delete",
+        "--id",
+        "app-1",
+        "--federated-credential-id",
+        "radius-dev"
+      ],
+      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "app", "delete", "--id", "app-1"]
+    ]);
+    expect(cleanup.state).toBe("succeeded");
+    expect(cleanup.warnings).toEqual([]);
+    expect(op.setupArtifacts.cleanup).toMatchObject({
+      state: "succeeded",
+      attempts: 1
+    });
+    expect(op.setupArtifacts.cleanup.results).toHaveLength(6);
+  });
+
+  it("treats not-found as success and preserves reused resources", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "reused", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "reused",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev",
+      subject: "repo:octo/app:environment:dev"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+
+    const calls: string[][] = [];
+    const cleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        calls.push(args);
+        return args[0] === "role" ?
+            {
+              code: 1,
+              stdout: "",
+              stderr: "No matched assignments were found to delete."
+            }
+          : {
+              code: 1,
+              stdout: "",
+              stderr:
+                "Request_ResourceNotFound: Resource 'radius-dev' does not exist or one of its queried reference-property objects are not present."
+            };
+      }
+    });
+
+    expect(calls).toEqual([
+      [
+        "role",
+        "assignment",
+        "delete",
+        "--assignee-object-id",
+        "sp-1",
+        "--assignee-principal-type",
+        "ServicePrincipal",
+        "--role",
+        "Contributor",
+        "--scope",
+        "/subscriptions/sub/resourceGroups/rg",
+        "--output",
+        "none"
+      ],
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "delete",
+        "--id",
+        "app-1",
+        "--federated-credential-id",
+        "radius-dev"
+      ]
+    ]);
+    expect(cleanup.state).toBe("succeeded");
+    expect(cleanup.warnings).toEqual([]);
+    expect(op.setupArtifacts.cleanup.results).toMatchObject([
+      { outcome: "not_found", artifactType: "role_assignment" },
+      { outcome: "not_found", artifactType: "federated_credential" }
+    ]);
+  });
+
+  it("is idempotent across repeated cleanup attempts", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+
+    await cleanupAzureSetupArtifacts(op, {
+      runAz: async () => ({ code: 0, stdout: "", stderr: "" })
+    });
+    const second = await cleanupAzureSetupArtifacts(op, {
+      runAz: async () => ({
+        code: 1,
+        stdout: "",
+        stderr:
+          "Request_ResourceNotFound: Resource 'app-1' does not exist or one of its queried reference-property objects are not present."
+      })
+    });
+
+    expect(second.state).toBe("succeeded");
+    expect(op.setupArtifacts.cleanup).toMatchObject({
+      state: "succeeded",
+      attempts: 2
+    });
+    expect(
+      op.setupArtifacts.cleanup.results.filter((r: any) => r.attempt === 2)
+    ).toMatchObject([
+      { artifactType: "service_principal", outcome: "not_found" },
+      { artifactType: "azure_app", outcome: "not_found" }
+    ]);
+  });
+
+  it("records warnings and continues when a delete fails", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev",
+      subject: "repo:octo/app:environment:dev"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+
+    const calls: string[][] = [];
+    const cleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        calls.push(args);
+        return args[0] === "role" ?
+            {
+              code: 1,
+              stdout: "",
+              stderr:
+                "AuthorizationFailed: caller cannot delete this role assignment."
+            }
+          : { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    expect(cleanup.state).toBe("succeeded_with_warnings");
+    expect(cleanup.warnings[0]).toContain("AuthorizationFailed");
+    expect(calls).toEqual([
+      [
+        "role",
+        "assignment",
+        "delete",
+        "--assignee-object-id",
+        "sp-1",
+        "--assignee-principal-type",
+        "ServicePrincipal",
+        "--role",
+        "Contributor",
+        "--scope",
+        "/subscriptions/sub/resourceGroups/rg",
+        "--output",
+        "none"
+      ],
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "delete",
+        "--id",
+        "app-1",
+        "--federated-credential-id",
+        "radius-dev"
+      ],
+      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "app", "delete", "--id", "app-1"]
+    ]);
+    expect(op.setupArtifacts.cleanup).toMatchObject({
+      state: "succeeded_with_warnings",
+      attempts: 1
+    });
+  });
+});
+
+describe("finalizeSetupFailure", () => {
+  it("rolls back newly created GitHub and Azure artifacts before any workflow commit", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev",
+      subject: "repo:octo/app:environment:dev"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const ghCalls: string[][] = [];
+    const azCalls: string[][] = [];
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "environment config exploded",
+      code: "environment-config-failed",
+      extra: {
+        steps: ["Creating GitHub environment dev..."],
+        azError: "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY"
+      },
+      steps: [],
+      runAz: async (args) => {
+        azCalls.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      runDeleteEnvironment: async (args) => {
+        ghCalls.push(args);
+      }
+    });
+
+    expect(failure.status).toBe(400);
+    expect(failure.body.error).toBe("environment config exploded");
+    expect(failure.body.code).toBe("environment-config-failed");
+    expect(failure.body.steps).toEqual(["Creating GitHub environment dev..."]);
+    expect(JSON.stringify(failure.body)).not.toContain(
+      "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY"
+    );
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackBeforeCommit: true,
+      state: "succeeded"
+    });
+    expect((failure.body.cleanup as any).results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifactType: "github_environment",
+          outcome: "deleted"
+        }),
+        expect.objectContaining({
+          artifactType: "role_assignment",
+          outcome: "deleted"
+        }),
+        expect.objectContaining({
+          artifactType: "federated_credential",
+          outcome: "deleted"
+        }),
+        expect.objectContaining({
+          artifactType: "service_principal",
+          outcome: "deleted"
+        }),
+        expect.objectContaining({
+          artifactType: "azure_app",
+          outcome: "deleted"
+        })
+      ])
+    );
+    expect(ghCalls).toEqual([
+      ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"]
+    ]);
+    expect(op.state).toBe("failed");
+    expect(op.failure.message).toBe("environment config exploded");
+    expect(op.setupArtifacts.cleanup.state).toBe("succeeded");
+    expect(azCalls).toEqual([
+      [
+        "role",
+        "assignment",
+        "delete",
+        "--assignee-object-id",
+        "sp-1",
+        "--assignee-principal-type",
+        "ServicePrincipal",
+        "--role",
+        "Contributor",
+        "--scope",
+        "/subscriptions/sub/resourceGroups/rg",
+        "--output",
+        "none"
+      ],
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "delete",
+        "--id",
+        "app-1",
+        "--federated-credential-id",
+        "radius-dev"
+      ],
+      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "app", "delete", "--id", "app-1"]
+    ]);
+  });
+
+  it("preserves the original error when cleanup also fails", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedFederatedCredential(op, {
+      name: "radius-dev",
+      subject: "repo:octo/app:environment:dev"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "original failure",
+      code: "original-failure",
+      steps: [],
+      runAz: async (args) =>
+        args[0] === "role" ?
+          {
+            code: 1,
+            stdout: "",
+            stderr:
+              "AuthorizationFailed: caller cannot delete this role assignment."
+          }
+        : { code: 0, stdout: "", stderr: "" },
+      runDeleteEnvironment: async () => {
+        throw new Error("GitHub delete exploded");
+      }
+    });
+
+    expect(failure.body.error).toBe("original failure");
+    expect(failure.body.code).toBe("original-failure");
+    expect(op.failure.message).toBe("original failure");
+    expect(op.failure.code).toBe("original-failure");
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackBeforeCommit: true,
+      state: "succeeded_with_warnings"
+    });
+    expect((failure.body.cleanup as any).warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("AuthorizationFailed"),
+        expect.stringContaining("GitHub delete exploded")
+      ])
+    );
+  });
+
+  it("does not delete a reused GitHub environment", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    let deleted = false;
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "reused env failed",
+      code: "reused-env-failed",
+      steps: [],
+      runDeleteEnvironment: async () => {
+        deleted = true;
+      }
+    });
+
+    expect(deleted).toBe(false);
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: false,
+      state: "not_needed",
+      retained: [
+        {
+          kind: "github_environment",
+          reason: "reused",
+          target: "octo/app:dev"
+        }
+      ]
+    });
+  });
+
+  it("retains a created-candidate GitHub environment with manual cleanup guidance", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    let deleted = false;
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "candidate env failed",
+      code: "candidate-env-failed",
+      steps: [],
+      runDeleteEnvironment: async () => {
+        deleted = true;
+      }
+    });
+
+    expect(deleted).toBe(false);
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: true,
+      rollbackBeforeCommit: true,
+      state: "succeeded_with_warnings",
+      retained: [
+        {
+          kind: "github_environment",
+          reason: "manual_cleanup_required",
+          target: "octo/app:dev"
+        }
+      ]
+    });
+    expect((failure.body.cleanup as any).warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("cannot prove this request created it")
+      ])
+    );
+  });
+
+  it("retains resources after the first workflow commit and reports cleanup as not needed", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      branch: "main",
+      mode: "default_branch"
+    });
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "verify run failed later",
+      code: "verify-run-failed",
+      steps: [],
+      runAz: async () => {
+        throw new Error("should not roll back after commit");
+      },
+      runDeleteEnvironment: async () => {
+        throw new Error("should not delete environment after commit");
+      }
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: false,
+      rollbackBeforeCommit: false,
+      state: "not_needed"
+    });
+    expect(op.state).toBe("failed_partial");
+    expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+  });
+
+  it("retains committed resources when a later workflow step fails", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-deploy-octo-app"
+    });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      branch: "main",
+      mode: "default_branch"
+    });
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "verify dispatch exploded",
+      code: "verify-dispatch-failed",
+      steps: [],
+      runAz: async () => {
+        throw new Error("should not clean up after commit");
+      },
+      runDeleteEnvironment: async () => {
+        throw new Error("should not delete environment after commit");
+      }
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: false,
+      rollbackBeforeCommit: false,
+      state: "not_needed"
+    });
+    expect((failure.body.cleanup as any).retained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "azure_app",
+          reason: "retained",
+          target: "radius-deploy-octo-app (app-1)"
+        }),
+        expect.objectContaining({
+          kind: "service_principal",
+          reason: "retained",
+          target: "Service Principal for radius-deploy-octo-app (app-1)"
+        }),
+        expect.objectContaining({
+          kind: "github_environment",
+          reason: "retained",
+          target: "octo/app:dev"
+        }),
+        expect.objectContaining({
+          kind: "workflow_file",
+          reason: "retained",
+          target: ".github/workflows/radius-verify-credentials.yml on main"
+        })
+      ])
+    );
+    expect(op.state).toBe("failed_partial");
   });
 });
 
@@ -261,8 +1095,12 @@ describe("findFederatedCredentialNameCollision", () => {
     repoFullName,
     envName: "prod-west"
   });
-  const colonSubject = `repo:${repoFullName}:${buildEnvironmentSuffix("prod:west")}`;
-  const hyphenSubject = `repo:${repoFullName}:${buildEnvironmentSuffix("prod-west")}`;
+  const colonSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(
+    "prod:west"
+  )}`;
+  const hyphenSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(
+    "prod-west"
+  )}`;
 
   it("names collapse but subjects differ (guards the premise of the fix)", () => {
     expect(hyphenName).toBe(colonName);

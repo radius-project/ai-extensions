@@ -79,6 +79,9 @@ jobs:
       - name: Run unit tests
         run: pnpm run test
 
+      - name: Check progress demo bundle
+        run: pnpm --filter @radius-project/adapter-canvas run demo:check
+
       # edge:    Changesets owns versioning, so ask it what the next release
       #          will be instead of guessing from the manifest. --snapshot
       #          stamps the calculated version (see snapshot.useCalculatedVersion

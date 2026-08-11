@@ -13,6 +13,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "watch": "node build.mjs --watch",
+    "demo": "node dev/run-demo.mjs",
+    "demo:check": "node dev/run-demo.mjs --build-only",
     "watch:dev": "node build.mjs --watch --install",
     "lint": "eslint \"src/**/*.ts\" vitest.config.ts build.mjs"
   },

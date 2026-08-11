@@ -3,7 +3,8 @@ import {
   explainOidcEnterpriseClaim,
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
-  extractErrorLines
+  extractErrorLines,
+  extractGitHubActionsStepLog
 } from "./deploy.js";
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
@@ -28,6 +29,49 @@ describe("explainOidcEnterpriseClaim", () => {
     // Explains the personal-account root cause and the empty actual value.
     expect(out.toLowerCase()).toContain("personal");
     expect(out).toContain("empty");
+  });
+
+  describe("extractGitHubActionsStepLog", () => {
+    it("isolates the actual Azure Login step from advisory text that mentions AADSTS7002381", () => {
+      const log = [
+        "verify\tAzure Login (OIDC)\t2026-08-07T04:04:47Z ##[error]No subscriptions found.",
+        'verify\tReport possible GitHub enterprise-claim mismatch\t2026-08-07T04:04:48Z echo "Check for AADSTS7002381"',
+        'verify\tReport possible GitHub enterprise-claim mismatch\t2026-08-07T04:04:48Z echo "must contain the enterprise claim"'
+      ].join("\n");
+      const azureLogin = extractGitHubActionsStepLog(log, "Azure Login (OIDC)");
+      expect(azureLogin).toContain("No subscriptions found");
+      expect(azureLogin).not.toContain("AADSTS7002381");
+      expect(explainOidcEnterpriseClaim(azureLogin)).toBe("");
+    });
+
+    it("returns an empty string when structured step prefixes are unavailable", () => {
+      expect(
+        extractGitHubActionsStepLog(
+          "AADSTS7002381 was mentioned outside a structured step log",
+          "Azure Login (OIDC)"
+        )
+      ).toBe("");
+    });
+
+    it("isolates Azure Login when gh labels every log row UNKNOWN STEP", () => {
+      const log = [
+        "verify\tUNKNOWN STEP\t2026-08-07T04:04:46Z ##[group]Run azure/login@abc123",
+        "verify\tUNKNOWN STEP\t2026-08-07T04:04:47Z Running Azure CLI Login.",
+        `verify\tUNKNOWN STEP\t2026-08-07T04:04:48Z ##[error]${MS_ERROR}`,
+        "verify\tUNKNOWN STEP\t2026-08-07T04:04:49Z ##[endgroup]",
+        "verify\tUNKNOWN STEP\t2026-08-07T04:04:50Z Logout succeeded.",
+        'verify\tUNKNOWN STEP\t2026-08-07T04:04:51Z ##[group]Run echo "Check for AADSTS7002381"',
+        "verify\tUNKNOWN STEP\t2026-08-07T04:04:52Z must contain the enterprise claim"
+      ].join("\n");
+
+      const azureLogin = extractGitHubActionsStepLog(log, "Azure Login (OIDC)");
+      expect(azureLogin).toContain("AADSTS7002381");
+      expect(azureLogin).toContain("Logout succeeded");
+      expect(azureLogin).not.toContain('Run echo "Check for AADSTS7002381"');
+      expect(explainOidcEnterpriseClaim(azureLogin)).toContain(
+        "GitHub Enterprise"
+      );
+    });
   });
 
   it("is tenant-agnostic: surfaces a non-Microsoft tenant's accepted + actual values", () => {
