@@ -11,6 +11,9 @@ interface InfraMockState {
   committed: Record<string, Record<string, string>>;
   commits: RecordedCommit[];
   upstream: Record<string, string>;
+  // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
+  // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
+  failCommits: boolean;
 }
 
 // Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
@@ -20,6 +23,7 @@ interface InfraMockState {
 const h = vi.hoisted<InfraMockState>(() => ({
   committed: {}, // branch -> { path -> committed body } (absent = file missing)
   commits: [], // recorded commitFileToRepo calls
+  failCommits: false, // when true, commitFileToRepo rejects
   upstream: {
     // Minimal stand-ins for radius-project/radius/.github/extension templates.
     "verify-azure.yml":
@@ -60,6 +64,7 @@ vi.mock("./gh.js", () => ({
     branch: string,
     message: string
   ) => {
+    if (h.failCommits) throw new Error("protected branch");
     h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
@@ -105,6 +110,7 @@ describe("syncRepoWorkflows", () => {
   beforeEach(() => {
     h.committed = {};
     h.commits = [];
+    h.failCommits = false;
   });
 
   it("no-ops when there are no managed environments", async () => {
@@ -329,10 +335,13 @@ describe("syncRepoWorkflows", () => {
       }
     );
 
-    expect(res.updated.sort()).toEqual([
+    expect(res.created.sort()).toEqual([
       ".github/workflows/delete-application.yml",
       ".github/workflows/delete-azure.yml"
     ]);
+    // Newly-authored files are reported under `created`, not `updated`.
+    expect(res.updated).toEqual([]);
+    expect(res.failed).toEqual([]);
     const created = h.commits.map((c) => c.path).sort();
     expect(created).toEqual([
       ".github/workflows/delete-application.yml",
@@ -360,6 +369,7 @@ describe("syncRepoWorkflows", () => {
     );
 
     expect(res.updated).toEqual([]);
+    expect(res.created).toEqual([]);
     expect(h.commits).toEqual([]);
   });
 
@@ -379,6 +389,35 @@ describe("syncRepoWorkflows", () => {
     );
 
     expect(res.updated).toEqual([]);
+    expect(res.created).toEqual([]);
+    expect(res.failed).toEqual([]);
     expect(h.commits).toEqual([]);
+  });
+
+  it("reports a commit failure in `failed` and does not abort the pass", async () => {
+    // The default branch is missing the delete workflows, but committing to it
+    // is rejected (e.g. a protected branch). The failure must be surfaced in
+    // `failed` — carrying the branch — rather than swallowed.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+    h.failCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"],
+        create: true
+      }
+    );
+
+    expect(res.created).toEqual([]);
+    expect(res.updated).toEqual([]);
+    expect(res.failed.map((f) => f.path).sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    expect(res.failed.every((f) => f.branch === "main")).toBe(true);
   });
 });

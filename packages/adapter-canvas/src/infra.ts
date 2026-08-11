@@ -78,6 +78,30 @@ interface WorkflowCandidate {
   provider: string | null;
 }
 
+// A workflow file the sync tried to commit but couldn't (e.g. the branch is
+// protected). Carries the branch so a caller can tell the user exactly which
+// branch the commit was rejected on.
+export interface WorkflowCommitFailure {
+  path: string;
+  branch: string;
+}
+
+export interface SyncWorkflowResult {
+  // Paths of already-committed files that were rewritten because they had
+  // drifted from the upstream template.
+  updated: string[];
+  // Paths of files that were newly authored because they were missing on a
+  // branch (only when `opts.create` is set). Kept separate from `updated` so a
+  // caller can tell whether it just created a workflow and therefore needs to
+  // wait for GitHub to register it before dispatching.
+  created: string[];
+  // Per-branch commit failures (create or update) so a caller can surface a
+  // specific "couldn't commit to <branch>" message instead of a generic hint.
+  failed: WorkflowCommitFailure[];
+  branches?: string[];
+  skipped: boolean;
+}
+
 interface TemplateCacheEntry {
   at: number;
   body: string;
@@ -523,18 +547,23 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
  * exists on the remote, so the workflow is always present on the branch it will
  * run from — an unpushed working branch is still skipped. Best-effort and
  * non-throwing per file: a protected branch (or any commit failure) is reported
- * via `log` and skipped rather than aborting the pass. Returns
- * `{ updated, branches, skipped }` where `updated` is the de-duplicated set of
- * paths changed on any branch.
+ * via `log`, recorded in the returned `failed` list, and skipped rather than
+ * aborting the pass. Returns `{ updated, created, failed, branches, skipped }`:
+ * `updated` is the de-duplicated set of drift-rewritten paths, `created` the set
+ * of newly-authored paths (so a caller can tell it must wait for GitHub to
+ * register a just-created workflow before dispatching), and `failed` the
+ * per-branch commit failures (so a caller can name the branch a commit was
+ * rejected on).
  */
 export async function syncRepoWorkflows(
   repo: string,
   environments: ManagedEnvironment[],
   opts: SyncWorkflowOptions = {}
-): Promise<{ updated: string[]; branches?: string[]; skipped: boolean }> {
+): Promise<SyncWorkflowResult> {
   const log = typeof opts.log === "function" ? opts.log : () => {};
   const envs = (environments || []).filter((e) => e && e.name);
-  if (!repo || envs.length === 0) return { updated: [], skipped: true };
+  if (!repo || envs.length === 0)
+    return { updated: [], created: [], failed: [], skipped: true };
 
   // Optional allow-list of bare workflow filenames to sync. When set, only
   // those files are considered (see opts.only above).
@@ -612,6 +641,8 @@ export async function syncRepoWorkflows(
   }
 
   const updated = new Set<string>();
+  const created = new Set<string>();
+  const failed: WorkflowCommitFailure[] = [];
   // Cache branch-existence lookups so authoring missing files doesn't re-query
   // the same branch for every candidate path. A branch that isn't on the remote
   // (e.g. an unpushed working branch) must never be authored onto.
@@ -648,9 +679,10 @@ export async function syncRepoWorkflows(
             branch,
             `Add ${fileName} from upstream Radius workflow templates`
           );
-          updated.add(path);
+          created.add(path);
           log(`created ${path} on "${branch}"`);
         } catch (e) {
+          failed.push({ path, branch });
           log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
         }
         continue;
@@ -683,10 +715,17 @@ export async function syncRepoWorkflows(
         updated.add(path);
         log(`updated ${path} on "${branch}"`);
       } catch (e) {
+        failed.push({ path, branch });
         log(`could not update ${path} on "${branch}": ${errorMessage(e)}`);
       }
     }
   }
 
-  return { updated: [...updated], branches, skipped: false };
+  return {
+    updated: [...updated],
+    created: [...created],
+    failed,
+    branches,
+    skipped: false
+  };
 }
