@@ -3,7 +3,10 @@ import {
   KEEPALIVE_ACTIVE_WINDOW_MS,
   KEEPALIVE_INTERVAL_MS
 } from "../../../src/runtime/create-radius-extension.js";
-import { createFakeDependencies } from "../../support/runtime/fakes.js";
+import {
+  createFakeDependencies,
+  createFakeSession
+} from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
 const ACTION_NAMES = [
@@ -56,6 +59,13 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(harness.createCanvas).toHaveBeenCalledOnce();
     expect(harness.joinSession).toHaveBeenCalledOnce();
     expect(harness.sessionHolder.get()).toBe(harness.session);
+    expect(() =>
+      harness.extension.attachSession(harness.session)
+    ).not.toThrow();
+    expect(() => harness.extension.attachSession(createFakeSession())).toThrow(
+      /session is already attached/
+    );
+    await harness.extension.shutdown("test");
   });
 
   it("round-trips SDK metadata and schemas while retaining routed handlers", async () => {
@@ -81,6 +91,16 @@ describe("P0-A Radius runtime registration contract", () => {
         }
       }
     });
+    const canvasProperties =
+      harness.registration.canvas.inputSchema.properties ?? {};
+    expect(Object.keys(canvasProperties)).toEqual([
+      "page",
+      "repo",
+      "branch",
+      "baseBranch",
+      "headBranch"
+    ]);
+    expect(canvasProperties.branch).toMatchObject({ type: "string" });
     expect(harness.registration.canvas.actions.map(({ name }) => name)).toEqual(
       ACTION_NAMES
     );
@@ -106,6 +126,15 @@ describe("P0-A Radius runtime registration contract", () => {
     ).resolves.toMatchObject({
       message: "Azure OIDC configuration generated"
     });
+
+    await expect(
+      harness.host.open("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: 42
+      })
+    ).rejects.toThrow("canvas input.branch must be a string");
+    await harness.extension.shutdown("test");
   });
 
   describe("P0-A RU-21 operation-aware keepalive", () => {
@@ -182,10 +211,8 @@ describe("P0-A Radius runtime registration contract", () => {
 
       await harness.extension.shutdown("test");
       await harness.extension.shutdown("test");
-      // shutdown's bounded server-close race leaves its losing 2s timeout
-      // scheduled briefly; after that settles, the keepalive interval must be
-      // gone too.
-      await vi.advanceTimersByTimeAsync(2_000);
+      // Both cleanup timeouts clear their losing timers, and stopKeepalive runs
+      // from finally, so successful shutdown leaves no scheduled work.
       expect(vi.getTimerCount()).toBe(0);
 
       await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 1);
