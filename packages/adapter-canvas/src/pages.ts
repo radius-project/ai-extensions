@@ -207,6 +207,10 @@ ${getInlineVendorStyles()}
   }
   .rad-lede { color: var(--rad-text-tertiary); font-weight: 300; font-size: 15px; line-height: 22px; max-width: 720px; }
   .rad-lede strong, .rad-lede b { font-weight: 500; color: var(--rad-text-secondary); }
+  .rad-lede-link { color: var(--rad-link); text-decoration: none; border-bottom: 1px solid transparent; }
+  .rad-lede-link strong { color: inherit; }
+  .rad-lede-link:hover, .rad-lede-link:focus-visible { color: var(--rad-link-hover); border-bottom-color: currentColor; }
+  .rad-lede-link:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; border-radius: 2px; }
   h2 { font-size: 16px; font-weight: 600; margin: 16px 0 8px; }
 
   /* ─── Sub-tabs (underlined) ───────────────────────────────────────────── */
@@ -635,11 +639,22 @@ export function graphHeader(activePage: string): string {
       return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
     })
     .join("\n  ");
+  // Each mode named in the lede links to its own sub-tab. Built from the same
+  // `pages` list as the nav so the two can never point at different routes.
+  const byLabel = Object.fromEntries(pages.map((p) => [p.label, p.id]));
+  const ledeLink = (label: string) =>
+    `<a href="?page=${byLabel[label]}" class="rad-lede-link" onclick="radiusNavTo(event, '${byLabel[label]}')"><strong>${label}</strong></a>`;
   return `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Application Graph</span></h1>
   <p class="rad-lede">
-    Visualize your application graph as you've designed it (<strong>Modeled</strong>), as you want it deployed (<strong>Planned</strong>), as it's running in your environments (<strong>Deployed</strong>), or as it differs between branches (<strong>Diff</strong>).
+    Visualize your application graph as you've designed it (${ledeLink(
+      "Modeled"
+    )}), as you want it deployed (${ledeLink(
+      "Planned"
+    )}), as it's running in your environments (${ledeLink(
+      "Deployed"
+    )}), or as it differs between branches (${ledeLink("Diff")}).
   </p>
 </div>
 <nav id="graph-nav" class="rad-subtabs">

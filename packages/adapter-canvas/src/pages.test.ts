@@ -119,6 +119,35 @@ describe("graphHeader / graphHeaderClose", () => {
     expect(graphHeader("graph")).toContain("<");
     expect(graphHeaderClose()).toContain("<");
   });
+
+  it("links each mode named in the lede to its own sub-tab", () => {
+    const html = graphHeader("graph");
+    const expected: Array<[string, string]> = [
+      ["Modeled", "graph"],
+      ["Planned", "planned"],
+      ["Deployed", "deployed"],
+      ["Diff", "graph-diff"]
+    ];
+    for (const [label, page] of expected) {
+      expect(html).toContain(
+        `<a href="?page=${page}" class="rad-lede-link" onclick="radiusNavTo(event, '${page}')"><strong>${label}</strong></a>`
+      );
+    }
+  });
+
+  it("keeps the lede links pointing at the same routes as the nav", () => {
+    const html = graphHeader("planned");
+    // Every route referenced by a lede link must also exist as a nav sub-tab.
+    const ledeRoutes = [
+      ...html.matchAll(
+        /class="rad-lede-link" onclick="radiusNavTo\(event, '([^']+)'\)"/g
+      )
+    ];
+    expect(ledeRoutes).toHaveLength(4);
+    for (const [, route] of ledeRoutes) {
+      expect(html).toContain(`data-page="${route}"`);
+    }
+  });
 });
 
 describe("graphPage — empty resources (initial) branch", () => {

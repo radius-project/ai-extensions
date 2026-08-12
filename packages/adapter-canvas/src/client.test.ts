@@ -491,6 +491,18 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
   });
 });
 
+describe("CLIENT_GRAPH_JS — line weights", () => {
+  it("draws edges and node borders thick enough to read at a glance", () => {
+    // Doubled from the original 1.5 / 1 / 2 so the graph stays legible.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var style = { stroke: stroke, strokeWidth: 3 };"
+    );
+    expect(CLIENT_GRAPH_JS).toContain("borderWidth: diffMode ? 4 : 2,");
+    expect(CLIENT_GRAPH_JS).toContain("(d.borderWidth || 2) + 'px'");
+    expect(CLIENT_GRAPH_JS).not.toContain("strokeWidth: 1.5");
+  });
+});
+
 describe("CLIENT_GRAPH_JS — View app definition link (recipe-pack model)", () => {
   it("defaults each node's definition file to the committed .radius/app.bicep", () => {
     expect(CLIENT_GRAPH_JS).toContain(
