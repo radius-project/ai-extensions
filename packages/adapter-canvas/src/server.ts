@@ -2935,26 +2935,7 @@ function createRequestHandler(instanceId: string) {
         };
         const checkpoint = async (): Promise<boolean> => {
           try {
-            if (!(await checkpoint())) return;
-            return true;
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
-            });
-            // Do not retry the same deterministic write or continue mutating
-            // GitHub without durable provenance for what already succeeded.
-            await fail(
-              500,
-              "Radius changed no further cloud resources because it could not save the setup recovery record.",
-              "operation-persistence-failed"
-            );
-            return false;
-          }
-        };
-        const checkpoint = async (): Promise<boolean> => {
-          try {
-            if (!(await checkpoint())) return;
+            await operations.persist();
             return true;
           } catch (error) {
             operations.report?.({
@@ -4825,6 +4806,25 @@ function createRequestHandler(instanceId: string) {
           res.setHeader("Content-Type", "application/json");
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
+        };
+        const checkpoint = async (): Promise<boolean> => {
+          try {
+            await operations.persist();
+            return true;
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
+            });
+            // Do not retry the same deterministic write or continue mutating
+            // GitHub without durable provenance for what already succeeded.
+            await fail(
+              500,
+              "Radius changed no further cloud resources because it could not save the setup recovery record.",
+              "operation-persistence-failed"
+            );
+            return false;
+          }
         };
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
