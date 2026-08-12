@@ -71,10 +71,10 @@ async function failureInjectedRegistries(failOnSave: number) {
 }
 
 async function resumeRecoveredOperation(operation, actions) {
-  if (operation.setupArtifacts.azure.app.state === "created") {
+  if (operation.setupArtifacts.azureApp.state === "created") {
     await actions.createAzureApp();
   }
-  if (operation.setupArtifacts.github.environment.state === "created") {
+  if (operation.setupArtifacts.githubEnvironment.state === "created") {
     await actions.deleteGitHubEnvironment();
   }
 }
@@ -343,7 +343,7 @@ describe("operation restart functional coverage", () => {
       state: "failed",
       failure: { code: "operation-interrupted" },
       setupArtifacts: {
-        azure: { app: { state: "not_started" } },
+        azureApp: { state: "not_started" },
         cleanup: { state: "not_needed" }
       }
     });
@@ -398,7 +398,7 @@ describe("operation restart functional coverage", () => {
     expect(recovered).toMatchObject({
       state: "failed",
       setupArtifacts: {
-        github: { environment: { state: "not_started" } },
+        githubEnvironment: { state: "not_started" },
         cleanup: { state: "not_needed" }
       }
     });
