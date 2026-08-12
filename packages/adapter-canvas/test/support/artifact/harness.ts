@@ -106,6 +106,10 @@ export async function runArtifactSmoke(
     }
   );
   const exitPromise = waitForExit(child);
+  // The first consumer is the shutdown race far below, so claim the rejection
+  // now: a spawn failure would otherwise surface as an unhandled rejection that
+  // kills the worker instead of this harness's own diagnostic.
+  exitPromise.catch(() => undefined);
 
   let stderr = "";
   let registration: ArtifactRegistrationSnapshot | undefined;

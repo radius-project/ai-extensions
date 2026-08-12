@@ -27,16 +27,16 @@ describe("RU-04: current action/tool declaration fixture baseline", () => {
       (action) => action.name
     );
     expect(currentNames).toEqual(fixture.acceptedSurface.actions);
-    expect(currentNames).not.toEqual(
-      expect.arrayContaining(fixture.acceptedSurface.removedActions)
-    );
+    for (const removed of fixture.acceptedSurface.removedActions) {
+      expect(currentNames, removed).not.toContain(removed);
+    }
   });
 
   it("keeps exactly the retained tools matching the accepted fixture", () => {
     const currentNames = RADIUS_TOOL_DECLARATIONS.map((tool) => tool.name);
     expect(currentNames).toEqual(fixture.acceptedSurface.tools);
-    expect(currentNames).not.toEqual(
-      expect.arrayContaining(fixture.acceptedSurface.removedTools)
-    );
+    for (const removed of fixture.acceptedSurface.removedTools) {
+      expect(currentNames, removed).not.toContain(removed);
+    }
   });
 });

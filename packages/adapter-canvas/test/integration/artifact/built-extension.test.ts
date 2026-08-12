@@ -84,6 +84,14 @@ describe("P0-C built Radius extension artifact", () => {
 
     expect(result.registration).toEqual(EXPECTED_REGISTRATION);
     expect(result.closeCount).toBe(1);
+    // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
+    // and reports them only on stderr, so pinning stderr to the exact benign
+    // shutdown line is the sole evidence that startup fully succeeded.
+    expect(
+      result.stderr.split(/\r?\n/).filter((line) => line.trim() !== "")
+    ).toEqual([
+      "[radius] received SIGTERM; shutting down 0 canvas server(s)..."
+    ]);
   }, 30_000);
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {

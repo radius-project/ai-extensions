@@ -152,6 +152,10 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       (source.match(/pathname\.startsWith\("\/api\//g) || []).length;
 
     expect(fixture.routes).toHaveLength(37);
+    expect(
+      new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
+        .size
+    ).toBe(37);
     expect(declaredRouteCount).toBe(37);
     for (const route of fixture.routes) {
       const matcher =
@@ -247,9 +251,30 @@ describe("Phase 0 reviewed compatibility oracles", () => {
   });
 
   it("pins the single built artifact path and external SDK import", () => {
-    expect(fixture.artifact).toEqual({
-      path: "plugins/radius/dist/extension.mjs",
-      sdkExternal: "@github/copilot-sdk/extension"
-    });
+    const build = readFileSync(
+      resolve(REPO_ROOT, "packages/adapter-canvas/build.mjs"),
+      "utf8"
+    );
+    const joined = (declaration: string): string[] => {
+      const match = build.match(
+        new RegExp(`const ${declaration} =\\s*\\n?\\s*join\\(([^)]*)\\);`)
+      );
+      if (!match)
+        throw new Error(`build.mjs no longer declares ${declaration}`);
+      return [...match[1].matchAll(/"([^"]+)"/g)].map((segment) => segment[1]);
+    };
+    const outfile = [
+      ...joined("pluginDir"),
+      ...joined("distDir"),
+      ...joined("outfile")
+    ].join("/");
+    const externals = [
+      ...(build.match(/external:\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(
+        /"([^"]+)"/g
+      )
+    ].map((entry) => entry[1]);
+
+    expect(outfile).toBe(fixture.artifact.path);
+    expect(externals).toContain(fixture.artifact.sdkExternal);
   });
 });
