@@ -168,18 +168,30 @@ describe("P0-A Radius runtime registration contract", () => {
     it("cleans up the operation timer and session only once", async () => {
       const harness = await createRuntimeSdkHarness();
       markPanelInactive(harness);
-      (
-        harness.deps.operations.setupInFlight as ReturnType<typeof vi.fn>
-      ).mockReturnValue(true);
+      const setupInFlight = harness.deps.operations.setupInFlight as ReturnType<
+        typeof vi.fn
+      >;
+      setupInFlight.mockReturnValue(true);
       const close = vi.fn();
       harness.session.close = close;
 
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 1);
+      expect(setupInFlight).toHaveBeenCalled();
+      expect(harness.session.metadata?.snapshot).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
       await harness.extension.shutdown("test");
       await harness.extension.shutdown("test");
+      // shutdown's bounded server-close race leaves its losing 2s timeout
+      // scheduled briefly; after that settles, the keepalive interval must be
+      // gone too.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(vi.getTimerCount()).toBe(0);
+
       await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 1);
 
       expect(close).toHaveBeenCalledOnce();
-      expect(harness.session.metadata?.snapshot).not.toHaveBeenCalled();
+      expect(harness.session.metadata?.snapshot).toHaveBeenCalledOnce();
     });
   });
 });
