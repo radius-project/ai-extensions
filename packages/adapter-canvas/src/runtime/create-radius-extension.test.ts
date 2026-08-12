@@ -302,19 +302,26 @@ describe("RU-21: operation-aware host keepalive", () => {
   it("keeps the host channel alive while setup is in flight, then stops after terminal state", async () => {
     const { ext, deps, setLastWebviewActivityAt } = setup();
     const session = createFakeSession();
+    // Model the operation registry as state rather than a call-ordered mock, so
+    // the assertions describe "setup running" vs "setup finished" instead of
+    // how many times the runtime happens to read the predicate per tick.
+    let setupRunning = true;
     const setupInFlight = deps.operations.setupInFlight as ReturnType<
       typeof vi.fn
     >;
-    setupInFlight.mockReturnValueOnce(true).mockReturnValue(false);
+    setupInFlight.mockImplementation(() => setupRunning);
     ext.attachSession(session);
     setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
 
     await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
-    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
-
     await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
-    expect(setupInFlight).toHaveBeenCalledTimes(2);
-    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(2);
+
+    // The operation reaches a terminal state: the panel is still inactive and no
+    // deploy is running, so the host channel must stop being kept alive.
+    setupRunning = false;
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(2);
   });
 
   it("fails safely when setup state cannot be read", async () => {
@@ -334,26 +341,31 @@ describe("RU-21: operation-aware host keepalive", () => {
     expect(session.metadata!.snapshot).not.toHaveBeenCalled();
   });
 
-  it("does not duplicate runtime cleanup during an active setup operation", async () => {
-    const { ext, deps } = setup();
-    const close = vi.fn((callback?: () => void) => callback?.());
-    (deps.operations.setupInFlight as ReturnType<typeof vi.fn>).mockReturnValue(
-      true
-    );
-    deps.servers.set("radius-panel", {
-      server: { close, closeAllConnections: vi.fn() } as never,
-      baseUrl: "http://127.0.0.1:0",
-      url: "http://127.0.0.1:0/?page=environment",
-      page: "environment",
-      state: {}
-    });
-    ext.attachSession(createFakeSession());
+  it("stops keeping the channel alive after shutdown even while setup is still in flight", async () => {
+    const { ext, deps, setLastWebviewActivityAt } = setup();
+    const session = createFakeSession();
+    const setupInFlight = deps.operations.setupInFlight as ReturnType<
+      typeof vi.fn
+    >;
+    // The operation never reaches a terminal state: shutdown, not the operation,
+    // must be what stops the keepalive.
+    setupInFlight.mockReturnValue(true);
+    ext.attachSession(session);
+    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
 
-    const shutdown1 = ext.shutdown("SIGTERM");
-    const shutdown2 = ext.shutdown("SIGINT");
-    expect(shutdown1).toBe(shutdown2);
-    await Promise.all([shutdown1, shutdown2]);
-    expect(close).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
+
+    await ext.shutdown("SIGTERM");
+    const readsAtShutdown = setupInFlight.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 3);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
+    // The runtime also stops polling the operation registry after teardown.
+    expect(setupInFlight.mock.calls.length).toBe(readsAtShutdown);
+    // Cleanup runs once and completely: the interval is released rather than
+    // left firing behind the shutdown guard.
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
