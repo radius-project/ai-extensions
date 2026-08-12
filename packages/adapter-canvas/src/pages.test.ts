@@ -820,7 +820,7 @@ describe("graphDiffPage", () => {
     for (const html of [empty, rendered]) {
       expect(html).toContain('id="graph-diff-subtitle"');
       expect(html).toContain(
-        "The application graph diff compares the application model on two branches"
+        "The application graph diff compares the application model"
       );
       expect(html).toContain("added, removed, or modified");
     }
