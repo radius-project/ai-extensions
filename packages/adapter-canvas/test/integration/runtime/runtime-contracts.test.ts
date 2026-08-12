@@ -3,25 +3,17 @@ import {
   KEEPALIVE_ACTIVE_WINDOW_MS,
   KEEPALIVE_INTERVAL_MS
 } from "../../../src/runtime/create-radius-extension.js";
-import { createFakeDependencies } from "../../support/runtime/fakes.js";
+import {
+  createFakeDependencies,
+  createFakeSession
+} from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
-const ACTION_NAMES = [
-  "configure_oidc",
-  "render_graph",
-  "render_graph_diff",
-  "create_environment",
-  "get_graph_resources",
-  "update_source_refs"
-];
+const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
 const TOOL_NAMES = [
-  "radius_configure_oidc",
   "radius_generate_app",
-  "radius_render_graph",
-  "radius_render_graph_diff",
   "radius_generate_pr_diff_markdown",
-  "radius_create_environment",
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
@@ -56,6 +48,13 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(harness.createCanvas).toHaveBeenCalledOnce();
     expect(harness.joinSession).toHaveBeenCalledOnce();
     expect(harness.sessionHolder.get()).toBe(harness.session);
+    expect(() =>
+      harness.extension.attachSession(harness.session)
+    ).not.toThrow();
+    expect(() => harness.extension.attachSession(createFakeSession())).toThrow(
+      /session is already attached/
+    );
+    await harness.extension.shutdown("test");
   });
 
   it("round-trips SDK metadata and schemas while retaining routed handlers", async () => {
@@ -81,6 +80,16 @@ describe("P0-A Radius runtime registration contract", () => {
         }
       }
     });
+    const canvasProperties =
+      harness.registration.canvas.inputSchema.properties ?? {};
+    expect(Object.keys(canvasProperties)).toEqual([
+      "page",
+      "repo",
+      "branch",
+      "baseBranch",
+      "headBranch"
+    ]);
+    expect(canvasProperties.branch).toMatchObject({ type: "string" });
     expect(harness.registration.canvas.actions.map(({ name }) => name)).toEqual(
       ACTION_NAMES
     );
@@ -93,19 +102,13 @@ describe("P0-A Radius runtime registration contract", () => {
     ]);
 
     await expect(
-      harness.host.invoke("radius-panel", "configure_oidc", {
-        provider: "invalid"
+      harness.host.open("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: 42
       })
-    ).rejects.toThrow(/must be one of azure, aws/);
-
-    await expect(
-      harness.host.invoke("radius-panel", "configure_oidc", {
-        provider: "azure",
-        tenantId: "tenant"
-      })
-    ).resolves.toMatchObject({
-      message: "Azure OIDC configuration generated"
-    });
+    ).rejects.toThrow("canvas input.branch must be a string");
+    await harness.extension.shutdown("test");
   });
 
   describe("P0-A RU-21 operation-aware keepalive", () => {
@@ -182,10 +185,8 @@ describe("P0-A Radius runtime registration contract", () => {
 
       await harness.extension.shutdown("test");
       await harness.extension.shutdown("test");
-      // shutdown's bounded server-close race leaves its losing 2s timeout
-      // scheduled briefly; after that settles, the keepalive interval must be
-      // gone too.
-      await vi.advanceTimersByTimeAsync(2_000);
+      // Both cleanup timeouts clear their losing timers, and stopKeepalive runs
+      // from finally, so successful shutdown leaves no scheduled work.
       expect(vi.getTimerCount()).toBe(0);
 
       await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 1);
@@ -290,15 +291,20 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
   it("reloads source references through the same SDK instance", async () => {
     const harness = await createRuntimeSdkHarness();
-    await harness.host.invoke("radius-panel", "render_graph", {
-      resources: [{ id: "database", name: "database", type: "Radius.Data/sql" }]
-    });
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    harness.deps.sourceRefs.setSourceRefResources(
+      entry,
+      "graph",
+      [{ id: "database", name: "database", type: "Radius.Data/sql" }],
+      { repo: "acme/widgets", branch: "main" }
+    );
+    entry.state.activeGraphView = "graph";
     const resources = (await harness.host.invoke(
       "radius-panel",
       "get_graph_resources",
       { missingOnly: false }
     )) as { contextToken: string };
-    const entry = harness.servers.get("radius-panel");
+    const originalEntry = harness.servers.get("radius-panel");
 
     await expect(
       harness.host.invoke("radius-panel", "update_source_refs", {
@@ -314,8 +320,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         input: { page: "graph" }
       })
     );
-    expect(harness.servers.get("radius-panel")).toBe(entry);
-    expect(entry?.state.graphResources?.[0].codeReference).toBe(
+    expect(harness.servers.get("radius-panel")).toBe(originalEntry);
+    expect(originalEntry?.state.graphResources?.[0].codeReference).toBe(
       "src/database.ts#L10"
     );
   });

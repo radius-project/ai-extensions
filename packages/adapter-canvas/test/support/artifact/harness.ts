@@ -12,17 +12,27 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export interface ArtifactRegistrationSnapshot {
   joinCount: number;
-  canvas: {
+  canvases: Array<{
     id: string;
     displayName: string;
     description: string;
     inputSchema: Record<string, unknown>;
-    actionNames: string[];
+    actions: Array<{
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      handlerCallable: boolean;
+    }>;
     hasOpen: boolean;
     hasOnClose: boolean;
-  };
-  tools: Array<{ name: string; parameters: Record<string, unknown> }>;
-  hooks: string[];
+  }>;
+  tools: Array<{
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    handlerCallable: boolean;
+  }>;
+  hooks: Array<{ name: string; callable: boolean }>;
   bundledSkill: {
     hasSkill: boolean;
     hasCustomTypes: boolean;
@@ -96,6 +106,10 @@ export async function runArtifactSmoke(
     }
   );
   const exitPromise = waitForExit(child);
+  // The first consumer is the shutdown race far below, so claim the rejection
+  // now: a spawn failure would otherwise surface as an unhandled rejection that
+  // kills the worker instead of this harness's own diagnostic.
+  exitPromise.catch(() => undefined);
 
   let stderr = "";
   let registration: ArtifactRegistrationSnapshot | undefined;

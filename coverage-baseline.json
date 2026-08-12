@@ -1,0 +1,35 @@
+{
+  "aggregate": {
+    "statements": 46.64,
+    "branches": 46.3,
+    "functions": 59.64,
+    "lines": 46.91
+  },
+  "packages": {
+    "adapter-canvas": {
+      "statements": 41.88,
+      "branches": 42.47,
+      "functions": 55.97,
+      "lines": 42.12
+    },
+    "adapter-shared": {
+      "statements": 51.35,
+      "branches": 51.03,
+      "functions": 59.77,
+      "lines": 53.61
+    },
+    "core": {
+      "statements": 96.13,
+      "branches": 87.82,
+      "functions": 96.42,
+      "lines": 96.66
+    }
+  },
+  "newlyExtracted": {
+    "runtime": {
+      "branches": 70,
+      "functions": 80,
+      "lines": 80
+    }
+  }
+}

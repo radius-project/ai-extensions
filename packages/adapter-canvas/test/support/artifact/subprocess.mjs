@@ -24,6 +24,17 @@ childProcess.spawn = (...args) =>
   blocked("subprocess-spawn", String(args[0] ?? ""));
 childProcess.execFile = (...args) =>
   blocked("subprocess-exec", String(args[0] ?? ""));
+// exec() routes through the execFile export above, but fork() and the *Sync
+// variants are independent exports, so each needs its own guard for the
+// fail-closed claim to hold.
+childProcess.fork = (...args) =>
+  blocked("subprocess-fork", String(args[0] ?? ""));
+childProcess.spawnSync = (...args) =>
+  blocked("subprocess-spawn-sync", String(args[0] ?? ""));
+childProcess.execSync = (...args) =>
+  blocked("subprocess-exec-sync", String(args[0] ?? ""));
+childProcess.execFileSync = (...args) =>
+  blocked("subprocess-exec-file-sync", String(args[0] ?? ""));
 syncBuiltinESMExports();
 
 const artifact = process.env.RADIUS_ARTIFACT_PATH;

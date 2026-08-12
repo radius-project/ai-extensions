@@ -38,11 +38,14 @@ describe("RU-01: canvas metadata + input schema", () => {
     ]);
   });
 
-  it("builds an input schema with the page enum, default, and repo/baseBranch/headBranch fields", () => {
+  it("builds an input schema with the page enum, default, and repo/branch/baseBranch/headBranch fields", () => {
     const schema = buildRadiusCanvasInputSchema("graph");
     expect(schema.properties.page.enum).toEqual([...RADIUS_CANVAS_PAGES]);
     expect(schema.properties.page.default).toBe("graph");
     expect(schema.properties.repo.type).toBe("string");
+    // The canvas reads input.branch when opening a non-workspace repository, so
+    // it must be advertised or callers cannot know the branch can be chosen.
+    expect(schema.properties.branch.type).toBe("string");
     expect(schema.properties.baseBranch.type).toBe("string");
     expect(schema.properties.headBranch.type).toBe("string");
   });
@@ -76,12 +79,8 @@ describe("RU-01: canvas metadata + input schema", () => {
 
 // RU-02: action names/descriptions/required/enums/reserved exclusion.
 describe("RU-02: action declarations", () => {
-  it("declares exactly the current 6 action names, in order", () => {
+  it("declares exactly the retained 2 action names, in order", () => {
     expect(RADIUS_ACTION_DECLARATIONS.map((a) => a.name)).toEqual([
-      "configure_oidc",
-      "render_graph",
-      "render_graph_diff",
-      "create_environment",
       "get_graph_resources",
       "update_source_refs"
     ]);
@@ -93,35 +92,6 @@ describe("RU-02: action declarations", () => {
       descriptions.every((d) => typeof d === "string" && d.length > 0)
     ).toBe(true);
     expect(new Set(descriptions).size).toBe(descriptions.length);
-  });
-
-  it("requires provider on configure_oidc and constrains it to azure/aws", () => {
-    const decl = RADIUS_ACTION_DECLARATIONS.find(
-      (a) => a.name === "configure_oidc"
-    )!;
-    expect(decl.inputSchema.required).toEqual(["provider"]);
-    expect(props(decl.inputSchema).provider.enum).toEqual(["azure", "aws"]);
-  });
-
-  it("requires name/provider/repo on create_environment and constrains provider", () => {
-    const decl = RADIUS_ACTION_DECLARATIONS.find(
-      (a) => a.name === "create_environment"
-    )!;
-    expect(decl.inputSchema.required).toEqual(["name", "provider", "repo"]);
-    expect(props(decl.inputSchema).provider.enum).toEqual(["azure", "aws"]);
-  });
-
-  it("requires all 5 fields on render_graph_diff", () => {
-    const decl = RADIUS_ACTION_DECLARATIONS.find(
-      (a) => a.name === "render_graph_diff"
-    )!;
-    expect(decl.inputSchema.required).toEqual([
-      "baseResources",
-      "headResources",
-      "repo",
-      "baseBranch",
-      "headBranch"
-    ]);
   });
 
   it("requires contextToken + refs on update_source_refs, with nested id/codeReference required", () => {
@@ -156,14 +126,10 @@ describe("RU-02: action declarations", () => {
 
 // RU-03: tool names/schemas/descriptions/unique.
 describe("RU-03: tool declarations", () => {
-  it("declares exactly the current 10 tool names, in order", () => {
+  it("declares exactly the retained 6 tool names, in order", () => {
     expect(RADIUS_TOOL_DECLARATIONS.map((t) => t.name)).toEqual([
-      "radius_configure_oidc",
       "radius_generate_app",
-      "radius_render_graph",
-      "radius_render_graph_diff",
       "radius_generate_pr_diff_markdown",
-      "radius_create_environment",
       "radius_publish_custom_type_extension",
       "radius_publish_recipe",
       "radius_deploy",
@@ -189,23 +155,6 @@ describe("RU-03: tool declarations", () => {
       expect(tool.parameters.type).toBe("object");
       expect(typeof tool.parameters.properties).toBe("object");
     }
-  });
-
-  it("requires resources on radius_render_graph and all 5 fields on radius_render_graph_diff", () => {
-    const renderGraph = RADIUS_TOOL_DECLARATIONS.find(
-      (t) => t.name === "radius_render_graph"
-    )!;
-    expect(renderGraph.parameters.required).toEqual(["resources"]);
-    const renderGraphDiff = RADIUS_TOOL_DECLARATIONS.find(
-      (t) => t.name === "radius_render_graph_diff"
-    )!;
-    expect(renderGraphDiff.parameters.required).toEqual([
-      "baseResources",
-      "headResources",
-      "repo",
-      "baseBranch",
-      "headBranch"
-    ]);
   });
 
   it("requires repo/baseBranch/headBranch on radius_generate_pr_diff_markdown", () => {

@@ -143,6 +143,29 @@ export function createRadiusExtension(
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | undefined;
 
+  // Cleanup must never hang the process: a server that refuses to close, or a
+  // session whose teardown never settles, is abandoned after this budget so
+  // shutdown still completes and the host can reclaim the tool registrations.
+  const CLEANUP_TIMEOUT_MS = 2000;
+
+  // Races `work` against a timeout WITHOUT leaking the timer when work wins.
+  async function withTimeout(
+    work: Promise<unknown>,
+    ms: number
+  ): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        work,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ms);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   function shutdown(signal = "shutdown"): Promise<void> {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
@@ -153,56 +176,68 @@ export function createRadiusExtension(
         );
       } catch {}
 
-      const closes: Array<Promise<void>> = [];
-      for (const [id, entry] of deps.servers) {
-        try {
-          entry.server.closeAllConnections?.();
-          closes.push(
-            new Promise<void>((resolve) => {
-              try {
-                entry.server.close(() => resolve());
-              } catch {
-                resolve();
-              }
-            })
-          );
-        } catch {
-          /* ignore */
-        }
-        deps.servers.delete(id);
-      }
-      await Promise.race([
-        Promise.all(closes),
-        new Promise<void>((resolve) => setTimeout(resolve, 2000))
-      ]);
-
       try {
+        const closes: Array<Promise<void>> = [];
+        for (const [id, entry] of deps.servers) {
+          try {
+            entry.server.closeAllConnections?.();
+            closes.push(
+              new Promise<void>((resolve) => {
+                try {
+                  entry.server.close(() => resolve());
+                } catch {
+                  resolve();
+                }
+              })
+            );
+          } catch {
+            /* ignore */
+          }
+          deps.servers.delete(id);
+        }
+        await withTimeout(Promise.all(closes), CLEANUP_TIMEOUT_MS);
+
         const session = deps.session.tryGet();
         if (session) {
-          for (const name of [
-            "close",
-            "dispose",
-            "leave",
-            "stop",
-            "disconnect"
-          ]) {
-            const candidate = Reflect.get(session, name);
-            if (typeof candidate === "function") {
-              await Reflect.apply(candidate, session, []);
-              break;
-            }
-          }
-          const asyncDispose = Reflect.get(session, Symbol.asyncDispose);
-          if (typeof asyncDispose === "function") {
-            await Reflect.apply(asyncDispose, session, []);
-          }
+          await withTimeout(
+            (async () => {
+              let tornDown = false;
+              for (const name of [
+                "close",
+                "dispose",
+                "leave",
+                "stop",
+                "disconnect"
+              ]) {
+                const candidate = Reflect.get(session, name);
+                if (typeof candidate === "function") {
+                  await Reflect.apply(candidate, session, []);
+                  tornDown = true;
+                  break;
+                }
+              }
+              // Symbol.asyncDispose is a FALLBACK, not an additional step: a
+              // session exposing both close() and asyncDispose must not be
+              // torn down twice.
+              if (!tornDown) {
+                const asyncDispose = Reflect.get(session, Symbol.asyncDispose);
+                if (typeof asyncDispose === "function") {
+                  await Reflect.apply(asyncDispose, session, []);
+                }
+              }
+            })(),
+            CLEANUP_TIMEOUT_MS
+          );
         }
       } catch (e) {
         try {
           console.error(`[radius] session teardown error: ${errorMessage(e)}`);
         } catch {}
+      } finally {
+        // Always release the keepalive, even if cleanup above threw or timed
+        // out, so a stuck teardown can never leave the timer running.
+        stopKeepalive();
       }
-      stopKeepalive();
     })();
     return shutdownPromise;
   }
@@ -260,7 +295,29 @@ export function createRadiusExtension(
     keepaliveTimer = undefined;
   }
 
+  // Production calls this exactly once, from bootstrap, after joinSession()
+  // resolves. A second call with a DIFFERENT session would silently orphan the
+  // first one — shutdown only tears down the session the holder currently
+  // points at — so it is rejected rather than allowed to leak a live session.
+  let attachedSession: SessionPort | undefined;
+
   function attachSession(session: SessionPort): void {
+    // Shutdown has already run and will not run again, so a session stored now
+    // would never be torn down. Reject it before mutating either session holder.
+    if (shutdownPromise) {
+      throw new Error(
+        "Radius runtime: cannot attach a session after shutdown; the runtime can no longer tear it down."
+      );
+    }
+    if (attachedSession) {
+      if (attachedSession !== session) {
+        throw new Error(
+          "Radius runtime: a session is already attached; attachSession() must be called exactly once."
+        );
+      }
+      return;
+    }
+    attachedSession = session;
     deps.session.set(session);
     startKeepalive();
   }

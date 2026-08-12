@@ -76,8 +76,24 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Run Node tests
-        run: pnpm run test
+      - name: Run Node tests with coverage
+        id: coverage
+        run: pnpm run coverage
+
+      - name: Write coverage summary
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
+        run: node scripts/coverage-summary.mjs
+
+      - name: Upload coverage reports
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-reports
+          path: |
+            coverage/coverage-summary.json
+            coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Check progress demo bundle
         run: pnpm --filter @radius-project/adapter-canvas run demo:check
@@ -126,6 +142,8 @@ jobs:
       # after Build rather than relying on a pre-existing workspace artifact.
       - name: Run built-artifact smoke tests
         run: pnpm run test:integration:artifact
+      - name: Verify Bicep checker is packaged
+        run: test -f plugins/radius/dist/skills/radius-app-bicep/scripts/validate-bicep.mjs
 
       - name: Upload plugin dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

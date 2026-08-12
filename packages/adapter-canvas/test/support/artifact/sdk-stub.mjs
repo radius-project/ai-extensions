@@ -17,7 +17,6 @@ export function createCanvas(declaration) {
 
 export async function joinSession(declaration) {
   joinCount++;
-  const canvas = declaration.canvases[0];
   const generateApp = declaration.tools.find(
     (tool) => tool.name === "radius_generate_app"
   );
@@ -28,20 +27,32 @@ export async function joinSession(declaration) {
     type: "registered",
     snapshot: {
       joinCount,
-      canvas: {
+      canvases: declaration.canvases.map((canvas) => ({
         id: canvas.id,
         displayName: canvas.displayName,
         description: canvas.description,
         inputSchema: json(canvas.inputSchema),
-        actionNames: canvas.actions.map((action) => action.name),
+        actions: canvas.actions.map((action) => ({
+          name: action.name,
+          description: action.description,
+          inputSchema: json(action.inputSchema),
+          handlerCallable: typeof action.handler === "function"
+        })),
         hasOpen: typeof canvas.open === "function",
         hasOnClose: typeof canvas.onClose === "function"
-      },
+      })),
       tools: declaration.tools.map((tool) => ({
         name: tool.name,
-        parameters: json(tool.parameters)
+        description: tool.description,
+        parameters: json(tool.parameters),
+        handlerCallable: typeof tool.handler === "function"
       })),
-      hooks: Object.keys(declaration.hooks).sort(),
+      hooks: Object.entries(declaration.hooks)
+        .map(([name, hook]) => ({
+          name,
+          callable: typeof hook === "function"
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
       bundledSkill: {
         hasSkill: String(bundledSkill).includes("# radius-app-bicep skill"),
         hasCustomTypes: String(bundledSkill).includes(

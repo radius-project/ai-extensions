@@ -1,0 +1,106 @@
+{
+  "total": {
+    "lines": {
+      "total": 40,
+      "covered": 30,
+      "skipped": 0,
+      "pct": 75
+    },
+    "statements": {
+      "total": 40,
+      "covered": 30,
+      "skipped": 0,
+      "pct": 75
+    },
+    "functions": {
+      "total": 20,
+      "covered": 15,
+      "skipped": 0,
+      "pct": 75
+    },
+    "branches": {
+      "total": 20,
+      "covered": 15,
+      "skipped": 0,
+      "pct": 75
+    }
+  },
+  "/repo/packages/adapter-canvas/src/runtime/a.ts": {
+    "lines": {
+      "total": 10,
+      "covered": 8,
+      "skipped": 0,
+      "pct": 80
+    },
+    "statements": {
+      "total": 10,
+      "covered": 8,
+      "skipped": 0,
+      "pct": 80
+    },
+    "functions": {
+      "total": 5,
+      "covered": 4,
+      "skipped": 0,
+      "pct": 80
+    },
+    "branches": {
+      "total": 5,
+      "covered": 4,
+      "skipped": 0,
+      "pct": 80
+    }
+  },
+  "/repo/packages/adapter-shared/src/a.ts": {
+    "lines": {
+      "total": 10,
+      "covered": 7,
+      "skipped": 0,
+      "pct": 70
+    },
+    "statements": {
+      "total": 10,
+      "covered": 7,
+      "skipped": 0,
+      "pct": 70
+    },
+    "functions": {
+      "total": 5,
+      "covered": 3,
+      "skipped": 0,
+      "pct": 60
+    },
+    "branches": {
+      "total": 5,
+      "covered": 3,
+      "skipped": 0,
+      "pct": 60
+    }
+  },
+  "/repo/packages/core/src/a.ts": {
+    "lines": {
+      "total": 20,
+      "covered": 15,
+      "skipped": 0,
+      "pct": 75
+    },
+    "statements": {
+      "total": 20,
+      "covered": 15,
+      "skipped": 0,
+      "pct": 75
+    },
+    "functions": {
+      "total": 10,
+      "covered": 8,
+      "skipped": 0,
+      "pct": 80
+    },
+    "branches": {
+      "total": 10,
+      "covered": 8,
+      "skipped": 0,
+      "pct": 80
+    }
+  }
+}

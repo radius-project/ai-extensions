@@ -8,13 +8,24 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { runArtifactSmoke } from "../../support/artifact/harness.js";
+import {
+  runArtifactSmoke,
+  type ArtifactRegistrationSnapshot
+} from "../../support/artifact/harness.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
 const ARTIFACT = join(DIST, "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
+// Independent reviewed oracle: unlike importing the live declaration builders,
+// this fixture changes only when a contract update is deliberately accepted.
+const EXPECTED_REGISTRATION = JSON.parse(
+  readFileSync(
+    new URL("../../fixtures/artifact-registration.json", import.meta.url),
+    "utf8"
+  )
+) as ArtifactRegistrationSnapshot;
 
 function filesUnder(path: string): string[] {
   if (!existsSync(path)) return [];
@@ -71,44 +82,16 @@ describe("P0-C built Radius extension artifact", () => {
     assertCurrentArtifact();
     const result = await runArtifactSmoke(ARTIFACT);
 
-    expect(result.registration).toMatchObject({
-      joinCount: 1,
-      canvas: {
-        id: "radius",
-        displayName: "Radius",
-        description:
-          "Application modeling and deployment: configure cloud credentials, generate app.bicep, visualize application graphs, view PR diffs, and create deployment environments.",
-        hasOpen: true,
-        hasOnClose: true,
-        actionNames: [
-          "configure_oidc",
-          "render_graph",
-          "render_graph_diff",
-          "create_environment",
-          "get_graph_resources",
-          "update_source_refs"
-        ]
-      },
-      hooks: ["onPreToolUse", "onSessionStart"],
-      bundledSkill: {
-        hasSkill: true,
-        hasCustomTypes: true,
-        hasSourceReferences: true
-      }
-    });
-    expect(result.registration.tools.map(({ name }) => name)).toEqual([
-      "radius_configure_oidc",
-      "radius_generate_app",
-      "radius_render_graph",
-      "radius_render_graph_diff",
-      "radius_generate_pr_diff_markdown",
-      "radius_create_environment",
-      "radius_publish_custom_type_extension",
-      "radius_publish_recipe",
-      "radius_deploy",
-      "radius_deploy_status"
-    ]);
+    expect(result.registration).toEqual(EXPECTED_REGISTRATION);
     expect(result.closeCount).toBe(1);
+    // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
+    // and reports them only on stderr, so pinning stderr to the exact benign
+    // shutdown line is the sole evidence that startup fully succeeded.
+    expect(
+      result.stderr.split(/\r?\n/).filter((line) => line.trim() !== "")
+    ).toEqual([
+      "[radius] received SIGTERM; shutting down 0 canvas server(s)..."
+    ]);
   }, 30_000);
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {

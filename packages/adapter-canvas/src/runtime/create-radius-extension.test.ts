@@ -56,6 +56,73 @@ describe("RU-20: createRadiusExtension never joins a session", () => {
   });
 });
 
+// Review follow-up: attachSession() is a once-per-process operation. Replacing
+// an attached session would orphan the original, which shutdown would then
+// never tear down.
+describe("attachSession is single-use", () => {
+  it("rejects a second attach with a different session", () => {
+    const { deps } = createFakeDependencies();
+    const ext = createRadiusExtension(deps);
+    ext.attachSession(createFakeSession());
+
+    expect(() => ext.attachSession(createFakeSession())).toThrow(
+      /already attached/
+    );
+  });
+
+  it("keeps the originally attached session as the one shutdown tears down", async () => {
+    const { deps } = createFakeDependencies();
+    const ext = createRadiusExtension(deps);
+    const first = createFakeSession({ close: vi.fn() } as never);
+    const second = createFakeSession({ close: vi.fn() } as never);
+    ext.attachSession(first);
+    try {
+      ext.attachSession(second);
+    } catch {
+      /* expected */
+    }
+
+    await ext.shutdown("SIGTERM");
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(second.close).not.toHaveBeenCalled();
+  });
+
+  it("treats re-attaching the identical session as a no-op", () => {
+    const { deps } = createFakeDependencies();
+    const ext = createRadiusExtension(deps);
+    const session = createFakeSession();
+    ext.attachSession(session);
+
+    expect(() => ext.attachSession(session)).not.toThrow();
+  });
+
+  it("rejects a session attached after shutdown without mutating the holder or starting keepalive", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = createFakeDependencies();
+      const ext = createRadiusExtension(deps);
+      await ext.shutdown("SIGTERM");
+
+      const session = createFakeSession();
+      let attachError: unknown;
+      try {
+        ext.attachSession(session);
+      } catch (error) {
+        attachError = error;
+      }
+      // Assert state first: the old store-then-return behavior must fail here,
+      // even before checking the public error contract.
+      expect(deps.session.tryGet()).toBeUndefined();
+      expect(() => {
+        throw attachError;
+      }).toThrow(/cannot attach a session after shutdown/);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 function setup() {
   const fake = createFakeDependencies();
   fake.sessionHolder.set(createFakeSession());
@@ -440,6 +507,65 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     await ext.shutdown("SIGTERM");
     await ext.shutdown("SIGTERM");
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  // Review follow-up: a session exposing BOTH a named teardown and
+  // Symbol.asyncDispose was previously cleaned up twice.
+  it("uses Symbol.asyncDispose only as a fallback, never in addition to close()", async () => {
+    const { ext } = setup();
+    const close = vi.fn();
+    const asyncDispose = vi.fn();
+    const session = createFakeSession({
+      close,
+      [Symbol.asyncDispose]: asyncDispose
+    } as never);
+    ext.attachSession(session);
+
+    await ext.shutdown("SIGTERM");
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(asyncDispose).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Symbol.asyncDispose when no named teardown method exists", async () => {
+    const { ext } = setup();
+    const asyncDispose = vi.fn();
+    const session = createFakeSession({
+      [Symbol.asyncDispose]: asyncDispose
+    } as never);
+    ext.attachSession(session);
+
+    await ext.shutdown("SIGTERM");
+    expect(asyncDispose).toHaveBeenCalledTimes(1);
+  });
+
+  // Review follow-up: a session teardown that never settles must not hang
+  // shutdown or leave the keepalive running.
+  it("completes and stops the keepalive even when session teardown never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ext, setLastWebviewActivityAt } = setup();
+      const session = createFakeSession({
+        close: vi.fn(() => new Promise<void>(() => {}))
+      } as never);
+      ext.attachSession(session);
+      setLastWebviewActivityAt(Date.now());
+
+      let settled = false;
+      const shutdownDone = ext.shutdown("SIGTERM").then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      await shutdownDone;
+
+      expect(settled).toBe(true);
+      expect(ext.isShutDown()).toBe(true);
+      // The hung teardown must not leave the keepalive interval behind.
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
+      expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns the same in-flight promise for concurrent shutdown calls", async () => {
