@@ -438,16 +438,7 @@ describe("resolveOidcSubject", () => {
       runner,
       opts
     );
-    expect(res.federatedCredentials).toEqual([
-      {
-        name: "github-octo-org-octo-repo-prod-mutable",
-        subject: "repo:octo-org/octo-repo:environment:prod"
-      },
-      {
-        name: "github-octo-org-octo-repo-prod-immutable",
-        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
-      }
-    ]);
+    expect(res.federatedCredentials).toHaveLength(2);
     const bySubject = Object.fromEntries(
       res.federatedCredentials.map((f) => [f.name, f.subject])
     );
@@ -532,7 +523,16 @@ describe("resolveOidcSubject", () => {
       runner,
       opts
     );
-    expect(res.federatedCredentials).toHaveLength(2);
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-mutable",
+        subject: "repo:octo-org/octo-repo:environment:prod"
+      },
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
   });
 
   it("treats an exact immutable default prefix as proven immutable", async () => {
