@@ -340,7 +340,7 @@ describe("operation restart functional coverage", () => {
       deleteGitHubEnvironment: async () => {}
     });
     expect(recovered).toMatchObject({
-      state: "failed",
+      state: "failed_partial",
       failure: { code: "operation-interrupted" },
       setupArtifacts: {
         azureApp: { state: "not_started" },
@@ -396,7 +396,7 @@ describe("operation restart functional coverage", () => {
       }
     });
     expect(recovered).toMatchObject({
-      state: "failed",
+      state: "failed_partial",
       setupArtifacts: {
         githubEnvironment: { state: "not_started" },
         cleanup: { state: "not_needed" }
