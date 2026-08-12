@@ -497,6 +497,9 @@ ${getInlineVendorScripts()}
 <script>
 ${CLIENT_GRAPH_JS}
 </script>
+<script>
+${CLIENT_DELETE_DIALOG_JS}
+</script>
 <div class="main-content">
 ${bodyContent}
 </div>
@@ -511,9 +514,6 @@ ${CLIENT_HEARTBEAT_JS}
 </script>
 <script>
 ${CLIENT_OPCHIP_JS}
-</script>
-<script>
-${CLIENT_DELETE_DIALOG_JS}
 </script>
 </body>
 </html>`;

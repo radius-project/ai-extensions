@@ -7,6 +7,11 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  CLIENT_REPO_BRANCH_JS,
+  CLIENT_GRAPH_JS,
+  CLIENT_DELETE_DIALOG_JS
+} from "./client.js";
+import {
   pageShell,
   oidcPage,
   graphHeader,
@@ -1353,6 +1358,74 @@ describe("inline scripts", () => {
         const src = block.slice("<script>".length, -"</script>".length);
         expect(() => new Function(src)).not.toThrow();
       }
+    }
+  );
+});
+
+// Function declarations hoist within a <script> block but not across blocks, so
+// a page whose body script uses a shared helper injected *after* it dies with a
+// ReferenceError — taking every later statement with it, which surfaces as a
+// permanently stuck "Loading…". Each block parses fine alone, so only an
+// ordering check catches this. The shared libraries are exactly the code that
+// crosses block boundaries, so they are what this pins.
+describe("shared client helpers are injected before the page body uses them", () => {
+  const SHARED_LIBS = [
+    CLIENT_REPO_BRANCH_JS,
+    CLIENT_GRAPH_JS,
+    CLIENT_DELETE_DIALOG_JS
+  ];
+
+  // Top-level declarations of the shared libraries: the names pages may rely on.
+  const sharedHelpers = [
+    ...new Set(
+      SHARED_LIBS.flatMap((lib) =>
+        [...lib.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(
+          (m) => m[1]
+        )
+      )
+    )
+  ];
+
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it("finds the shared helpers to check", () => {
+    expect(sharedHelpers).toContain("radiusCreateDeleteDeploymentDialog");
+    expect(sharedHelpers).toContain("radiusApplyDeployedEnvState");
+  });
+
+  it.each(renderers)(
+    "%s uses no shared helper before it is defined",
+    (_name, render) => {
+      // Compare by block, not by character offset: within a single block a
+      // forward reference is fine, because declarations hoist to its top.
+      const blocks = (
+        render().match(/<script>([\s\S]*?)<\/script>/g) || []
+      ).map((b) => b.slice("<script>".length, -"</script>".length));
+      const violations: string[] = [];
+      for (const name of sharedHelpers) {
+        const declaredIn = blocks.findIndex((src) =>
+          new RegExp(`^function\\s+${name}\\s*\\(`, "m").test(src)
+        );
+        if (declaredIn === -1) continue;
+        const usedIn = blocks.findIndex(
+          (src, i) =>
+            i !== declaredIn && new RegExp(`\\b${name}\\s*\\(`).test(src)
+        );
+        if (usedIn !== -1 && usedIn < declaredIn) {
+          violations.push(
+            `${name} used in block ${usedIn} but defined in block ${declaredIn}`
+          );
+        }
+      }
+      expect(violations).toEqual([]);
     }
   );
 });
