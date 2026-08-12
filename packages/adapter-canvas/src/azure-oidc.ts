@@ -913,13 +913,13 @@ export async function resolveOidcSubject(
       subjectConfig.useImmutableSubject = c.use_immutable_subject;
     }
     if (typeof c.sub_claim_prefix === "string" && c.sub_claim_prefix) {
-      subjectConfig.subClaimPrefix = c.sub_claim_prefix;
+      const prefixSlug = c.sub_claim_prefix.replace(
+        /^(?:repo|repository):/,
+        ""
+      );
+      subjectConfig.subClaimPrefix = prefixSlug;
       if (subjectConfig.useImmutableSubject === undefined) {
         const [owner, repoName] = fullName.split("/");
-        const prefixSlug = c.sub_claim_prefix.replace(
-          /^(?:repo|repository):/,
-          ""
-        );
         const expectedImmutableSlug = `${owner}@${ownerId}/${repoName}@${repoId}`;
         if (
           prefixSlug.toLowerCase() === expectedImmutableSlug.toLowerCase() ||

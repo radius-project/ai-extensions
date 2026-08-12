@@ -565,30 +565,6 @@ describe("resolveOidcSubject", () => {
       }
     });
 
-    it("matches a canonical immutable default prefix case-insensitively", async () => {
-      const runner = makeRunner({
-        "/repos/octo-org/octo-repo": REPO_OK,
-        "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
-          ok: true,
-          status: 200,
-          json: {
-            use_default: true,
-            sub_claim_prefix: "repo:OCTO-ORG@111/OCTO-REPO@222"
-          }
-        }
-      });
-      const res = await resolveOidcSubject(
-        {
-          targetRepo: "octo-org/octo-repo",
-          envName: "prod",
-          suffix: "environment:prod"
-        },
-        runner,
-        opts
-      );
-      expect(res.federatedCredentials).toHaveLength(1);
-      expect(res.subjectConfig.useImmutableSubject).toBe(true);
-    });
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -604,6 +580,31 @@ describe("resolveOidcSubject", () => {
         subject: "repo:octo-org@111/octo-repo@222:environment:prod"
       }
     ]);
+  });
+
+  it("matches a canonical immutable default prefix case-insensitively", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "repo:OCTO-ORG@111/OCTO-REPO@222"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toHaveLength(1);
+    expect(res.subjectConfig.useImmutableSubject).toBe(true);
   });
 
   it.each(["repo:octo-org/octo-repo", "repo:team@corp/octo-repo"])(
