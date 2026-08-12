@@ -2463,8 +2463,7 @@ function createRequestHandler(
         ...request.azure,
         repo: op.repo,
         environment: op.environment,
-        operationId,
-        serverOwned: true
+        operationId
       });
       if (setupResult?.inputRequired || op.state === "input_required") return;
     }
@@ -2477,8 +2476,7 @@ function createRequestHandler(
       environment: op.environment,
       provider: op.provider,
       operationId,
-      clientId: setupResult?.clientId || request.environment?.clientId || "",
-      serverOwned: true
+      clientId: setupResult?.clientId || request.environment?.clientId || ""
     });
     await monitorVerification(operationId);
   }
@@ -2487,11 +2485,11 @@ function createRequestHandler(
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
-    lastWebviewActivityAt = Date.now();
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
     const isServerOwnedRequest =
       req.headers["x-radius-server-owned"] === serverOwnedToken;
+    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
     // CSRF defense-in-depth: reject cross-site state-changing requests before
     // any routing or body parse. See isCrossSiteMutation for the rules.
     if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
@@ -2833,10 +2831,8 @@ function createRequestHandler(
           statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
         })
       );
-      setImmediate(() =>
-        scheduleServerOwnedTask(operationId, () =>
-          runEnvironmentOperation(operationId)
-        )
+      scheduleServerOwnedTask(operationId, () =>
+        runEnvironmentOperation(operationId)
       );
       return;
     }
@@ -3543,10 +3539,6 @@ function createRequestHandler(
                 code === "app-selection-required" ?
                   "azure-app-selection"
                 : "azure-service-management-reference",
-              fields:
-                code === "app-selection-required" ?
-                  ["appId", "createNew"]
-                : ["serviceManagementReference"],
               metadata:
                 code === "app-selection-required" ?
                   {

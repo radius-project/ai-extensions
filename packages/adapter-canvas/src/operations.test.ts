@@ -1066,7 +1066,6 @@ describe("keepalive predicate", () => {
       requireInput(op, {
         code: "app-selection-required",
         checkpoint: "azure-app-selection",
-        fields: ["appId", "createNew"],
         message: "Choose an App Registration."
       });
 
@@ -1096,7 +1095,6 @@ describe("keepalive predicate", () => {
       requireInput(op, {
         code: "service-management-reference-required",
         checkpoint: "azure-service-management-reference",
-        fields: ["serviceManagementReference"],
         message: "Enter the Service Management Reference."
       });
 
@@ -1117,6 +1115,26 @@ describe("keepalive predicate", () => {
       expect(op.state).toBe("running");
       expect(op.inputRequired).toBeNull();
       expect(canResumeInput(op)).toBe(false);
+    });
+
+    it("releases an abandoned input wait after the operation stale window", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 16 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/abandoned-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.running(op.repo)).toBeNull();
     });
   });
 
@@ -1469,9 +1487,9 @@ describe("environment creation boundaries", () => {
     expect(operationStart).toBeGreaterThan(-1);
     expect(route).toContain("operations.start(op)");
     expect(route).toContain("res.writeHead(202)");
-    expect(route).toContain("setImmediate");
+    expect(route).toContain("scheduleServerOwnedTask");
     expect(route.indexOf("res.end(")).toBeLessThan(
-      route.indexOf("setImmediate")
+      route.indexOf("scheduleServerOwnedTask")
     );
   });
 
@@ -1479,6 +1497,9 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).toContain('"X-Radius-Server-Owned": serverOwnedToken');
     expect(SERVER_SRC).toContain(
       'req.headers["x-radius-server-owned"] === serverOwnedToken'
+    );
+    expect(SERVER_SRC).toContain(
+      "if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now()"
     );
     expect(SERVER_SRC).toContain('postInternal("/api/azure-auto-setup"');
     expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');

@@ -339,7 +339,7 @@ export function setStageState(op: any, stageId: any, state: any): any {
 /** Keep a live operation open while the user supplies information needed to continue. */
 export function requireInput(
   op: any,
-  { code, message, checkpoint = null, fields = [], metadata = null }: any = {}
+  { code, message, checkpoint = null, metadata = null }: any = {}
 ): any {
   if (!op || isTerminalState(op.state)) return op;
   op.state = INPUT_REQUIRED_STATE;
@@ -348,14 +348,12 @@ export function requireInput(
     message: message || "",
     checkpoint:
       typeof checkpoint === "string" && checkpoint ? checkpoint : code || null,
-    fields: Array.isArray(fields) ? fields.map(String) : [],
     metadata:
       metadata && typeof metadata === "object" ?
         structuredClone(metadata)
       : null,
     requestedAt: nowIso()
   };
-  op.recoveryState = "waiting_input";
   op.lastActivityAt = op.inputRequired.requestedAt;
   return op;
 }
@@ -1128,7 +1126,13 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
 /** Whether a non-terminal record has gone quiet long enough to be abandoned. */
 export function isStale(op: any, now = Date.now()): boolean {
   if (!op || isTerminalState(op.state)) return false;
-  if (op.recoveryState === "waiting_input") return false;
+  if (op.state === INPUT_REQUIRED_STATE) {
+    return (
+      now -
+        new Date(op.inputRequired?.requestedAt || op.lastActivityAt).getTime() >
+      STALE_AFTER_MS
+    );
+  }
   if (hasCompleteVerificationIdentity(op)) {
     return now - Number(op.verification.dispatchedAt) > VERIFY_STALE_AFTER_MS;
   }

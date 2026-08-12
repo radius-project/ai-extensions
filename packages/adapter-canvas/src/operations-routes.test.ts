@@ -131,7 +131,6 @@ describe("POST /api/operations server-owned execution", () => {
     requireInput(op, {
       code: "service-management-reference-required",
       checkpoint: "azure-service-management-reference",
-      fields: ["serviceManagementReference"],
       message: "Enter the Service Management Reference."
     });
 
@@ -180,7 +179,6 @@ describe("POST /api/operations server-owned execution", () => {
     requireInput(op, {
       code: "app-selection-required",
       checkpoint: "azure-app-selection",
-      fields: ["appId", "createNew"],
       message: "Choose an app."
     });
 
