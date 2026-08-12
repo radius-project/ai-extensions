@@ -9,22 +9,11 @@ import {
 } from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
-const ACTION_NAMES = [
-  "configure_oidc",
-  "render_graph",
-  "render_graph_diff",
-  "create_environment",
-  "get_graph_resources",
-  "update_source_refs"
-];
+const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
 const TOOL_NAMES = [
-  "radius_configure_oidc",
   "radius_generate_app",
-  "radius_render_graph",
-  "radius_render_graph_diff",
   "radius_generate_pr_diff_markdown",
-  "radius_create_environment",
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
@@ -111,21 +100,6 @@ describe("P0-A Radius runtime registration contract", () => {
       "onPreToolUse",
       "onSessionStart"
     ]);
-
-    await expect(
-      harness.host.invoke("radius-panel", "configure_oidc", {
-        provider: "invalid"
-      })
-    ).rejects.toThrow(/must be one of azure, aws/);
-
-    await expect(
-      harness.host.invoke("radius-panel", "configure_oidc", {
-        provider: "azure",
-        tenantId: "tenant"
-      })
-    ).resolves.toMatchObject({
-      message: "Azure OIDC configuration generated"
-    });
 
     await expect(
       harness.host.open("radius-panel", {
@@ -317,15 +291,20 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
   it("reloads source references through the same SDK instance", async () => {
     const harness = await createRuntimeSdkHarness();
-    await harness.host.invoke("radius-panel", "render_graph", {
-      resources: [{ id: "database", name: "database", type: "Radius.Data/sql" }]
-    });
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    harness.deps.sourceRefs.setSourceRefResources(
+      entry,
+      "graph",
+      [{ id: "database", name: "database", type: "Radius.Data/sql" }],
+      { repo: "acme/widgets", branch: "main" }
+    );
+    entry.state.activeGraphView = "graph";
     const resources = (await harness.host.invoke(
       "radius-panel",
       "get_graph_resources",
       { missingOnly: false }
     )) as { contextToken: string };
-    const entry = harness.servers.get("radius-panel");
+    const originalEntry = harness.servers.get("radius-panel");
 
     await expect(
       harness.host.invoke("radius-panel", "update_source_refs", {
@@ -341,8 +320,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         input: { page: "graph" }
       })
     );
-    expect(harness.servers.get("radius-panel")).toBe(entry);
-    expect(entry?.state.graphResources?.[0].codeReference).toBe(
+    expect(harness.servers.get("radius-panel")).toBe(originalEntry);
+    expect(originalEntry?.state.graphResources?.[0].codeReference).toBe(
       "src/database.ts#L10"
     );
   });

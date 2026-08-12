@@ -42,198 +42,6 @@
       },
       "actions": [
         {
-          "name": "configure_oidc",
-          "description": "Configure OIDC identity federation for Azure or AWS and display the setup commands",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "provider": {
-                "type": "string",
-                "enum": [
-                  "azure",
-                  "aws"
-                ],
-                "description": "Cloud provider to configure"
-              },
-              "tenantId": {
-                "type": "string",
-                "description": "Azure Tenant ID"
-              },
-              "tenantName": {
-                "type": "string",
-                "description": "Azure Tenant display name"
-              },
-              "subscriptionId": {
-                "type": "string",
-                "description": "Azure Subscription ID"
-              },
-              "subscriptionName": {
-                "type": "string",
-                "description": "Azure Subscription display name"
-              },
-              "clientId": {
-                "type": "string",
-                "description": "Azure Client ID (App Registration)"
-              },
-              "clientName": {
-                "type": "string",
-                "description": "Azure App Registration display name"
-              },
-              "accountId": {
-                "type": "string",
-                "description": "AWS Account ID"
-              },
-              "accountName": {
-                "type": "string",
-                "description": "AWS Account alias or display name"
-              },
-              "region": {
-                "type": "string",
-                "description": "AWS Region"
-              }
-            },
-            "required": [
-              "provider"
-            ]
-          },
-          "handlerCallable": true
-        },
-        {
-          "name": "render_graph",
-          "description": "Render the application graph from ApplicationGraphResource data",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "resources": {
-                "type": "array",
-                "description": "Array of ApplicationGraphResource objects with id, name, type, and connections",
-                "items": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "handlerCallable": true
-        },
-        {
-          "name": "render_graph_diff",
-          "description": "Render a diff graph showing changes between base and head application models in a PR",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "baseResources": {
-                "type": "array",
-                "description": "Base branch resources",
-                "items": {
-                  "type": "object"
-                }
-              },
-              "headResources": {
-                "type": "array",
-                "description": "Head branch resources",
-                "items": {
-                  "type": "object"
-                }
-              },
-              "repo": {
-                "type": "string",
-                "description": "Repository in owner/repo format"
-              },
-              "baseBranch": {
-                "type": "string",
-                "description": "Base branch represented by baseResources"
-              },
-              "headBranch": {
-                "type": "string",
-                "description": "Head branch represented by headResources"
-              }
-            },
-            "required": [
-              "baseResources",
-              "headResources",
-              "repo",
-              "baseBranch",
-              "headBranch"
-            ]
-          },
-          "handlerCallable": true
-        },
-        {
-          "name": "create_environment",
-          "description": "Create a GitHub environment, private GHCR state package, cloud settings, and verification/deploy workflows",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string",
-                "description": "Environment name (e.g. production)"
-              },
-              "provider": {
-                "type": "string",
-                "enum": [
-                  "azure",
-                  "aws"
-                ],
-                "description": "Cloud provider"
-              },
-              "repo": {
-                "type": "string",
-                "description": "Repository in owner/repo format"
-              },
-              "clientId": {
-                "type": "string",
-                "description": "Azure application (client) ID"
-              },
-              "tenantId": {
-                "type": "string",
-                "description": "Azure tenant ID"
-              },
-              "subscriptionId": {
-                "type": "string",
-                "description": "Azure Subscription ID"
-              },
-              "resourceGroup": {
-                "type": "string",
-                "description": "Azure Resource Group"
-              },
-              "location": {
-                "type": "string",
-                "description": "Azure Location"
-              },
-              "roleArn": {
-                "type": "string",
-                "description": "AWS IAM role ARN used by GitHub OIDC"
-              },
-              "accountId": {
-                "type": "string",
-                "description": "AWS Account ID"
-              },
-              "region": {
-                "type": "string",
-                "description": "AWS Region"
-              },
-              "cluster": {
-                "type": "string",
-                "description": "AKS or EKS cluster name"
-              },
-              "vpcId": {
-                "type": "string",
-                "description": "Optional AWS VPC ID"
-              },
-              "subnetIds": {
-                "type": "string",
-                "description": "Optional comma-separated AWS subnet IDs"
-              }
-            },
-            "required": [
-              "name",
-              "provider",
-              "repo"
-            ]
-          },
-          "handlerCallable": true
-        },
-        {
           "name": "get_graph_resources",
           "description": "Return the current graph resources, optionally filtered to only those missing a codeReference. Use this to discover which resources need source-code references after the graph has been built.",
           "inputSchema": {
@@ -245,11 +53,7 @@
               },
               "view": {
                 "type": "string",
-                "enum": [
-                  "graph",
-                  "planned",
-                  "diff"
-                ],
+                "enum": ["graph", "planned", "diff"],
                 "description": "Graph view to inspect. Defaults to the active canvas page."
               }
             }
@@ -277,10 +81,7 @@
                       "description": "Repo-relative path with optional #L<line>"
                     }
                   },
-                  "required": [
-                    "id",
-                    "codeReference"
-                  ]
+                  "required": ["id", "codeReference"]
                 }
               },
               "contextToken": {
@@ -288,10 +89,7 @@
                 "description": "Graph context token returned by get_graph_resources"
               }
             },
-            "required": [
-              "contextToken",
-              "refs"
-            ]
+            "required": ["contextToken", "refs"]
           },
           "handlerCallable": true
         }
@@ -301,24 +99,6 @@
     }
   ],
   "tools": [
-    {
-      "name": "radius_configure_oidc",
-      "description": "Opens the Radius OIDC configuration canvas to set up Azure or AWS identity federation for GitHub Actions",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "provider": {
-            "type": "string",
-            "enum": [
-              "azure",
-              "aws"
-            ],
-            "description": "Cloud provider to configure"
-          }
-        }
-      },
-      "handlerCallable": true
-    },
     {
       "name": "radius_generate_app",
       "description": "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
@@ -330,69 +110,6 @@
             "description": "Path to the repository to analyze"
           }
         }
-      },
-      "handlerCallable": true
-    },
-    {
-      "name": "radius_render_graph",
-      "description": "Renders an interactive application graph visualization from resource data",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "resources": {
-            "type": "array",
-            "description": "Array of ApplicationGraphResource objects",
-            "items": {
-              "type": "object"
-            }
-          }
-        },
-        "required": [
-          "resources"
-        ]
-      },
-      "handlerCallable": true
-    },
-    {
-      "name": "radius_render_graph_diff",
-      "description": "Renders a diff visualization comparing base and head application graphs for a pull request",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "baseResources": {
-            "type": "array",
-            "description": "Base branch resources",
-            "items": {
-              "type": "object"
-            }
-          },
-          "headResources": {
-            "type": "array",
-            "description": "Head branch resources",
-            "items": {
-              "type": "object"
-            }
-          },
-          "repo": {
-            "type": "string",
-            "description": "Repository in owner/repo format"
-          },
-          "baseBranch": {
-            "type": "string",
-            "description": "Base branch represented by baseResources"
-          },
-          "headBranch": {
-            "type": "string",
-            "description": "Head branch represented by headResources"
-          }
-        },
-        "required": [
-          "baseResources",
-          "headResources",
-          "repo",
-          "baseBranch",
-          "headBranch"
-        ]
       },
       "handlerCallable": true
     },
@@ -415,33 +132,7 @@
             "description": "Head branch (PR source, e.g. 'feature/add-redis')"
           }
         },
-        "required": [
-          "repo",
-          "baseBranch",
-          "headBranch"
-        ]
-      },
-      "handlerCallable": true
-    },
-    {
-      "name": "radius_create_environment",
-      "description": "Opens the GitHub environment creation canvas to set up a deployment environment with cloud provider secrets",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "provider": {
-            "type": "string",
-            "enum": [
-              "azure",
-              "aws"
-            ],
-            "description": "Cloud provider"
-          },
-          "repo": {
-            "type": "string",
-            "description": "Repository in owner/repo format"
-          }
-        }
+        "required": ["repo", "baseBranch", "headBranch"]
       },
       "handlerCallable": true
     },
@@ -478,10 +169,7 @@
             "description": "OCI target under the repository being modeled, e.g. br:ghcr.io/<owner>/<repo>/<recipe>:<tag>."
           }
         },
-        "required": [
-          "file",
-          "target"
-        ]
+        "required": ["file", "target"]
       },
       "handlerCallable": true
     },
@@ -509,10 +197,7 @@
           },
           "provider": {
             "type": "string",
-            "enum": [
-              "azure",
-              "aws"
-            ],
+            "enum": ["azure", "aws"],
             "description": "Cloud provider. Defaults to the last deploy's provider."
           },
           "appFile": {
