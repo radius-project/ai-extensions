@@ -1293,8 +1293,11 @@ describe("triggerDeployRepairHandoff", () => {
     entry.state.deployRepairing = false;
     entry.state.deployHandoffState = "idle";
     entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
     expect(triggerDeployRepairHandoff(entry)).toBe(true);
     expect(calls).toHaveLength(2);
+    // The handoff belongs to the new attempt, not a reopened attempt-A.
+    expect(calls[1]).toMatchObject({ attemptId: "attempt-B" });
   });
 
   it("suppresses a re-handoff while delivery is still in flight", () => {
