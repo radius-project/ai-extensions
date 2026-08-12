@@ -906,9 +906,8 @@ export async function resolveOidcSubject(
     }
     subjectConfig = {
       useDefault: c.use_default,
-      includeClaimKeys: Array.isArray(c.include_claim_keys)
-        ? c.include_claim_keys
-        : []
+      includeClaimKeys:
+        Array.isArray(c.include_claim_keys) ? c.include_claim_keys : []
     };
     if (typeof c.use_immutable_subject === "boolean") {
       subjectConfig.useImmutableSubject = c.use_immutable_subject;
@@ -972,9 +971,9 @@ export async function resolveOidcSubject(
         subjectConfig: {
           useDefault: true,
           useImmutableSubject: true,
-          ...(subjectConfig.useImmutableSubject === true
-            ? { subClaimPrefix: subjectConfig.subClaimPrefix }
-            : {})
+          ...(subjectConfig.useImmutableSubject === true ?
+            { subClaimPrefix: subjectConfig.subClaimPrefix }
+          : {})
         }
       })
     });
