@@ -1475,6 +1475,20 @@ describe("triggerDeployRepairHandoff", () => {
     });
   });
 
+  // Every deploy mints an attempt id today, but a state without one must not
+  // get stranded as pending - that would block every later handoff.
+  it("still settles a handoff opened without an attempt id", async () => {
+    setDeployRepairHandoff(() => Promise.resolve("message-id"));
+    const entry = failedEntry({ deployAttempt: undefined });
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployRepairing).toBe(true);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "delivered",
+      pending: false
+    });
+  });
+
   it("drops a scheduled retry when a new deploy starts during the backoff", async () => {
     vi.useFakeTimers();
     try {

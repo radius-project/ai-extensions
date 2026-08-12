@@ -855,10 +855,11 @@ export function triggerDeployRepairHandoff(
     // asynchronously, so a user deploy started in the meantime would otherwise
     // be mutated by the previous attempt's handoff. Binding to the attempt that
     // opened this handoff keeps a stale settle from marking the new attempt as
-    // delivered/owned, which would suppress its own handoff for good. An
-    // attempt-less state cannot be identified, so it never owns a settle.
-    const ownsAttempt = () =>
-      attemptId !== "" && state.deployAttempt?.id === attemptId;
+    // delivered/owned, which would suppress its own handoff for good. Compare
+    // both sides normalized so an attempt-less handoff still settles against an
+    // attempt-less state - refusing to settle there would strand it as pending
+    // and block every later trigger - while a new deploy's id still revokes it.
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
     const delivered = () => {
       if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
