@@ -15,6 +15,7 @@ import {
   isAppOwnerAlreadyAssignedError,
   fetchGitHubJson,
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
@@ -322,6 +323,85 @@ describe("fetchGitHubJson retry", () => {
   });
 });
 
+describe("findLegacyMutableCredentialName", () => {
+  const immutable = {
+    federatedCredentials: [],
+    fullName: "octo-org/octo-repo",
+    ownerId: 111,
+    repoId: 222,
+    subjectConfig: { useDefault: true, useImmutableSubject: true }
+  };
+
+  it("finds the legacy mutable credential for a proven immutable repository", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        immutable,
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-mutable",
+            "repo:octo-org/octo-repo:environment:prod"
+          ]
+        ])
+      )
+    ).toBe("github-octo-org-octo-repo-prod-mutable");
+  });
+
+  it("does not warn for an inconclusive default state", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        {
+          ...immutable,
+          subjectConfig: { useDefault: true }
+        },
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-mutable",
+            "repo:octo-org/octo-repo:environment:prod"
+          ]
+        ])
+      )
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { useDefault: false, useImmutableSubject: true },
+    { useDefault: true, useImmutableSubject: false }
+  ])(
+    "does not warn for subject config $useDefault/$useImmutableSubject",
+    (subjectConfig) => {
+      expect(
+        findLegacyMutableCredentialName(
+          { ...immutable, subjectConfig },
+          "environment:prod",
+          new Map([
+            [
+              "github-octo-org-octo-repo-prod-mutable",
+              "repo:octo-org/octo-repo:environment:prod"
+            ]
+          ])
+        )
+      ).toBeUndefined();
+    }
+  );
+
+  it("does not warn when no existing credential matches the mutable subject", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        immutable,
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-immutable",
+            "repo:octo-org@111/octo-repo@222:environment:prod"
+          ]
+        ])
+      )
+    ).toBeUndefined();
+  });
+});
+
 describe("resolveOidcSubject", () => {
   const opts = { sleepFn: async () => {} };
 
@@ -335,6 +415,7 @@ describe("resolveOidcSubject", () => {
         stderr: "Not Found (HTTP 404)"
       }
     });
+
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -381,6 +462,148 @@ describe("resolveOidcSubject", () => {
     ]);
   });
 
+  it("creates only the immutable default FIC when GitHub explicitly enables immutable subjects", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          use_immutable_subject: true,
+          sub_claim_prefix: "repo:octo-org@111/octo-repo@222"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("creates both default FICs when a successful response omits immutable fields", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: { use_default: true }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toHaveLength(2);
+  });
+
+  it("treats an exact immutable default prefix as proven immutable", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "repo:octo-org@111/octo-repo@222"
+        }
+      }
+    });
+
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("normalizes a canonical immutable prefix without repo:", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "octo-org@111/octo-repo@222"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it.each(["repo:octo-org/octo-repo", "repo:team@corp/octo-repo"])(
+    "keeps both default FICs for an unverified prefix %s",
+    async (prefix) => {
+      const runner = makeRunner({
+        "/repos/octo-org/octo-repo": REPO_OK,
+        "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+          ok: true,
+          status: 200,
+          json: { use_default: true, sub_claim_prefix: prefix }
+        }
+      });
+      const res = await resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "prod",
+          suffix: "environment:prod"
+        },
+        runner,
+        opts
+      );
+      expect(res.federatedCredentials.map((fic) => fic.subject).sort()).toEqual(
+        [
+          "repo:octo-org/octo-repo:environment:prod",
+          "repo:octo-org@111/octo-repo@222:environment:prod"
+        ]
+      );
+      expect(res.subjectConfig.useImmutableSubject).toBe(
+        prefix.includes("@") ? undefined : false
+      );
+    }
+  );
+
   it("builds a single custom subject from include_claim_keys", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
@@ -425,6 +648,7 @@ describe("resolveOidcSubject", () => {
         }
       }
     });
+
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -439,6 +663,33 @@ describe("resolveOidcSubject", () => {
     );
   });
 
+  it("infers a custom repository subject is mutable from a name-only prefix", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: false,
+          include_claim_keys: ["repository", "context"],
+          sub_claim_prefix: "repo:octo-org/octo-repo"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials[0].subject).toBe(
+      "repository:octo-org/octo-repo:environment:dev"
+    );
+  });
+
   it("prefers sub_claim_prefix for a custom immutable repository key", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
@@ -447,6 +698,7 @@ describe("resolveOidcSubject", () => {
         status: 200,
         json: {
           use_default: false,
+          use_immutable_subject: true,
           include_claim_keys: ["repository"],
           sub_claim_prefix: "repo:octo-org@9/octo-repo@8"
         }

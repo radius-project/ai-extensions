@@ -59,8 +59,10 @@ import {
   setPreferredGhLogin
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
+import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   buildAppCreateArgs,
   buildAppDeleteArgs,
   buildAppOwnerAddArgs,
@@ -3310,23 +3312,23 @@ function createRequestHandler(instanceId: string) {
 
         // Step 2: Resolve the federated credential(s) BEFORE creating
         // anything. This reads the canonical repo + subject customization
-        // from GitHub. For the default (not customized) subject we create
-        // BOTH the mutable and immutable forms so whichever GitHub mints
-        // at token time matches; for a customized subject we build the
-        // single exact subject (failing loud only if a repo/repository
-        // claim needs an immutability decision it cannot make).
+        // from GitHub. A proven immutable default creates only ID-bound trust;
+        // an inconclusive default creates both forms for rollout compatibility.
+        // A customized subject builds the single exact subject (failing loud
+        // only if a repo/repository claim needs an immutability decision).
         steps.push("Resolving GitHub OIDC subject...");
         // Note: enterprise-claim rejection (AADSTS7002381) is handled at
         // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
         // which surfaces a tenant-agnostic explanation. Package-scope /
         // workflow-permission changes remain out of scope for this fix.
-        let oidc;
+        const oidcSuffix = buildEnvironmentSuffix(envName);
+        let oidc: ResolveOidcSubjectResult;
         try {
           oidc = await resolveOidcSubject(
             {
               targetRepo,
               envName,
-              suffix: buildEnvironmentSuffix(envName)
+              suffix: oidcSuffix
             },
             ghJsonRunner
           );
@@ -3984,8 +3986,8 @@ function createRequestHandler(instanceId: string) {
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join } = await import("node:path");
-        let existingSubjects = [];
-        let existingNameToSubject = new Map();
+        let existingSubjects: string[] = [];
+        let existingNameToSubject = new Map<string, string>();
         // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
         // on SUBJECT (below), but we also need the NAME→subject map to
         // detect a name collision: clean() collapses ':' and '-' to the
@@ -4019,6 +4021,19 @@ function createRequestHandler(instanceId: string) {
           } catch {
             /* fall back to attempting all, guarded by the read-back below */
           }
+        }
+        const mutableCredentialName = findLegacyMutableCredentialName(
+          oidc,
+          oidcSuffix,
+          existingNameToSubject
+        );
+        if (mutableCredentialName) {
+          steps.push(
+            `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
+              `After immutable OIDC verification succeeds, remove it with: ` +
+              `az ad app federated-credential delete --id ${clientId} ` +
+              `--federated-credential-id ${mutableCredentialName}`
+          );
         }
         const ficsToCreate = selectMissingFederatedCredentials(
           oidc.federatedCredentials,
