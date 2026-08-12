@@ -218,6 +218,40 @@ interface PullRequestState {
   base: string;
 }
 
+export async function persistMutationCheckpoint({
+  operation,
+  persist,
+  report,
+  fail
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+  fail: (
+    status: number,
+    error: string,
+    code: string
+  ) => Promise<void>;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    // Do not retry the same deterministic write or continue making cloud
+    // changes without durable provenance for what already succeeded.
+    await fail(
+      500,
+      "Radius changed no further cloud resources because it could not save the setup recovery record.",
+      "operation-persistence-failed"
+    );
+    return false;
+  }
+}
+
 interface EnvironmentListResult {
   error?: string;
   stdout?: string;
@@ -2934,26 +2968,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
-        const checkpoint = async (): Promise<boolean> => {
-          try {
-            await operations.persist();
-            return true;
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
-            });
-            // A failed checkpoint is deterministic in common cases such as
-            // EACCES or ENOSPC. Do not write again while closing the operation,
-            // and do not continue making cloud changes without durable provenance.
-            await fail(
-              500,
-              "Radius changed no further cloud resources because it could not save the setup recovery record.",
-              "operation-persistence-failed"
-            );
-            return false;
-          }
-        };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         if (!targetRepo || !resourceGroup || !clusterName) {
           await fail(
@@ -4948,25 +4969,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
-        const checkpoint = async (): Promise<boolean> => {
-          try {
-            await operations.persist();
-            return true;
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
-            });
-            // Do not retry the same deterministic write or continue mutating
-            // GitHub without durable provenance for what already succeeded.
-            await fail(
-              500,
-              "Radius changed no further cloud resources because it could not save the setup recovery record.",
-              "operation-persistence-failed"
-            );
-            return false;
-          }
-        };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
         // `workflow` scope, which is required to create/update files under

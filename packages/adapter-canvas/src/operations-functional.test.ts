@@ -18,6 +18,8 @@ import {
   STAGE_VERIFY,
   toClientView
 } from "./operations.js";
+import type { OperationStore } from "./operation-store.js";
+import { persistMutationCheckpoint } from "./server.js";
 
 const directories: string[] = [];
 
@@ -38,6 +40,43 @@ async function persistedRegistries(now = Date.now()) {
       return next;
     }
   };
+}
+
+async function failureInjectedRegistries(failOnSave: number) {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), "radius-operation-failure-injection-")
+  );
+  directories.push(directory);
+  const filePath = path.join(directory, "operations.json");
+  const fileStore = createFileOperationStore({ filePath });
+  let saveCount = 0;
+  const store: OperationStore = {
+    load: () => fileStore.load(),
+    report: fileStore.report,
+    async save(envelope) {
+      saveCount += 1;
+      if (saveCount === failOnSave) throw new Error("injected write failure");
+      await fileStore.save(envelope);
+    }
+  };
+  const first = createRegistry({ store });
+  return {
+    first,
+    async restart() {
+      const next = createRegistry({ store: fileStore });
+      await next.hydrate();
+      return next;
+    }
+  };
+}
+
+async function resumeRecoveredOperation(operation, actions) {
+  if (operation.setupArtifacts.azure.app.state === "created") {
+    await actions.createAzureApp();
+  }
+  if (operation.setupArtifacts.github.environment.state === "created") {
+    await actions.deleteGitHubEnvironment();
+  }
 }
 
 function operation(overrides = {}) {
@@ -249,5 +288,121 @@ describe("operation restart functional coverage", () => {
       /RAW_STDERR|TOKEN_SECRET|COMMAND_OUTPUT|evidence/
     );
     expect(JSON.stringify(toClientView(op))).not.toContain("RAW_STDERR");
+  });
+
+  it("stops after a post-mutation checkpoint failure and does not replay the mutation after restart", async () => {
+    const { first, restart } = await failureInjectedRegistries(2);
+    const op = operation();
+    first.start(op);
+    await first.persist();
+    let createCalls = 0;
+    let failCalls = 0;
+    const diagnostics = [];
+
+    createCalls += 1;
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-contoso-store"
+    });
+    const checkpointed = await persistMutationCheckpoint({
+      operation: op,
+      persist: () => first.persist(),
+      report: (diagnostic) => diagnostics.push(diagnostic),
+      fail: async (_status, message, code) => {
+        failCalls += 1;
+        finish(op, "failed_partial", {
+          failure: {
+            code,
+            stage: op.currentStage,
+            stepSeq: null,
+            message,
+            classification: "unknown"
+          }
+        });
+      }
+    });
+
+    expect(checkpointed).toBe(false);
+    expect(createCalls).toBe(1);
+    expect(failCalls).toBe(1);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ code: "operation-store-write-failed" })
+    ]);
+    expect(op.state).toBe("failed_partial");
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    await resumeRecoveredOperation(recovered, {
+      createAzureApp: async () => {
+        createCalls += 1;
+      },
+      deleteGitHubEnvironment: async () => {}
+    });
+    expect(recovered).toMatchObject({
+      state: "failed",
+      failure: { code: "operation-interrupted" },
+      setupArtifacts: {
+        azure: { app: { state: "not_started" } },
+        cleanup: { state: "not_needed" }
+      }
+    });
+    expect(createCalls).toBe(1);
+  });
+
+  it("never deletes an ambiguous GitHub Environment after its provenance checkpoint fails", async () => {
+    const { first, restart } = await failureInjectedRegistries(2);
+    const op = operation();
+    first.start(op);
+    await first.persist();
+    let putCalls = 0;
+    let deleteCalls = 0;
+    let failCalls = 0;
+
+    putCalls += 1;
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    const checkpointed = await persistMutationCheckpoint({
+      operation: op,
+      persist: () => first.persist(),
+      fail: async (_status, message, code) => {
+        failCalls += 1;
+        finish(op, "failed_partial", {
+          failure: {
+            code,
+            stage: op.currentStage,
+            stepSeq: null,
+            message,
+            classification: "unknown"
+          }
+        });
+      }
+    });
+
+    expect(checkpointed).toBe(false);
+    expect(putCalls).toBe(1);
+    expect(failCalls).toBe(1);
+    expect(deleteCalls).toBe(0);
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    await resumeRecoveredOperation(recovered, {
+      createAzureApp: async () => {},
+      deleteGitHubEnvironment: async () => {
+        deleteCalls += 1;
+      }
+    });
+    expect(recovered).toMatchObject({
+      state: "failed",
+      setupArtifacts: {
+        github: { environment: { state: "not_started" } },
+        cleanup: { state: "not_needed" }
+      }
+    });
+    expect(putCalls).toBe(1);
+    expect(deleteCalls).toBe(0);
   });
 });
