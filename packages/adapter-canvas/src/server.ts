@@ -3858,7 +3858,35 @@ function createRequestHandler(instanceId: string) {
                 appId: clientId,
                 displayName: appName
               });
-              if (!(await checkpoint())) return;
+              try {
+                await operations.persist();
+              } catch (error) {
+                operations.report?.({
+                  code: "operation-store-write-failed",
+                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+                });
+                finish(op, "failed", {
+                  failure: {
+                    code: "operation-persistence-failed",
+                    stage: op.currentStage,
+                    stepSeq: null,
+                    message:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    classification: "unknown"
+                  }
+                });
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(500);
+                res.end(
+                  JSON.stringify({
+                    error:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    code: "operation-persistence-failed",
+                    operationId: op.operationId
+                  })
+                );
+                return;
+              }
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
@@ -3904,7 +3932,35 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
-              if (!(await checkpoint())) return;
+              try {
+                await operations.persist();
+              } catch (error) {
+                operations.report?.({
+                  code: "operation-store-write-failed",
+                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+                });
+                finish(op, "failed", {
+                  failure: {
+                    code: "operation-persistence-failed",
+                    stage: op.currentStage,
+                    stepSeq: null,
+                    message:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    classification: "unknown"
+                  }
+                });
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(500);
+                res.end(
+                  JSON.stringify({
+                    error:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    code: "operation-persistence-failed",
+                    operationId: op.operationId
+                  })
+                );
+                return;
+              }
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -4054,7 +4110,35 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
-        if (!(await checkpoint())) return;
+        try {
+          await operations.persist();
+        } catch (error) {
+          operations.report?.({
+            code: "operation-store-write-failed",
+            message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+          });
+          finish(op, "failed", {
+            failure: {
+              code: "operation-persistence-failed",
+              stage: op.currentStage,
+              stepSeq: null,
+              message:
+                "Radius changed no cloud resources because it could not save the setup recovery record.",
+              classification: "unknown"
+            }
+          });
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(500);
+          res.end(
+            JSON.stringify({
+              error:
+                "Radius changed no cloud resources because it could not save the setup recovery record.",
+              code: "operation-persistence-failed",
+              operationId: op.operationId
+            })
+          );
+          return;
+        }
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -4212,7 +4296,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
-            if (!(await checkpoint())) return;
+            await operations.persist();
           }
         }
 
@@ -4737,7 +4821,7 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
-          if (!(await checkpoint())) return;
+          await operations.persist();
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
