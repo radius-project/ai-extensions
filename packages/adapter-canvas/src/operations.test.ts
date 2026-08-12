@@ -1476,9 +1476,7 @@ describe("environment creation boundaries", () => {
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
-    expect(SERVER_SRC).toContain(
-      '"X-Radius-Server-Owned": serverOwnedToken'
-    );
+    expect(SERVER_SRC).toContain('"X-Radius-Server-Owned": serverOwnedToken');
     expect(SERVER_SRC).toContain(
       'req.headers["x-radius-server-owned"] === serverOwnedToken'
     );

@@ -2840,7 +2840,9 @@ function createRequestHandler(
       );
       return;
     }
-    const abandonMatch = pathname.match(/^\/api\/operations\/([^/]+)\/abandon$/);
+    const abandonMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/abandon$/
+    );
     if (abandonMatch && req.method === "POST") {
       const operationId = decodeURIComponent(abandonMatch[1]);
       const op = operations.get(operationId);
