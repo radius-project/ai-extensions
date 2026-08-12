@@ -25,3 +25,5 @@ catalog:
   "@vitest/coverage-v8": ^4.1.10
   typescript: ^7.0.2
   vitest: ^4.1.10
+
+minimumReleaseAge: 11520   # 8 days
