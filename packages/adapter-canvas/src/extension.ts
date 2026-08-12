@@ -30,7 +30,6 @@ import {
   isWorkspaceSelection,
   parseRepoFromRemote,
   resolvePersistedSessionId,
-  resolveSessionId,
   toSafeRepoRelPath,
   workspaceFileExists
 } from "./workspace.js";
