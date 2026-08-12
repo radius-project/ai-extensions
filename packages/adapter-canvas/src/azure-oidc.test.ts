@@ -16,6 +16,7 @@ import {
   fetchGitHubJson,
   resolveOidcSubject,
   findLegacyMutableCredentialName,
+  quotePosixShellArg,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
@@ -347,6 +348,18 @@ describe("findLegacyMutableCredentialName", () => {
     ).toBe("github-octo-org-octo-repo-prod-mutable");
   });
 
+  describe("quotePosixShellArg", () => {
+    it("quotes spaces and shell metacharacters", () => {
+      expect(quotePosixShellArg("legacy fic; echo unsafe")).toBe(
+        "'legacy fic; echo unsafe'"
+      );
+    });
+
+    it("escapes embedded single quotes", () => {
+      expect(quotePosixShellArg("legacy'fic")).toBe("'legacy'\"'\"'fic'");
+    });
+  });
+
   it("does not warn for an inconclusive default state", () => {
     expect(
       findLegacyMutableCredentialName(
@@ -425,7 +438,16 @@ describe("resolveOidcSubject", () => {
       runner,
       opts
     );
-    expect(res.federatedCredentials).toHaveLength(2);
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-mutable",
+        subject: "repo:octo-org/octo-repo:environment:prod"
+      },
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
     const bySubject = Object.fromEntries(
       res.federatedCredentials.map((f) => [f.name, f.subject])
     );

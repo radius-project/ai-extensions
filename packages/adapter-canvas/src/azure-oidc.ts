@@ -132,6 +132,10 @@ export function findLegacyMutableCredentialName(
   )?.[0];
 }
 
+export function quotePosixShellArg(value: string): string {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
 // owner/repo using GitHub's real charset — an owner is 1-39 chars starting
 // alphanumeric with internal hyphens; a repo is 1-100 of [A-Za-z0-9._-]. This
 // rejects spaces and shell metacharacters (`&`, `?`, ...) that could otherwise
