@@ -66,6 +66,11 @@ export function buildRadiusCanvasInputSchema(defaultPage: string) {
         description:
           "Repository in owner/repo format to pre-select in dropdowns"
       },
+      branch: {
+        type: "string",
+        description:
+          "Branch to read .radius/app.bicep from when repo is not the current workspace repository. Ignored for the workspace repository, which always uses the checked-out branch. Defaults to 'main'."
+      },
       baseBranch: {
         type: "string",
         description:
