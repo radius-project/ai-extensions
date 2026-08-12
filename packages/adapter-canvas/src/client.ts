@@ -1081,7 +1081,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
             var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;
             pushNode(r.id || r.name, {
                 borderColor: colors.border,
-                borderWidth: diffMode ? 4 : 2,
+                borderWidth: 3,
                 borderStyle: plannedMode ? 'dashed' : 'solid',
                 bgColor: colors.bg,
                 icon: radiusResolveIcon(r),
@@ -1133,7 +1133,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                     var outColors = { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge-muted)' };
                     pushNode(outId, {
                         borderColor: outColors.border,
-                        borderWidth: 2,
+                        borderWidth: 3,
                         bgColor: outColors.bg,
                         icon: radiusResolveIcon(out),
                         nodeName: out.name || outLabel,
@@ -1263,7 +1263,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
             : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
-            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-node-bg)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 2) + 'px', borderColor: d.borderColor || 'var(--rad-node-border)' },
+            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-node-bg)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 3) + 'px', borderColor: d.borderColor || 'var(--rad-node-border)' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,

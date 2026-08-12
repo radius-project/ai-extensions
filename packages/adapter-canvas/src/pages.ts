@@ -95,7 +95,7 @@ ${getInlineVendorStyles()}
     --rad-warning-bg: color-mix(in srgb, var(--rad-warning) 16%, var(--rad-surface));
     --rad-danger-bg: color-mix(in srgb, var(--rad-danger) 14%, var(--rad-surface));
     --rad-node-bg: var(--rad-surface);
-    --rad-node-border: var(--rad-stroke);
+    --rad-node-border: var(--rad-stroke-strong);
     --rad-edge: var(--rad-stroke-strong);
     --rad-edge-muted: var(--rad-stroke);
     --rad-grid: var(--rad-stroke);
@@ -360,7 +360,7 @@ ${getInlineVendorStyles()}
   .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
   .rad-node {
     position: relative; width: 220px; min-height: 104px;
-    background: var(--rad-surface); border: 1px solid var(--rad-stroke);
+    background: var(--rad-surface); border: 3px solid var(--rad-node-border);
     border-radius: 16px; padding: 16px 18px;
     pointer-events: auto; cursor: pointer;
   }
