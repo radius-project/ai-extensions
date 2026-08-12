@@ -18,6 +18,7 @@ export interface OperationStoreDiagnostic {
   code:
     | "operation-store-corrupt"
     | "operation-store-invalid-record"
+    | "operation-store-write-failed"
     | "operation-store-unavailable";
   message: string;
 }

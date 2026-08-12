@@ -1226,6 +1226,9 @@ export function createRegistry({
     async persist() {
       await store.save(snapshot());
     },
+    report(diagnostic) {
+      store.report?.(diagnostic);
+    },
     snapshot,
     /** The operation still running for a repo, if any. */
     running(repo) {

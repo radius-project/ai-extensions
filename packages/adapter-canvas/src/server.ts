@@ -2933,6 +2933,45 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = async (): Promise<boolean> => {
+          try {
+            if (!(await checkpoint())) return;
+            return true;
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
+            });
+            // Do not retry the same deterministic write or continue mutating
+            // GitHub without durable provenance for what already succeeded.
+            await fail(
+              500,
+              "Radius changed no further cloud resources because it could not save the setup recovery record.",
+              "operation-persistence-failed"
+            );
+            return false;
+          }
+        };
+        const checkpoint = async (): Promise<boolean> => {
+          try {
+            if (!(await checkpoint())) return;
+            return true;
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op?.operationId || "unknown"}: ${errorMessage(error)}`
+            });
+            // A failed checkpoint is deterministic in common cases such as
+            // EACCES or ENOSPC. Do not write again while closing the operation,
+            // and do not continue making cloud changes without durable provenance.
+            await fail(
+              500,
+              "Radius changed no further cloud resources because it could not save the setup recovery record.",
+              "operation-persistence-failed"
+            );
+            return false;
+          }
+        };
 
         if (!targetRepo || !resourceGroup || !clusterName) {
           await fail(
@@ -3095,7 +3134,7 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
-          await operations.persist();
+          if (!(await checkpoint())) return;
         }
         enterStage(op, STAGE_AUTHORIZE_IDENTITY);
 
@@ -3557,7 +3596,7 @@ function createRequestHandler(instanceId: string) {
               appId: clientId,
               displayName: null
             });
-            await operations.persist();
+            if (!(await checkpoint())) return;
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
@@ -3782,7 +3821,7 @@ function createRequestHandler(instanceId: string) {
                 appId: clientId,
                 displayName: appName
               });
-              await operations.persist();
+              if (!(await checkpoint())) return;
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
@@ -3828,7 +3867,7 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
-              await operations.persist();
+              if (!(await checkpoint())) return;
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -3978,7 +4017,7 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
-        await operations.persist();
+        if (!(await checkpoint())) return;
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -4136,7 +4175,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
-            await operations.persist();
+            if (!(await checkpoint())) return;
           }
         }
 
@@ -4240,7 +4279,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         recordServicePrincipal(op, { objectId: spObjectId });
-        await operations.persist();
+        if (!(await checkpoint())) return;
 
         const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
         steps.push(`Assigning Contributor role on ${resourceGroup}...`);
@@ -4265,7 +4304,7 @@ function createRequestHandler(instanceId: string) {
             scope: contributorScope,
             principalObjectId: spObjectId
           });
-          await operations.persist();
+          if (!(await checkpoint())) return;
         }
 
         // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
@@ -4312,7 +4351,7 @@ function createRequestHandler(instanceId: string) {
               scope: clusterScope,
               principalObjectId: spObjectId
             });
-            await operations.persist();
+            if (!(await checkpoint())) return;
           }
         } else {
           // Non-fatal: control-plane access is already in place, and
@@ -4661,7 +4700,7 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
-          await operations.persist();
+          if (!(await checkpoint())) return;
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
@@ -5014,7 +5053,7 @@ function createRequestHandler(instanceId: string) {
           repo: targetRepo,
           name: envName
         });
-        await operations.persist();
+        if (!(await checkpoint())) return;
         // Tag the environment as Radius-managed so the listing can filter
         // out environments created outside this extension.
         await setEnvironmentVariable("RADIUS_MANAGED", "true");
@@ -5136,7 +5175,7 @@ function createRequestHandler(instanceId: string) {
           branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
           mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
         });
-        await operations.persist();
+        if (!(await checkpoint())) return;
 
         // Step 4: Also commit the deploy workflows (dispatcher + both
         // provider workflows). The dispatcher references both provider
@@ -5187,7 +5226,7 @@ function createRequestHandler(instanceId: string) {
               deployCommit.viaPr ? prState?.branch || null : defaultBranch,
             mode: deployCommit.viaPr ? "pull_request" : "default_branch"
           });
-          await operations.persist();
+          if (!(await checkpoint())) return;
         }
         // Best-effort: remove the legacy monolithic deploy workflow so it
         // does not double-trigger alongside the new dispatcher. Skipped in
@@ -5231,7 +5270,7 @@ function createRequestHandler(instanceId: string) {
                   delCommit.viaPr ? prState?.branch || null : defaultBranch,
                 mode: delCommit.viaPr ? "pull_request" : "default_branch"
               });
-              await operations.persist();
+              if (!(await checkpoint())) return;
             }
           }
           steps.push("✅ Delete workflows committed.");
@@ -5414,7 +5453,7 @@ function createRequestHandler(instanceId: string) {
             runId: verifyRunId == null ? null : String(verifyRunId),
             runUrl: verifyRunUrl || null
           };
-          await operations.persist();
+          if (!(await checkpoint())) return;
           const entry = servers.get(instanceId);
           if (entry) {
             entry.state.deployDispatchedAt = dispatchedAt;

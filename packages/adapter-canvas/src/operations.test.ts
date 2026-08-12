@@ -887,6 +887,39 @@ describe("registry", () => {
     expect(restored.size()).toBe(0);
     expect(envelope.operations).toEqual([]);
   });
+
+  it("reports persistence failures without retrying the failed write", async () => {
+    const diagnostics = [];
+    let saves = 0;
+    const reg = createRegistry({
+      store: {
+        report(diagnostic) {
+          diagnostics.push(diagnostic);
+        },
+        async load() {
+          return null;
+        },
+        async save() {
+          saves += 1;
+          throw new Error("disk full");
+        }
+      }
+    });
+
+    reg.report({
+      code: "operation-store-write-failed",
+      message: "Could not persist setup operation op_test: disk full"
+    });
+
+    expect(diagnostics).toEqual([
+      {
+        code: "operation-store-write-failed",
+        message: "Could not persist setup operation op_test: disk full"
+      }
+    ]);
+    await expect(reg.persist()).rejects.toThrow("disk full");
+    expect(saves).toBe(1);
+  });
 });
 
 describe("startup reconciliation", () => {
