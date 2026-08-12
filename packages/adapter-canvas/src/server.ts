@@ -851,13 +851,23 @@ export function triggerDeployRepairHandoff(
     const attemptId = state.deployAttempt?.id || "";
     state.deployHandoffState = "pending";
     state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
+    // A canvas panel is reused across deploys and these callbacks settle
+    // asynchronously, so a user deploy started in the meantime would otherwise
+    // be mutated by the previous attempt's handoff. Binding to the attempt that
+    // opened this handoff keeps a stale settle from marking the new attempt as
+    // delivered/owned, which would suppress its own handoff for good. An
+    // attempt-less state cannot be identified, so it never owns a settle.
+    const ownsAttempt = () =>
+      attemptId !== "" && state.deployAttempt?.id === attemptId;
     const delivered = () => {
+      if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
       state.deployRepairing = true;
     };
     // A handoff that never reached the agent must not leave the loop marked as
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
+      if (!ownsAttempt()) return;
       state.deployRepairing = false;
       const exhausted =
         (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
@@ -868,6 +878,9 @@ export function triggerDeployRepairHandoff(
       // exactly the unmounted-panel case this trigger exists to cover.
       if (exhausted) return;
       const timer = setTimeout(() => {
+        // The backoff is another window for a new deploy to start, and that
+        // deploy drives its own handoff.
+        if (!ownsAttempt()) return;
         triggerDeployRepairHandoff(entry, instanceId);
       }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
       // Never hold the process open for a retry.

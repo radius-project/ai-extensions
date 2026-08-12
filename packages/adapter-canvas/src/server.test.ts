@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   addGraphProgress,
   azureCredentialIdValidationError,
@@ -10,6 +10,7 @@ import {
   deleteNewlyCreatedGitHubEnvironment,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS,
   endChildInput,
   ensureServicePrincipal,
   finalizeSetupFailure,
@@ -1398,6 +1399,143 @@ describe("triggerDeployRepairHandoff", () => {
       state: "pending",
       pending: true
     });
+  });
+
+  // A canvas panel is reused across deploys, so these settle against whatever
+  // deploy is current, not the one that opened the handoff.
+  it("ignores a delivery that lands after a new deploy replaced the attempt", async () => {
+    let resolveSend: (value: string) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const entry = failedEntry();
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    // The user starts a new deploy before the send settles. Mirror exactly what
+    // /api/deploy assigns when agentInitiated !== true.
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployRepairing = false;
+    entry.state.deployHandoffState = "idle";
+    entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    resolveSend("message-id");
+    await Promise.resolve();
+
+    // Marking the new attempt delivered/owned would permanently suppress its
+    // own handoff via the deployRepairing guard.
+    expect(entry.state.deployRepairing).toBe(false);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "idle",
+      attempts: 0
+    });
+
+    // The new attempt still gets its own handoff when it fails.
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+      return Promise.resolve("message-id");
+    });
+    entry.state.deployStatus = "failed";
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    expect(calls).toEqual([
+      expect.objectContaining({ attemptId: "attempt-B" })
+    ]);
+  });
+
+  it("ignores a rejection that lands after a new deploy replaced the attempt", async () => {
+    let rejectSend: (reason: Error) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSend = reject;
+        })
+    );
+    const entry = failedEntry();
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployRepairing = false;
+    entry.state.deployHandoffState = "idle";
+    entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    rejectSend(new Error("send failed"));
+    await Promise.resolve();
+
+    // "retryable" here would also keep the webview polling for a handoff that
+    // belongs to a deploy that is already over.
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "idle",
+      attempts: 0,
+      pending: false
+    });
+  });
+
+  it("drops a scheduled retry when a new deploy starts during the backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = failedEntry();
+      expect(triggerDeployRepairHandoff(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "retryable",
+        attempts: 1
+      });
+
+      // The backoff is its own window for the user to start a new deploy, and
+      // that deploy can fail fast enough to land back in the handoff window.
+      entry.state.deployRepairing = false;
+      entry.state.deployHandoffState = "idle";
+      entry.state.deployHandoffAttempts = 0;
+      entry.state.deployAttempt = { id: "attempt-B" };
+
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS * 2);
+
+      // The retry belonged to attempt-A, so it must not re-send that attempt's
+      // payload against attempt-B or consume attempt-B's budget.
+      expect(calls).toHaveLength(1);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "idle",
+        attempts: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries from the server when nothing polls the status route", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = failedEntry();
+      expect(triggerDeployRepairHandoff(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+
+      // No status poll happens here; the retry has to come from the timer.
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      expect(calls).toHaveLength(2);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "retryable",
+        attempts: 2
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
