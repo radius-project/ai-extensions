@@ -29,6 +29,7 @@ import {
   fetchWorkspaceBicep,
   isWorkspaceSelection,
   parseRepoFromRemote,
+  resolvePersistedSessionId,
   resolveSessionId,
   toSafeRepoRelPath,
   workspaceFileExists
@@ -1426,28 +1427,45 @@ When planned graph resolution cannot resolve a resource type, distinguish two ca
   }
 });
 
-const operationSessionId = await resolveSessionId();
-if (operationSessionId) {
-  const operationPath = join(
-    process.env.USERPROFILE || os.homedir(),
-    ".copilot",
-    "session-state",
-    operationSessionId,
-    "radius",
-    "operations",
-    "operations.json"
-  );
-  await configureOperationStore(
-    createFileOperationStore({
-      filePath: operationPath,
-      report: (diagnostic) => {
-        try {
-          console.error(`[radius] ${diagnostic.code}: ${diagnostic.message}`);
-        } catch {}
-      }
-    })
-  );
-} else {
+const reportOperationStore = (diagnostic: {
+  code: string;
+  message: string;
+}) => {
+  try {
+    console.error(`[radius] ${diagnostic.code}: ${diagnostic.message}`);
+  } catch {}
+};
+try {
+  const operationSessionId = await resolvePersistedSessionId();
+  if (!operationSessionId) {
+    reportOperationStore({
+      code: "operation-store-unavailable",
+      message:
+        "Durable operation recovery is disabled because no verified Copilot session directory was found."
+    });
+    await configureOperationStore(disabledOperationStore());
+  } else {
+    const operationPath = join(
+      process.env.USERPROFILE || os.homedir(),
+      ".copilot",
+      "session-state",
+      operationSessionId,
+      "radius",
+      "operations",
+      "operations.json"
+    );
+    await configureOperationStore(
+      createFileOperationStore({
+        filePath: operationPath,
+        report: reportOperationStore
+      })
+    );
+  }
+} catch (error) {
+  reportOperationStore({
+    code: "operation-store-unavailable",
+    message: `Durable operation recovery is disabled: ${String(error)}`
+  });
   await configureOperationStore(disabledOperationStore());
 }
 
