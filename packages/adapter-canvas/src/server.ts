@@ -63,7 +63,6 @@ import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
   resolveOidcSubject,
   findLegacyMutableCredentialName,
-  quotePosixShellArg,
   buildAppCreateArgs,
   buildAppDeleteArgs,
   buildAppOwnerAddArgs,
@@ -4032,8 +4031,8 @@ function createRequestHandler(instanceId: string) {
           steps.push(
             `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
               `After immutable OIDC verification succeeds, remove it with: ` +
-              `az ad app federated-credential delete --id ${quotePosixShellArg(clientId)} ` +
-              `--federated-credential-id ${quotePosixShellArg(mutableCredentialName)}`
+              `az ad app federated-credential delete --id ${clientId} ` +
+              `--federated-credential-id ${mutableCredentialName}`
           );
         }
         const ficsToCreate = selectMissingFederatedCredentials(

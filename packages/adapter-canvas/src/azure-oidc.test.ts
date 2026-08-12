@@ -16,7 +16,6 @@ import {
   fetchGitHubJson,
   resolveOidcSubject,
   findLegacyMutableCredentialName,
-  quotePosixShellArg,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
@@ -348,18 +347,6 @@ describe("findLegacyMutableCredentialName", () => {
     ).toBe("github-octo-org-octo-repo-prod-mutable");
   });
 
-  describe("quotePosixShellArg", () => {
-    it("quotes spaces and shell metacharacters", () => {
-      expect(quotePosixShellArg("legacy fic; echo unsafe")).toBe(
-        "'legacy fic; echo unsafe'"
-      );
-    });
-
-    it("escapes embedded single quotes", () => {
-      expect(quotePosixShellArg("legacy'fic")).toBe("'legacy'\"'\"'fic'");
-    });
-  });
-
   it("does not warn for an inconclusive default state", () => {
     expect(
       findLegacyMutableCredentialName(
@@ -577,6 +564,31 @@ describe("resolveOidcSubject", () => {
         }
       }
     });
+
+    it("matches a canonical immutable default prefix case-insensitively", async () => {
+      const runner = makeRunner({
+        "/repos/octo-org/octo-repo": REPO_OK,
+        "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+          ok: true,
+          status: 200,
+          json: {
+            use_default: true,
+            sub_claim_prefix: "repo:OCTO-ORG@111/OCTO-REPO@222"
+          }
+        }
+      });
+      const res = await resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "prod",
+          suffix: "environment:prod"
+        },
+        runner,
+        opts
+      );
+      expect(res.federatedCredentials).toHaveLength(1);
+      expect(res.subjectConfig.useImmutableSubject).toBe(true);
+    });
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -720,9 +732,8 @@ describe("resolveOidcSubject", () => {
         status: 200,
         json: {
           use_default: false,
-          use_immutable_subject: true,
           include_claim_keys: ["repository"],
-          sub_claim_prefix: "repo:octo-org@9/octo-repo@8"
+          sub_claim_prefix: "repository:octo-org@9/octo-repo@8"
         }
       }
     });

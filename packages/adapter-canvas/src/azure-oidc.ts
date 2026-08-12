@@ -132,10 +132,6 @@ export function findLegacyMutableCredentialName(
   )?.[0];
 }
 
-export function quotePosixShellArg(value: string): string {
-  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
-}
-
 // owner/repo using GitHub's real charset — an owner is 1-39 chars starting
 // alphanumeric with internal hyphens; a repo is 1-100 of [A-Za-z0-9._-]. This
 // rejects spaces and shell metacharacters (`&`, `?`, ...) that could otherwise
@@ -920,9 +916,18 @@ export async function resolveOidcSubject(
       subjectConfig.subClaimPrefix = c.sub_claim_prefix;
       if (subjectConfig.useImmutableSubject === undefined) {
         const [owner, repoName] = fullName.split("/");
-        const prefixSlug = c.sub_claim_prefix.replace(/^repo:/, "");
+        const prefixSlug = c.sub_claim_prefix.replace(
+          /^(?:repo|repository):/,
+          ""
+        );
         const expectedImmutableSlug = `${owner}@${ownerId}/${repoName}@${repoId}`;
-        if (prefixSlug === expectedImmutableSlug) {
+        if (
+          prefixSlug.toLowerCase() === expectedImmutableSlug.toLowerCase() ||
+          (!subjectConfig.useDefault && prefixSlug.includes("@"))
+        ) {
+          // Customized subjects have no dual-credential hedge, so GitHub's
+          // reported @-bearing prefix remains authoritative there. Defaults use
+          // the stricter canonical comparison before removing mutable trust.
           subjectConfig.useImmutableSubject = true;
         } else if (!prefixSlug.includes("@")) {
           // GitHub logins and repository names cannot contain "@", so a
@@ -950,7 +955,10 @@ export async function resolveOidcSubject(
     // An explicit/proven immutable result is security-sensitive: retaining the
     // mutable name-based trust would permit namespace recycling. All other
     // states remain dual because GitHub's rollout can enforce immutable defaults
-    // independently of the repository opt-in setting.
+    // independently of the repository opt-in setting. An unverified @-bearing
+    // default prefix is deliberately not reused to construct the immutable FIC;
+    // the ID-derived form is safer, though a genuinely authoritative divergent
+    // prefix would still cause login mismatch and needs an explicit diagnostic.
     if (subjectConfig.useImmutableSubject !== true) {
       federatedCredentials.push({
         name: buildFederatedCredentialName({
