@@ -8069,6 +8069,16 @@ function createRequestHandler(instanceId: string) {
             } catch {
               /* ignore */
             }
+          }).finally(() => {
+            // The monitor owns every terminal transition of this deploy, so
+            // firing here makes the repair loop independent of the webview.
+            // Previously the only trigger was the /api/deploy-status route,
+            // which the browser polls solely while the deployments page is
+            // mounted: closing the panel, navigating away, or reopening onto
+            // another page left a failed deploy orphaned with the handoff
+            // never attempted. The route keeps its own call as a fallback,
+            // and triggerDeployRepairHandoff is idempotent per repair loop.
+            triggerDeployRepairHandoff(entry, instanceId);
           });
         }
         res.setHeader("Content-Type", "application/json");
