@@ -167,6 +167,7 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE
 } from "./infra.js";
+import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
   getRunDetail,
@@ -622,22 +623,25 @@ const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
-// are in sync with the upstream Radius templates so the run never executes a
-// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
-// is scoped to just the workflow about to run (`only`) and is awaited so any
-// in-place update lands before the dispatch — but a sync failure never blocks
-// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
-// and delete workflow content is provider-agnostic, so it only matters for
-// verify. `workingBranch` (when it matches the repo) is synced alongside the
-// default branch so a worktree-consistent run uses current files on both.
+// are present on the branch it runs from AND in sync with the upstream Radius
+// templates, so the dispatch never 404s on a missing file or executes a drifted
+// copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
+// scoped to just the workflow about to run (`only`), authors a missing file
+// (`create`), and is awaited so any create/update lands before the dispatch —
+// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// may be "" when unknown; deploy and delete workflow content is
+// provider-agnostic, so it only matters for verify. `workingBranch` (when it
+// matches the repo) is synced alongside the default branch so a
+// worktree-consistent run uses current files on both.
 async function ensureWorkflowsCurrent(
   repo: string,
   environment: string,
   provider: string,
   only: string[],
   workingBranch = ""
-): Promise<void> {
-  if (!repo || !environment || !only || only.length === 0) return;
+): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
+  if (!repo || !environment || !only || only.length === 0)
+    return { created: [], failed: [] };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -645,18 +649,27 @@ async function ensureWorkflowsCurrent(
       {
         workingBranch: workingBranch || "",
         only,
+        // Author the workflow if it's missing on the branch it will run from,
+        // not just update drift. `gh workflow run` resolves the workflow from
+        // the default branch, so a never-committed (or wrongly-refed) file 404s;
+        // creating it here makes the dispatch self-healing.
+        create: true,
         log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
       }
     );
-    if (r && r.updated && r.updated.length) {
+    if (
+      r &&
+      ((r.updated && r.updated.length) || (r.created && r.created.length))
+    ) {
+      const changed = [...(r.updated || []), ...(r.created || [])];
       console.error(
-        `[radius workflow-presync] ${repo}: updated ${r.updated.join(
-          ", "
-        )} before dispatch`
+        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
+    return { created: r.created || [], failed: r.failed || [] };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
+    return { created: [], failed: [] };
   }
 }
 
@@ -6321,15 +6334,47 @@ function createRequestHandler(instanceId: string) {
         // GitHub Environment (and its credentials) intact.
         //
         // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy. Delete
-        // workflow content is provider-agnostic, and workflow_dispatch runs
-        // from the default branch, so provider/workingBranch aren't needed.
-        await ensureWorkflowsCurrent(repo, environment, "", [
+        // dispatching, so the run never executes a drifted copy — and author
+        // them if they're missing (the #273 case). Delete workflow content is
+        // provider-agnostic, and workflow_dispatch runs from the default
+        // branch, so provider/workingBranch aren't needed.
+        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
           DELETE_APP_DISPATCHER_FILE,
           DELETE_AZURE_FILE
         ]);
+        // If the sync couldn't commit the dispatcher to the default branch
+        // (e.g. it's protected, or the token lacks write access), the dispatch
+        // below will 404 on a genuinely-absent workflow. Fail fast with a
+        // specific message naming the branch instead of the generic hint.
+        const commitFail = sync.failed.find(
+          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
+        if (commitFail) {
+          respond(400, {
+            error:
+              "Couldn't commit the delete workflow (" +
+              DELETE_APP_DISPATCHER_FILE +
+              ') to the "' +
+              commitFail.branch +
+              '" branch of ' +
+              repo +
+              ", so there's nothing to dispatch. The branch may be protected" +
+              " or your GitHub token may lack write access to " +
+              repo +
+              "."
+          });
+          return;
+        }
+        // A just-authored workflow isn't registered by GitHub synchronously, so
+        // an immediate workflow_dispatch would 404. When we created it, wait
+        // briefly and retry the not-found race a few times (mirroring the
+        // create-environment verify dispatch); when it was already present, the
+        // single [0]-delay attempt keeps the common path fast.
+        const justCreated = sync.created.some(
+          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
         const dispatchedAt = Date.now();
-        const dispatch = await ghWorkflow([
+        const dispatchArgs = [
           "workflow",
           "run",
           DELETE_APP_DISPATCHER_FILE,
@@ -6339,17 +6384,28 @@ function createRequestHandler(instanceId: string) {
           "application=" + application,
           "--repo",
           repo
-        ]);
+        ];
+        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
+        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
+        for (const delay of dispatchDelays) {
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          dispatch = await ghWorkflow(dispatchArgs);
+          if (dispatch.code === 0) break;
+          // Only the not-found registration race self-resolves; any other
+          // failure (scope, Actions disabled, …) won't, so stop retrying.
+          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+        }
         if (dispatch.code !== 0) {
           const de = (dispatch.stderr || "").trim();
           const hint =
             /workflow.{0,20}scope/i.test(de) ?
               ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " Ensure " +
-              DELETE_APP_DISPATCHER_FILE +
-              " exists on the default branch (recreate the environment to commit it) and that Actions are enabled for " +
+            : " The delete workflow is committed to the default branch" +
+              " automatically before dispatch, so a persistent failure usually" +
+              " means GitHub Actions is disabled for " +
               repo +
-              ".";
+              " or the default branch is protected — check both and retry.";
           respond(400, {
             error:
               "Failed to start the delete workflow (" +
