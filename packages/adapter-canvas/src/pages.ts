@@ -3012,6 +3012,12 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                         }).then(function() {
                             envProgressTimer = setTimeout(tick, 0);
                         }).catch(function(error) {
+                            if (error && error.abandonOperation) {
+                                fetch('/api/operations/' + encodeURIComponent(operationId) + '/abandon', { method: 'POST' })
+                                    .then(function() { envProgressTimer = setTimeout(tick, 0); })
+                                    .catch(function() { envProgressTimer = setTimeout(tick, 1500); });
+                                return;
+                            }
                             if (error && error.retryPrompt) promptingRequestedAt = '';
                             envProgressTimer = setTimeout(tick, 1500);
                         });
@@ -3647,7 +3653,7 @@ function promptSmr() {
             cleanup();
             resolve(smr);
         }
-        function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
+        function onCancel() { cleanup(); var error = new Error('Service Management Reference is required to continue.'); error.abandonOperation = true; reject(error); }
         retryBtn.addEventListener('click', onRetry);
         cancelBtn.addEventListener('click', onCancel);
     });
@@ -3777,7 +3783,7 @@ function showAppPicker(opts) {
             if (chosen.value === '__create__') resolve({ createNew: true });
             else resolve({ appId: chosen.value });
         }
-        function onCancel() { cleanup(); reject(new Error('Identity selection cancelled.')); }
+        function onCancel() { cleanup(); var error = new Error('Identity selection cancelled.'); error.abandonOperation = true; reject(error); }
         confirmBtn.addEventListener('click', onConfirm);
         cancelBtn.addEventListener('click', onCancel);
     });

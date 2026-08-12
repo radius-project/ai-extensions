@@ -137,14 +137,32 @@ describe("POST /api/operations server-owned execution", () => {
 
     const wrong = await postJson(
       `/api/operations/${encodeURIComponent(op.operationId)}/resume/app-selection-required`,
-      { appId: "app-1" }
+      {
+        checkpoint: "azure-service-management-reference",
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
+        appId: "app-1"
+      }
     );
     expect(wrong.status).toBe(409);
+
+    const missingContext = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
+      {
+        checkpoint: "azure-service-management-reference",
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+      }
+    );
+    expect(missingContext.status).toBe(409);
 
     const resumed = await postJson(
       `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
       {
         checkpoint: "azure-service-management-reference",
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
         serviceManagementReference: "11111111-1111-1111-1111-111111111111"
       }
     );
@@ -153,6 +171,26 @@ describe("POST /api/operations server-owned execution", () => {
     expect(op.request.azure.serviceManagementReference).toBe(
       "11111111-1111-1111-1111-111111111111"
     );
+  });
+
+  it("abandons an input wait and releases the repository lock", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/abandon");
+    requireInput(op, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      fields: ["appId", "createNew"],
+      message: "Choose an app."
+    });
+
+    const abandoned = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/abandon`,
+      {}
+    );
+    expect(abandoned.status).toBe(200);
+    expect(op.state).toBe("cancelled");
+    expect(operations.running(op.repo)).toBeNull();
   });
 });
 

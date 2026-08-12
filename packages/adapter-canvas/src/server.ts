@@ -14,7 +14,7 @@ import type {
   Server as HttpServer,
   ServerResponse
 } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
@@ -119,6 +119,7 @@ import {
 } from "./verification-plan.js";
 import {
   operations,
+  isTerminalState,
   isStale,
   hasCompleteVerificationIdentity,
   toClientView,
@@ -146,6 +147,7 @@ import {
   requireInput,
   resumeAfterInput,
   setExecutionActive,
+  INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
@@ -2352,6 +2354,7 @@ function createRequestHandler(
   resolveBaseUrl: () => string
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
+  const serverOwnedToken = randomUUID();
 
   function scheduleServerOwnedTask(
     operationId: string,
@@ -2404,7 +2407,7 @@ function createRequestHandler(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "1"
+        "X-Radius-Server-Owned": serverOwnedToken
       },
       body: JSON.stringify(data)
     });
@@ -2429,7 +2432,7 @@ function createRequestHandler(
       });
       const response = await fetch(
         `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
-        { headers: { "X-Radius-Server-Owned": "1" } }
+        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
       );
       const result: any = await response.json();
       if (!response.ok) {
@@ -2487,6 +2490,8 @@ function createRequestHandler(
     lastWebviewActivityAt = Date.now();
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    const isServerOwnedRequest =
+      req.headers["x-radius-server-owned"] === serverOwnedToken;
     // CSRF defense-in-depth: reject cross-site state-changing requests before
     // any routing or body parse. See isCrossSiteMutation for the rules.
     if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
@@ -2748,10 +2753,10 @@ function createRequestHandler(
       if (
         !canResumeInput(op, {
           code,
-          checkpoint: data.checkpoint || op.inputRequired?.checkpoint,
-          repo: data.repo || op.repo,
-          environment: data.environment || op.environment,
-          provider: data.provider || op.provider
+          checkpoint: data.checkpoint,
+          repo: data.repo,
+          environment: data.environment,
+          provider: data.provider
         })
       ) {
         res.setHeader("Content-Type", "application/json");
@@ -2768,6 +2773,12 @@ function createRequestHandler(
       if (!op.request && op.resumeRequest) {
         op.request = structuredClone(op.resumeRequest);
       }
+      const resumeSnapshot = {
+        inputRequired: structuredClone(op.inputRequired),
+        request: structuredClone(op.request),
+        resumeRequest:
+          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
+      };
       if (code === "service-management-reference-required") {
         op.request.azure.serviceManagementReference =
           data.serviceManagementReference || "";
@@ -2794,7 +2805,26 @@ function createRequestHandler(
         return;
       }
       resumeAfterInput(op);
-      await operations.persist();
+      try {
+        await operations.persist();
+      } catch (error) {
+        op.request = resumeSnapshot.request;
+        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
+        else op.resumeRequest = resumeSnapshot.resumeRequest;
+        requireInput(op, resumeSnapshot.inputRequired);
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+            code: "operation-resume-persist-failed",
+            operationId,
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
       res.setHeader("Content-Type", "application/json");
       res.writeHead(202);
       res.end(
@@ -2808,6 +2838,49 @@ function createRequestHandler(
           runEnvironmentOperation(operationId)
         )
       );
+      return;
+    }
+    const abandonMatch = pathname.match(/^\/api\/operations\/([^/]+)\/abandon$/);
+    if (abandonMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(abandonMatch[1]);
+      const op = operations.get(operationId);
+      if (
+        !op ||
+        op.state !== INPUT_REQUIRED_STATE ||
+        op.executionActive ||
+        isTerminalState(op.state)
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(op ? 409 : 404);
+        res.end(
+          JSON.stringify({
+            error:
+              op ?
+                "The operation is not waiting for input."
+              : "Unknown operation.",
+            code: op ? "operation-abandon-mismatch" : "unknown-operation"
+          })
+        );
+        return;
+      }
+      finish(op, "cancelled");
+      try {
+        await operations.persist();
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Radius could not persist the abandoned operation.",
+            code: "operation-abandon-persist-failed",
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
     if (pathname.startsWith("/api/operations/") && req.method === "GET") {
@@ -3623,7 +3696,7 @@ function createRequestHandler(
             existing.environment !== envName ||
             existing.provider !== "azure" ||
             existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
-            (!data.serverOwned && !existing.inputRequired)
+            (!isServerOwnedRequest && !existing.inputRequired)
           ) {
             await fail(
               409,

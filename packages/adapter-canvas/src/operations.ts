@@ -400,11 +400,19 @@ export function canResumeInput(
     op.executionActive
   )
     return false;
-  if (code && op.inputRequired.code !== code) return false;
-  if (checkpoint && op.inputRequired.checkpoint !== checkpoint) return false;
-  if (repo && op.repo !== repo) return false;
-  if (environment && op.environment !== environment) return false;
-  if (provider && op.provider !== provider) return false;
+  if (
+    !code ||
+    !checkpoint ||
+    !repo ||
+    !environment ||
+    !provider ||
+    op.inputRequired.code !== code ||
+    op.inputRequired.checkpoint !== checkpoint ||
+    op.repo !== repo ||
+    op.environment !== environment ||
+    op.provider !== provider
+  )
+    return false;
   return true;
 }
 

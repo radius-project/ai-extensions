@@ -1396,7 +1396,8 @@ describe("the step-marker convention at the call sites", () => {
     const out = [];
     const re = /steps\.push\(\s*([\s\S]*?)\);/g;
     let m;
-    while ((m = re.exec(SERVER_SRC))) out.push(m[1].trim());
+    while ((m = re.exec(SERVER_SRC)))
+      out.push(m[1].trim().replace(/,\s*$/, ""));
     return out;
   }
 
@@ -1475,7 +1476,12 @@ describe("environment creation boundaries", () => {
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
-    expect(SERVER_SRC).toContain('X-Radius-Server-Owned": "1"');
+    expect(SERVER_SRC).toContain(
+      '"X-Radius-Server-Owned": serverOwnedToken'
+    );
+    expect(SERVER_SRC).toContain(
+      'req.headers["x-radius-server-owned"] === serverOwnedToken'
+    );
     expect(SERVER_SRC).toContain('postInternal("/api/azure-auto-setup"');
     expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');
   });
