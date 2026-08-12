@@ -11,6 +11,9 @@ interface InfraMockState {
   committed: Record<string, Record<string, string>>;
   commits: RecordedCommit[];
   upstream: Record<string, string>;
+  // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
+  // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
+  failCommits: boolean;
 }
 
 // Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
@@ -20,6 +23,7 @@ interface InfraMockState {
 const h = vi.hoisted<InfraMockState>(() => ({
   committed: {}, // branch -> { path -> committed body } (absent = file missing)
   commits: [], // recorded commitFileToRepo calls
+  failCommits: false, // when true, commitFileToRepo rejects
   upstream: {
     // Minimal stand-ins for radius-project/radius/.github/extension templates.
     "verify-azure.yml":
@@ -47,6 +51,8 @@ vi.mock("./gh.js", () => ({
       : { content: body, error: null };
   },
   getDefaultBranch: async () => "main",
+  getBranchHeadSha: async (_repo: string, branch: string) =>
+    branch in h.committed ? `sha-${branch}` : "",
   fetchFileFromRepo: async (_repo: string, path: string, branch = "main") => {
     const files = h.committed[branch];
     return files && path in files ? files[path] : null;
@@ -58,6 +64,7 @@ vi.mock("./gh.js", () => ({
     branch: string,
     message: string
   ) => {
+    if (h.failCommits) throw new Error("protected branch");
     h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
@@ -119,6 +126,7 @@ describe("syncRepoWorkflows", () => {
   beforeEach(() => {
     h.committed = {};
     h.commits = [];
+    h.failCommits = false;
   });
 
   it("no-ops when there are no managed environments", async () => {
@@ -326,5 +334,106 @@ describe("syncRepoWorkflows", () => {
     expect(res.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
     expect(h.commits).toHaveLength(1);
     expect(h.commits[0].path).toBe(".github/workflows/run-rad-commands.yml");
+  });
+
+  it("with `create`, authors a missing workflow on the default branch", async () => {
+    // Repo has the deploy + verify files but is missing the delete workflows.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"],
+        create: true
+      }
+    );
+
+    expect(res.created.sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    // Newly-authored files are reported under `created`, not `updated`.
+    expect(res.updated).toEqual([]);
+    expect(res.failed).toEqual([]);
+    const created = h.commits.map((c) => c.path).sort();
+    expect(created).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    expect(h.commits.every((c) => c.branch === "main")).toBe(true);
+    const expected = await generateDeleteWorkflow("dev");
+    const dispatcher = h.commits.find(
+      (c) => c.path === ".github/workflows/delete-application.yml"
+    );
+    expect(dispatcher?.content).toBe(expected["delete-application.yml"]);
+  });
+
+  it("without `create`, still skips a missing workflow (no authoring)", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"]
+      }
+    );
+
+    expect(res.updated).toEqual([]);
+    expect(res.created).toEqual([]);
+    expect(h.commits).toEqual([]);
+  });
+
+  it("with `create`, does NOT author onto an unpushed working branch", async () => {
+    // Default branch is fully in sync; the working branch isn't pushed, so its
+    // missing files must not be authored even though `create` is set.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    // No `h.committed.feature` — branch absent on the remote.
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        workingBranch: "feature",
+        create: true
+      }
+    );
+
+    expect(res.updated).toEqual([]);
+    expect(res.created).toEqual([]);
+    expect(res.failed).toEqual([]);
+    expect(h.commits).toEqual([]);
+  });
+
+  it("reports a commit failure in `failed` and does not abort the pass", async () => {
+    // The default branch is missing the delete workflows, but committing to it
+    // is rejected (e.g. a protected branch). The failure must be surfaced in
+    // `failed` — carrying the branch — rather than swallowed.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    delete h.committed.main[".github/workflows/delete-azure.yml"];
+    h.failCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      {
+        only: ["delete-application.yml", "delete-azure.yml"],
+        create: true
+      }
+    );
+
+    expect(res.created).toEqual([]);
+    expect(res.updated).toEqual([]);
+    expect(res.failed.map((f) => f.path).sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-azure.yml"
+    ]);
+    expect(res.failed.every((f) => f.branch === "main")).toBe(true);
   });
 });
