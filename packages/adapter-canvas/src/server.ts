@@ -248,6 +248,27 @@ export async function persistMutationCheckpoint({
   }
 }
 
+export async function persistBestEffort({
+  operation,
+  persist,
+  report
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    return false;
+  }
+}
+
 interface EnvironmentListResult {
   error?: string;
   stdout?: string;
@@ -3950,35 +3971,7 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
-              try {
-                await operations.persist();
-              } catch (error) {
-                operations.report?.({
-                  code: "operation-store-write-failed",
-                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-                });
-                finish(op, "failed", {
-                  failure: {
-                    code: "operation-persistence-failed",
-                    stage: op.currentStage,
-                    stepSeq: null,
-                    message:
-                      "Radius changed no cloud resources because it could not save the setup recovery record.",
-                    classification: "unknown"
-                  }
-                });
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(500);
-                res.end(
-                  JSON.stringify({
-                    error:
-                      "Radius changed no cloud resources because it could not save the setup recovery record.",
-                    code: "operation-persistence-failed",
-                    operationId: op.operationId
-                  })
-                );
-                return;
-              }
+              if (!(await checkpoint())) return;
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -4128,35 +4121,7 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
-        try {
-          await operations.persist();
-        } catch (error) {
-          operations.report?.({
-            code: "operation-store-write-failed",
-            message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-          });
-          finish(op, "failed", {
-            failure: {
-              code: "operation-persistence-failed",
-              stage: op.currentStage,
-              stepSeq: null,
-              message:
-                "Radius changed no cloud resources because it could not save the setup recovery record.",
-              classification: "unknown"
-            }
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(500);
-          res.end(
-            JSON.stringify({
-              error:
-                "Radius changed no cloud resources because it could not save the setup recovery record.",
-              code: "operation-persistence-failed",
-              operationId: op.operationId
-            })
-          );
-          return;
-        }
+        if (!(await checkpoint())) return;
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -4314,7 +4279,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
-            await operations.persist();
+            if (!(await checkpoint())) return;
           }
         }
 
@@ -4839,7 +4804,35 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
-          await operations.persist();
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
@@ -5599,6 +5592,7 @@ function createRequestHandler(instanceId: string) {
             runId: verifyRunId == null ? null : String(verifyRunId),
             runUrl: verifyRunUrl || null
           };
+          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
           if (!(await checkpoint())) return;
           const entry = servers.get(instanceId);
           if (entry) {
@@ -5643,7 +5637,11 @@ function createRequestHandler(instanceId: string) {
                   }" to finish setup.`
             }
           });
-          await operations.persist();
+          await persistBestEffort({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
         } else {
           recordCommitState(op, {
             mode: prState ? "pull_request" : "default_branch",
@@ -5652,10 +5650,8 @@ function createRequestHandler(instanceId: string) {
               prState?.base || verifyPlan.defaultBranch || defaultBranch,
             pullRequestUrl: pullRequestUrl || null
           });
-          // Verification is dispatched but still running; the client
-          // polls /api/verify-status and the record stays open until it
-          // reaches a verdict.
-          enterStage(op, STAGE_VERIFY);
+          // Verification is dispatched but still running; stage and exact
+          // dispatch identity were persisted together above.
         }
 
         res.setHeader("Content-Type", "application/json");
@@ -6643,7 +6639,11 @@ function createRequestHandler(instanceId: string) {
               runId: String(runId),
               runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
             };
-            await operations.persist();
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
           } else if (runId && entry) entry.state.verifyRunId = runId;
         }
         if (!runId) {
@@ -6679,7 +6679,11 @@ function createRequestHandler(instanceId: string) {
         if (detail.conclusion === "success") {
           if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
             finishSucceeded(verifyOp);
-            await operations.persist();
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
           }
           respond({ state: "success", runId, runUrl });
           return;
@@ -6724,7 +6728,11 @@ function createRequestHandler(instanceId: string) {
               evidence: errMsg
             }
           });
-          await operations.persist();
+          await persistBestEffort({
+            operation: verifyOp,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
         }
         respond({ state: "failed", runId, runUrl, error: errMsg });
       } catch (e) {

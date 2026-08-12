@@ -19,7 +19,7 @@ import {
   toClientView
 } from "./operations.js";
 import type { OperationStore } from "./operation-store.js";
-import { persistMutationCheckpoint } from "./server.js";
+import { persistBestEffort, persistMutationCheckpoint } from "./server.js";
 
 const directories: string[] = [];
 
@@ -147,6 +147,33 @@ describe("operation restart functional coverage", () => {
       recoveryState: "verification_pending",
       verification: {
         runId: "777",
+        ref: "feature/cart",
+        environment: "dev"
+      }
+    });
+  });
+
+  it("restores verification pending when stage and dispatch identity are checkpointed together", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "feature/cart",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    enterStage(op, STAGE_VERIFY);
+    await first.persist();
+
+    const restored = await restart();
+    expect(restored.get(op.operationId)).toMatchObject({
+      currentStage: STAGE_VERIFY,
+      recoveryState: "verification_pending",
+      verification: {
+        workflow: "radius-verify-credentials.yml",
         ref: "feature/cart",
         environment: "dev"
       }
@@ -404,5 +431,26 @@ describe("operation restart functional coverage", () => {
     });
     expect(putCalls).toBe(1);
     expect(deleteCalls).toBe(0);
+  });
+
+  it("reports a best-effort persistence failure without changing the authoritative result", async () => {
+    const diagnostics = [];
+    let result = "success";
+    const persisted = await persistBestEffort({
+      operation: operation(),
+      persist: async () => {
+        throw new Error("disk full");
+      },
+      report: (diagnostic) => diagnostics.push(diagnostic)
+    });
+
+    expect(persisted).toBe(false);
+    expect(result).toBe("success");
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: "operation-store-write-failed",
+        message: expect.stringContaining("disk full")
+      })
+    ]);
   });
 });

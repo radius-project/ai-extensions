@@ -1070,6 +1070,9 @@ describe("environmentPage — non-blocking setup progress", () => {
     );
     expect(html).toContain("v.state === 'expired' || v.terminal");
     expect(html).not.toContain("v.state === 'unknown' || v.terminal");
+    expect(html).toContain(
+      "if (op.verification && op.verification.dispatchedAt) verifyDispatchedAtMs = Number(op.verification.dispatchedAt);"
+    );
   });
 
   it("re-hydrates terminal request failures from the shared operation record", () => {

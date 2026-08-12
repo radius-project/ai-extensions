@@ -1235,7 +1235,16 @@ export function createRegistry({
       prune();
       // Rewrite only after every record has been inspected. This removes rejected
       // records without allowing one bad entry to brick every future startup.
-      if (rejected > 0) await store.save(snapshot());
+      if (rejected > 0) {
+        try {
+          await store.save(snapshot());
+        } catch (error) {
+          store.report?.({
+            code: "operation-store-cleanup-write-failed",
+            message: `Restored valid operations but could not rewrite the cleaned operation store: ${String(error)}`
+          });
+        }
+      }
       return restored;
     },
     async persist() {
@@ -1401,6 +1410,10 @@ export function toClientView(op: any): any {
     context: op.context,
     journey: op.journey,
     terminal: op.terminal,
+    verification:
+      typeof op.verification?.dispatchedAt === "number" ?
+        { dispatchedAt: op.verification.dispatchedAt }
+      : null,
     inputRequired: op.inputRequired || null,
     summary: summarize(op),
     terminalState: isTerminalState(op.state) ? op.state : null,

@@ -561,6 +561,24 @@ describe("client projection", () => {
     expect(toClientView(op).terminalState).toBe("succeeded");
   });
 
+  it("projects only the verification dispatch time to the browser", () => {
+    const op = newOp();
+    op.verification = {
+      dispatchedAt: 1234,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "777",
+      runUrl: "https://github.com/contoso/store/actions/runs/777"
+    };
+
+    expect(toClientView(op).verification).toEqual({ dispatchedAt: 1234 });
+    const projected = JSON.stringify(toClientView(op));
+    expect(projected).not.toContain("radius-verify-credentials");
+    expect(projected).not.toContain("actions/runs");
+    expect(projected).not.toContain("runId");
+  });
+
   it("projects removed resources, reusable artifacts, and a clean retry after rollback", () => {
     const op = newOp();
     recordAzureApp(op, {
@@ -887,6 +905,44 @@ describe("registry", () => {
     await expect(restored.hydrate()).resolves.toEqual([]);
     expect(restored.size()).toBe(0);
     expect(envelope.operations).toEqual([]);
+  });
+
+  it("keeps valid restored records when rewriting a cleaned envelope fails", async () => {
+    const valid = newOp();
+    requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    const diagnostics = [];
+    const store = {
+      report(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+      async load() {
+        return {
+          schemaVersion: 1,
+          operations: [
+            toPersistedOperation(valid),
+            { operationId: "op_invalid", schemaVersion: 1 }
+          ]
+        };
+      },
+      async save() {
+        throw new Error("disk full");
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toHaveLength(1);
+    expect(restored.get(valid.operationId)).toMatchObject({
+      recoveryState: "waiting_input"
+    });
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "operation-store-invalid-record" }),
+        expect.objectContaining({
+          code: "operation-store-cleanup-write-failed",
+          message: expect.stringContaining("disk full")
+        })
+      ])
+    );
   });
 
   it("reports persistence failures without retrying the failed write", async () => {
