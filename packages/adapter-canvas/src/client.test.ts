@@ -344,19 +344,29 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     textContent: string;
     className: string;
     disabled: boolean;
+    title?: string;
+    setAttribute(name: string, value: string): void;
+    removeAttribute(name: string): void;
   }
 
   function runApply(
     hasEnv: boolean,
     hasDeployment: boolean,
     appValue = "web-app",
-    envValue = "prod"
+    envValue = "prod",
+    deploymentStatus?: string
   ) {
     const btn: FakeBtn = {
       dataset: {},
       textContent: "",
       className: "",
-      disabled: true
+      disabled: true,
+      setAttribute(name: string, value: string) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute(name: string) {
+        if (name === "title") delete this.title;
+      }
     };
     const hint = { textContent: "", innerHTML: "" };
     const elements: Record<string, unknown> = {
@@ -370,7 +380,7 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
       "document",
       `${CLIENT_REPO_BRANCH_JS}; return radiusApplyDeployedEnvState;`
     )(document);
-    const mode = apply(hasEnv, hasDeployment);
+    const mode = apply(hasEnv, hasDeployment, deploymentStatus);
     return { btn, hint, mode };
   }
 
@@ -394,6 +404,45 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     expect(hint.innerHTML).toContain("<strong>web-app</strong>");
     expect(hint.innerHTML).toContain("<strong>prod</strong>");
     expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  // A delete already in flight must not be dispatchable a second time. This
+  // mirrors the Deployments table, whose per-row delete button is disabled while
+  // the status is "deleting" — the two surfaces drive the same operation, so a
+  // gap here would just be a second way around the same guard.
+  it("disables the button while a delete is already in flight", () => {
+    const { btn, hint, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "deleting"
+    );
+    expect(mode).toBe("delete");
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deleting\u2026");
+    expect(btn.title).toContain("already being deleted");
+    expect(hint.innerHTML).toContain("currently being deleted");
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+  });
+
+  it.each(["success", "failed", "unknown", undefined])(
+    "leaves the button enabled for terminal status %s",
+    (status) => {
+      const { btn } = runApply(true, true, "web-app", "prod", status);
+      expect(btn.disabled).toBe(false);
+      expect(btn.textContent).toBe("Delete Deployment");
+      expect(btn.title).toBeUndefined();
+    }
+  );
+
+  // The state is re-applied on every selector change, so a stale title left over
+  // from a deleting environment must not follow the user to a healthy one.
+  it("clears the deleting tooltip when the selection changes to a free environment", () => {
+    const { btn } = runApply(true, false, "web-app", "staging", "deleting");
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
   });
 
   it("offers Delete Deployment when a deployment already exists", () => {

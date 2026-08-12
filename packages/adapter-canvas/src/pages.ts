@@ -1791,6 +1791,13 @@ function escapeHtmlClient(s) {
         return !!DEPLOYMENTS_BY_ENV[env];
     }
 
+    // The selected environment's deployment status, or '' when nothing is
+    // deployed there. "deleting" means a delete run is still in flight.
+    function deploymentStatus(app, env) {
+        if (!deploymentExists(app, env)) return '';
+        return DEPLOYMENTS_BY_ENV[env] || '';
+    }
+
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
     var logOutput = document.getElementById('deployed-log-output');
@@ -1836,10 +1843,32 @@ function escapeHtmlClient(s) {
 
     function refreshControls() {
         var app = appSelect.value, env = envSelect.value;
-        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env));
+        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env));
         labelEl.innerHTML = (app && env)
             ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
             : '';
+        // A delete in flight is transient, so poll until it resolves — otherwise
+        // the button stays stuck on "Deleting…" until a manual reload.
+        scheduleDeletePoll(deploymentStatus(app, env) === 'deleting');
+    }
+
+    // Refresh the deployment listing while a delete runs so the button re-enables
+    // on its own once the delete finishes. Bounded so a stuck delete never polls
+    // forever; on timeout the real status is whatever the listing last reported.
+    var deletePollTimer = null;
+    var deletePollTries = 0;
+    function scheduleDeletePoll(active) {
+        if (!active) {
+            if (deletePollTimer) { clearTimeout(deletePollTimer); deletePollTimer = null; }
+            deletePollTries = 0;
+            return;
+        }
+        if (deletePollTimer || deletePollTries > 45) return; // ~3 min at 4s
+        deletePollTimer = setTimeout(function() {
+            deletePollTimer = null;
+            deletePollTries++;
+            loadDeploymentStates().then(refreshControls);
+        }, 4000);
     }
 
     function showNothing(msg) {

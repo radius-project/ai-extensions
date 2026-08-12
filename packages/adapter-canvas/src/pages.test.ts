@@ -847,12 +847,21 @@ describe("deployedGraphPage", () => {
       "The deployed application graph depicts the selected application"
     );
     expect(html).toContain('id="deployed-subtitle-hint"');
-    expect(html).toContain(
-      "radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env))"
-    );
+    expect(html).toContain("radiusApplyDeployedEnvState(HAS_ENVS,");
     expect(html).toContain("radiusDeployDeployedApp(");
     expect(html).toContain("/api/list-deployments?repo=");
     expect(html).toContain('var CONTEXT_BRANCH = "feature-x"');
+  });
+
+  // The disabled-while-deleting guard only works if the page actually feeds the
+  // selected environment's status into the adaptive state function, and then
+  // keeps polling so the button re-enables once the delete resolves.
+  it("passes the deployment status through and polls while a delete runs", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("deploymentStatus(app, env)");
+    expect(html).toContain("function deploymentStatus(");
+    expect(html).toContain("scheduleDeletePoll(");
+    expect(html).toContain("deploymentStatus(app, env) === 'deleting'");
   });
 
   it("places the primary button inline with the selectors", () => {

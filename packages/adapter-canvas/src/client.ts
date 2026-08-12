@@ -250,10 +250,15 @@ var RADIUS_DEPLOYED_HAS_DEPLOYMENT = false;
 // escalating states:
 //   • no environment at all      → "Create Environment" (links to the form)
 //   • environment but no deploy  → "Deploy Application" (dispatches a deploy)
-//   • an existing deployment     → "Delete Deployment"  (existing modal flow)
+//   • an existing deployment     → "Delete Deployment"  (3-step confirm dialog)
 // The subtitle hint under the sub-tabs names the selected application and
 // environment so the next step is always spelled out.
-function radiusApplyDeployedEnvState(hasEnv, hasDeployment) {
+//
+// deploymentStatus is the selected environment's deployment status. A delete
+// already in flight disables the button, matching the Deployments table, whose
+// per-row delete button is likewise disabled while status is "deleting" —
+// dispatching a second delete would only fail or race the first.
+function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus) {
     RADIUS_DEPLOYED_HAS_ENV = !!hasEnv;
     RADIUS_DEPLOYED_HAS_DEPLOYMENT = !!hasDeployment;
     var btn = document.getElementById('deployed-delete-btn');
@@ -262,9 +267,11 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment) {
     var envSel = document.getElementById('deployed-env-select');
     var app = (appSel && appSel.value) || '';
     var env = (envSel && envSel.value) || '';
+    var deleting = deploymentStatus === 'deleting';
     var mode = !hasEnv ? 'create-env' : (hasDeployment ? 'delete' : 'deploy');
     if (btn) {
         btn.dataset.mode = mode;
+        btn.removeAttribute('title');
         if (mode === 'create-env') {
             btn.textContent = 'Create Environment';
             btn.className = 'rad-btn rad-btn--primary';
@@ -274,9 +281,12 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment) {
             btn.className = 'rad-btn rad-btn--primary';
             btn.disabled = !(app && env);
         } else {
-            btn.textContent = 'Delete Deployment';
+            btn.textContent = deleting ? 'Deleting…' : 'Delete Deployment';
             btn.className = 'rad-btn rad-btn--danger-outline';
-            btn.disabled = !(app && env);
+            btn.disabled = !(app && env) || deleting;
+            if (deleting) {
+                btn.setAttribute('title', 'This deployment is already being deleted from environment "' + env + '". Wait for the delete to finish.');
+            }
         }
     }
     if (hint) {
@@ -286,6 +296,8 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment) {
             hint.textContent = ' To deploy this application, you must first create an environment.';
         } else if (mode === 'deploy') {
             hint.innerHTML = ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
+        } else if (deleting) {
+            hint.innerHTML = ' The application (' + appLabel + ') is currently being deleted from the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
         } else {
             hint.innerHTML = ' Click the name of any application component to deep link into the cloud portal for its infrastructure. To delete the application (' + appLabel + ') currently deployed to the environment (' + envLabel + '), click "Delete Deployment".';
         }
