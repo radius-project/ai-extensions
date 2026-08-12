@@ -1,6 +1,6 @@
 ---
 name: radius-code-quality
-description: 'Mandatory repository-wide engineering workflow for every production TypeScript or JavaScript change in radius-project/ai-extensions. Use whenever an agent adds, edits, refactors, or reviews code, tests, runtime behavior, HTTP routes, page renderers, browser behavior, build logic, or generated-extension inputs. Enforces the Radius Canvas re-architecture from PR #282, complete Vitest coverage with a goal of 100% coverage for changed production code, required boundary tests, and repository TypeScript/JavaScript conventions.'
+description: 'Mandatory repository-wide engineering workflow for every TypeScript or JavaScript change in radius-project/ai-extensions. Use whenever an agent adds, edits, refactors, or reviews code, tests, runtime behavior, HTTP routes, page renderers, browser behavior, build logic, or generated-extension inputs. Enforces the Radius Canvas re-architecture from PR #282, complete Vitest coverage with a goal of 100% coverage for changed production code, required boundary tests, and repository TypeScript/JavaScript conventions.'
 argument-hint: 'The production-code change, bug, feature, or refactor to implement'
 user-invocable: true
 ---
