@@ -1,6 +1,14 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
+// The ref of radius-project/radius that hosts the delete workflow templates and
+// the `delete-resource` composite action. These now live on `main`, so both the
+// template fetch and the `{{RADIUS_REF}}` the provider workflows pin their
+// composite actions to default to RADIUS_REF ("main"). It can be overridden via
+// the RADIUS_DELETE_REF env var (e.g. pin to a commit SHA or a PR branch) so the
+// delete templates can be re-pinned without releasing a new core package.
+export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || RADIUS_REF;
+
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
 // `.github/workflows/`. The dispatcher references both provider files by path
@@ -13,7 +21,7 @@ export type DeleteWorkflowFiles = Record<string, string>;
 
 /**
  * Build the application-delete GitHub Actions workflows, mirroring the
- * composite-action structure of radius-project/radius (PR #12367).
+ * composite-action structure of radius-project/radius.
  *
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` dispatcher plus the reusable
@@ -33,7 +41,7 @@ export function generateDeleteWorkflow(
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${RADIUS_REF}".`
+        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`
       );
     }
     return body;
@@ -45,11 +53,11 @@ export function generateDeleteWorkflow(
     ),
     [DELETE_AZURE_FILE]: fillTemplate(pick(DELETE_AZURE_FILE), {
       ENV: env,
-      RADIUS_REF
+      RADIUS_REF: DELETE_RADIUS_REF
     }),
     [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
       ENV: env,
-      RADIUS_REF
+      RADIUS_REF: DELETE_RADIUS_REF
     })
   };
   for (const [file, body] of Object.entries(files)) {
