@@ -266,19 +266,6 @@ describe("RU-19: keepalive", () => {
     expect(session.metadata!.snapshot).toHaveBeenCalled();
   });
 
-  it("pings when environment setup is in flight even if the panel is not recently active", async () => {
-    const { ext, deps, setLastWebviewActivityAt } = setup();
-    const session = createFakeSession();
-    ext.attachSession(session);
-    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
-    (deps.operations.setupInFlight as ReturnType<typeof vi.fn>).mockReturnValue(
-      true
-    );
-
-    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
-    expect(session.metadata!.snapshot).toHaveBeenCalled();
-  });
-
   it("never throws even when session.metadata.snapshot rejects", async () => {
     const { ext, setLastWebviewActivityAt } = setup();
     const session = createFakeSession({
@@ -301,6 +288,72 @@ describe("RU-19: keepalive", () => {
 
     await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
     expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe("RU-21: operation-aware host keepalive", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the host channel alive while setup is in flight, then stops after terminal state", async () => {
+    const { ext, deps, setLastWebviewActivityAt } = setup();
+    const session = createFakeSession();
+    const setupInFlight = deps.operations.setupInFlight as ReturnType<
+      typeof vi.fn
+    >;
+    setupInFlight.mockReturnValueOnce(true).mockReturnValue(false);
+    ext.attachSession(session);
+    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
+
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+    expect(setupInFlight).toHaveBeenCalledTimes(2);
+    expect(session.metadata!.snapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails safely when setup state cannot be read", async () => {
+    const { ext, deps, setLastWebviewActivityAt } = setup();
+    const session = createFakeSession();
+    (
+      deps.operations.setupInFlight as ReturnType<typeof vi.fn>
+    ).mockImplementation(() => {
+      throw new Error("operation registry unavailable");
+    });
+    ext.attachSession(session);
+    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
+
+    await expect(
+      vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10)
+    ).resolves.not.toThrow();
+    expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate runtime cleanup during an active setup operation", async () => {
+    const { ext, deps } = setup();
+    const close = vi.fn((callback?: () => void) => callback?.());
+    (deps.operations.setupInFlight as ReturnType<typeof vi.fn>).mockReturnValue(
+      true
+    );
+    deps.servers.set("radius-panel", {
+      server: { close, closeAllConnections: vi.fn() } as never,
+      baseUrl: "http://127.0.0.1:0",
+      url: "http://127.0.0.1:0/?page=environment",
+      page: "environment",
+      state: {}
+    });
+    ext.attachSession(createFakeSession());
+
+    const shutdown1 = ext.shutdown("SIGTERM");
+    const shutdown2 = ext.shutdown("SIGINT");
+    expect(shutdown1).toBe(shutdown2);
+    await Promise.all([shutdown1, shutdown2]);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
 
