@@ -219,20 +219,40 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     dataset: { mode?: string };
     textContent: string;
     disabled: boolean;
+    title?: string;
+    setAttribute(name: string, value: string): void;
+    removeAttribute(name: string): void;
   }
   interface FakeSelect {
     value: string;
   }
 
-  function runApply(hasEnv: boolean, appValue = "web-app", envValue = "prod") {
-    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
+  function runApply(
+    hasEnv: boolean,
+    appValue = "web-app",
+    envValue = "prod",
+    branchValue = "main"
+  ) {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      disabled: true,
+      setAttribute(name: string, value: string) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute(name: string) {
+        if (name === "title") delete this.title;
+      }
+    };
     const hint = { textContent: "", innerHTML: "" };
     const appSel: FakeSelect = { value: appValue };
     const envSel: FakeSelect = { value: envValue };
+    const branchSel: FakeSelect = { value: branchValue };
     const elements: Record<string, unknown> = {
       "plan-btn": btn,
       "planned-subtitle-hint": hint,
       "planned-app": appSel,
+      "planned-branch": branchSel,
       "planned-env": envSel
     };
     const document = { getElementById: (id: string) => elements[id] || null };
@@ -260,6 +280,50 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(hint.innerHTML).toContain("<strong>web-app</strong>");
     expect(hint.innerHTML).toContain("<strong>prod</strong>");
     expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  // An empty branch is not inert at the server: /api/deploy resolves it to the
+  // repo's default branch, so an enabled button here would deploy code the user
+  // never previewed on the planned graph.
+  it("stays disabled until a branch is selected", () => {
+    const { btn } = runApply(true, "web-app", "prod", "");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("branch");
+  });
+
+  it("stays disabled until an environment is selected", () => {
+    const { btn } = runApply(true, "web-app", "", "main");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("environment");
+  });
+
+  it("stays disabled when neither a branch nor an environment is selected", () => {
+    const { btn } = runApply(true, "web-app", "", "");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("branch");
+    expect(btn.title).toContain("environment");
+  });
+
+  it("treats a whitespace-only branch as unselected", () => {
+    const { btn } = runApply(true, "web-app", "prod", "   ");
+    expect(btn.disabled).toBe(true);
+  });
+
+  // The state is re-applied on every selector change, so a tooltip explaining a
+  // now-resolved gap must not linger.
+  it("clears the explanatory tooltip once the selection is complete", () => {
+    const { btn } = runApply(true, "web-app", "prod", "main");
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
+  });
+
+  // Create Environment navigates rather than deploying, so it has nothing to
+  // wait on and must stay clickable.
+  it("keeps Create Environment enabled regardless of branch/environment", () => {
+    const { btn } = runApply(false, "", "", "");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
   });
 
   it("HTML-escapes app/environment names in the hint to avoid injection", () => {
@@ -310,6 +374,36 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     });
     expect(btn.disabled).toBe(true);
     expect(location.href).toBe("/?page=deploying");
+  });
+
+  it("refuses to dispatch without an explicit branch", () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      disabled: false,
+      setAttribute() {},
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "planned-branch": { value: "  " },
+      "planned-env": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
   });
 
   it("does nothing when there is no selected environment", () => {

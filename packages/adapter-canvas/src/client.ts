@@ -188,26 +188,44 @@ var RADIUS_PLAN_HAS_ENV = false;
 // deploys the selected application/branch to the selected environment). The
 // subtitle hint under the sub-tabs is updated to match, naming the currently
 // selected application and environment so the next step is always spelled out.
+//
+// In deploy mode the button stays disabled until both a branch and an
+// environment are chosen. Those are the two values dispatched to /api/deploy,
+// and an empty branch there is not inert: the server falls back to the repo's
+// default branch, which would deploy something other than the graph the user
+// just previewed.
 function radiusApplyPlanEnvState(hasEnv) {
     RADIUS_PLAN_HAS_ENV = !!hasEnv;
     var btn = document.getElementById('plan-btn');
     var hint = document.getElementById('planned-subtitle-hint');
     var appSel = document.getElementById('planned-app');
+    var branchSel = document.getElementById('planned-branch');
     var envSel = document.getElementById('planned-env');
+    var branch = (branchSel && branchSel.value && branchSel.value.trim()) || '';
+    var env = (envSel && envSel.value) || '';
     if (btn) {
+        btn.removeAttribute('title');
         if (hasEnv) {
             btn.dataset.mode = 'deploy';
             btn.textContent = 'Deploy Application';
+            btn.disabled = !(branch && env);
+            if (!branch && !env) {
+                btn.setAttribute('title', 'Select a branch and an environment to deploy.');
+            } else if (!branch) {
+                btn.setAttribute('title', 'Select the branch to deploy.');
+            } else if (!env) {
+                btn.setAttribute('title', 'Select the environment to deploy to.');
+            }
         } else {
             btn.dataset.mode = 'create-env';
             btn.textContent = 'Create Environment';
+            btn.disabled = false;
         }
-        btn.disabled = false;
     }
     if (hint) {
         if (hasEnv) {
             var appName = (appSel && appSel.value) || 'this application';
-            var envName = (envSel && envSel.value) || 'the selected environment';
+            var envName = env || 'the selected environment';
             hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
         } else {
             hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
@@ -226,7 +244,11 @@ function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
     var envSel = document.getElementById('planned-env');
     var branch = (branchSel && branchSel.value.trim()) || '';
     var env = envSel ? envSel.value : '';
-    if (!repo || !env) return;
+    // Never dispatch without an explicit branch. The server would otherwise
+    // resolve an empty one to the repo's default branch, deploying code the
+    // user never previewed. The button is already disabled in this state; this
+    // guard covers the dispatch path itself.
+    if (!repo || !env || !branch) return;
     var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
     btn.disabled = true;
     btn.textContent = 'Starting deployment…';
