@@ -367,7 +367,7 @@ ${getInlineVendorStyles()}
   .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-node-border); box-sizing: border-box; }
   .rad-node {
     position: relative; width: 220px; min-height: 104px;
-    background: var(--rad-surface); border: 3px solid var(--rad-node-border);
+    background: var(--rad-surface); border: 2.5px solid var(--rad-node-border);
     border-radius: 16px; padding: 16px 18px;
     pointer-events: auto; cursor: pointer;
   }

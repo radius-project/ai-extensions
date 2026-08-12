@@ -493,11 +493,11 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
 
 describe("CLIENT_GRAPH_JS — line weights", () => {
   it("draws edges and node borders thick enough to read at a glance", () => {
-    // Doubled from the original 1.5 / 1 / 2 so the graph stays legible.
+    // Up from the original 1.5 / 1 / 2 so the graph stays legible.
     expect(CLIENT_GRAPH_JS).toContain(
-      "var style = { stroke: stroke, strokeWidth: 3 };"
+      "var style = { stroke: stroke, strokeWidth: 2.5 };"
     );
-    expect(CLIENT_GRAPH_JS).toContain("(d.borderWidth || 3) + 'px'");
+    expect(CLIENT_GRAPH_JS).toContain("(d.borderWidth || 2.5) + 'px'");
     expect(CLIENT_GRAPH_JS).not.toContain("strokeWidth: 1.5");
   });
 
@@ -505,7 +505,7 @@ describe("CLIENT_GRAPH_JS — line weights", () => {
     // Diff nodes used to be twice as thick as modeled/planned ones, which read
     // as an unintended emphasis difference rather than a diff signal — diff
     // status is already carried by the border colour.
-    expect(CLIENT_GRAPH_JS).toContain("borderWidth: 3,");
+    expect(CLIENT_GRAPH_JS).toContain("borderWidth: 2.5,");
     expect(CLIENT_GRAPH_JS).not.toContain("borderWidth: diffMode");
   });
 });
