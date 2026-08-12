@@ -227,11 +227,7 @@ export async function persistMutationCheckpoint({
   operation: any;
   persist: () => Promise<void>;
   report?: (diagnostic: { code: string; message: string }) => void;
-  fail: (
-    status: number,
-    error: string,
-    code: string
-  ) => Promise<void>;
+  fail: (status: number, error: string, code: string) => Promise<void>;
 }): Promise<boolean> {
   try {
     await persist();
@@ -4758,7 +4754,8 @@ function createRequestHandler(instanceId: string) {
       let op: any = null;
       let steps: string[] = [];
       let deleteGitHubEnvironmentRunner:
-        ((args: string[]) => Promise<unknown>) | null = null;
+        | ((args: string[]) => Promise<unknown>)
+        | null = null;
       try {
         const data = JSON.parse(body);
         const targetRepo = data.repo || "";
@@ -7449,7 +7446,9 @@ function createRequestHandler(instanceId: string) {
                   );
                 }
               } catch (e) {
-                addLog("⚠ Could not resolve planned graph: " + errorMessage(e));
+                addLog(
+                  "⚠ Could not resolve planned graph: " + errorMessage(e)
+                );
               }
             }
 
