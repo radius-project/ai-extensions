@@ -7,14 +7,16 @@ user-invocable: true
 
 # Radius code quality
 
-Apply this skill to every production TypeScript or JavaScript change in this repository. A code change is incomplete until its behavior is covered by unit tests, any boundary tests required by the test architecture are included, and the production design follows the approved re-architecture.
+Apply this skill to every production TypeScript or JavaScript change in this repository. A code change is incomplete until its behavior is covered by unit tests, any boundary tests required for the seams it touches are included, and the production design follows the repository's architecture.
 
-This skill turns the [test architecture and test plan proposed in PR #282](https://github.com/radius-project/ai-extensions/pull/282) into an implementation workflow. Read the complete documents before changing a seam they define:
+The Architecture, TypeScript and JavaScript, Vitest, and Coverage rules below are standing repository policy and apply now.
+
+The Radius Canvas test architecture and test plan add phase-specific migration detail on top of that policy:
 
 - `docs/design/2026-08-radius-canvas-test-architecture.md`
 - `docs/design/2026-08-radius-canvas-test-plan.md`
 
-If those files are not present on the current branch, inspect their versions in PR #282 with `gh pr view`, `gh pr diff`, or the GitHub contents API. Do not guess at a requirement identifier, phase gate, route owner, page state, or test level.
+Both are **proposed in [PR #282](https://github.com/radius-project/ai-extensions/pull/282) and still in draft**, so treat their phase gates, requirement identifiers, inventories, and migration mechanics as authoritative only for work that explicitly implements them, and only in the version merged or referenced by the task. If those files are not on the current branch, read them with `gh pr diff 282` or the GitHub contents API pinned to a commit SHA rather than a moving branch. Never guess at a requirement identifier, phase gate, route owner, page state, or test level, and prefer the documents over this summary if they disagree.
 
 ## Required workflow
 
@@ -38,7 +40,7 @@ If those files are not present on the current branch, inspect their versions in 
 
 ### Canvas re-architecture
 
-- `extension.ts` is the composition root and the only module that calls `joinSession()`. Put canvas declarations, tools, hooks, lifecycle, and handlers behind factories in `src/runtime/` with injected dependencies.
+- `extension.ts` is the composition root and the only module that imports the SDK's `joinSession`. Other runtime modules may invoke an injected session port, as `runtime/bootstrap.ts` does. Put canvas declarations, tools, hooks, lifecycle, and handlers behind factories in `src/runtime/` with injected dependencies, constructible without joining a real session.
 - Own per-instance state, caches, callbacks, server lifecycle, and clocks in the instance-scoped server container. Do not add process-global mutable state.
 - Construct one complete typed production dependency object at the composition root. Give route families and services only narrowed dependency views. Missing dependencies fail during construction; never install a silent success-shaped default.
 - Keep one route table as the source of truth for method, path, matching, body policy, and handler. Every route has exactly one owner.
@@ -83,7 +85,7 @@ If those files are not present on the current branch, inspect their versions in 
 - Collocate each unit test beside its production module as `*.test.ts`. There is no `test/unit/` directory.
 - When production code moves, move its tests to the same destination in the same change.
 - Put all non-unit Canvas suites under `packages/adapter-canvas/test/`: `component/`, `functional/`, `integration/`, `e2e/journeys/`, `accessibility/`, `keyboard/`, `visual/`, and `host/`.
-- Put reusable deterministic data and fakes in `test/fixtures/`, and non-unit harness setup in `test/setup/`. Production code must never import test support.
+- Put reusable deterministic data in `test/fixtures/`, shared fakes and helpers in `test/support/`, and non-unit harness setup in `test/setup/`, following the existing layout. Production code must never import test support.
 
 ### Test design
 
@@ -102,7 +104,7 @@ If those files are not present on the current branch, inspect their versions in 
 
 ## Required test level by change
 
-Use the PR #282 taxonomy exactly:
+Use the PR #282 taxonomy exactly. Add a level when it exists and can run; when its infrastructure has not landed yet, add the strongest available lower-level test and note the gap rather than inventing a suite:
 
 | Changed boundary                                                              | Required evidence beyond collocated unit tests                                                                                                                           |
 |-------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -118,18 +120,29 @@ Use the PR #282 taxonomy exactly:
 | Stable visual behavior                                                        | Reviewed VIS baseline only when the changed state is in the approved visual set                                                                                          |
 | Real host discovery or panel lifecycle                                        | HOST; do not claim that HIT or an emulated contract covers the host                                                                                                      |
 
+Suite readiness follows PR #282's schedule: unit tests and any focused RCT, HIT, or ART introduced with a seam apply now; Chromium BCT, BFT, E2E, A11Y, and KBD become required once their Phase 6 infrastructure lands; VIS follows in Phase 7; HOST is a scheduled and release gate and is never a pull-request gate.
+
+Match the evidence to the kind of change:
+
+| Change type                                     | Expected evidence                                                                     |
+|-------------------------------------------------|---------------------------------------------------------------------------------------|
+| Production logic                                | Collocated unit tests, plus the boundary rows above when a seam changes               |
+| Build, packaging, or workflow generation        | Artifact, configuration, or command-level verification rather than a forced unit test |
+| Test, fixture, or harness code                  | The suites it supports pass and remain deterministic                                  |
+| Generated output such as `plugins/radius/dist/` | Rebuild from source and confirm the artifact is in sync; never hand-edit or test it   |
+
 Choose the cheapest level that can faithfully represent the behavior, but do not stop at unit tests when the changed contract crosses a boundary. Focused RCT, HIT, and ART tests land with the seam they protect and are later promoted into permanent suites rather than duplicated.
 
 ## Coverage policy
 
 - The goal is **100% line, statement, function, and branch coverage for every new or changed production-code path**.
 - Treat 100% as a quality goal, not a mandate to force coverage through unnatural testing techniques. Do not expose production internals solely for tests, add test-only branches or hooks, over-mock implementation details, invoke unreachable states artificially, or write assertions whose only purpose is to execute a line. Prefer behavior-focused tests through natural seams; when a legitimate path cannot be exercised naturally, document the limitation as described below.
-- Repository aggregate and per-package coverage must never decrease from the accepted version-controlled baseline described by PR #282.
+- Repository aggregate and per-package coverage must never decrease. Once a baseline is recorded in version-controlled Vitest configuration, treat it as the hard floor; until then, compare `pnpm run coverage` before and after your change and do not regress it.
 - PR #282's 80% line, 80% function, and 70% branch thresholds for newly extracted modules are minimum migration gates, not the target for new work under this skill.
 - Coverage percentages do not replace scenario gates. Explicitly test worktree branch selection, stale source-reference rejection, external-error propagation, path confinement, resumable operation identity, destructive fail-closed behavior, and retained action, tool, lifecycle, route, and artifact contracts whenever affected.
 - Do not game coverage with ignored executable lines, uncovered allowlists, trivial assertions, or tests coupled to implementation details.
 - Exclude only generated bundle text, vendored libraries, and test fixtures as defined by the test architecture.
-- If 100% changed-code coverage is genuinely infeasible because of unreachable platform code or a tool limitation, document the exact uncovered path and reason in the pull request. Add the strongest behavior or boundary test available, and never lower a repository threshold automatically.
+- If 100% changed-code coverage is genuinely infeasible, document the exact uncovered lines or branches and why they are structurally unreachable rather than merely inconvenient, and add the strongest behavior or boundary test available. Effort, time pressure, and test awkwardness do not qualify, and a repository threshold is never lowered automatically.
 - Do not expand an unrelated change solely to cover pre-existing untouched code, but do not leave newly introduced branches or changed behavior untested.
 
 ## Verification
@@ -144,7 +157,7 @@ pnpm run coverage
 pnpm run build
 ```
 
-Also run every required RCT, HIT, ART, browser, Playwright, accessibility, keyboard, visual, or host command introduced for the affected boundary. Do not report completion when a required suite is skipped, unavailable, or replaced by manual validation.
+Also run every required RCT, HIT, ART, browser, Playwright, accessibility, keyboard, visual, or host command that exists for the affected boundary. Do not report completion when a required suite is skipped or replaced by manual validation; when a suite does not exist yet, say so explicitly instead of implying it passed.
 
 Before finishing, confirm:
 
