@@ -1319,3 +1319,73 @@ describe("operation status chip in the top navigation", () => {
     );
   });
 });
+
+// Inline <script> blocks in pages.ts are template-literal strings, so a syntax
+// error in one is invisible to tsc, eslint and prettier — it surfaces only at
+// runtime as a silently dead script (this has caused a real "perpetual
+// Loading…" bug). Parsing every emitted block is the only cheap guard.
+describe("inline scripts", () => {
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it.each(renderers)(
+    "%s emits only parseable script blocks",
+    (_name, render) => {
+      const blocks = render().match(/<script>([\s\S]*?)<\/script>/g) || [];
+      expect(blocks.length).toBeGreaterThan(0);
+      for (const block of blocks) {
+        const src = block.slice("<script>".length, -"</script>".length);
+        expect(() => new Function(src)).not.toThrow();
+      }
+    }
+  );
+});
+
+// Deleting a deployment tears down live infrastructure irreversibly. Every
+// surface that offers it must use the same 3-step type-to-confirm dialog — a
+// page shipping a lighter confirmation of its own lowers the bar product-wide.
+describe("delete-deployment confirmation is uniform", () => {
+  const DIALOG_IDS = [
+    "deploy-delete-modal",
+    "deploy-delete-body",
+    "deploy-delete-app",
+    "deploy-delete-env",
+    "deploy-delete-close"
+  ];
+
+  it.each([
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["deployingPage", () => deployingPage({})]
+  ])("%s renders the shared dialog", (_name, render) => {
+    const html = render();
+    expect(html).toContain('class="rad-ddlg"');
+    for (const id of DIALOG_IDS) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain("radiusCreateDeleteDeploymentDialog");
+  });
+
+  it("the Deployed graph page no longer ships a one-click confirm", () => {
+    const html = deployedGraphPage({});
+    expect(html).not.toContain("deployed-delete-confirm");
+    expect(html).not.toContain("deployed-delete-cancel");
+    expect(html).not.toContain("Are you sure you want to delete");
+  });
+
+  it("both pages emit byte-identical dialog markup", () => {
+    const extract = (html: string) => {
+      const start = html.indexOf('<div id="deploy-delete-modal"');
+      expect(start).toBeGreaterThan(-1);
+      return html.slice(
+        start,
+        html.indexOf("</div>", html.indexOf('id="deploy-delete-body"'))
+      );
+    };
+    expect(extract(deployedGraphPage({}))).toBe(extract(deployingPage({})));
+  });
+});

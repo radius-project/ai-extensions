@@ -11,7 +11,8 @@ import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS,
-  CLIENT_OPCHIP_JS
+  CLIENT_OPCHIP_JS,
+  CLIENT_DELETE_DIALOG_JS
 } from "./client.js";
 
 describe("client.ts exports", () => {
@@ -1223,5 +1224,103 @@ describe("CLIENT_OPCHIP_JS — the ambient operation chip", () => {
     const h = mount({ operation: running, stored: "op_1" });
     await h.feed(running);
     expect(h.chip.hidden).toBe(false);
+  });
+});
+
+describe("CLIENT_DELETE_DIALOG_JS — shared 3-step delete confirmation", () => {
+  function makeEl(id: string) {
+    return {
+      id,
+      value: "",
+      disabled: false,
+      textContent: "",
+      innerHTML: "",
+      style: { display: "none" } as Record<string, string>,
+      handlers: {} as Record<string, (e: unknown) => void>,
+      addEventListener(type: string, fn: (e: unknown) => void) {
+        this.handlers[type] = fn;
+      },
+      focus() {}
+    };
+  }
+
+  function setup() {
+    const els: Record<string, ReturnType<typeof makeEl>> = {};
+    const get = (id: string) => (els[id] = els[id] || makeEl(id));
+    // The dialog's own chrome must exist for the factory to attach.
+    [
+      "deploy-delete-modal",
+      "deploy-delete-body",
+      "deploy-delete-app",
+      "deploy-delete-env",
+      "deploy-delete-close"
+    ].forEach(get);
+    const doc = {
+      getElementById: (id: string) =>
+        id in els ? els[id]
+        : /^del-/.test(id) ? get(id)
+        : null,
+      addEventListener() {}
+    };
+    const factory = new Function(
+      "document",
+      CLIENT_DELETE_DIALOG_JS + "\nreturn radiusCreateDeleteDeploymentDialog;"
+    )(doc);
+    return { els, factory, get };
+  }
+
+  it("requires all three steps before it will confirm", () => {
+    const { els, factory, get } = setup();
+    const confirmed: Array<[string, string]> = [];
+    const dialog = factory({
+      onConfirm: (a: string, e: string) => confirmed.push([a, e])
+    });
+    dialog.open("todoapp", "prod");
+
+    expect(els["deploy-delete-modal"].style.display).toBe("flex");
+    expect(els["deploy-delete-app"].textContent).toBe("todoapp");
+    expect(els["deploy-delete-body"].innerHTML).toContain("del-step1-btn");
+
+    get("del-step1-btn").handlers.click({});
+    expect(els["deploy-delete-body"].innerHTML).toContain("cannot be undone");
+
+    get("del-step2-btn").handlers.click({});
+    const input = get("del-confirm-input");
+    const btn = get("del-confirm-btn");
+    expect(els["deploy-delete-body"].innerHTML).toContain("todoapp/prod");
+
+    // A wrong token must neither enable the button nor confirm.
+    input.value = "todoapp";
+    input.handlers.input({});
+    expect(btn.disabled).toBe(true);
+    btn.handlers.click({});
+    expect(confirmed).toEqual([]);
+
+    input.value = "todoapp/prod";
+    input.handlers.input({});
+    expect(btn.disabled).toBe(false);
+    btn.handlers.click({});
+    expect(confirmed).toEqual([["todoapp", "prod"]]);
+    expect(els["deploy-delete-modal"].style.display).toBe("none");
+  });
+
+  it("escapes app and environment names in the dialog body", () => {
+    const { els, factory, get } = setup();
+    const dialog = factory({ onConfirm: () => {} });
+    dialog.open("<img>", "prod");
+    get("del-step1-btn").handlers.click({});
+    expect(els["deploy-delete-body"].innerHTML).toContain("&lt;img&gt;");
+    expect(els["deploy-delete-body"].innerHTML).not.toContain("<img>");
+  });
+
+  it("resets to step one after being closed", () => {
+    const { els, factory, get } = setup();
+    const dialog = factory({ onConfirm: () => {} });
+    dialog.open("todoapp", "prod");
+    get("del-step1-btn").handlers.click({});
+    dialog.close();
+    expect(els["deploy-delete-body"].innerHTML).toBe("");
+    dialog.open("todoapp", "prod");
+    expect(els["deploy-delete-body"].innerHTML).toContain("del-step1-btn");
   });
 });

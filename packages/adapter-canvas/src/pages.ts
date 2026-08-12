@@ -16,7 +16,8 @@ import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS,
-  CLIENT_OPCHIP_JS
+  CLIENT_OPCHIP_JS,
+  CLIENT_DELETE_DIALOG_JS
 } from "./client.js";
 import { topNav, radiusMark, feedbackWidget } from "./ui.js";
 import { isWorkspaceSelection } from "./workspace.js";
@@ -461,6 +462,30 @@ ${getInlineVendorStyles()}
      Theme it as a CSS property instead, which does resolve var(). */
   .react-flow__background circle { fill: var(--rad-grid); }
   .react-flow__background path { stroke: var(--rad-grid); }
+  /* Delete confirmation dialog (Figma type-to-confirm flow). Global because
+     every surface that can delete a deployment shares this one dialog. */
+  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }
+  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke); }
+  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text); }
+  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary); padding:6px; border-radius:6px; }
+  .rad-ddlg__close:hover { background:var(--rad-neutral-bg); }
+  .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
+  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text); }
+  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text); }
+  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary); }
+  .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
+  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary); margin:0; }
+  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke); background:var(--rad-neutral-bg); color:var(--rad-text); }
+  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover); }
+  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
+  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
+  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
+  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
+  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
+  .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
+  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
+  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
+  .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
 </style>
 </head>
 <body>
@@ -486,6 +511,9 @@ ${CLIENT_HEARTBEAT_JS}
 </script>
 <script>
 ${CLIENT_OPCHIP_JS}
+</script>
+<script>
+${CLIENT_DELETE_DIALOG_JS}
 </script>
 </body>
 </html>`;
@@ -1407,6 +1435,26 @@ ${graphHeaderClose()}`
 
 // Shared by both render paths of the Diff pane (empty selection and rendered
 // graph) so the two copies of the markup cannot drift apart.
+// Delete confirmation dialog (Figma 3-step type-to-confirm flow), shared by
+// every page that can delete a deployment. Tearing down live infrastructure is
+// irreversible, so a page must never ship a lighter-weight confirmation of its
+// own — that would quietly lower the bar for the whole product. The step
+// behaviour lives in radiusCreateDeleteDeploymentDialog (client.ts).
+const DELETE_DEPLOYMENT_DIALOG_HTML = `<div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="rad-ddlg" role="dialog" aria-modal="true" aria-labelledby="deploy-delete-title">
+    <div class="rad-ddlg__header">
+      <span class="rad-ddlg__title" id="deploy-delete-title">Delete Deployment</span>
+      <button type="button" class="rad-ddlg__close" id="deploy-delete-close" aria-label="Close">✕</button>
+    </div>
+    <div class="rad-ddlg__info">
+      <span class="rad-ddlg__info-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+      <span class="rad-ddlg__app" id="deploy-delete-app"></span>
+      <span class="rad-ddlg__env">Environment: <strong id="deploy-delete-env"></strong></span>
+    </div>
+    <div class="rad-ddlg__content" id="deploy-delete-body"></div>
+  </div>
+</div>`;
+
 const GRAPH_DIFF_SUBTITLE = `<p class="rad-lede" id="graph-diff-subtitle" style="margin:0 0 20px;">The application graph diff compares the application model between branches, allowing you to visualize changes in your application to reveal added, removed, or modified components. Use it to review the impact of a pull request before it is merged.</p>`;
 
 export function graphDiffPage(state: CanvasState = {}): string {
@@ -1680,17 +1728,9 @@ ${graphHeader("deployed")}
   <div id="deployed-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
-<!-- Delete confirmation modal -->
-<div id="deployed-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:460px; width:90%; margin:0;">
-    <div class="rad-card__title" style="margin-bottom:8px;">Delete Deployment</div>
-    <p id="deployed-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
-    <div style="display:flex; justify-content:flex-end; gap:10px;">
-      <button id="deployed-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="deployed-delete-confirm" class="rad-btn rad-btn--danger-outline" style="margin:0;">Delete Deployment</button>
-    </div>
-  </div>
-</div>
+<!-- Delete confirmation: the same 3-step type-to-confirm dialog the Deployments
+     tab uses, so deleting from the graph is gated exactly as heavily. -->
+${DELETE_DEPLOYMENT_DIALOG_HTML}
 
 <!-- Deleting (transition) modal -->
 <div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
@@ -1888,11 +1928,8 @@ function escapeHtmlClient(s) {
     appSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
     envSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
 
-    // --- Delete deployment ---
-    var delModal = document.getElementById('deployed-delete-modal');
-    var delText = document.getElementById('deployed-delete-text');
-    var delConfirm = document.getElementById('deployed-delete-confirm');
-    var delCancel = document.getElementById('deployed-delete-cancel');
+    // --- Delete deployment (shared 3-step type-to-confirm dialog) ---
+    var deleteDialog = radiusCreateDeleteDeploymentDialog({ onConfirm: runDelete });
 
     deleteBtn.addEventListener('click', function() {
         // The primary button is adaptive — route by the mode the current
@@ -1904,16 +1941,15 @@ function escapeHtmlClient(s) {
             return;
         }
         var app = appSelect.value, env = envSelect.value;
-        if (!app || !env) return;
-        delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong>?';
-        delModal.style.display = 'flex';
+        if (!app || !env || !deleteDialog) return;
+        deleteDialog.open(app, env);
     });
-    delCancel.addEventListener('click', function() { delModal.style.display = 'none'; });
-    delModal.addEventListener('click', function(e) { if (e.target === delModal) { delModal.style.display = 'none'; } });
-    delConfirm.addEventListener('click', function() {
-        var app = appSelect.value, env = envSelect.value;
+
+    // Unlike the Deployments table, this page has no row to annotate with a
+    // "Deleting…" status, so it shows a transition modal and then hands the user
+    // to the Deployments tab to watch the workflow run.
+    function runDelete(app, env) {
         if (!app || !env) return;
-        delModal.style.display = 'none';
         document.getElementById('deployed-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(app) + '</strong> from <strong>' + escapeHtmlClient(env) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
         document.getElementById('deployed-deleting-modal').style.display = 'flex';
         fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CONTEXT_REPO, environment: env, application: app }) })
@@ -1927,7 +1963,7 @@ function escapeHtmlClient(s) {
                 document.getElementById('deployed-deleting-modal').style.display = 'none';
                 showInline('error', 'Could not delete the deployment. Please try again.');
             });
-    });
+    }
 
     Promise.all([loadApplications(), loadEnvironments(), loadDeploymentStates()]).then(function() {
         refreshControls();
@@ -4523,20 +4559,7 @@ function deployLandingView(state: CanvasState): string {
 <!-- Delete confirmation dialog (Figma 3-step type-to-confirm flow). The
      "deleting" transition is shown inline on the row (status → Deleting…),
      not as a blocking modal. -->
-<div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="rad-ddlg" role="dialog" aria-modal="true" aria-labelledby="deploy-delete-title">
-    <div class="rad-ddlg__header">
-      <span class="rad-ddlg__title" id="deploy-delete-title">Delete Deployment</span>
-      <button type="button" class="rad-ddlg__close" id="deploy-delete-close" aria-label="Close">✕</button>
-    </div>
-    <div class="rad-ddlg__info">
-      <span class="rad-ddlg__info-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
-      <span class="rad-ddlg__app" id="deploy-delete-app"></span>
-      <span class="rad-ddlg__env">Environment: <strong id="deploy-delete-env"></strong></span>
-    </div>
-    <div class="rad-ddlg__content" id="deploy-delete-body"></div>
-  </div>
-</div>
+${DELETE_DEPLOYMENT_DIALOG_HTML}
 
 <style>
   .rad-deploy-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:0 0 20px; }
@@ -4572,29 +4595,8 @@ function deployLandingView(state: CanvasState): string {
   .rad-inline--success .rad-inline__icon { color:var(--rad-success); font-weight:700; }
   .rad-inline--error { background:var(--rad-danger-bg); border:1px solid var(--rad-danger); color:var(--rad-text); }
   .rad-inline--error .rad-inline__icon { color:var(--rad-danger); }
-  /* Delete confirmation dialog (Figma type-to-confirm flow). */
-  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }
-  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke); }
-  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text); }
-  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary); padding:6px; border-radius:6px; }
-  .rad-ddlg__close:hover { background:var(--rad-neutral-bg); }
-  .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
-  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text); }
-  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text); }
-  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary); }
-  .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
-  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary); margin:0; }
-  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke); background:var(--rad-neutral-bg); color:var(--rad-text); }
-  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover); }
-  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
-  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
-  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
-  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
-  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
-  .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
-  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
-  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
-  .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
+  /* Delete confirmation dialog styling now lives in the global pageShell CSS
+     so the Deployed graph page shares this exact dialog. */
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -4843,57 +4845,10 @@ function loadDeployments(fresh) {
         .catch(function() { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
-// --- Delete deployment: 3-step type-to-confirm dialog (Figma) ---
-var delModal = document.getElementById('deploy-delete-modal');
-var delBody = document.getElementById('deploy-delete-body');
-var delAppEl = document.getElementById('deploy-delete-app');
-var delEnvEl = document.getElementById('deploy-delete-env');
-var delClose = document.getElementById('deploy-delete-close');
-var pendingDelete = null;
-var delStep = 1;
+// --- Delete deployment: 3-step type-to-confirm dialog (shared, client.ts) ---
+var deleteDialog = radiusCreateDeleteDeploymentDialog({ onConfirm: runDelete });
 
-function closeDeleteModal() { delModal.style.display = 'none'; pendingDelete = null; delStep = 1; delBody.innerHTML = ''; }
-
-// Render the current step's body. Steps escalate the confirmation:
-//   1) intent, 2) acknowledge the irreversible effects, 3) type "app/env".
-function renderDeleteStep() {
-    if (!pendingDelete) return;
-    var app = pendingDelete.app, env = pendingDelete.environment;
-    if (delStep === 1) {
-        delBody.innerHTML =
-            '<p class="rad-ddlg__text">Deleting this deployment will tear down running containers and resources. To proceed, please confirm your intention.</p>' +
-            '<button type="button" class="rad-ddlg__btn" id="del-step1-btn">I want to delete this deployment</button>';
-        document.getElementById('del-step1-btn').addEventListener('click', function() { delStep = 2; renderDeleteStep(); });
-    } else if (delStep === 2) {
-        delBody.innerHTML =
-            '<div class="rad-ddlg__warn"><span aria-hidden="true">⚠</span><span>This action cannot be undone. Please read carefully!</span></div>' +
-            '<div class="rad-ddlg__bullet"><span>This will permanently delete the deployment of <strong>' + escapeHtmlClient(app) + '</strong> from environment <strong>' + escapeHtmlClient(env) + '</strong>, including all associated resources.</span></div>' +
-            '<button type="button" class="rad-ddlg__btn" id="del-step2-btn">I have read and understand these effects</button>';
-        document.getElementById('del-step2-btn').addEventListener('click', function() { delStep = 3; renderDeleteStep(); });
-    } else {
-        var token = app + '/' + env;
-        delBody.innerHTML =
-            '<p class="rad-ddlg__confirm-label">To confirm, type "' + escapeHtmlClient(token) + '" in the box below</p>' +
-            '<input type="text" class="rad-ddlg__input" id="del-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="' + escapeHtmlClient(token) + '">' +
-            '<button type="button" class="rad-ddlg__delete" id="del-confirm-btn" disabled>Delete this deployment</button>';
-        var input = document.getElementById('del-confirm-input');
-        var btn = document.getElementById('del-confirm-btn');
-        var matches = function() { return input.value.trim() === token; };
-        input.addEventListener('input', function() { btn.disabled = !matches(); });
-        input.addEventListener('keydown', function(e) { if (e.key === 'Enter' && matches()) runDelete(); });
-        btn.addEventListener('click', function() { if (matches()) runDelete(); });
-        input.focus();
-    }
-}
-
-function openDeleteModal(app, env) {
-    pendingDelete = { app: app, environment: env };
-    delStep = 1;
-    delAppEl.textContent = app;
-    delEnvEl.textContent = env;
-    renderDeleteStep();
-    delModal.style.display = 'flex';
-}
+function openDeleteModal(app, env) { if (deleteDialog) deleteDialog.open(app, env); }
 
 function wireDeleteButtons() {
     document.querySelectorAll('.js-del-dep').forEach(function(btn) {
@@ -4901,16 +4856,11 @@ function wireDeleteButtons() {
     });
 }
 
-delClose.addEventListener('click', closeDeleteModal);
-delModal.addEventListener('click', function(e) { if (e.target === delModal) closeDeleteModal(); });
-
 // Dispatch the delete, then let the row reflect "Deleting…" while the workflow
 // runs. When the deployment finally clears from the listing, show the green
 // "successfully deleted" banner (Figma deployments-deleted state).
-function runDelete() {
-    if (!pendingDelete) return;
-    var dep = pendingDelete;
-    closeDeleteModal();
+function runDelete(app, env) {
+    var dep = { app: app, environment: env };
     fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
