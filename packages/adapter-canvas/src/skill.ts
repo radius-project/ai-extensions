@@ -72,14 +72,14 @@ function sanitizeRepoPath(repoPath: unknown): string {
 function bundledSkillBase(): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const installed = path.join(moduleDir, "skills", "radius-app-bicep");
-  if (existsSync(path.join(installed, "scripts", "check.mjs"))) {
+  if (existsSync(path.join(installed, "scripts", "validate-bicep.mjs"))) {
     return installed;
   }
   const source = path.resolve(
     moduleDir,
     "../../../plugins/radius/skills/radius-app-bicep"
   );
-  if (existsSync(path.join(source, "scripts", "check.mjs"))) {
+  if (existsSync(path.join(source, "scripts", "validate-bicep.mjs"))) {
     return source;
   }
   return installed;

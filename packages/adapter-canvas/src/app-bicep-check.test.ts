@@ -17,8 +17,9 @@ const checker = path.join(
   "skills",
   "radius-app-bicep",
   "scripts",
-  "check.mjs"
+  "validate-bicep.mjs"
 );
+const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const temporaryDirectories = new Set<string>();
 
 afterEach(() => {
@@ -38,8 +39,24 @@ function fakeBicep(
   directory: string,
   compilerOutput: string,
   status: number
-): string {
+): NodeJS.ProcessEnv {
+  const bicep = path.join(
+    directory,
+    ".radius",
+    "ai-extensions",
+    "bin",
+    executable
+  );
   const driver = path.join(directory, "build");
+  fs.mkdirSync(path.dirname(bicep), { recursive: true });
+  try {
+    fs.linkSync(fs.realpathSync(process.execPath), bicep);
+  } catch {
+    fs.copyFileSync(process.execPath, bicep);
+  }
+  if (process.platform !== "win32") {
+    fs.chmodSync(bicep, 0o755);
+  }
   fs.writeFileSync(
     driver,
     [
@@ -49,15 +66,15 @@ function fakeBicep(
       ""
     ].join("\n")
   );
-  return process.execPath;
+  return { HOME: directory, USERPROFILE: directory };
 }
 
-function runChecker(directory: string, bicep: string) {
+function runChecker(directory: string, env: NodeJS.ProcessEnv) {
   const app = path.join(directory, "app.bicep");
   fs.writeFileSync(app, "");
   return spawnSync(process.execPath, [checker, app], {
     encoding: "utf8",
-    env: { ...process.env, BICEP_BINARY: bicep }
+    env: { ...process.env, ...env }
   });
 }
 
@@ -160,31 +177,35 @@ test("fails closed when Bicep diagnostics are not valid SARIF", () => {
   assert.equal(result.stderr, "warning: boom\n");
 });
 
-function installedBicep(): string | null {
-  const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
-  for (const candidate of [
-    process.env.BICEP_BINARY,
-    path.join(os.homedir(), ".radius", "ai-extensions", "bin", executable),
-    path.join(os.homedir(), ".rad", "bin", executable),
+test("ignores Bicep overrides and PATH", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(directory, {
+    ...fakeBicep(directory, sarif([]), 0),
+    BICEP_BINARY: path.join(directory, "other-bicep"),
+    PATH: ""
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+function hasInstalledBicep(): boolean {
+  const candidate = path.join(
+    os.homedir(),
+    ".radius",
+    "ai-extensions",
+    "bin",
     executable
-  ]) {
-    if (!candidate) {
-      continue;
-    }
-    const version = spawnSync(candidate, ["--version"], { stdio: "ignore" });
-    if (!version.error && version.status === 0) {
-      return candidate;
-    }
-  }
-  return null;
+  );
+  const version = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+  return !version.error && version.status === 0;
 }
 
-const bicep = installedBicep();
+const hasBicep = hasInstalledBicep();
 
-test.skipIf(bicep === null)(
+test.skipIf(!hasBicep)(
   "accepts a secure value and rejects an insecure sensitive input",
   () => {
-    assert.ok(bicep);
     const directory = temporaryDirectory();
     const app = path.join(directory, "app.bicep");
 
@@ -213,16 +234,14 @@ resource script 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
 
     fs.writeFileSync(app, model(true));
     const clean = spawnSync(process.execPath, [checker, app], {
-      encoding: "utf8",
-      env: { ...process.env, BICEP_BINARY: bicep }
+      encoding: "utf8"
     });
     assert.equal(clean.status, 0, clean.stderr);
     assert.equal(clean.stderr, "");
 
     fs.writeFileSync(app, model(false));
     const insecure = spawnSync(process.execPath, [checker, app], {
-      encoding: "utf8",
-      env: { ...process.env, BICEP_BINARY: bicep }
+      encoding: "utf8"
     });
     assert.equal(insecure.status, 1);
     assert.match(insecure.stderr, /use-secure-value-for-secure-inputs/u);

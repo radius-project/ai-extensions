@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -66,13 +65,13 @@ function isFailure(result) {
 }
 
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
-const bicep =
-  process.env.BICEP_BINARY ||
-  [
-    path.join(os.homedir(), ".radius", "ai-extensions", "bin", executable),
-    path.join(os.homedir(), ".rad", "bin", executable)
-  ].find((candidate) => fs.existsSync(candidate)) ||
-  executable;
+const bicep = path.join(
+  os.homedir(),
+  ".radius",
+  "ai-extensions",
+  "bin",
+  executable
+);
 const app = path.resolve(process.argv[2] || ".radius/app.bicep");
 
 const compiled = spawnSync(

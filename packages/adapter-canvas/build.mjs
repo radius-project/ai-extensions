@@ -153,7 +153,7 @@ function installToLocal() {
       "skills",
       "radius-app-bicep",
       "scripts",
-      "check.mjs"
+      "validate-bicep.mjs"
     );
     if (existsSync(checkerFrom)) {
       const checkerTo = join(
@@ -161,7 +161,7 @@ function installToLocal() {
         "skills",
         "radius-app-bicep",
         "scripts",
-        "check.mjs"
+        "validate-bicep.mjs"
       );
       mkdirSync(dirname(checkerTo), { recursive: true });
       const tmp = `${checkerTo}.tmp-${process.pid}`;
