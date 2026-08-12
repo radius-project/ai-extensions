@@ -838,6 +838,9 @@ function triggerAppBicepHandoff(
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
 export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
 
+// Backoff before re-sending a handoff whose delivery was rejected.
+export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
+
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
   instanceId = ""
@@ -869,10 +872,19 @@ export function triggerDeployRepairHandoff(
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
       state.deployRepairing = false;
-      state.deployHandoffState =
-        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS ?
-          "failed"
-        : "retryable";
+      const exhausted =
+        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
+      state.deployHandoffState = exhausted ? "failed" : "retryable";
+      // Retry from the server too. /api/deploy-status also retries, but only
+      // while the webview polls it, so a transient delivery failure would
+      // otherwise strand the handoff as retryable with budget left over -
+      // exactly the unmounted-panel case this trigger exists to cover.
+      if (exhausted) return;
+      const timer = setTimeout(() => {
+        triggerDeployRepairHandoff(entry, instanceId);
+      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      // Never hold the process open for a retry.
+      timer.unref?.();
     };
     try {
       Promise.resolve(
@@ -8108,24 +8120,36 @@ function createRequestHandler(instanceId: string) {
               "/actions/runs/" +
               dRunId;
             entry.state.deployStatus = "failed";
-          })().catch((monErr) => {
-            // Never let the background monitor die silently (which would
-            // leave the page stuck polling an 'in_progress' that never
-            // resolves). Surface the error and settle the status.
-            try {
-              addLog(
-                "❌ Deploy monitor stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr)
-              );
-              if (!entry.state.deployError)
-                entry.state.deployError =
-                  "Deploy monitoring stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr);
-              entry.state.deployStatus = "failed";
-            } catch {
-              /* ignore */
-            }
-          });
+          })()
+            .catch((monErr) => {
+              // Never let the background monitor die silently (which would
+              // leave the page stuck polling an 'in_progress' that never
+              // resolves). Surface the error and settle the status.
+              try {
+                addLog(
+                  "❌ Deploy monitor stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr)
+                );
+                if (!entry.state.deployError)
+                  entry.state.deployError =
+                    "Deploy monitoring stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr);
+                entry.state.deployStatus = "failed";
+              } catch {
+                /* ignore */
+              }
+            })
+            .finally(() => {
+              // The monitor owns every terminal transition of this deploy, so
+              // firing here makes the repair loop independent of the webview.
+              // Previously the only trigger was the /api/deploy-status route,
+              // which the browser polls solely while the deployments page is
+              // mounted: closing the panel, navigating away, or reopening onto
+              // another page left a failed deploy orphaned with the handoff
+              // never attempted. The route keeps its own call as a fallback,
+              // and triggerDeployRepairHandoff is idempotent per repair loop.
+              triggerDeployRepairHandoff(entry, instanceId);
+            });
         }
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
