@@ -34,7 +34,6 @@ import {
   recordGitHubEnvironment,
   recordServicePrincipal,
   reconcileRestoredOperation,
-  resumeAfterInput,
   sanitizeResumeTarget,
   setCloudContext,
   setStageState,
@@ -55,6 +54,19 @@ function newOp(overrides = {}) {
     environment: "dev",
     ...overrides
   });
+}
+
+function addSafeResumeRequest(op) {
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: {
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider
+    }
+  };
+  return op;
 }
 
 describe("stage inventory", () => {
@@ -841,6 +853,7 @@ describe("registry", () => {
     const first = createRegistry({ store });
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     first.put(op);
     await first.persist();
 
@@ -855,6 +868,7 @@ describe("registry", () => {
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     let envelope = {
       schemaVersion: 1,
       operations: [
@@ -913,6 +927,7 @@ describe("registry", () => {
   it("keeps valid restored records when rewriting a cleaned envelope fails", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     const diagnostics = [];
     const store = {
       report(diagnostic) {
@@ -986,6 +1001,7 @@ describe("startup reconciliation", () => {
   it("restores input-required operations without stale filtering", () => {
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     reconcileRestoredOperation(op);
     expect(op.recoveryState).toBe("waiting_input");
@@ -1093,7 +1109,9 @@ describe("keepalive predicate", () => {
           provider: "azure"
         })
       ).toBe(true);
-      expect(canResumeInput(op, { code: "app-selection-required" })).toBe(false);
+      expect(canResumeInput(op, { code: "app-selection-required" })).toBe(
+        false
+      );
 
       resumeAfterInput(op);
       expect(op.state).toBe("running");
@@ -1451,7 +1469,9 @@ describe("environment creation boundaries", () => {
     expect(route).toContain("operations.start(op)");
     expect(route).toContain("res.writeHead(202)");
     expect(route).toContain("setImmediate");
-    expect(route.indexOf("res.end(")).toBeLessThan(route.indexOf("setImmediate"));
+    expect(route.indexOf("res.end(")).toBeLessThan(
+      route.indexOf("setImmediate")
+    );
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {

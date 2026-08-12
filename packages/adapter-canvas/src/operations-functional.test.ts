@@ -286,6 +286,15 @@ describe("operation restart functional coverage", () => {
     const op = operation();
     first.start(op);
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {},
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
     await first.persist();
 
     const restored = await restart();

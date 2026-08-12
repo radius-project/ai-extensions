@@ -3004,13 +3004,15 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                             }).then(function(response) {
                                 if (response.ok) return response;
                                 return response.json().catch(function() { return {}; }).then(function(payload) {
-                                    throw new Error(payload.error || payload.message || 'Unable to resume environment setup.');
+                                    var error = new Error(payload.error || payload.message || 'Unable to resume environment setup.');
+                                    error.retryPrompt = true;
+                                    throw error;
                                 });
                             });
                         }).then(function() {
                             envProgressTimer = setTimeout(tick, 0);
-                        }).catch(function() {
-                            promptingRequestedAt = '';
+                        }).catch(function(error) {
+                            if (error && error.retryPrompt) promptingRequestedAt = '';
                             envProgressTimer = setTimeout(tick, 1500);
                         });
                         return;
