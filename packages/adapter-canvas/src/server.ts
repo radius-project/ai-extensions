@@ -3115,7 +3115,35 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
-          if (!(await checkpoint())) return;
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
         }
         enterStage(op, STAGE_AUTHORIZE_IDENTITY);
 
