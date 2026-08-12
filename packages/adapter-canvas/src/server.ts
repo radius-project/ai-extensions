@@ -59,8 +59,10 @@ import {
   setPreferredGhLogin
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
+import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   buildAppCreateArgs,
   buildAppDeleteArgs,
   buildAppOwnerAddArgs,
@@ -118,6 +120,7 @@ import {
 import {
   operations,
   isStale,
+  hasCompleteVerificationIdentity,
   toClientView,
   createOperation,
   buildStages,
@@ -216,6 +219,57 @@ interface CommandResult {
 interface PullRequestState {
   branch: string;
   base: string;
+}
+
+export async function persistMutationCheckpoint({
+  operation,
+  persist,
+  report,
+  fail
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+  fail: (status: number, error: string, code: string) => Promise<void>;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    // Do not retry the same deterministic write or continue making cloud
+    // changes without durable provenance for what already succeeded.
+    await fail(
+      500,
+      "Radius changed no further cloud resources because it could not save the setup recovery record.",
+      "operation-persistence-failed"
+    );
+    return false;
+  }
+}
+
+export async function persistBestEffort({
+  operation,
+  persist,
+  report
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    return false;
+  }
 }
 
 interface EnvironmentListResult {
@@ -2958,6 +3012,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         if (!targetRepo || !resourceGroup || !clusterName) {
           await fail(
@@ -3116,6 +3177,35 @@ function createRequestHandler(instanceId: string) {
                 error: `Setup is already running for ${targetRepo}.`,
                 code: "operation-in-progress",
                 operationId: started.conflict.operationId
+              })
+            );
+            return;
+          }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
               })
             );
             return;
@@ -3335,23 +3425,23 @@ function createRequestHandler(instanceId: string) {
 
         // Step 2: Resolve the federated credential(s) BEFORE creating
         // anything. This reads the canonical repo + subject customization
-        // from GitHub. For the default (not customized) subject we create
-        // BOTH the mutable and immutable forms so whichever GitHub mints
-        // at token time matches; for a customized subject we build the
-        // single exact subject (failing loud only if a repo/repository
-        // claim needs an immutability decision it cannot make).
+        // from GitHub. A proven immutable default creates only ID-bound trust;
+        // an inconclusive default creates both forms for rollout compatibility.
+        // A customized subject builds the single exact subject (failing loud
+        // only if a repo/repository claim needs an immutability decision).
         steps.push("Resolving GitHub OIDC subject...");
         // Note: enterprise-claim rejection (AADSTS7002381) is handled at
         // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
         // which surfaces a tenant-agnostic explanation. Package-scope /
         // workflow-permission changes remain out of scope for this fix.
-        let oidc;
+        const oidcSuffix = buildEnvironmentSuffix(envName);
+        let oidc: ResolveOidcSubjectResult;
         try {
           oidc = await resolveOidcSubject(
             {
               targetRepo,
               envName,
-              suffix: buildEnvironmentSuffix(envName)
+              suffix: oidcSuffix
             },
             ghJsonRunner
           );
@@ -3581,6 +3671,35 @@ function createRequestHandler(instanceId: string) {
               appId: clientId,
               displayName: null
             });
+            try {
+              await operations.persist();
+            } catch (error) {
+              operations.report?.({
+                code: "operation-store-write-failed",
+                message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+              });
+              finish(op, "failed", {
+                failure: {
+                  code: "operation-persistence-failed",
+                  stage: op.currentStage,
+                  stepSeq: null,
+                  message:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  classification: "unknown"
+                }
+              });
+              res.setHeader("Content-Type", "application/json");
+              res.writeHead(500);
+              res.end(
+                JSON.stringify({
+                  error:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  code: "operation-persistence-failed",
+                  operationId: op.operationId
+                })
+              );
+              return;
+            }
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
@@ -3805,6 +3924,35 @@ function createRequestHandler(instanceId: string) {
                 appId: clientId,
                 displayName: appName
               });
+              try {
+                await operations.persist();
+              } catch (error) {
+                operations.report?.({
+                  code: "operation-store-write-failed",
+                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+                });
+                finish(op, "failed", {
+                  failure: {
+                    code: "operation-persistence-failed",
+                    stage: op.currentStage,
+                    stepSeq: null,
+                    message:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    classification: "unknown"
+                  }
+                });
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(500);
+                res.end(
+                  JSON.stringify({
+                    error:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    code: "operation-persistence-failed",
+                    operationId: op.operationId
+                  })
+                );
+                return;
+              }
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
@@ -3850,6 +3998,7 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
+              if (!(await checkpoint())) return;
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -3999,6 +4148,7 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
+        if (!(await checkpoint())) return;
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -4009,8 +4159,8 @@ function createRequestHandler(instanceId: string) {
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join } = await import("node:path");
-        let existingSubjects = [];
-        let existingNameToSubject = new Map();
+        let existingSubjects: string[] = [];
+        let existingNameToSubject = new Map<string, string>();
         // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
         // on SUBJECT (below), but we also need the NAME→subject map to
         // detect a name collision: clean() collapses ':' and '-' to the
@@ -4044,6 +4194,19 @@ function createRequestHandler(instanceId: string) {
           } catch {
             /* fall back to attempting all, guarded by the read-back below */
           }
+        }
+        const mutableCredentialName = findLegacyMutableCredentialName(
+          oidc,
+          oidcSuffix,
+          existingNameToSubject
+        );
+        if (mutableCredentialName) {
+          steps.push(
+            `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
+              `After immutable OIDC verification succeeds, remove it with: ` +
+              `az ad app federated-credential delete --id ${clientId} ` +
+              `--federated-credential-id ${mutableCredentialName}`
+          );
         }
         const ficsToCreate = selectMissingFederatedCredentials(
           oidc.federatedCredentials,
@@ -4156,6 +4319,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
+            if (!(await checkpoint())) return;
           }
         }
 
@@ -4259,6 +4423,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         recordServicePrincipal(op, { objectId: spObjectId });
+        if (!(await checkpoint())) return;
 
         const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
         steps.push(`Assigning Contributor role on ${resourceGroup}...`);
@@ -4283,6 +4448,7 @@ function createRequestHandler(instanceId: string) {
             scope: contributorScope,
             principalObjectId: spObjectId
           });
+          if (!(await checkpoint())) return;
         }
 
         // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
@@ -4329,6 +4495,7 @@ function createRequestHandler(instanceId: string) {
               scope: clusterScope,
               principalObjectId: spObjectId
             });
+            if (!(await checkpoint())) return;
           }
         } else {
           // Non-fatal: control-plane access is already in place, and
@@ -4677,6 +4844,35 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
@@ -4802,6 +4998,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
         // `workflow` scope, which is required to create/update files under
@@ -5029,6 +5232,7 @@ function createRequestHandler(instanceId: string) {
           repo: targetRepo,
           name: envName
         });
+        if (!(await checkpoint())) return;
         // Tag the environment as Radius-managed so the listing can filter
         // out environments created outside this extension.
         await setEnvironmentVariable("RADIUS_MANAGED", "true");
@@ -5150,6 +5354,7 @@ function createRequestHandler(instanceId: string) {
           branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
           mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
         });
+        if (!(await checkpoint())) return;
 
         // Step 4: Also commit the deploy workflows (dispatcher + both
         // provider workflows). The dispatcher references both provider
@@ -5200,6 +5405,7 @@ function createRequestHandler(instanceId: string) {
               deployCommit.viaPr ? prState?.branch || null : defaultBranch,
             mode: deployCommit.viaPr ? "pull_request" : "default_branch"
           });
+          if (!(await checkpoint())) return;
         }
         // Best-effort: remove the legacy monolithic deploy workflow so it
         // does not double-trigger alongside the new dispatcher. Skipped in
@@ -5243,6 +5449,7 @@ function createRequestHandler(instanceId: string) {
                   delCommit.viaPr ? prState?.branch || null : defaultBranch,
                 mode: delCommit.viaPr ? "pull_request" : "default_branch"
               });
+              if (!(await checkpoint())) return;
             }
           }
           steps.push("✅ Delete workflows committed.");
@@ -5417,6 +5624,16 @@ function createRequestHandler(instanceId: string) {
         // Record dispatch markers so the deploy monitor can track the
         // correct (newly-triggered) runs rather than any stale runs.
         {
+          op.verification = {
+            dispatchedAt,
+            workflow: VERIFY_WORKFLOW_FILE,
+            ref: verifyPlan.ref || defaultBranch,
+            environment: envName,
+            runId: verifyRunId == null ? null : String(verifyRunId),
+            runUrl: verifyRunUrl || null
+          };
+          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
+          if (!(await checkpoint())) return;
           const entry = servers.get(instanceId);
           if (entry) {
             entry.state.deployDispatchedAt = dispatchedAt;
@@ -5460,6 +5677,11 @@ function createRequestHandler(instanceId: string) {
                   }" to finish setup.`
             }
           });
+          await persistBestEffort({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
         } else {
           recordCommitState(op, {
             mode: prState ? "pull_request" : "default_branch",
@@ -5468,10 +5690,8 @@ function createRequestHandler(instanceId: string) {
               prState?.base || verifyPlan.defaultBranch || defaultBranch,
             pullRequestUrl: pullRequestUrl || null
           });
-          // Verification is dispatched but still running; the client
-          // polls /api/verify-status and the record stays open until it
-          // reaches a verdict.
-          enterStage(op, STAGE_VERIFY);
+          // Verification is dispatched but still running; stage and exact
+          // dispatch identity were persisted together above.
         }
 
         res.setHeader("Content-Type", "application/json");
@@ -6442,6 +6662,7 @@ function createRequestHandler(instanceId: string) {
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
+      const operationId = url.searchParams.get("operationId") || "";
       const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -6455,16 +6676,58 @@ function createRequestHandler(instanceId: string) {
 
       try {
         const entry = servers.get(instanceId);
-        const dispatchedAt = entry?.state?.deployDispatchedAt || 0;
-        let runId = entry?.state?.verifyRunId || null;
+        const verifyOp = operationId ? operations.get(operationId) : null;
+        if (
+          operationId &&
+          (!verifyOp ||
+            verifyOp.repo !== repo ||
+            verifyOp.environment !==
+              (url.searchParams.get("environment") || verifyOp.environment))
+        ) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error: "The verification operation does not match this request."
+          });
+          return;
+        }
+        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error:
+              "The verification operation has incomplete dispatch identity."
+          });
+          return;
+        }
+        const dispatchedAt =
+          verifyOp?.verification?.dispatchedAt ||
+          entry?.state?.deployDispatchedAt ||
+          0;
+        let runId =
+          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
         if (!runId) {
           runId = await findWorkflowRun(
             repo,
-            "radius-verify-credentials.yml",
+            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
             dispatchedAt,
             null
           );
-          if (runId && entry) entry.state.verifyRunId = runId;
+          if (runId && verifyOp) {
+            verifyOp.verification = {
+              dispatchedAt: verifyOp.verification.dispatchedAt,
+              workflow: verifyOp.verification.workflow,
+              ref: verifyOp.verification.ref,
+              environment: verifyOp.verification.environment,
+              runId: String(runId),
+              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
+            };
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          } else if (runId && entry) entry.state.verifyRunId = runId;
         }
         if (!runId) {
           respond({ state: "pending", runId: null });
@@ -6496,10 +6759,15 @@ function createRequestHandler(instanceId: string) {
           });
           return;
         }
-        const verifyOp = operations.running(repo);
         if (detail.conclusion === "success") {
-          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY)
+          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
             finishSucceeded(verifyOp);
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          }
           respond({ state: "success", runId, runUrl });
           return;
         }
@@ -6542,6 +6810,11 @@ function createRequestHandler(instanceId: string) {
               classification: "user-fixable",
               evidence: errMsg
             }
+          });
+          await persistBestEffort({
+            operation: verifyOp,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
           });
         }
         respond({ state: "failed", runId, runUrl, error: errMsg });
