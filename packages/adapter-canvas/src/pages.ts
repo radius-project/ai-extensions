@@ -95,10 +95,17 @@ ${getInlineVendorStyles()}
     --rad-warning-bg: color-mix(in srgb, var(--rad-warning) 16%, var(--rad-surface));
     --rad-danger-bg: color-mix(in srgb, var(--rad-danger) 14%, var(--rad-surface));
     --rad-node-bg: var(--rad-surface);
-    --rad-node-border: var(--rad-stroke-strong);
-    --rad-edge: var(--rad-stroke-strong);
-    --rad-edge-muted: var(--rad-stroke);
-    --rad-grid: var(--rad-stroke);
+    /* Graph lines are data, not chrome, so they deliberately do NOT flow
+       through the host's border tokens: --border-color-muted is *fainter*
+       than --border-color-default in Primer, which made --rad-stroke-strong
+       resolve to the weakest line on the canvas. Mixing the active text
+       colour into the active background instead keeps a consistent contrast
+       ratio and inverts correctly in dark mode (light lines on a dark
+       canvas) without needing a second palette. */
+    --rad-node-border: color-mix(in srgb, var(--rad-text) 45%, var(--rad-bg));
+    --rad-edge: color-mix(in srgb, var(--rad-text) 55%, var(--rad-bg));
+    --rad-edge-muted: color-mix(in srgb, var(--rad-text) 38%, var(--rad-bg));
+    --rad-grid: color-mix(in srgb, var(--rad-text) 14%, var(--rad-bg));
     --rad-code-bg: var(--rad-bg-subtle);
     --rad-code-text: var(--rad-text);
     --rad-shadow: color-mix(in srgb, var(--rad-text) 18%, transparent);
@@ -357,7 +364,7 @@ ${getInlineVendorStyles()}
   .legend { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
-  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
+  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-node-border); box-sizing: border-box; }
   .rad-node {
     position: relative; width: 220px; min-height: 104px;
     background: var(--rad-surface); border: 3px solid var(--rad-node-border);

@@ -112,6 +112,43 @@ describe("pageShell", () => {
     expect(typeStyles).toContain("overflow: hidden");
     expect(typeStyles).toContain("white-space: nowrap");
   });
+
+  it("derives graph line colours from text/background, not host border tokens", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    // Primer's --border-color-muted is FAINTER than --border-color-default, so
+    // routing graph lines through --rad-stroke-strong (which falls back to it)
+    // made them the weakest thing on the canvas. Mixing text into background
+    // keeps contrast stable and inverts correctly in dark mode.
+    for (const token of [
+      "--rad-node-border",
+      "--rad-edge",
+      "--rad-edge-muted",
+      "--rad-grid"
+    ]) {
+      const value = html.match(new RegExp(`${token}:\\s*([^;]+);`))?.[1];
+      expect(value, `${token} should not be defined`).toBeTruthy();
+      expect(value).toContain("color-mix");
+      expect(value).toContain("var(--rad-text)");
+      expect(value).not.toContain("--rad-stroke");
+    }
+  });
+
+  it("keeps graph lines in a legible contrast order", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const pct = (token: string) =>
+      Number(
+        html
+          .match(new RegExp(`${token}:\\s*([^;]+);`))?.[1]
+          ?.match(/var\(--rad-text\)\s+(\d+)%/)?.[1]
+      );
+    // Edges read strongest, then node borders, then the muted edge; the
+    // background grid stays well below all of them so it never competes.
+    expect(pct("--rad-edge")).toBeGreaterThanOrEqual(pct("--rad-node-border"));
+    expect(pct("--rad-node-border")).toBeGreaterThan(pct("--rad-edge-muted"));
+    expect(pct("--rad-edge-muted")).toBeGreaterThan(pct("--rad-grid"));
+    // All load-bearing lines need enough mix to stay visible in both themes.
+    expect(pct("--rad-edge-muted")).toBeGreaterThanOrEqual(35);
+  });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
