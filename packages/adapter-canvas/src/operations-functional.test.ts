@@ -94,7 +94,7 @@ describe("operation restart functional coverage", () => {
     first.start(op);
     enterStage(op, STAGE_VERIFY);
     op.verification = {
-      dispatchedAt: 1234,
+      dispatchedAt: Date.now(),
       workflow: "radius-verify-credentials.yml",
       ref: "feature/cart",
       environment: "dev",
