@@ -130,6 +130,12 @@ Either one makes a hard-coded name-based string wrong. **The only correct approa
 to ask GitHub what the subject will be and build the FIC to match** — and to *fail
 loudly* on an unknown claim key rather than silently emit a wrong subject.
 
+GitHub's immutable rollout requires a security-aware compatibility policy. Repositories created after July 15, 2026, and repositories renamed or transferred after that date, automatically adopt immutable subjects; older repositories can retain mutable subjects until they opt in. The repository API describes `use_immutable_subject` as an opt-in/opt-out setting, so `false` or an absent field does not prove which default a post-rollout repository effectively uses.
+
+Radius therefore creates only the immutable FIC when GitHub explicitly reports immutable subjects or returns the exact canonical immutable prefix. This removes the recyclable name-based trust path for customers using the stronger configuration. For a 404, omitted immutable fields, `false`, or an unverified prefix, Radius retains both default FICs so either effective GitHub default can authenticate. The dual case is a compatibility fallback with a broader trust surface, not the preferred steady state.
+
+If an app registration was provisioned before this policy and still contains a mutable FIC after GitHub is known to use immutable subjects, Create Environment warns with an Azure CLI deletion command. Validate authentication with the immutable subject before deleting the old credential. See [GitHub's immutable subject announcement](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) and [Microsoft Entra's migration guidance](https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-github-immutable-subjects).
+
 ### A.4 The AWS shape (for contrast)
 
 AWS expresses the same pattern with different nouns: an **IAM OIDC identity
