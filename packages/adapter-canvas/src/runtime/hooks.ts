@@ -24,8 +24,8 @@ export const DEFAULT_CANVAS_PAGE = "graph";
 import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
-} from "./deploy-diagnostics.js";
-import type { CanvasState } from "./shared.js";
+} from "../deploy-diagnostics.js";
+import type { CanvasState } from "../shared.js";
 
 interface GraphTriggerTarget {
   repo: string;
@@ -249,7 +249,7 @@ export function appBicepHandoffPrompt(
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
 export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
-export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.js";
+export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-diagnostics.js";
 
 // Prompt injected as a new user turn (via session.send) when a deploy started
 // from the canvas Deploy button fails. That path dispatches the workflow
