@@ -112,6 +112,55 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
 
   const actions = [
     {
+      ...declarationByName.get("create_environment")!,
+      handler: async (ctx: CanvasContext) => {
+        const entry = await deps.getOrCreateServer(
+          ctx.instanceId,
+          "environment"
+        );
+        const data = record(ctx.input);
+        try {
+          const provider = optionalString(data.provider);
+          const required =
+            provider === "azure" ?
+              [
+                "clientId",
+                "tenantId",
+                "subscriptionId",
+                "resourceGroup",
+                "cluster"
+              ]
+            : ["roleArn", "accountId", "region", "cluster"];
+          const missing = required.filter((name) => !data[name]);
+          if (missing.length > 0) {
+            throw new Error(
+              `Missing required ${provider} environment inputs: ${missing.join(", ")}.`
+            );
+          }
+          const response = await deps.deploy.fetch(
+            `${entry.baseUrl}/api/operations`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                ...data,
+                environment: optionalString(data.name)
+              })
+            }
+          );
+          const result = record(await response.json());
+          if (!response.ok && !result.error) {
+            result.error = `Environment setup failed with HTTP ${response.status}.`;
+          }
+          entry.state.envResult = result;
+        } catch (e) {
+          entry.state.envResult = { error: errorMessage(e) };
+        }
+        entry.url = `${entry.baseUrl}/?page=environment`;
+        return entry.state.envResult;
+      }
+    },
+    {
       ...declarationByName.get("get_graph_resources")!,
       handler: async (ctx: CanvasContext) => {
         const entry = await deps.getOrCreateServer(ctx.instanceId);
@@ -378,6 +427,15 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
+        if (deps.operations.hasActiveEnvironmentTasks()) {
+          const stopListening = deps.operations.onEnvironmentTasksSettled(() => {
+            stopListening();
+            if (deps.servers.get(ctx.instanceId) !== entry) return;
+            deps.servers.delete(ctx.instanceId);
+            entry.server.close();
+          });
+          return;
+        }
         deps.servers.delete(ctx.instanceId);
         await new Promise<void>((resolve) =>
           entry.server.close(() => resolve())

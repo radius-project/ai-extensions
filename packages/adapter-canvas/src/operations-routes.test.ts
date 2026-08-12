@@ -3,14 +3,18 @@
 // driven through the same routes the panel polls. The panel's whole design rests
 // on the record outliving the request that created it, so this exercises the
 // HTTP boundary rather than the module in isolation.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getOrCreateServer } from "./server.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  getOrCreateServer,
+  setEnvironmentOperationTestRunner
+} from "./server.js";
 import {
   addLegacyStep,
   buildStages,
   createOperation,
   enterStage,
   finish,
+  requireInput,
   operations,
   recordAzureApp,
   recordCommitState,
@@ -32,12 +36,124 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  setEnvironmentOperationTestRunner(null);
   operations.clear();
   try {
     entry?.server?.close();
   } catch {
     /* best-effort */
   }
+});
+
+async function postJson(path, body) {
+  const res = await fetch(baseUrl + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+describe("POST /api/operations server-owned execution", () => {
+  it("returns 202 before the scheduled task completes and finishes without polling", async () => {
+    operations.clear();
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    const runner = vi.fn(async (operationId) => {
+      await blocked;
+      finish(operations.get(operationId), "succeeded");
+      await operations.persist();
+    });
+    setEnvironmentOperationTestRunner(runner);
+
+    const started = await postJson("/api/operations", {
+      repo: "contoso/detached",
+      environment: "dev",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+
+    expect(started.status).toBe(202);
+    expect(started.body.operationId).toMatch(/^op_/);
+    expect(started.body.statusUrl).toContain(started.body.operationId);
+    expect(runner).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => {
+      expect(operations.get(started.body.operationId)?.state).toBe("succeeded");
+    });
+  });
+
+  it("returns the active operation id on a conflicting start", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const first = await postJson("/api/operations", {
+      repo: "contoso/conflict",
+      environment: "dev",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+    const second = await postJson("/api/operations", {
+      repo: "contoso/conflict",
+      environment: "prod",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+    expect(first.status).toBe(202);
+    expect(second).toMatchObject({
+      status: 409,
+      body: {
+        code: "operation-in-progress",
+        operationId: first.body.operationId
+      }
+    });
+  });
+
+  it("resumes only the prompt currently owned by the operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/resume");
+    op.request = { azure: {}, environment: {}, needsAzureCredentials: true };
+    requireInput(op, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      fields: ["serviceManagementReference"],
+      message: "Enter the Service Management Reference."
+    });
+
+    const wrong = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/app-selection-required`,
+      { appId: "app-1" }
+    );
+    expect(wrong.status).toBe(409);
+
+    const resumed = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
+      {
+        checkpoint: "azure-service-management-reference",
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+      }
+    );
+    expect(resumed.status).toBe(202);
+    expect(op.state).toBe("running");
+    expect(op.request.azure.serviceManagementReference).toBe(
+      "11111111-1111-1111-1111-111111111111"
+    );
+  });
 });
 
 async function getJson(path) {

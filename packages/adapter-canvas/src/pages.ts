@@ -2884,6 +2884,7 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
     var operationId = '';
     var verifyDispatchedAtMs = 0;
     var verifyDeadlineMs = 45 * 60 * 1000;
+    var promptingRequestedAt = '';
     var elapsedEl = document.getElementById('env-progress-elapsed');
     envProgressElapsedTimer = setInterval(function() {
         if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - startedAtMs);
@@ -2971,6 +2972,50 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                     if (onTerminal) onTerminal(op);
                     return;
                 }
+                if (op.state === 'input_required' && op.inputRequired && op.inputRequired.requestedAt !== promptingRequestedAt) {
+                    promptingRequestedAt = op.inputRequired.requestedAt;
+                    var prompt = op.inputRequired;
+                    var answer;
+                    if (prompt.code === 'service-management-reference-required') {
+                        answer = promptSmr().then(function(smr) {
+                            return { serviceManagementReference: smr };
+                        });
+                    } else if (prompt.code === 'app-selection-required') {
+                        answer = showAppPicker({
+                            title: 'Choose a deploy identity',
+                            intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
+                            candidates: (prompt.metadata && prompt.metadata.candidates) || [],
+                            defaultAppId: prompt.metadata && prompt.metadata.defaultAppId,
+                            allowCreateNew: true
+                        }).then(function(choice) {
+                            return choice.createNew ? { createNew: true } : { appId: choice.appId };
+                        });
+                    }
+                    if (answer) {
+                        answer.then(function(values) {
+                            values.checkpoint = prompt.checkpoint;
+                            values.repo = repo;
+                            values.environment = environment;
+                            values.provider = provider;
+                            return fetch('/api/operations/' + encodeURIComponent(operationId) + '/resume/' + encodeURIComponent(prompt.code), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(values)
+                            }).then(function(response) {
+                                if (response.ok) return response;
+                                return response.json().catch(function() { return {}; }).then(function(payload) {
+                                    throw new Error(payload.error || payload.message || 'Unable to resume environment setup.');
+                                });
+                            });
+                        }).then(function() {
+                            envProgressTimer = setTimeout(tick, 0);
+                        }).catch(function() {
+                            promptingRequestedAt = '';
+                            envProgressTimer = setTimeout(tick, 1500);
+                        });
+                        return;
+                    }
+                }
                 if (op.currentStage === 'verify' && environment) {
                     // Reading verification status is what advances the server's
                     // operation record from verify/running to a terminal state.
@@ -3028,6 +3073,8 @@ function resumeEnvProgress(repo) {
 // One place that turns a terminal record into what the landing shows, so the
 // resumed path and the just-clicked path cannot disagree.
 function applyEnvTerminal(op) {
+    var btn = document.getElementById('deploy-btn');
+    if (btn) { btn.textContent = 'Create Environment'; btn.disabled = false; }
     var warnings = op.steps.filter(function(s) { return s.state === 'warning'; })
         .map(function(s) { return '⚠️ ' + s.label; });
     if (op.terminalState === 'action_required') {
@@ -3036,6 +3083,16 @@ function applyEnvTerminal(op) {
     } else if (op.terminalState === 'succeeded' || op.terminalState === 'succeeded_with_warnings') {
         showEnvSuccessBanner(op.provider, op.environment);
         showEnvSetupWarnings(warnings);
+    } else {
+        var message = 'Environment setup failed: ' + ((op.failure && op.failure.message) || 'unknown error');
+        var panel = document.getElementById('env-progress-panel');
+        if (panel) {
+            panel.classList.remove('env-progress--done');
+            panel.classList.add('env-progress--failed');
+        }
+        var activityEl = document.getElementById('env-progress-activity');
+        if (activityEl) activityEl.textContent = message;
+        showEnvError(message);
     }
     loadEnvTable();
 }
@@ -3560,46 +3617,6 @@ function findAzureClusterResourceGroup(clusterId) {
     }
     return '';
 }
-function runAzureAutoSetup(params) {
-    var payload = {
-        repo: params.repo, environment: params.environment,
-        resourceGroup: params.resourceGroup, cluster: params.cluster,
-        subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
-    };
-    // The cluster's own resource group (from discovery), used server-side to
-    // scope the AKS Cluster Admin grant. Sent only when known.
-    if (params.clusterResourceGroup) payload.clusterResourceGroup = params.clusterResourceGroup;
-    // Only sent on a retry after the tenant demands it (progressive disclosure).
-    if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
-    // ROUND 9: editable create name + explicit identity selection. Send appName
-    // whenever the field was populated in params (even ''), so the server can
-    // distinguish an explicit blank (invalid) from an omitted field (derive).
-    if (params.appName !== undefined) payload.appName = params.appName;
-    if (params.appId) payload.appId = params.appId;
-    if (params.createNew) payload.createNew = true;
-    if (params.operationId) payload.operationId = params.operationId;
-    return fetch('/api/azure-auto-setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    }).then(function(r) { return r.json(); }).then(function(data) {
-        if (data.error) {
-            var err = new Error(data.error);
-            err.code = data.code;
-            err.steps = data.steps;
-            err.cleanup = data.cleanup;
-            err.cleanupWarning = data.cleanupWarning;
-            // Carry selection metadata so the interactive wrapper can prompt.
-            err.candidates = data.candidates;
-            err.defaultAppId = data.defaultAppId;
-            err.operationId = data.operationId;
-            throw err;
-        }
-        if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
-        return data;
-    });
-}
-
 // Prompt for a Service Management Reference (GUID) via the modal; resolves the
 // entered GUID or rejects if the user cancels.
 function promptSmr() {
@@ -3764,36 +3781,6 @@ function showAppPicker(opts) {
     });
 }
 
-// Run auto-setup, resolving both progressive-disclosure prompts:
-//   - service-management-reference-required → SMR modal, retry with the GUID
-//   - app-selection-required → identity picker, retry with appId/createNew
-// Retries recursively so a create-after-picking can still surface the SMR prompt.
-function runAzureAutoSetupInteractive(params) {
-    return runAzureAutoSetup(params).catch(function(err) {
-        var continued = Object.assign({}, params, { operationId: err.operationId || params.operationId });
-        if (err.code === 'service-management-reference-required') {
-            return promptSmr().then(function(smr) {
-                return runAzureAutoSetupInteractive(Object.assign({}, continued, { serviceManagementReference: smr }));
-            });
-        }
-        if (err.code === 'app-selection-required') {
-            return showAppPicker({
-                title: 'Choose a deploy identity',
-                intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
-                candidates: err.candidates || [],
-                defaultAppId: err.defaultAppId,
-                allowCreateNew: true
-            }).then(function(choice) {
-                var next = Object.assign({}, continued);
-                if (choice.createNew) { next.createNew = true; delete next.appId; }
-                else { next.appId = choice.appId; delete next.createNew; }
-                return runAzureAutoSetupInteractive(next);
-            });
-        }
-        throw err;
-    });
-}
-
 deployBtn.addEventListener('click', function() {
     var btn = this;
     var statusEl = document.getElementById('deploy-status');
@@ -3874,56 +3861,40 @@ deployBtn.addEventListener('click', function() {
         stages: [], steps: [], terminalState: null, failure: null, startedAt: new Date().toISOString(),
     });
     focusEnvProgressPanel();
-    trackEnvProgress(targetRepo, env, provider);
 
-    var preflight;
-    if (needsAzureCreds) {
-        var appNameEl = document.getElementById('az-app-name-input');
-        var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
-        preflight = runAzureAutoSetupInteractive({
-            repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster,
-            clusterResourceGroup: clusterResourceGroup,
-            subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId,
-            appName: appNameEl ? appNameEl.value.trim() : '',
-            appId: selectedAppId
-        });
-    } else {
-        preflight = Promise.resolve(null);
-    }
-
-    preflight.then(function(setupResult) {
-        // Auto-setup's step log (incl. any ⚠️ AKS Cluster Admin warning) rides on
-        // the resolved payload; keep it so we can surface warnings once the
-        // environment is created (below), instead of discarding it as before.
-        var setupSteps = (setupResult && setupResult.steps) || [];
-        var envData = {
+    var appNameEl = document.getElementById('az-app-name-input');
+    var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
+    var envData = {
             repo: targetRepo,
             environment: env,
             provider: provider,
             cluster: cluster,
             namespace: namespace,
             profileName: selectedProfile.name,
-            operationId: setupResult && setupResult.operationId,
             origin: 'environment',
             resumeTarget: { page: 'planned', repo: targetRepo, branch: CTX_BRANCH },
             resumeBranch: CTX_BRANCH,
             resumeReason: 'View planned graph'
-        };
-        envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
-        if (provider === 'azure') {
-            envData.clientId = document.getElementById('az-client-id').value.trim();
-            envData.tenantId = selectedProfile.tenantId || '';
-            envData.subscriptionId = selectedProfile.subscriptionId || '';
-            envData.resourceGroup = resourceGroup;
-        } else {
-            envData.roleArn = selectedProfile.roleArn || '';
-            envData.region = selectedProfile.region || '';
-            envData.accountId = selectedProfile.accountId || '';
-            envData.vpcId = vpc; envData.subnetIds = subnets;
-        }
-        return fetch('/api/create-environment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(envData) })
-            .then(function(r) { return r.json(); })
-            .then(function(envResult) {
+    };
+    envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
+    if (provider === 'azure') {
+        envData.clientId = document.getElementById('az-client-id').value.trim();
+        envData.tenantId = selectedProfile.tenantId || '';
+        envData.subscriptionId = selectedProfile.subscriptionId || '';
+        envData.resourceGroup = resourceGroup;
+        envData.clusterResourceGroup = clusterResourceGroup;
+        envData.appName = appNameEl ? appNameEl.value.trim() : '';
+        envData.appId = selectedAppId;
+    } else {
+        envData.roleArn = selectedProfile.roleArn || '';
+        envData.region = selectedProfile.region || '';
+        envData.accountId = selectedProfile.accountId || '';
+        envData.vpcId = vpc; envData.subnetIds = subnets;
+    }
+    fetch('/api/operations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(envData) })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(startResult) {
+                var envResult = startResult.d || {};
                 if (envResult.error) {
                     stopEnvProgress();
                     btn.textContent = 'Create Environment'; btn.disabled = false;
@@ -3934,61 +3905,13 @@ deployBtn.addEventListener('click', function() {
                         });
                     return;
                 }
-                // Terminal state: action_required. The server states this rather
-                // than leaving us to infer it: a pull request can exist on a run
-                // that dispatched verification perfectly well, and reading the URL
-                // as a control-flow decision is exactly what #247 was.
-                if (envResult.actionRequired) {
-                    stopEnvProgress();
-                    btn.textContent = 'Create Environment'; btn.disabled = false;
-                    statusEl.style.display = 'none';
-                    showEnvSetupWarnings(setupSteps.concat(envResult.steps || []));
-                    showEnvActionRequired(provider, env, envResult.pullRequestUrl, {
-                        branch: envResult.pullRequestBranch,
-                        baseBranch: envResult.pullRequestBaseBranch
+                envProgressTimer = setTimeout(function() {
+                    trackEnvProgress(targetRepo, env, provider, function(finished) {
+                        applyEnvTerminal(finished);
                     });
-                    loadEnvTable();
-                    return;
-                }
-                btn.textContent = 'Verifying credentials…';
-                var pollStart = Date.now();
-                var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
-                function pollVerify() {
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env) + '&operationId=' + encodeURIComponent(envResult.operationId || ''))
-                        .then(function(r) { return r.json(); })
-                        .then(function(v) {
-                            if (v.state === 'success') {
-                                stopEnvProgress();
-                                btn.textContent = 'Create Environment'; btn.disabled = false;
-                                statusEl.style.display = 'none';
-                                showEnvSuccessBanner(provider, env); showEnvSetupWarnings(setupSteps); loadEnvTable();
-                                fetch('/api/operations?repo=' + encodeURIComponent(targetRepo))
-                                    .then(function(r) { return r.json(); })
-                                    .then(function(payload) {
-                                        if (payload && payload.operation) renderEnvProgress(payload.operation);
-                                        else hideEnvProgress();
-                                    })
-                                    .catch(function() { hideEnvProgress(); });
-                                return;
-                            }
-                            // Name the Actions step the run is on instead of
-                            // leaving eight minutes of unchanging text. Absent
-                            // when the jobs sub-resource 503s, which it does
-                            // intermittently — so it degrades to silence rather
-                            // than announcing its own absence.
-                            if (v.activity) envVerifyActivity = v.activity;
-                            if (v.state === 'failed') { failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : '')); return; }
-                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.' + (v.runUrl ? ' It may still be running — view it at ' + v.runUrl : '')); return; }
-                            setTimeout(pollVerify, 5000);
-                        })
-                        .catch(function() {
-                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.'); return; }
-                            setTimeout(pollVerify, 5000);
-                        });
-                }
-                pollVerify();
-            });
-    }).catch(function(err) {
+                }, 0);
+            })
+    .catch(function(err) {
         stopEnvProgress();
         btn.textContent = 'Create Environment'; btn.disabled = false;
         statusEl.style.display = 'none';
