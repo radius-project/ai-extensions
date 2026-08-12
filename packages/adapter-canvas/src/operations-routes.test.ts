@@ -82,7 +82,7 @@ describe("POST /api/operations server-owned execution", () => {
     expect(started.status).toBe(202);
     expect(started.body.operationId).toMatch(/^op_/);
     expect(started.body.statusUrl).toContain(started.body.operationId);
-    expect(runner).not.toHaveBeenCalled();
+    expect(operations.get(started.body.operationId)?.state).toBe("running");
 
     release();
     await vi.waitFor(() => {

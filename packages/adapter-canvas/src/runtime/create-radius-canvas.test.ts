@@ -605,4 +605,26 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
     expect(deps.servers.has("radius-panel")).toBe(false);
   });
+
+  it("cancels a deferred close when the same instance reopens", async () => {
+    const { canvas, deps } = setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    const entry = deps.servers.get("radius-panel")!;
+    const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("radius-panel"));
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    settled?.();
+
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(deps.servers.get("radius-panel")).toBe(entry);
+  });
 });

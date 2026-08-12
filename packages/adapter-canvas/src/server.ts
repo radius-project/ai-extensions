@@ -493,8 +493,7 @@ interface FederatedCredential {
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map<string, CanvasServerEntry>();
 let environmentOperationTestRunner:
-  | ((operationId: string) => Promise<void>)
-  | null = null;
+  ((operationId: string) => Promise<void>) | null = null;
 
 export function setEnvironmentOperationTestRunner(
   runner: ((operationId: string) => Promise<void>) | null
@@ -2274,13 +2273,18 @@ function createRequestHandler(
     operationId: string,
     task: () => Promise<void>
   ): void {
-    if (serverOwnedTasks.has(operationId)) return;
     activeEnvironmentTasks.add(operationId);
     const op = operations.get(operationId);
     if (op) setExecutionActive(op, true);
-    const running = new Promise<void>((resolve) => {
-      setImmediate(() => resolve());
-    })
+    const prior = serverOwnedTasks.get(operationId);
+    const running = (prior || Promise.resolve())
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            setImmediate(() => resolve());
+          })
+      )
       .then(task)
       .catch(async (error) => {
         const current = operations.get(operationId);
@@ -2299,6 +2303,7 @@ function createRequestHandler(
         }
       })
       .finally(() => {
+        if (serverOwnedTasks.get(operationId) !== running) return;
         const current = operations.get(operationId);
         if (current && !current.endedAt) setExecutionActive(current, false);
         serverOwnedTasks.delete(operationId);
@@ -2319,7 +2324,7 @@ function createRequestHandler(
       },
       body: JSON.stringify(data)
     });
-    const result = await response.json();
+    const result: any = await response.json();
     if (!response.ok && !result?.inputRequired) {
       throw new Error(
         result?.error || `Request failed with HTTP ${response.status}.`
@@ -2329,7 +2334,7 @@ function createRequestHandler(
   }
 
   async function monitorVerification(operationId: string): Promise<void> {
-    const deadline = Date.now() + 10 * 60 * 1000;
+    const deadline = Date.now() + 45 * 60 * 1000;
     while (Date.now() < deadline) {
       const op = operations.get(operationId);
       if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
@@ -2342,16 +2347,19 @@ function createRequestHandler(
         `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
         { headers: { "X-Radius-Server-Owned": "1" } }
       );
-      const result = await response.json();
+      const result: any = await response.json();
       if (!response.ok) {
         throw new Error(
-          result?.error || `Verification status failed with HTTP ${response.status}.`
+          result?.error ||
+            `Verification status failed with HTTP ${response.status}.`
         );
       }
       if (result?.state === "success" || result?.state === "failed") return;
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
-    throw new Error("Credential verification did not complete within 10 minutes.");
+    throw new Error(
+      "Credential verification did not complete within 45 minutes."
+    );
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
@@ -2374,7 +2382,8 @@ function createRequestHandler(
       if (setupResult?.inputRequired || op.state === "input_required") return;
     }
     const current = operations.get(operationId);
-    if (!current || current.state === "input_required" || current.endedAt) return;
+    if (!current || current.state === "input_required" || current.endedAt)
+      return;
     await postInternal("/api/create-environment", {
       ...request.environment,
       repo: op.repo,
@@ -2591,7 +2600,31 @@ function createRequestHandler(
         );
         return;
       }
-      await operations.persist();
+      try {
+        await operations.persist();
+      } catch (error) {
+        finish(op, "failed", {
+          failure: {
+            code: "operation-registration-persist-failed",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not durably register the environment operation.",
+            classification: "unknown",
+            evidence: errorMessage(error)
+          }
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not durably register the environment operation. No setup work was started.",
+            code: "operation-registration-persist-failed"
+          })
+        );
+        return;
+      }
       const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Location", statusUrl);
@@ -3358,14 +3391,12 @@ function createRequestHandler(
               metadata:
                 code === "app-selection-required" ?
                   {
-                    candidates: Array.isArray(extra.candidates) ?
-                      extra.candidates
-                    : [],
+                    candidates:
+                      Array.isArray(extra.candidates) ? extra.candidates : [],
                     defaultAppId: extra.defaultAppId || null
                   }
                 : null
             });
-            setExecutionActive(op, false);
             await operations.persist();
             res.setHeader("Content-Type", "application/json");
             res.writeHead(status);

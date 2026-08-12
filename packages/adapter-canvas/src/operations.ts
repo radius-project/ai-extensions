@@ -350,7 +350,9 @@ export function requireInput(
       typeof checkpoint === "string" && checkpoint ? checkpoint : code || null,
     fields: Array.isArray(fields) ? fields.map(String) : [],
     metadata:
-      metadata && typeof metadata === "object" ? structuredClone(metadata) : null,
+      metadata && typeof metadata === "object" ?
+        structuredClone(metadata)
+      : null,
     requestedAt: nowIso()
   };
   op.recoveryState = "waiting_input";
