@@ -114,16 +114,41 @@ describe("operation restart functional coverage", () => {
       code: "app-selection-required",
       message: "Choose an App Registration."
     });
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {
+        resourceGroup: "rg-dev",
+        cluster: "aks-dev",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1"
+      },
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure",
+        resourceGroup: "rg-dev",
+        cluster: "aks-dev"
+      }
+    };
+    op.request = {
+      ...op.resumeRequest,
+      environment: {
+        ...op.resumeRequest.environment,
+        roleArn: "SECRET_ROLE_ARN"
+      }
+    };
     op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     await first.persist();
 
     const restored = await restart();
     const recovered = restored.get(op.operationId);
     expect(recovered).toMatchObject({
-      state: "running",
+      state: "input_required",
       recoveryState: "waiting_input",
       inputRequired: { code: "app-selection-required" }
     });
+    expect(recovered.resumeRequest.azure.resourceGroup).toBe("rg-dev");
+    expect(recovered.request).toBeUndefined();
     expect(isStale(recovered)).toBe(false);
   });
 
@@ -312,7 +337,7 @@ describe("operation restart functional coverage", () => {
     const persisted = await fs.readFile(filePath, "utf8");
     expect(persisted).toContain("subscriptionId");
     expect(persisted).not.toMatch(
-      /RAW_STDERR|TOKEN_SECRET|COMMAND_OUTPUT|evidence/
+      /RAW_STDERR|TOKEN_SECRET|COMMAND_OUTPUT|SECRET_ROLE_ARN|evidence/
     );
     expect(JSON.stringify(toClientView(op))).not.toContain("RAW_STDERR");
   });

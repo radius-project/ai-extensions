@@ -140,8 +140,10 @@ import {
   projectCleanupSummary,
   finish,
   finishSucceeded,
+  canResumeInput,
   requireInput,
   resumeAfterInput,
+  setExecutionActive,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
@@ -490,6 +492,27 @@ interface FederatedCredential {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map<string, CanvasServerEntry>();
+let environmentOperationTestRunner:
+  | ((operationId: string) => Promise<void>)
+  | null = null;
+
+export function setEnvironmentOperationTestRunner(
+  runner: ((operationId: string) => Promise<void>) | null
+): void {
+  environmentOperationTestRunner = runner;
+}
+
+const activeEnvironmentTasks = new Set<string>();
+const environmentTasksSettledListeners = new Set<() => void>();
+
+export function hasActiveEnvironmentTasks(): boolean {
+  return activeEnvironmentTasks.size > 0;
+}
+
+export function onEnvironmentTasksSettled(listener: () => void): () => void {
+  environmentTasksSettledListeners.add(listener);
+  return () => environmentTasksSettledListeners.delete(listener);
+}
 
 export function graphDefinitionHash(
   content: string,
@@ -2241,7 +2264,129 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(instanceId: string) {
+function createRequestHandler(
+  instanceId: string,
+  resolveBaseUrl: () => string
+) {
+  const serverOwnedTasks = new Map<string, Promise<void>>();
+
+  function scheduleServerOwnedTask(
+    operationId: string,
+    task: () => Promise<void>
+  ): void {
+    if (serverOwnedTasks.has(operationId)) return;
+    activeEnvironmentTasks.add(operationId);
+    const op = operations.get(operationId);
+    if (op) setExecutionActive(op, true);
+    const running = new Promise<void>((resolve) => {
+      setImmediate(() => resolve());
+    })
+      .then(task)
+      .catch(async (error) => {
+        const current = operations.get(operationId);
+        if (current && !current.endedAt) {
+          finish(current, "failed", {
+            failure: {
+              code: "server-owned-task-failed",
+              stage: current.currentStage,
+              stepSeq: null,
+              message: errorMessage(error),
+              classification: "unknown",
+              evidence: error instanceof Error ? error.stack || null : null
+            }
+          });
+          await operations.persist().catch(() => {});
+        }
+      })
+      .finally(() => {
+        const current = operations.get(operationId);
+        if (current && !current.endedAt) setExecutionActive(current, false);
+        serverOwnedTasks.delete(operationId);
+        activeEnvironmentTasks.delete(operationId);
+        if (activeEnvironmentTasks.size === 0) {
+          for (const listener of environmentTasksSettledListeners) listener();
+        }
+      });
+    serverOwnedTasks.set(operationId, running);
+  }
+
+  async function postInternal(pathname: string, data: unknown): Promise<any> {
+    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": "1"
+      },
+      body: JSON.stringify(data)
+    });
+    const result = await response.json();
+    if (!response.ok && !result?.inputRequired) {
+      throw new Error(
+        result?.error || `Request failed with HTTP ${response.status}.`
+      );
+    }
+    return result;
+  }
+
+  async function monitorVerification(operationId: string): Promise<void> {
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const op = operations.get(operationId);
+      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
+      const params = new URLSearchParams({
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      const response = await fetch(
+        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
+        { headers: { "X-Radius-Server-Owned": "1" } }
+      );
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          result?.error || `Verification status failed with HTTP ${response.status}.`
+        );
+      }
+      if (result?.state === "success" || result?.state === "failed") return;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    throw new Error("Credential verification did not complete within 10 minutes.");
+  }
+
+  async function runEnvironmentOperation(operationId: string): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId);
+      return;
+    }
+    const op = operations.get(operationId);
+    if (!op) return;
+    const request = op.request || op.resumeRequest || {};
+    let setupResult: any = null;
+    if (op.provider === "azure" && request.needsAzureCredentials) {
+      setupResult = await postInternal("/api/azure-auto-setup", {
+        ...request.azure,
+        repo: op.repo,
+        environment: op.environment,
+        operationId,
+        serverOwned: true
+      });
+      if (setupResult?.inputRequired || op.state === "input_required") return;
+    }
+    const current = operations.get(operationId);
+    if (!current || current.state === "input_required" || current.endedAt) return;
+    await postInternal("/api/create-environment", {
+      ...request.environment,
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider,
+      operationId,
+      clientId: setupResult?.clientId || request.environment?.clientId || "",
+      serverOwned: true
+    });
+    await monitorVerification(operationId);
+  }
+
   return async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
@@ -2305,6 +2450,246 @@ function createRequestHandler(instanceId: string) {
       res.writeHead(200);
       res.end(
         JSON.stringify({ operation: record ? toClientView(record) : null })
+      );
+      return;
+    }
+    if (pathname === "/api/operations" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
+        );
+        return;
+      }
+      const repo = String(data.repo || "");
+      const environment = String(data.environment || data.name || "dev");
+      const provider = data.provider === "aws" ? "aws" : "azure";
+      if (!isValidRepoSlug(repo)) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: `Invalid repository "${repo}". Expected "owner/repo".`,
+            code: "invalid-repo"
+          })
+        );
+        return;
+      }
+      if (!environment.trim()) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Environment name is required.",
+            code: "environment-required"
+          })
+        );
+        return;
+      }
+      if (provider === "azure") {
+        if (
+          !isResourceGroupName(String(data.resourceGroup || "")) ||
+          !isAksClusterName(String(data.cluster || "")) ||
+          !isUuid(String(data.tenantId || "")) ||
+          !isUuid(String(data.subscriptionId || ""))
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error:
+                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+              code: "invalid-azure-operation-input"
+            })
+          );
+          return;
+        }
+      } else if (
+        !String(data.roleArn || "").trim() ||
+        !String(data.accountId || "").trim() ||
+        !String(data.region || "").trim() ||
+        !String(data.cluster || "").trim()
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error:
+              "AWS setup requires roleArn, accountId, region, and cluster.",
+            code: "invalid-aws-operation-input"
+          })
+        );
+        return;
+      }
+      const needsAzureCredentials =
+        provider === "azure" && !String(data.clientId || "").trim();
+      const op = createOperation({
+        provider,
+        repo,
+        environment,
+        stages: buildStages({ includeIdentity: needsAzureCredentials }),
+        journey: {
+          origin: data.origin || null,
+          resumeTarget: data.resumeTarget || null,
+          resumeBranch: data.resumeBranch || data.branch || null,
+          resumeReason: data.resumeReason || null
+        }
+      });
+      op.request = {
+        needsAzureCredentials,
+        azure: {
+          resourceGroup: data.resourceGroup || "",
+          cluster: data.cluster || "",
+          clusterResourceGroup: data.clusterResourceGroup || "",
+          subscriptionId: data.subscriptionId || "",
+          tenantId: data.tenantId || "",
+          appName: data.appName,
+          appId: data.appId || "",
+          createNew: data.createNew === true,
+          serviceManagementReference: data.serviceManagementReference || ""
+        },
+        environment: { ...data, environment, provider }
+      };
+      if (provider === "azure") {
+        op.resumeRequest = {
+          needsAzureCredentials,
+          azure: structuredClone(op.request.azure),
+          environment: {
+            repo,
+            environment,
+            provider,
+            cluster: data.cluster || "",
+            namespace: data.namespace || "",
+            profileName: data.profileName || "",
+            branch: data.branch || "",
+            tenantId: data.tenantId || "",
+            subscriptionId: data.subscriptionId || "",
+            resourceGroup: data.resourceGroup || "",
+            origin: data.origin || null,
+            resumeTarget: data.resumeTarget || null,
+            resumeBranch: data.resumeBranch || null,
+            resumeReason: data.resumeReason || null
+          }
+        };
+      }
+      const started = operations.start(op);
+      if (!started.ok) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: `Setup is already running for ${repo}.`,
+            code: "operation-in-progress",
+            operationId: started.conflict.operationId
+          })
+        );
+        return;
+      }
+      await operations.persist();
+      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Location", statusUrl);
+      res.writeHead(202);
+      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
+    }
+    const resumeMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
+    );
+    if (resumeMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(resumeMatch[1]);
+      const code = decodeURIComponent(resumeMatch[2]);
+      const op = operations.get(operationId);
+      if (!op) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(404);
+        res.end(
+          JSON.stringify({
+            error: "Unknown operation.",
+            code: "unknown-operation"
+          })
+        );
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = {};
+      }
+      if (
+        !canResumeInput(op, {
+          code,
+          checkpoint: data.checkpoint || op.inputRequired?.checkpoint,
+          repo: data.repo || op.repo,
+          environment: data.environment || op.environment,
+          provider: data.provider || op.provider
+        })
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: "The operation is not waiting for this input.",
+            code: "operation-resume-mismatch",
+            operationId
+          })
+        );
+        return;
+      }
+      if (!op.request && op.resumeRequest) {
+        op.request = structuredClone(op.resumeRequest);
+      }
+      if (code === "service-management-reference-required") {
+        op.request.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.serviceManagementReference =
+            data.serviceManagementReference || "";
+        }
+      } else if (code === "app-selection-required") {
+        op.request.azure.appId = data.appId || "";
+        op.request.azure.createNew = data.createNew === true;
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.appId = data.appId || "";
+          op.resumeRequest.azure.createNew = data.createNew === true;
+        }
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Unsupported resume prompt.",
+            code: "unsupported-resume"
+          })
+        );
+        return;
+      }
+      resumeAfterInput(op);
+      await operations.persist();
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(202);
+      res.end(
+        JSON.stringify({
+          operationId,
+          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
+        })
+      );
+      setImmediate(() =>
+        scheduleServerOwnedTask(operationId, () =>
+          runEnvironmentOperation(operationId)
+        )
       );
       return;
     }
@@ -2959,12 +3344,35 @@ function createRequestHandler(instanceId: string) {
             code === "app-selection-required" ||
             code === "service-management-reference-required";
           if (op && retryablePrompt) {
-            requireInput(op, { code, message: error });
+            requireInput(op, {
+              code,
+              message: error,
+              checkpoint:
+                code === "app-selection-required" ?
+                  "azure-app-selection"
+                : "azure-service-management-reference",
+              fields:
+                code === "app-selection-required" ?
+                  ["appId", "createNew"]
+                : ["serviceManagementReference"],
+              metadata:
+                code === "app-selection-required" ?
+                  {
+                    candidates: Array.isArray(extra.candidates) ?
+                      extra.candidates
+                    : [],
+                    defaultAppId: extra.defaultAppId || null
+                  }
+                : null
+            });
+            setExecutionActive(op, false);
+            await operations.persist();
             res.setHeader("Content-Type", "application/json");
             res.writeHead(status);
             res.end(
               JSON.stringify({
                 error,
+                inputRequired: true,
                 ...(code ? { code } : {}),
                 ...(op ? { operationId: op.operationId } : {}),
                 ...sanitizeFailureExtra(extra || {})
@@ -3100,7 +3508,7 @@ function createRequestHandler(instanceId: string) {
             existing.environment !== envName ||
             existing.provider !== "azure" ||
             existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
-            !existing.inputRequired
+            (!data.serverOwned && !existing.inputRequired)
           ) {
             await fail(
               409,
@@ -3110,7 +3518,7 @@ function createRequestHandler(instanceId: string) {
             return;
           }
           op = existing;
-          resumeAfterInput(op);
+          if (existing.inputRequired) resumeAfterInput(op);
         } else {
           op = createOperation({
             provider: "azure",
@@ -4760,7 +5168,8 @@ function createRequestHandler(instanceId: string) {
             existing.repo !== targetRepo ||
             existing.environment !== envName ||
             existing.provider !== provider ||
-            existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
+            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
+              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
             existing.inputRequired
           ) {
             res.setHeader("Content-Type", "application/json");
@@ -8665,7 +9074,8 @@ async function startServer(
   instanceId: string,
   page = DEFAULT_CANVAS_PAGE
 ): Promise<CanvasServerEntry> {
-  const handler = createRequestHandler(instanceId);
+  let baseUrl = "";
+  const handler = createRequestHandler(instanceId, () => baseUrl);
   // Restore the user's explicitly chosen GitHub account (if any) before priming
   // so the very first strategy resolution honors it. This is what makes the
   // account choice stable across restarts.
@@ -8691,7 +9101,7 @@ async function startServer(
     const address = server.address();
     port = typeof address === "object" && address ? address.port : 0;
   }
-  const baseUrl = `http://127.0.0.1:${port}`;
+  baseUrl = `http://127.0.0.1:${port}`;
   const entry: CanvasServerEntry = {
     server,
     baseUrl,

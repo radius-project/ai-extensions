@@ -54,6 +54,8 @@ import { generateAzureOIDC, generateAWSOIDC } from "./infra.js";
 import {
   servers,
   getOrCreateServer,
+  hasActiveEnvironmentTasks,
+  onEnvironmentTasksSettled,
   getLastWebviewActivityAt,
   setAppBicepHandoff,
   setDeployRepairHandoff,
@@ -162,7 +164,9 @@ const dependencies: RadiusExtensionDependencies = {
     fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
-    setupInFlight
+    setupInFlight,
+    hasActiveEnvironmentTasks,
+    onEnvironmentTasksSettled
   },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,

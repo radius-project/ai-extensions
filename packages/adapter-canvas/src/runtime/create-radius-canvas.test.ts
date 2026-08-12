@@ -534,6 +534,29 @@ describe("RU-17: canvas instance reuse", () => {
   });
 });
 
+describe("server-owned environment actions", () => {
+  it("starts one accepted operation instead of awaiting the legacy route", async () => {
+    const { canvas, deps } = setup();
+    const result = await findAction(canvas, "create_environment").handler(
+      ctx("radius-panel", {
+        name: "dev",
+        provider: "azure",
+        clientId: "client",
+        tenantId: "tenant",
+        subscriptionId: "subscription",
+        resourceGroup: "rg-dev",
+        cluster: "aks-dev"
+      })
+    );
+
+    expect(deps.deploy.fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/operations$/),
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(result).toEqual({});
+  });
+});
+
 // RU-18 (canvas half): onClose closes exactly once per instance.
 describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("closes the server on first onClose and is a no-op on a duplicate call", async () => {
@@ -558,5 +581,28 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     await canvas.onClose(ctx("panel-a"));
     expect(deps.servers.has("panel-a")).toBe(false);
     expect(deps.servers.has("panel-b")).toBe(true);
+  });
+
+  it("defers close until the last server-owned environment task settles", async () => {
+    const { canvas, deps } = setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    const entry = deps.servers.get("radius-panel")!;
+    const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("radius-panel"));
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(deps.servers.has("radius-panel")).toBe(true);
+
+    settled?.();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(deps.servers.has("radius-panel")).toBe(false);
   });
 });

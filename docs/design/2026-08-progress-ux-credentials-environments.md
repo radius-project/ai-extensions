@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Draft — **prototyped, not production-ready**. The operation record, inline panel, ambient chip, best-effort timeline announcement, and PR-path terminal state are implemented on this branch. The prototype deliberately retains the existing two synchronous POST handlers rather than implementing the proposed `POST /api/operations` background-start API, and cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
+- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
 
 ## Overview
 
@@ -20,7 +20,7 @@ Today, environment creation is tied to the page that started it. The page sends 
 
 This PR changes two parts of that arrangement. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The PR therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
 
-The proposed background-start API would make the final change. The server would accept one request, return `202 Accepted` with an operation ID, and continue setup after the request has ended. The user could then close the canvas entirely, which would stop `/api/ping` and remove recent page activity from the keepalive decision. At that point `setupInFlight()` becomes the only reason the two-minute timer continues calling `session.metadata.snapshot()`, so it is what prevents the host from stopping the extension halfway through setup.
+The background-start API makes the final ownership change. The server accepts one request, registers and persists the operation, returns `202 Accepted` with an operation ID and status URL, and schedules setup after the response has ended. The user can close the canvas entirely, which stops `/api/ping` and removes recent page activity from the keepalive decision. While the server task is executing, `setupInFlight()` keeps the host channel active. An operation paused in `input_required` retains the repository lock and persisted prompt but does not hold the extension process alive indefinitely.
 
 The branch contains a working prototype of the operation record, inline panel, status chip, completion entry, and pull-request outcome. It does not yet implement detached background execution, cooperative stop, live updates for every individual cloud action, or Copilot diagnosis. [Implementation findings](#implementation-findings) records what building and testing the prototype changed.
 

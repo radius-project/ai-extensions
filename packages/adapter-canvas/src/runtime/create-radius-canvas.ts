@@ -257,7 +257,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
             );
           }
           const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/create-environment`,
+            `${entry.baseUrl}/api/operations`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -546,6 +546,15 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
+        if (deps.operations.hasActiveEnvironmentTasks()) {
+          const stopListening = deps.operations.onEnvironmentTasksSettled(() => {
+            stopListening();
+            if (deps.servers.get(ctx.instanceId) !== entry) return;
+            deps.servers.delete(ctx.instanceId);
+            entry.server.close();
+          });
+          return;
+        }
         deps.servers.delete(ctx.instanceId);
         await new Promise<void>((resolve) =>
           entry.server.close(() => resolve())
