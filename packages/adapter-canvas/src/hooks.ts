@@ -222,11 +222,14 @@ export async function evaluateAppBicepHook(
   };
 }
 
-// Prompt injected as a new user turn (via session.send) when a Radius graph
-// canvas is opened but no .radius/app.bicep exists on the branch. Because it is
-// surfaced as a visible turn, keep it free of internal tool mechanics and
-// agent-only meta-instructions; it points the agent at the skill and states the
-// graph's data source, nothing more.
+// Prompt sent to the agent (via session.send) when a Radius graph canvas is
+// opened but no .radius/app.bicep exists on the branch. This is the *model*
+// prompt the agent acts on — it names the skill/tool and the graph's data
+// source so recovery works without another round trip. It is deliberately
+// NOT what the user sees: callers should pair it with
+// `appBicepHandoffDisplayPrompt` (via `MessageOptions.displayPrompt`) so the
+// chat timeline shows a short status line instead of this whole prompt, since
+// the user never typed it and it should not masquerade as something they did.
 export function appBicepHandoffPrompt(
   repo: string,
   page = "graph",
@@ -246,16 +249,33 @@ export function appBicepHandoffPrompt(
   ].join("\n");
 }
 
+// Concise, user-facing stand-in for `appBicepHandoffPrompt`. Pass this as
+// `MessageOptions.displayPrompt` when sending the handoff so the chat timeline
+// shows a short status line rather than the full internal repair prompt
+// (see the acceptance criteria on issue #209: automated recovery must not
+// appear to be a long, pre-written prompt the user submitted themselves).
+export function appBicepHandoffDisplayPrompt(
+  repo: string,
+  page = "graph"
+): string {
+  const where = repo ? ` for ${repo}` : "";
+  return `Generating the application model${where} so the Radius ${page} view can render.`;
+}
+
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
 export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
 export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.js";
 
-// Prompt injected as a new user turn (via session.send) when a deploy started
-// from the canvas Deploy button fails. That path dispatches the workflow
-// directly, so nothing carries the failure back to the agent; this is the
-// bridge. Deliberately self-contained — it names the tools that repair the model
-// and redeploy, so the loop does not depend on another skill being consulted.
+// Prompt sent to the agent (via session.send) when a deploy started from the
+// canvas Deploy button fails. That path dispatches the workflow directly, so
+// nothing carries the failure back to the agent; this is the bridge.
+// Deliberately self-contained — it names the tools that repair the model and
+// redeploy, so the loop does not depend on another skill being consulted.
+// This is the *model* prompt the agent acts on, not what the user sees:
+// pair it with `deployRepairHandoffDisplayPrompt` (via
+// `MessageOptions.displayPrompt`) so the chat timeline shows a short status
+// line instead of this whole prompt.
 export function deployRepairHandoffPrompt(
   repo: string,
   branch: string,
@@ -292,4 +312,18 @@ export function deployRepairHandoffPrompt(
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")
     .join("\n");
+}
+
+// Concise, user-facing stand-in for `deployRepairHandoffPrompt`. Pass this as
+// `MessageOptions.displayPrompt` when sending the handoff so the chat
+// timeline shows a short status line rather than the full internal repair
+// prompt (see the acceptance criteria on issue #209: automated recovery must
+// not appear to be a long, pre-written prompt the user submitted themselves).
+export function deployRepairHandoffDisplayPrompt(
+  repo: string,
+  branch: string
+): string {
+  const where = repo ? ` of ${repo}` : "";
+  const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+  return `Diagnosing the failed Radius deploy${where}${onPhrase} and repairing it if the app model caused it.`;
 }

@@ -4,7 +4,9 @@ import {
   DEFAULT_CANVAS_PAGE,
   appBicepReminder,
   appBicepHandoffPrompt,
+  appBicepHandoffDisplayPrompt,
   deployRepairHandoffPrompt,
+  deployRepairHandoffDisplayPrompt,
   DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   graphTriggerTargets,
@@ -122,6 +124,26 @@ describe("appBicepHandoffPrompt", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph");
     expect(msg).not.toContain("(branch ");
     expect(msg).not.toContain("(branches ");
+  });
+});
+
+describe("appBicepHandoffDisplayPrompt", () => {
+  it("is a short, user-facing status line rather than the full internal prompt", () => {
+    const msg = appBicepHandoffDisplayPrompt("acme/widgets", "graph");
+    expect(msg).toContain("acme/widgets");
+    expect(msg).toContain("graph");
+    // Must not leak the internal handoff's tool/skill mechanics — the user
+    // never typed or approved this text, so it should read as a status
+    // update, not the long repair prompt sent to the agent (issue #209).
+    expect(msg).not.toContain("radius_generate_app");
+    expect(msg).not.toContain("radius-app-bicep");
+    expect(msg.length).toBeLessThan(appBicepHandoffPrompt("acme/widgets", "graph").length);
+  });
+
+  it("omits the repo suffix when repo is empty and defaults the page to graph", () => {
+    const msg = appBicepHandoffDisplayPrompt("");
+    expect(msg).not.toContain("for ");
+    expect(msg).toContain("graph");
   });
 });
 
@@ -510,5 +532,30 @@ describe("deployRepairHandoffPrompt", () => {
     expect(
       deployRepairHandoffPrompt("octo/app", "main", failure)
     ).not.toContain("attemptId");
+  });
+});
+
+describe("deployRepairHandoffDisplayPrompt", () => {
+  it("is a short, user-facing status line rather than the full internal prompt", () => {
+    const msg = deployRepairHandoffDisplayPrompt("octo/app", "feat");
+    expect(msg).toContain("octo/app");
+    expect(msg).toContain("`feat`");
+    // Must not leak the internal handoff's tool mechanics — the user never
+    // typed or approved this text, so it should read as a status update, not
+    // the long repair prompt sent to the agent (issue #209).
+    expect(msg).not.toContain("radius_generate_app");
+    expect(msg).not.toContain("radius_deploy_status");
+    expect(msg.length).toBeLessThan(
+      deployRepairHandoffPrompt("octo/app", "feat", {
+        error: "boom",
+        deployRunUrl: "https://github.com/octo/app/actions/runs/42"
+      }).length
+    );
+  });
+
+  it("omits the repo/branch suffixes when empty", () => {
+    const msg = deployRepairHandoffDisplayPrompt("", "");
+    expect(msg).not.toContain(" of ");
+    expect(msg).not.toContain("(branch ");
   });
 });

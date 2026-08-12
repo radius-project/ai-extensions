@@ -63,7 +63,9 @@ import {
   GRAPH_PAGES,
   DEFAULT_CANVAS_PAGE,
   appBicepHandoffPrompt,
-  deployRepairHandoffPrompt
+  appBicepHandoffDisplayPrompt,
+  deployRepairHandoffPrompt,
+  deployRepairHandoffDisplayPrompt
 } from "./hooks.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
@@ -198,7 +200,10 @@ async function maybeHandoffAppBicep(
 
     try {
       Promise.resolve(
-        session.send(appBicepHandoffPrompt(repo, page, branches))
+        session.send({
+          prompt: appBicepHandoffPrompt(repo, page, branches),
+          displayPrompt: appBicepHandoffDisplayPrompt(repo, page)
+        })
       ).catch(() => {});
     } catch {
       /* session.send unavailable → ignore */
@@ -1447,13 +1452,27 @@ ensureRadBinary({
 // Wire the server-side app.bicep handoff to the SDK session. Graph/generate
 // routes fire when a repo/branch is selected (not just on canvas open), so this
 // is how selection changes trigger the radius-app-bicep skill automatically.
+//
+// `displayPrompt` swaps in a short status line for the chat timeline in place
+// of the full internal prompt: the agent still receives (and acts on) the
+// detailed instructions via `prompt`, but the user never sees a long,
+// pre-written message that looks like something they typed and submitted
+// themselves (see issue #209).
 setAppBicepHandoff(({ repo, branches, page }) =>
-  session.send(appBicepHandoffPrompt(repo, page, branches))
+  session.send({
+    prompt: appBicepHandoffPrompt(repo, page, branches),
+    displayPrompt: appBicepHandoffDisplayPrompt(repo, page)
+  })
 );
 setDeployRepairHandoff(({ repo, branch, error, deployRunUrl, attemptId }) =>
-  session.send(
-    deployRepairHandoffPrompt(repo, branch, { error, deployRunUrl, attemptId })
-  )
+  session.send({
+    prompt: deployRepairHandoffPrompt(repo, branch, {
+      error,
+      deployRunUrl,
+      attemptId
+    }),
+    displayPrompt: deployRepairHandoffDisplayPrompt(repo, branch)
+  })
 );
 
 // Let server routes ask the Copilot session to perform follow-up actions the
