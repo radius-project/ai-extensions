@@ -17,7 +17,6 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
   generateDeleteWorkflow as coreGenerateDeleteWorkflow,
-  DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
@@ -433,15 +432,15 @@ export async function generateDeployWorkflow(
  * job is stripped.
  *
  * The templates + the `delete-resource` composite action they reference live in
- * radius-project/radius PR #12367 (not yet on `main`), so both the fetch and the
- * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
+ * radius-project/radius (PR #12367, now on `main`), so both the fetch and the
+ * `{{RADIUS_REF}}` pinned into the provider workflows use RADIUS_REF.
  */
 export async function generateDeleteWorkflow(
   env: string
 ): Promise<Record<string, string>> {
   const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
   const bodies = await Promise.all(
-    files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
+    files.map((f) => fetchRadiusTemplate(f, RADIUS_REF))
   );
   const templates: Record<string, string> = {};
   files.forEach((f, i) => {

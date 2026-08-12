@@ -1,17 +1,6 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
-// The ref of radius-project/radius that hosts the delete workflow templates and
-// the `delete-resource` composite action. These landed in PR #12367
-// (radius-project/radius) and are NOT yet on `main`, so both the template fetch
-// and the `{{RADIUS_REF}}` the provider workflows pin their composite actions to
-// must point at the PR branch. Once #12367 merges, switch this back to
-// RADIUS_REF ("main") and delete this constant. It can be overridden via the
-// RADIUS_DELETE_REF env var (e.g. pin to a commit SHA) so it can be updated
-// without releasing a new core package if the PR branch moves.
-export const DELETE_RADIUS_REF =
-  process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
-
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
 // `.github/workflows/`. The dispatcher references both provider files by path
@@ -44,7 +33,7 @@ export function generateDeleteWorkflow(
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`
+        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${RADIUS_REF}".`
       );
     }
     return body;
@@ -56,11 +45,11 @@ export function generateDeleteWorkflow(
     ),
     [DELETE_AZURE_FILE]: fillTemplate(pick(DELETE_AZURE_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF
+      RADIUS_REF
     }),
     [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF
+      RADIUS_REF
     })
   };
   for (const [file, body] of Object.entries(files)) {
