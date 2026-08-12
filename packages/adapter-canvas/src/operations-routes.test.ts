@@ -281,8 +281,25 @@ describe("GET /api/operations/{id}", () => {
       );
       expect(status).toBe(200);
       expect(body).toEqual({
-        state: "unknown",
+        state: "expired",
+        terminal: true,
         error: "The verification operation does not match this request."
+      });
+    });
+
+    it("rejects incomplete verification identity instead of adopting a run", async () => {
+      const op = seed("contoso/incomplete-identity");
+      enterStage(op, STAGE_VERIFY);
+      op.verification = { dispatchedAt: Date.now() };
+
+      const { body } = await getJson(
+        `/api/verify-status?repo=contoso%2Fincomplete-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+      );
+
+      expect(body).toEqual({
+        state: "expired",
+        terminal: true,
+        error: "The verification operation has incomplete dispatch identity."
       });
     });
 

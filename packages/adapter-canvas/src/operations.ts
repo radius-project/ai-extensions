@@ -1035,15 +1035,30 @@ const MAX_RETAINED = 20;
 // on indefinitely. Longer than the slowest observed leg, short enough that a
 // stuck record clears itself.
 const STALE_AFTER_MS = 15 * 60 * 1000;
+export const VERIFY_STALE_AFTER_MS = 45 * 60 * 1000;
+
+export function hasCompleteVerificationIdentity(op: any): boolean {
+  const verification = op?.verification;
+  return Boolean(
+    op?.currentStage === STAGE_VERIFY &&
+    Number.isFinite(Number(verification?.dispatchedAt)) &&
+    Number(verification.dispatchedAt) > 0 &&
+    typeof verification?.workflow === "string" &&
+    verification.workflow &&
+    typeof verification?.ref === "string" &&
+    verification.ref &&
+    typeof verification?.environment === "string" &&
+    verification.environment
+  );
+}
 
 /** Whether a non-terminal record has gone quiet long enough to be abandoned. */
 export function isStale(op: any, now = Date.now()): boolean {
   if (!op || isTerminalState(op.state)) return false;
-  if (
-    op.recoveryState === "waiting_input" ||
-    op.recoveryState === "verification_pending"
-  )
-    return false;
+  if (op.recoveryState === "waiting_input") return false;
+  if (hasCompleteVerificationIdentity(op)) {
+    return now - Number(op.verification.dispatchedAt) > VERIFY_STALE_AFTER_MS;
+  }
   return (
     now - new Date(op.lastActivityAt || op.startedAt).getTime() > STALE_AFTER_MS
   );
@@ -1122,7 +1137,7 @@ export function reconcileRestoredOperation(op: any): any {
     op.recoveryState = "waiting_input";
     return op;
   }
-  if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {
+  if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
     return op;
   }

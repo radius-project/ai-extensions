@@ -1058,8 +1058,18 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(liveVerify).toBeGreaterThan(-1);
     expect(verifyRequest).toBeGreaterThan(liveVerify);
     expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
-      "v.state === 'success' || v.state === 'failed' ? 0 : 1500"
+      "v.state === 'expired' || v.terminal"
     );
+  });
+
+  it("bounds reconnect verification without treating transient unknown as terminal", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("var verifyDeadlineMs = 45 * 60 * 1000;");
+    expect(html).toContain(
+      "Date.now() - verifyDispatchedAtMs > verifyDeadlineMs"
+    );
+    expect(html).toContain("v.state === 'expired' || v.terminal");
+    expect(html).not.toContain("v.state === 'unknown' || v.terminal");
   });
 
   it("re-hydrates terminal request failures from the shared operation record", () => {

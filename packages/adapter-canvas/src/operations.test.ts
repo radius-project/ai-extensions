@@ -6,6 +6,7 @@ import {
   addLegacyStep,
   onOperationTerminal,
   isStale,
+  VERIFY_STALE_AFTER_MS,
   operations,
   setupInFlight,
   addStep,
@@ -1016,6 +1017,32 @@ describe("keepalive predicate", () => {
     op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     addStep(op, { label: "Assigning Contributor role" });
     expect(isStale(op)).toBe(false);
+  });
+
+  it("uses a bounded dispatch-based lifetime for live verification", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now() - 20 * 60 * 1000,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(false);
+    expect(
+      isStale(op, op.verification.dispatchedAt + VERIFY_STALE_AFTER_MS + 1)
+    ).toBe(true);
+  });
+
+  it("does not exempt incomplete verification identity from staleness", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = { dispatchedAt: Date.now() - 20 * 60 * 1000 };
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(true);
   });
 });
 

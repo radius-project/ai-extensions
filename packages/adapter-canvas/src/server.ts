@@ -118,6 +118,7 @@ import {
 import {
   operations,
   isStale,
+  hasCompleteVerificationIdentity,
   toClientView,
   createOperation,
   buildStages,
@@ -6600,8 +6601,18 @@ function createRequestHandler(instanceId: string) {
               (url.searchParams.get("environment") || verifyOp.environment))
         ) {
           respond({
-            state: "unknown",
+            state: "expired",
+            terminal: true,
             error: "The verification operation does not match this request."
+          });
+          return;
+        }
+        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error:
+              "The verification operation has incomplete dispatch identity."
           });
           return;
         }
@@ -6620,7 +6631,10 @@ function createRequestHandler(instanceId: string) {
           );
           if (runId && verifyOp) {
             verifyOp.verification = {
-              ...verifyOp.verification,
+              dispatchedAt: verifyOp.verification.dispatchedAt,
+              workflow: verifyOp.verification.workflow,
+              ref: verifyOp.verification.ref,
+              environment: verifyOp.verification.environment,
               runId: String(runId),
               runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
             };
