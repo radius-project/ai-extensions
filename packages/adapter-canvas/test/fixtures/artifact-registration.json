@@ -1,0 +1,560 @@
+{
+  "joinCount": 1,
+  "canvases": [
+    {
+      "id": "radius",
+      "displayName": "Radius",
+      "description": "Application modeling and deployment: configure cloud credentials, generate app.bicep, visualize application graphs, view PR diffs, and create deployment environments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "string",
+            "enum": [
+              "credentials",
+              "graph",
+              "planned",
+              "graph-diff",
+              "deployed",
+              "environment",
+              "deploying"
+            ],
+            "description": "Which page to display",
+            "default": "graph"
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository in owner/repo format to pre-select in dropdowns"
+          },
+          "branch": {
+            "type": "string",
+            "description": "Branch to read .radius/app.bicep from when repo is not the current workspace repository. Ignored for the workspace repository, which always uses the checked-out branch. Defaults to 'main'."
+          },
+          "baseBranch": {
+            "type": "string",
+            "description": "Base branch for graph-diff comparison (e.g. 'main'). When provided with headBranch, auto-compares on open."
+          },
+          "headBranch": {
+            "type": "string",
+            "description": "Head branch for graph-diff comparison (e.g. PR branch). When provided with baseBranch, auto-compares on open."
+          }
+        }
+      },
+      "actions": [
+        {
+          "name": "configure_oidc",
+          "description": "Configure OIDC identity federation for Azure or AWS and display the setup commands",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "azure",
+                  "aws"
+                ],
+                "description": "Cloud provider to configure"
+              },
+              "tenantId": {
+                "type": "string",
+                "description": "Azure Tenant ID"
+              },
+              "tenantName": {
+                "type": "string",
+                "description": "Azure Tenant display name"
+              },
+              "subscriptionId": {
+                "type": "string",
+                "description": "Azure Subscription ID"
+              },
+              "subscriptionName": {
+                "type": "string",
+                "description": "Azure Subscription display name"
+              },
+              "clientId": {
+                "type": "string",
+                "description": "Azure Client ID (App Registration)"
+              },
+              "clientName": {
+                "type": "string",
+                "description": "Azure App Registration display name"
+              },
+              "accountId": {
+                "type": "string",
+                "description": "AWS Account ID"
+              },
+              "accountName": {
+                "type": "string",
+                "description": "AWS Account alias or display name"
+              },
+              "region": {
+                "type": "string",
+                "description": "AWS Region"
+              }
+            },
+            "required": [
+              "provider"
+            ]
+          },
+          "handlerCallable": true
+        },
+        {
+          "name": "render_graph",
+          "description": "Render the application graph from ApplicationGraphResource data",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "resources": {
+                "type": "array",
+                "description": "Array of ApplicationGraphResource objects with id, name, type, and connections",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "handlerCallable": true
+        },
+        {
+          "name": "render_graph_diff",
+          "description": "Render a diff graph showing changes between base and head application models in a PR",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "baseResources": {
+                "type": "array",
+                "description": "Base branch resources",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "headResources": {
+                "type": "array",
+                "description": "Head branch resources",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "repo": {
+                "type": "string",
+                "description": "Repository in owner/repo format"
+              },
+              "baseBranch": {
+                "type": "string",
+                "description": "Base branch represented by baseResources"
+              },
+              "headBranch": {
+                "type": "string",
+                "description": "Head branch represented by headResources"
+              }
+            },
+            "required": [
+              "baseResources",
+              "headResources",
+              "repo",
+              "baseBranch",
+              "headBranch"
+            ]
+          },
+          "handlerCallable": true
+        },
+        {
+          "name": "create_environment",
+          "description": "Create a GitHub environment, private GHCR state package, cloud settings, and verification/deploy workflows",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Environment name (e.g. production)"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "azure",
+                  "aws"
+                ],
+                "description": "Cloud provider"
+              },
+              "repo": {
+                "type": "string",
+                "description": "Repository in owner/repo format"
+              },
+              "clientId": {
+                "type": "string",
+                "description": "Azure application (client) ID"
+              },
+              "tenantId": {
+                "type": "string",
+                "description": "Azure tenant ID"
+              },
+              "subscriptionId": {
+                "type": "string",
+                "description": "Azure Subscription ID"
+              },
+              "resourceGroup": {
+                "type": "string",
+                "description": "Azure Resource Group"
+              },
+              "location": {
+                "type": "string",
+                "description": "Azure Location"
+              },
+              "roleArn": {
+                "type": "string",
+                "description": "AWS IAM role ARN used by GitHub OIDC"
+              },
+              "accountId": {
+                "type": "string",
+                "description": "AWS Account ID"
+              },
+              "region": {
+                "type": "string",
+                "description": "AWS Region"
+              },
+              "cluster": {
+                "type": "string",
+                "description": "AKS or EKS cluster name"
+              },
+              "vpcId": {
+                "type": "string",
+                "description": "Optional AWS VPC ID"
+              },
+              "subnetIds": {
+                "type": "string",
+                "description": "Optional comma-separated AWS subnet IDs"
+              }
+            },
+            "required": [
+              "name",
+              "provider",
+              "repo"
+            ]
+          },
+          "handlerCallable": true
+        },
+        {
+          "name": "get_graph_resources",
+          "description": "Return the current graph resources, optionally filtered to only those missing a codeReference. Use this to discover which resources need source-code references after the graph has been built.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "missingOnly": {
+                "type": "boolean",
+                "description": "If true (default), return only resources missing codeReference. If false, return all resources."
+              },
+              "view": {
+                "type": "string",
+                "enum": [
+                  "graph",
+                  "planned",
+                  "diff"
+                ],
+                "description": "Graph view to inspect. Defaults to the active canvas page."
+              }
+            }
+          },
+          "handlerCallable": true
+        },
+        {
+          "name": "update_source_refs",
+          "description": "Attach source-code references to the exact graph context returned by get_graph_resources so nodes deep-link to their definition/initialization site.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "refs": {
+                "type": "array",
+                "description": "Array of {id, codeReference} objects. codeReference is a repo-relative path, optionally with #L<line> (e.g. 'src/db.js#L14').",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Stable resource ID returned by get_graph_resources"
+                    },
+                    "codeReference": {
+                      "type": "string",
+                      "description": "Repo-relative path with optional #L<line>"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "codeReference"
+                  ]
+                }
+              },
+              "contextToken": {
+                "type": "string",
+                "description": "Graph context token returned by get_graph_resources"
+              }
+            },
+            "required": [
+              "contextToken",
+              "refs"
+            ]
+          },
+          "handlerCallable": true
+        }
+      ],
+      "hasOpen": true,
+      "hasOnClose": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "radius_configure_oidc",
+      "description": "Opens the Radius OIDC configuration canvas to set up Azure or AWS identity federation for GitHub Actions",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "azure",
+              "aws"
+            ],
+            "description": "Cloud provider to configure"
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_generate_app",
+      "description": "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repoPath": {
+            "type": "string",
+            "description": "Path to the repository to analyze"
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_render_graph",
+      "description": "Renders an interactive application graph visualization from resource data",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "resources": {
+            "type": "array",
+            "description": "Array of ApplicationGraphResource objects",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "resources"
+        ]
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_render_graph_diff",
+      "description": "Renders a diff visualization comparing base and head application graphs for a pull request",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "baseResources": {
+            "type": "array",
+            "description": "Base branch resources",
+            "items": {
+              "type": "object"
+            }
+          },
+          "headResources": {
+            "type": "array",
+            "description": "Head branch resources",
+            "items": {
+              "type": "object"
+            }
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository in owner/repo format"
+          },
+          "baseBranch": {
+            "type": "string",
+            "description": "Base branch represented by baseResources"
+          },
+          "headBranch": {
+            "type": "string",
+            "description": "Head branch represented by headResources"
+          }
+        },
+        "required": [
+          "baseResources",
+          "headResources",
+          "repo",
+          "baseBranch",
+          "headBranch"
+        ]
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_generate_pr_diff_markdown",
+      "description": "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this BEFORE creating the PR and include the returned markdown in the PR body.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Repository in owner/repo format"
+          },
+          "baseBranch": {
+            "type": "string",
+            "description": "Base branch (PR target, e.g. 'main')"
+          },
+          "headBranch": {
+            "type": "string",
+            "description": "Head branch (PR source, e.g. 'feature/add-redis')"
+          }
+        },
+        "required": [
+          "repo",
+          "baseBranch",
+          "headBranch"
+        ]
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_create_environment",
+      "description": "Opens the GitHub environment creation canvas to set up a deployment environment with cloud provider secrets",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "azure",
+              "aws"
+            ],
+            "description": "Cloud provider"
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository in owner/repo format"
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_publish_custom_type_extension",
+      "description": "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication). Paths are confined to the workspace .radius/ directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "manifestPath": {
+            "type": "string",
+            "description": "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml."
+          },
+          "targetPath": {
+            "type": "string",
+            "description": "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz."
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_publish_recipe",
+      "description": "Publishes an authored Radius recipe Bicep file to the user's GitHub Container Registry (ghcr.io) using the extension's managed rad binary and the stored GitHub package credentials, so a generated custom type's recipe pack can reference it. Use this instead of running `rad bicep publish` directly. Prefer an Azure Verified Module (which needs no publish) when one matches the resource. The recipe file must live under the workspace .radius/ directory and the target must publish under the repository being modeled.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path to the recipe Bicep file, relative to the workspace .radius/ directory (e.g. .radius/<type>-recipe.bicep)."
+          },
+          "target": {
+            "type": "string",
+            "description": "OCI target under the repository being modeled, e.g. br:ghcr.io/<owner>/<repo>/<recipe>:<tag>."
+          }
+        },
+        "required": [
+          "file",
+          "target"
+        ]
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_deploy",
+      "description": "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. The workflow checks out the target branch from GitHub, so commit and push any repair before calling this. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. With no arguments it repeats the last deploy from this session, which is what a redeploy after repairing .radius/app.bicep needs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "description": "Deploy attempt this call belongs to, as given in the repair handoff. Required when redeploying inside a repair loop; it pins the repository, environment, branch, provider, and app file to that attempt."
+          },
+          "environment": {
+            "type": "string",
+            "description": "GitHub environment to deploy to. Defaults to the last deploy's environment."
+          },
+          "repo": {
+            "type": "string",
+            "description": "Target repository in owner/repo format. Defaults to the last deploy's repository."
+          },
+          "branch": {
+            "type": "string",
+            "description": "Branch to deploy. Defaults to the last deploy's branch."
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "azure",
+              "aws"
+            ],
+            "description": "Cloud provider. Defaults to the last deploy's provider."
+          },
+          "appFile": {
+            "type": "string",
+            "description": "Path to the application Bicep file. Defaults to .radius/app.bicep."
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_deploy_status",
+      "description": "Reports the current Radius deploy state (in_progress, success, or failed) with the workflow run URL and a bounded, fenced diagnostic block when it failed. Poll this after calling radius_deploy until it reports a terminal state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "description": "Deploy attempt this call belongs to, as given in the repair handoff. Required while following a repair loop."
+          },
+          "logLines": {
+            "type": "number",
+            "description": "How many trailing deploy log lines to include (default 40, max 200)."
+          }
+        }
+      },
+      "handlerCallable": true
+    }
+  ],
+  "hooks": [
+    {
+      "name": "onPreToolUse",
+      "callable": true
+    },
+    {
+      "name": "onSessionStart",
+      "callable": true
+    }
+  ],
+  "bundledSkill": {
+    "hasSkill": true,
+    "hasCustomTypes": true,
+    "hasSourceReferences": true
+  }
+}

@@ -12,17 +12,27 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export interface ArtifactRegistrationSnapshot {
   joinCount: number;
-  canvas: {
+  canvases: Array<{
     id: string;
     displayName: string;
     description: string;
     inputSchema: Record<string, unknown>;
-    actionNames: string[];
+    actions: Array<{
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      handlerCallable: boolean;
+    }>;
     hasOpen: boolean;
     hasOnClose: boolean;
-  };
-  tools: Array<{ name: string; parameters: Record<string, unknown> }>;
-  hooks: string[];
+  }>;
+  tools: Array<{
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    handlerCallable: boolean;
+  }>;
+  hooks: Array<{ name: string; callable: boolean }>;
   bundledSkill: {
     hasSkill: boolean;
     hasCustomTypes: boolean;
