@@ -1195,12 +1195,32 @@ export function createRegistry({
       const envelope = await store.load();
       if (!envelope) return [];
       const restored = [];
-      for (const value of envelope.operations) {
-        const op = reconcileRestoredOperation(fromPersistedOperation(value));
-        byId.set(op.operationId, op);
-        restored.push(op);
+      let rejected = 0;
+      for (const [index, value] of envelope.operations.entries()) {
+        try {
+          const op = reconcileRestoredOperation(fromPersistedOperation(value));
+          byId.set(op.operationId, op);
+          restored.push(op);
+        } catch (error) {
+          rejected += 1;
+          const operationId =
+            (
+              value &&
+              typeof value === "object" &&
+              typeof value.operationId === "string"
+            ) ?
+              ` (${value.operationId})`
+            : "";
+          store.report?.({
+            code: "operation-store-invalid-record",
+            message: `Skipped invalid persisted operation at index ${index}${operationId}: ${String(error)}`
+          });
+        }
       }
       prune();
+      // Rewrite only after every record has been inspected. This removes rejected
+      // records without allowing one bad entry to brick every future startup.
+      if (rejected > 0) await store.save(snapshot());
       return restored;
     },
     async persist() {

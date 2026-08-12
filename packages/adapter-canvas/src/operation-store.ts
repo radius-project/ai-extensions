@@ -11,10 +11,14 @@ export interface PersistedOperationsEnvelope {
 export interface OperationStore {
   load(): Promise<PersistedOperationsEnvelope | null>;
   save(envelope: PersistedOperationsEnvelope): Promise<void>;
+  report?(diagnostic: OperationStoreDiagnostic): void;
 }
 
 export interface OperationStoreDiagnostic {
-  code: "operation-store-corrupt" | "operation-store-unavailable";
+  code:
+    | "operation-store-corrupt"
+    | "operation-store-invalid-record"
+    | "operation-store-unavailable";
   message: string;
 }
 
@@ -50,6 +54,7 @@ export function createFileOperationStore({
   report?: OperationStoreReporter;
 }): OperationStore {
   return {
+    report,
     async load() {
       let raw: string;
       try {

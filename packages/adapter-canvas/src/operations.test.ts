@@ -829,6 +829,64 @@ describe("registry", () => {
       recoveryState: "waiting_input"
     });
   });
+
+  it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
+    const valid = newOp();
+    requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    let envelope = {
+      schemaVersion: 1,
+      operations: [
+        toPersistedOperation(valid),
+        { operationId: "op_invalid", schemaVersion: 1 }
+      ]
+    };
+    const diagnostics = [];
+    const store = {
+      report(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toHaveLength(1);
+    expect(restored.get(valid.operationId)).toMatchObject({
+      recoveryState: "waiting_input"
+    });
+    expect(envelope.operations).toHaveLength(1);
+    expect(envelope.operations[0].operationId).toBe(valid.operationId);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: "operation-store-invalid-record",
+        message: expect.stringContaining("op_invalid")
+      })
+    ]);
+  });
+
+  it("recovers from an envelope containing only invalid records", async () => {
+    let envelope = {
+      schemaVersion: 1,
+      operations: [{ operationId: "op_invalid", schemaVersion: 1 }]
+    };
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toEqual([]);
+    expect(restored.size()).toBe(0);
+    expect(envelope.operations).toEqual([]);
+  });
 });
 
 describe("startup reconciliation", () => {
