@@ -38,11 +38,14 @@ describe("RU-01: canvas metadata + input schema", () => {
     ]);
   });
 
-  it("builds an input schema with the page enum, default, and repo/baseBranch/headBranch fields", () => {
+  it("builds an input schema with the page enum, default, and repo/branch/baseBranch/headBranch fields", () => {
     const schema = buildRadiusCanvasInputSchema("graph");
     expect(schema.properties.page.enum).toEqual([...RADIUS_CANVAS_PAGES]);
     expect(schema.properties.page.default).toBe("graph");
     expect(schema.properties.repo.type).toBe("string");
+    // The canvas reads input.branch when opening a non-workspace repository, so
+    // it must be advertised or callers cannot know the branch can be chosen.
+    expect(schema.properties.branch.type).toBe("string");
     expect(schema.properties.baseBranch.type).toBe("string");
     expect(schema.properties.headBranch.type).toBe("string");
   });
