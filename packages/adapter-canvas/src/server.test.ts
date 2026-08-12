@@ -5,6 +5,8 @@ import {
   azureLoginRequiredResponse,
   buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
+  azureCliAssistDisplayPrompt,
+  azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
   deleteNewlyCreatedGitHubEnvironment,
@@ -1509,6 +1511,19 @@ describe("invokeSessionPrompt", () => {
       error: "The Copilot session could not start Azure CLI help."
     });
   });
+
+  it("forwards a paired prompt/displayPrompt message to the handler untouched", async () => {
+    const seen: unknown[] = [];
+    const message = {
+      prompt: "run az login …",
+      displayPrompt: "Signing in to Azure CLI."
+    };
+    const result = await invokeSessionPrompt(async (value) => {
+      seen.push(value);
+    }, message);
+    expect(seen).toEqual([message]);
+    expect(result).toEqual({ status: 200 });
+  });
 });
 
 describe("buildAzureCliAssistPrompt", () => {
@@ -1540,5 +1555,45 @@ describe("buildAzureCliAssistPrompt", () => {
     const prompt = buildAzureCliAssistPrompt({ action: "install" });
     expect(prompt).toContain("Azure CLI is not installed");
     expect(prompt).toContain("install Azure CLI");
+  });
+});
+
+describe("azureCliAssistDisplayPrompt", () => {
+  it("summarizes the login case without the command or environment mechanics", () => {
+    const display = azureCliAssistDisplayPrompt({
+      action: "login",
+      tenantId: "11111111-2222-3333-4444-555555555555"
+    });
+    expect(display).toBe(
+      "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials."
+    );
+    expect(display).not.toContain("az login");
+    expect(display).not.toContain("COPILOT_AGENT_SESSION_ID");
+    // A tenant guid is internal detail; it must not leak into the timeline.
+    expect(display).not.toContain("11111111");
+  });
+
+  it("summarizes the install case", () => {
+    expect(azureCliAssistDisplayPrompt({ action: "install" })).toContain(
+      "Installing Azure CLI"
+    );
+  });
+});
+
+describe("azureCliAssistMessage", () => {
+  // Issue #209: the canvas injects this turn on the user's behalf, so the
+  // timeline must not show the multi-paragraph instructions as if the user
+  // typed them, while the agent still receives them in full.
+  it("pairs the full agent prompt with its short display stand-in", () => {
+    const input = {
+      action: "login",
+      tenantId: "11111111-2222-3333-4444-555555555555"
+    };
+    const message = azureCliAssistMessage(input);
+    expect(message.prompt).toBe(buildAzureCliAssistPrompt(input));
+    expect(message.displayPrompt).toBe(azureCliAssistDisplayPrompt(input));
+    expect(message.prompt).toContain("COPILOT_AGENT_SESSION_ID");
+    expect(message.displayPrompt).not.toContain("COPILOT_AGENT_SESSION_ID");
+    expect(message.displayPrompt.length).toBeLessThan(message.prompt.length);
   });
 });
