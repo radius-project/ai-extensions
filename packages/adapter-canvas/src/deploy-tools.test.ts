@@ -185,6 +185,28 @@ describe("buildDeployPayload", () => {
     expect(buildDeployPayload({}, {}).agentInitiated).toBe(true);
   });
 
+  it("passes the attempt id through so the redeploy keeps the caller's id", () => {
+    const withAttempt = {
+      deployAttempt: {
+        id: "attempt-A",
+        targetRepo: "octo/app",
+        environment: "dev",
+        branch: "feat",
+        provider: "aws",
+        appFile: ".radius/app.bicep"
+      }
+    };
+    // Without this the server mints a new id, and the very next
+    // radius_deploy_status({ attemptId: "attempt-A" }) resolves nothing.
+    expect(
+      buildDeployPayload({ attemptId: "attempt-A" }, withAttempt).attemptId
+    ).toBe("attempt-A");
+  });
+
+  it("omits the attempt id for an unbound deploy so a fresh id is minted", () => {
+    expect(buildDeployPayload({}, state).attemptId).toBeUndefined();
+  });
+
   it("lets explicit arguments override the last deploy", () => {
     const payload = buildDeployPayload(
       {

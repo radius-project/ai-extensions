@@ -849,6 +849,7 @@ export function triggerDeployRepairHandoff(
     const error = state.deployError || "";
     const deployRunUrl = state.deployRunUrl || "";
     const attemptId = state.deployAttempt?.id || "";
+    const generation = state.deployGeneration || 0;
     state.deployHandoffState = "pending";
     state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
     // A canvas panel is reused across deploys and these callbacks settle
@@ -859,7 +860,13 @@ export function triggerDeployRepairHandoff(
     // both sides normalized so an attempt-less handoff still settles against an
     // attempt-less state - refusing to settle there would strand it as pending
     // and block every later trigger - while a new deploy's id still revokes it.
-    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
+    //
+    // The generation check covers the case the id alone cannot: a repair-loop
+    // redeploy deliberately keeps its attempt id, so only the generation bump
+    // marks this handoff as belonging to the run that already finished.
+    const ownsAttempt = () =>
+      (state.deployAttempt?.id || "") === attemptId &&
+      (state.deployGeneration || 0) === generation;
     const delivered = () => {
       if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
@@ -7079,12 +7086,32 @@ function createRequestHandler(instanceId: string) {
           }
           entry.state.deployingBranch = branch;
           const provider = data.provider || "azure";
+          // Every physical deploy run bumps the generation, including one that
+          // keeps its attempt id below. Async work belonging to an earlier run
+          // watches this to tell "still mine" from "superseded".
+          entry.state.deployGeneration =
+            (entry.state.deployGeneration || 0) + 1;
           // Immutable identity for this attempt. A canvas panel is reused
           // across deploys, so the repair loop binds to this snapshot
           // instead of the panel: a stale repair cannot redeploy whatever
           // the user started next.
+          //
+          // A repair-loop redeploy names the attempt it belongs to and keeps
+          // that id: the agent is told to pass one id to both radius_deploy and
+          // radius_deploy_status, and minting a new one here retired the id
+          // mid-loop so the very next status poll failed to resolve it. Honor
+          // the pin only when it matches the attempt that is current right now,
+          // so a stale or invented id cannot resurrect a finished attempt.
+          const pinnedAttemptId =
+            typeof data.attemptId === "string" &&
+            data.attemptId &&
+            data.attemptId === entry.state.deployAttempt?.id ?
+              data.attemptId
+            : "";
           entry.state.deployAttempt = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            id:
+              pinnedAttemptId ||
+              `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
             targetRepo: repo,
             environment: entry.state.envName || data.environment || "",
             branch,

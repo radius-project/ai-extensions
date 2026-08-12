@@ -157,6 +157,10 @@ export interface CanvasState {
   deployingResources?: CanvasGraphResource[] | null;
   deployParams?: CanvasDeployParams;
   deployAttempt?: CanvasDeployAttempt;
+  // Counts physical deploy runs, while deployAttempt.id names the logical repair
+  // loop and survives an agent redeploy. Anything that must be revoked by "a new
+  // deploy started" has to watch this, not the attempt id.
+  deployGeneration?: number;
   deployStartedAt?: number;
   deployFinishedAt?: number;
   deployLogs?: string[];

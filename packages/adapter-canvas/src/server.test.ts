@@ -1492,6 +1492,68 @@ describe("triggerDeployRepairHandoff", () => {
     });
   });
 
+  // A repair-loop redeploy keeps its attempt id on purpose, so the id alone
+  // can no longer tell "same loop" from "same run". A stale rejection is the
+  // discriminating case: /api/deploy already sets delivered/repairing for an
+  // agent redeploy, so a stale delivered() is idempotent, but a stale failed()
+  // clears ownership and schedules a retry against the run now in flight.
+  it("ignores a rejection that lands after an agent redeploy kept the attempt id", async () => {
+    let rejectSend: (reason: Error) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSend = reject;
+        })
+    );
+    const entry = failedEntry({ deployGeneration: 1 });
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    // The agent redeploys the same loop. Mirror what /api/deploy assigns when
+    // agentInitiated === true and the attempt id is pinned: the id is retained
+    // and only the generation moves.
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployRepairing = true;
+    entry.state.deployHandoffState = "delivered";
+    entry.state.deployHandoffAttempts = 0;
+    entry.state.deployGeneration = 2;
+
+    rejectSend(new Error("send failed"));
+    await Promise.resolve();
+
+    // The settle belongs to generation 1, which is over. Without the generation
+    // check it passes the id comparison and hands the in-flight redeploy back
+    // to a finished run: ownership cleared and a retry queued.
+    expect(entry.state.deployRepairing).toBe(true);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "delivered",
+      attempts: 0
+    });
+  });
+
+  it("lets a rejection settle its own run when no redeploy has started", async () => {
+    setDeployRepairHandoff(() => Promise.reject(new Error("send failed")));
+    const entry = failedEntry({ deployGeneration: 3 });
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    // Same generation and same id: the guard must not block a normal settle.
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "retryable",
+      attempts: 1
+    });
+  });
+
+  it("lets a rejection settle its own run when no redeploy has started", async () => {
+    setDeployRepairHandoff(() => Promise.reject(new Error("send failed")));
+    const entry = failedEntry({ deployGeneration: 3 });
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    // Same generation and same id: the guard must not block a normal settle.
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "retryable",
+      attempts: 1
+    });
+  });
+
   it("drops a scheduled retry when a new deploy starts during the backoff", async () => {
     vi.useFakeTimers();
     try {

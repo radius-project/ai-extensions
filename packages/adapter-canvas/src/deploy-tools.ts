@@ -32,6 +32,9 @@ export interface DeployPayload extends CanvasDeployParams {
   branch: string;
   appFile: string;
   agentInitiated: true;
+  // Asks /api/deploy to keep this attempt id rather than minting a new one, so
+  // the id the agent was handed still resolves on the next radius_deploy_status.
+  attemptId?: string;
 }
 
 export interface DeployStatusInput {
@@ -144,7 +147,11 @@ export function buildDeployPayload(
     branch: args.branch || snapshot.branch || last.branch || "",
     appFile:
       args.appFile || snapshot.appFile || last.appFile || ".radius/app.bicep",
-    agentInitiated: true
+    agentInitiated: true,
+    // validateDeployAttempt has already proved this is the current attempt, so
+    // replaying it keeps one repair loop under one id instead of renaming the
+    // attempt out from under the caller mid-loop.
+    ...(args.attemptId ? { attemptId: args.attemptId } : {})
   };
 }
 
