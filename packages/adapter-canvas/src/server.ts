@@ -4754,8 +4754,7 @@ function createRequestHandler(instanceId: string) {
       let op: any = null;
       let steps: string[] = [];
       let deleteGitHubEnvironmentRunner:
-        | ((args: string[]) => Promise<unknown>)
-        | null = null;
+        ((args: string[]) => Promise<unknown>) | null = null;
       try {
         const data = JSON.parse(body);
         const targetRepo = data.repo || "";
@@ -7446,9 +7445,7 @@ function createRequestHandler(instanceId: string) {
                   );
                 }
               } catch (e) {
-                addLog(
-                  "⚠ Could not resolve planned graph: " + errorMessage(e)
-                );
+                addLog("⚠ Could not resolve planned graph: " + errorMessage(e));
               }
             }
 
