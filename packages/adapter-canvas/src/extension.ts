@@ -17,7 +17,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
@@ -37,6 +38,7 @@ import {
   fetchWorkspaceBicep,
   isWorkspaceSelection,
   parseRepoFromRemote,
+  resolvePersistedSessionId,
   toSafeRepoRelPath,
   workspaceFileExists
 } from "./workspace.js";
@@ -66,10 +68,15 @@ import {
 } from "./source-refs.js";
 import {
   announcementOptions,
+  configureOperationStore,
   onOperationTerminal,
   setupInFlight,
   summarize
 } from "./operations.js";
+import {
+  createFileOperationStore,
+  disabledOperationStore
+} from "./operation-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
@@ -167,6 +174,48 @@ const radiusExtension = await bootstrapRadiusExtension(dependencies, {
   joinSession: async (declaration) =>
     (await joinSession(declaration)) as unknown as SessionPort
 });
+
+const reportOperationStore = (diagnostic: {
+  code: string;
+  message: string;
+}) => {
+  try {
+    console.error(`[radius] ${diagnostic.code}: ${diagnostic.message}`);
+  } catch {}
+};
+try {
+  const operationSessionId = await resolvePersistedSessionId();
+  if (!operationSessionId) {
+    reportOperationStore({
+      code: "operation-store-unavailable",
+      message:
+        "Durable operation recovery is disabled because no verified Copilot session directory was found."
+    });
+    await configureOperationStore(disabledOperationStore());
+  } else {
+    const operationPath = join(
+      process.env.USERPROFILE || os.homedir(),
+      ".copilot",
+      "session-state",
+      operationSessionId,
+      "radius",
+      "operations",
+      "operations.json"
+    );
+    await configureOperationStore(
+      createFileOperationStore({
+        filePath: operationPath,
+        report: reportOperationStore
+      })
+    );
+  }
+} catch (error) {
+  reportOperationStore({
+    code: "operation-store-unavailable",
+    message: `Durable operation recovery is disabled: ${String(error)}`
+  });
+  await configureOperationStore(disabledOperationStore());
+}
 
 onOperationTerminal((op: any) => {
   try {
