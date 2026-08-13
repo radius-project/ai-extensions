@@ -23,6 +23,10 @@ export interface CanvasRequestContext {
   ): void;
 }
 
+// Building a request context is deliberately side-effect free. Requested-page
+// synchronisation is a pre-routing concern that must run *after* cross-site
+// rejection, so it belongs in the dispatcher's preRoute step, not here — a
+// rejected mutation must never mutate instance page state.
 export function createRequestContext(
   request: IncomingMessage,
   response: ServerResponse<IncomingMessage>,
@@ -30,7 +34,6 @@ export function createRequestContext(
   instances: ReadonlyMap<string, CanvasServerEntry>
 ): CanvasRequestContext {
   const url = new URL(request.url || "/", "http://localhost");
-  syncRequestedPage(instances.get(instanceId), url.searchParams.get("page"));
   let body: Promise<string> | undefined;
 
   function readTextBody(): Promise<string> {

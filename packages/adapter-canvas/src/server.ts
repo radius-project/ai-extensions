@@ -507,16 +507,20 @@ const operationsStatusRoutes = createOperationsStatusRoutes({
   toClientView
 });
 
+// Built once at module initialization so table validation runs a single time
+// and a missing migrated handler fails early rather than per instance.
+const serverRoutes = createServerRouteTable({
+  ...livenessSourceRoutes,
+  ...operationsStatusRoutes
+});
+
 const canvasServer = createCanvasServer(
   createProductionCanvasServerDependencies({
     createRequestHandler: ({ instanceId, instances, markActivity }) =>
       createScaffoldRequestHandler({
         instanceId,
         instances,
-        routes: createServerRouteTable({
-          ...livenessSourceRoutes,
-          ...operationsStatusRoutes
-        }),
+        routes: serverRoutes,
         legacyFallback: createLegacyRequestHandler(instanceId),
         markActivity,
         preRoute: preRouteCanvasRequest
