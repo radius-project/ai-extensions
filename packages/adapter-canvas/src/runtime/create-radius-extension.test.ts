@@ -91,19 +91,26 @@ describe("attachSession is single-use", () => {
     expect(() => ext.attachSession(session)).not.toThrow();
   });
 
-  it("does not restart the keepalive when a session is attached after shutdown", async () => {
+  it("rejects a session attached after shutdown without mutating the holder or starting keepalive", async () => {
     vi.useFakeTimers();
     try {
-      const { deps, setLastWebviewActivityAt } = createFakeDependencies();
+      const { deps } = createFakeDependencies();
       const ext = createRadiusExtension(deps);
       await ext.shutdown("SIGTERM");
 
       const session = createFakeSession();
-      ext.attachSession(session);
-      setLastWebviewActivityAt(Date.now());
-
-      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
-      expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+      let attachError: unknown;
+      try {
+        ext.attachSession(session);
+      } catch (error) {
+        attachError = error;
+      }
+      // Assert state first: the old store-then-return behavior must fail here,
+      // even before checking the public error contract.
+      expect(deps.session.tryGet()).toBeUndefined();
+      expect(() => {
+        throw attachError;
+      }).toThrow(/cannot attach a session after shutdown/);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();

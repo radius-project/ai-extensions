@@ -125,6 +125,21 @@ export async function resolveSessionId(
   return candidates[0] || "";
 }
 
+export async function resolvePersistedSessionId(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home = env.USERPROFILE || os.homedir(),
+  exists: PathProbe = pathExists
+): Promise<string> {
+  if (!home) return "";
+  const candidates = [env.COPILOT_AGENT_SESSION_ID, env.SESSION_ID].filter(
+    (value): value is string => Boolean(value)
+  );
+  for (const id of candidates) {
+    if (await exists(sessionWorkspaceFile(home, id))) return id;
+  }
+  return "";
+}
+
 async function readSessionWorkspaceMetadata(): Promise<WorkspaceMetadata> {
   const home = process.env.USERPROFILE || os.homedir();
   if (!home) return {};

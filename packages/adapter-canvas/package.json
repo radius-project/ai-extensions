@@ -12,11 +12,13 @@
     "build:install": "node build.mjs --install",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:integration:runtime": "vitest run test/integration/runtime",
+    "test:integration:artifact": "vitest run --config vitest.artifact.config.ts",
     "watch": "node build.mjs --watch",
     "demo": "node dev/run-demo.mjs",
     "demo:check": "node dev/run-demo.mjs --build-only",
     "watch:dev": "node build.mjs --watch --install",
-    "lint": "eslint \"src/**/*.ts\" vitest.config.ts build.mjs"
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.{ts,mjs}\" vitest.config.ts vitest.artifact.config.ts build.mjs"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*",
