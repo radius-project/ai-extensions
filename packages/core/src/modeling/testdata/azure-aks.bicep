@@ -24,8 +24,8 @@ param containerImagesRegistry string
 @description('Name of the Kubernetes Secret holding registry credentials for Radius.Compute/containerImages. Leave empty for an unauthenticated registry.')
 param containerImagesRegistrySecretName string = ''
 
-resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
-  name: 'azure-avm'
+resource azureAksRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'azure-aks'
   properties: {
     recipes: {
       'Radius.Data/redisCaches': {
@@ -387,7 +387,7 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
       }
     }
     recipePacks: [
-      recipes.id
+      azureAksRecipePack.id
     ]
   }
 }
