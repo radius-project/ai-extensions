@@ -75,11 +75,34 @@ const TENANT_B = "22222222-2222-2222-2222-222222222222";
 const SUBSCRIPTION = "33333333-3333-3333-3333-333333333333";
 const NOT_A_GUID = "x&calc";
 
+// Load-bearing fixture values. Several differential cases only discriminate
+// while these hold a specific relationship to each other, so they are named
+// once here and asserted by the precondition guard in the differential suite
+// rather than being repeated as literals that could drift apart.
+const USER_NAME = "fixture-user@example.com";
+const SUBSCRIPTION_NAME = "Fixture Subscription";
+const CLI_MISSING_MARKER = "ENOENT";
+const SWITCH_KEY = `az account set --subscription ${SUBSCRIPTION}`;
+const ACCOUNT_SHOW_KEY = "az account show -o json";
+const AWS_IDENTITY_KEY = "aws sts get-caller-identity --output json";
+const SWITCH_FAILURE = "no such subscription";
+const NO_SESSION_ERROR = "Please run az login";
+const CLI_MISSING_ERROR = "spawn az ENOENT";
+const AWS_CLI_MISSING_ERROR = "spawn aws ENOENT";
+
+const DEFAULT_AZURE_VALIDATION = {
+  success: true,
+  tenantId: TENANT_A,
+  subscriptionId: SUBSCRIPTION,
+  subscriptionName: SUBSCRIPTION_NAME,
+  userName: USER_NAME
+};
+
 const AZ_ACCOUNT = {
   tenantId: TENANT_A,
   id: SUBSCRIPTION,
-  name: "Fixture Subscription",
-  user: { name: "fixture-user@example.com" }
+  name: SUBSCRIPTION_NAME,
+  user: { name: USER_NAME }
 };
 
 const AWS_IDENTITY = {
@@ -121,9 +144,9 @@ function commandLine(command: string, args: string[]): string {
 }
 
 const DEFAULT_COMMANDS: Record<string, string | Error> = {
-  [`az account set --subscription ${SUBSCRIPTION}`]: "",
-  "az account show -o json": JSON.stringify(AZ_ACCOUNT),
-  "aws sts get-caller-identity --output json": JSON.stringify(AWS_IDENTITY)
+  [SWITCH_KEY]: "",
+  [ACCOUNT_SHOW_KEY]: JSON.stringify(AZ_ACCOUNT),
+  [AWS_IDENTITY_KEY]: JSON.stringify(AWS_IDENTITY)
 };
 
 // One independent set of fakes plus the mutable state they read and write.
@@ -135,6 +158,23 @@ function fakes(
 ): { deps: IdentityAuthDependencies; state: CanvasState | undefined } {
   const state =
     options.missingEntry ? undefined : structuredClone(options.state ?? {});
+  // A case's scripted command must *override* a default vector, never add a
+  // new one. A key that drifts out of sync with DEFAULT_COMMANDS is otherwise
+  // completely silent: the real vector still succeeds, the case collapses into
+  // the plain success case, and it keeps asserting the same outcome while no
+  // longer covering the branch it was written for. Verified, not theorized -
+  // pointing the failing-switch case at a stale key left all 83 tests green.
+  // This turns that drift into a loud throw at the point of use, which covers
+  // every present and future case rather than one guarded fixture.
+  for (const key of Object.keys(options.commands ?? {})) {
+    if (!(key in DEFAULT_COMMANDS)) {
+      throw new Error(
+        `scripted command "${key}" overrides nothing; expected one of ${Object.keys(
+          DEFAULT_COMMANDS
+        ).join(", ")}`
+      );
+    }
+  }
   const commands = { ...DEFAULT_COMMANDS, ...(options.commands ?? {}) };
   const uuids = new Set(options.uuids ?? [TENANT_A, TENANT_B, SUBSCRIPTION]);
   const deps: IdentityAuthDependencies = {
@@ -144,13 +184,7 @@ function fakes(
         return Promise.reject(options.azureValidationThrows);
       }
       return Promise.resolve(
-        options.azureValidation ?? {
-          success: true,
-          tenantId: TENANT_A,
-          subscriptionId: SUBSCRIPTION,
-          subscriptionName: "Fixture Subscription",
-          userName: "fixture-user@example.com"
-        }
+        options.azureValidation ?? DEFAULT_AZURE_VALIDATION
       );
     },
     generateAzureOIDC: (data) => {
@@ -531,9 +565,7 @@ describe("identity-auth routes (SU-08)", () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
-        [`az account set --subscription ${SUBSCRIPTION}`]: new Error(
-          "no such subscription"
-        )
+        [SWITCH_KEY]: new Error(SWITCH_FAILURE)
       }
     });
     const recording = await run(
@@ -550,7 +582,7 @@ describe("identity-auth routes (SU-08)", () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
-        "az account show -o json": new Error("spawn az ENOENT")
+        [ACCOUNT_SHOW_KEY]: new Error(CLI_MISSING_ERROR)
       }
     });
     const recording = await run(
@@ -573,7 +605,7 @@ describe("identity-auth routes (SU-08)", () => {
   it("asks for a login when the CLI is present but has no session", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
-      commands: { "az account show -o json": new Error("Please run az login") }
+      commands: { [ACCOUNT_SHOW_KEY]: new Error(NO_SESSION_ERROR) }
     });
     const recording = await run(
       "/api/verify-azure-login",
@@ -842,9 +874,7 @@ describe("identity-auth routes (SU-08)", () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
-        "aws sts get-caller-identity --output json": new Error(
-          "spawn aws ENOENT"
-        )
+        [AWS_IDENTITY_KEY]: new Error(AWS_CLI_MISSING_ERROR)
       }
     });
     const recording = await run(
@@ -1296,12 +1326,14 @@ async function recordMigrated(input: DifferentialCase): Promise<Side> {
 }
 
 describe("identity-auth legacy/migrated differential contract", () => {
-  // Fixture-precondition guard. The tenant-mismatch and CLI-missing cases below
-  // only discriminate while these preconditions hold: if TENANT_B were edited
-  // to equal the active session tenant, or the ENOENT marker were removed, the
-  // corresponding differential cases would still pass while silently testing
-  // the success path instead. Asserting the preconditions makes such an edit
-  // fail loudly here.
+  // Fixture-precondition guard. Several cases below only discriminate while an
+  // unstated relationship between fixture values holds - if TENANT_B equalled
+  // the active session tenant, if the no-session error carried the CLI-missing
+  // marker, if two account fields collapsed to the same string, or if the
+  // default validation stopped supplying a user name, the corresponding cases
+  // would keep passing while silently re-testing a path another case already
+  // covers. Asserting the preconditions makes such an edit fail loudly here
+  // rather than degrading the compatibility proof to unit-only.
   it("holds the fixture preconditions the differential cases depend on", () => {
     expect(AZ_ACCOUNT.tenantId).toBe(TENANT_A);
     expect(TENANT_A.toLowerCase()).not.toBe(TENANT_B.toLowerCase());
@@ -1311,11 +1343,48 @@ describe("identity-auth legacy/migrated differential contract", () => {
     // The default command map must answer every vector these routes issue, so
     // an "unscripted command vector" throw means a wrong-port call, never a
     // missing fixture.
-    expect(Object.keys(DEFAULT_COMMANDS).sort()).toEqual([
-      "aws sts get-caller-identity --output json",
-      `az account set --subscription ${SUBSCRIPTION}`,
-      "az account show -o json"
-    ]);
+    expect(Object.keys(DEFAULT_COMMANDS).sort()).toEqual(
+      [SWITCH_KEY, ACCOUNT_SHOW_KEY, AWS_IDENTITY_KEY].sort()
+    );
+
+    // The narrow cases override a default vector rather than adding a new one.
+    // If a key drifted, the override would be inert: the command would quietly
+    // succeed and the case would collapse into the plain success case while
+    // still asserting the same outcome. That is silent, so it is pinned here.
+    // This is the failure mode slice 3c found on the branch listing.
+    for (const key of [SWITCH_KEY, ACCOUNT_SHOW_KEY, AWS_IDENTITY_KEY]) {
+      expect(DEFAULT_COMMANDS).toHaveProperty([key]);
+      expect(DEFAULT_COMMANDS[key]).not.toBeInstanceOf(Error);
+    }
+
+    // `isCliCommandMissing` is faked as a substring probe for this marker, so
+    // the marker must appear in exactly the CLI-missing fixtures. If the
+    // no-session or switch-failure message ever contained it, those cases would
+    // silently re-test the CLI-missing path.
+    expect(CLI_MISSING_ERROR).toContain(CLI_MISSING_MARKER);
+    expect(AWS_CLI_MISSING_ERROR).toContain(CLI_MISSING_MARKER);
+    expect(NO_SESSION_ERROR).not.toContain(CLI_MISSING_MARKER);
+    expect(SWITCH_FAILURE).not.toContain(CLI_MISSING_MARKER);
+
+    // Every field the verify routes read off the account is distinct, so a
+    // handler reading the wrong one produces a different payload instead of a
+    // coincidentally identical one that no mutation could expose.
+    const accountFields = [
+      AZ_ACCOUNT.tenantId,
+      AZ_ACCOUNT.id,
+      AZ_ACCOUNT.name,
+      AZ_ACCOUNT.user.name
+    ];
+    expect(new Set(accountFields).size).toBe(accountFields.length);
+
+    // The "validation without a user name" case only discriminates while the
+    // default validation actually supplies one; otherwise it duplicates the
+    // plain success case and stops covering the fallback.
+    expect(DEFAULT_AZURE_VALIDATION.userName).toBe(USER_NAME);
+    expect(USER_NAME).not.toBe("");
+    expect(DEFAULT_AZURE_VALIDATION.subscriptionName).not.toBe(
+      DEFAULT_AZURE_VALIDATION.subscriptionId
+    );
     // The AWS user is derived from the ARN's last segment; a fixture without a
     // "/" would make the ARN and account fallbacks indistinguishable.
     expect(AWS_IDENTITY.Arn).toContain("/");
@@ -1449,9 +1518,7 @@ describe("identity-auth legacy/migrated differential contract", () => {
         body: `{"subscriptionId":"${SUBSCRIPTION}"}`,
         options: {
           commands: {
-            [`az account set --subscription ${SUBSCRIPTION}`]: new Error(
-              "no such subscription"
-            )
+            [SWITCH_KEY]: new Error(SWITCH_FAILURE)
           }
         }
       }
@@ -1463,7 +1530,7 @@ describe("identity-auth legacy/migrated differential contract", () => {
         body: `{"tenantId":"${TENANT_A}"}`,
         options: {
           commands: {
-            "az account show -o json": new Error("spawn az ENOENT")
+            [ACCOUNT_SHOW_KEY]: new Error(CLI_MISSING_ERROR)
           }
         }
       }
@@ -1475,7 +1542,7 @@ describe("identity-auth legacy/migrated differential contract", () => {
         body: `{"tenantId":"${TENANT_A}"}`,
         options: {
           commands: {
-            "az account show -o json": new Error("Please run az login")
+            [ACCOUNT_SHOW_KEY]: new Error(NO_SESSION_ERROR)
           }
         }
       }
@@ -1485,7 +1552,7 @@ describe("identity-auth legacy/migrated differential contract", () => {
       {
         route: "verify-azure-login",
         body: "{}",
-        options: { commands: { "az account show -o json": "not json" } }
+        options: { commands: { [ACCOUNT_SHOW_KEY]: "not json" } }
       }
     ],
     [
@@ -1629,9 +1696,7 @@ describe("identity-auth legacy/migrated differential contract", () => {
         body: "{}",
         options: {
           commands: {
-            "aws sts get-caller-identity --output json": new Error(
-              "spawn aws ENOENT"
-            )
+            [AWS_IDENTITY_KEY]: new Error(AWS_CLI_MISSING_ERROR)
           }
         }
       }
