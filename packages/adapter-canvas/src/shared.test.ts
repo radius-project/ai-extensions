@@ -5,7 +5,8 @@ import {
   saveCredentialProfile,
   deleteCredentialProfile,
   getPreferredGitHubLogin,
-  setPreferredGitHubLogin
+  setPreferredGitHubLogin,
+  sharedCredentials
 } from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
@@ -17,6 +18,7 @@ describe("credential profiles", () => {
   });
 
   it("returns an empty list for an unknown repo", () => {
+    delete sharedCredentials.profiles;
     expect(listCredentialProfiles(REPO)).toEqual([]);
   });
 

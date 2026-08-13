@@ -890,8 +890,51 @@ function triggerAppBicepHandoff(
 // browser stops polling once a deploy is terminal: a rejected send has no later
 // poll to piggyback on, so the status route keeps the poll alive while delivery
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
-export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
+export interface DeployAttemptInput {
+  repo: string;
+  branch: string;
+  provider: string;
+  environment: string;
+  appFile: string;
+  agentInitiated: boolean;
+}
 
+// Open a new deploy attempt on a reused canvas state. Deliberately
+// synchronous: the reset and the new attempt id must land together, because
+// a previous attempt's handoff settling between them would still see itself
+// as the current attempt and could mark the incoming deploy as repairing,
+// suppressing its own repair handoff for good. Anything that needs awaiting
+// (branch resolution) has to happen before this is called.
+export function beginDeployAttempt(
+  state: CanvasState,
+  input: DeployAttemptInput
+): void {
+  state.deployStatus = "in_progress";
+  state.deployError = null;
+  state.deployErrorKind = null;
+  state.deployErrorBranch = null;
+  state.deployRunUrl = null;
+  state.deployRunId = null;
+  // An agent redeploy is already inside a repair loop; a user deploy starts
+  // fresh and may hand off again on failure.
+  state.deployRepairing = input.agentInitiated;
+  state.deployHandoffState = input.agentInitiated ? "delivered" : "idle";
+  state.deployHandoffAttempts = 0;
+  state.deployingBranch = input.branch;
+  // Immutable identity for this attempt. A canvas panel is reused across
+  // deploys, so the repair loop binds to this snapshot instead of the panel:
+  // a stale repair cannot redeploy whatever the user started next.
+  state.deployAttempt = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    targetRepo: input.repo,
+    environment: input.environment,
+    branch: input.branch,
+    provider: input.provider,
+    appFile: input.appFile
+  };
+}
+
+export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
 // Backoff before re-sending a handoff whose delivery was rejected.
 export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
 
@@ -918,13 +961,24 @@ export function triggerDeployRepairHandoff(
     const attemptId = state.deployAttempt?.id || "";
     state.deployHandoffState = "pending";
     state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
+    // A canvas panel is reused across deploys and these callbacks settle
+    // asynchronously, so a user deploy started in the meantime would otherwise
+    // be mutated by the previous attempt's handoff. Binding to the attempt that
+    // opened this handoff keeps a stale settle from marking the new attempt as
+    // delivered/owned, which would suppress its own handoff for good. Compare
+    // both sides normalized so an attempt-less handoff still settles against an
+    // attempt-less state - refusing to settle there would strand it as pending
+    // and block every later trigger - while a new deploy's id still revokes it.
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
     const delivered = () => {
+      if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
       state.deployRepairing = true;
     };
     // A handoff that never reached the agent must not leave the loop marked as
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
+      if (!ownsAttempt()) return;
       state.deployRepairing = false;
       const exhausted =
         (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
@@ -935,6 +989,9 @@ export function triggerDeployRepairHandoff(
       // exactly the unmounted-panel case this trigger exists to cover.
       if (exhausted) return;
       const timer = setTimeout(() => {
+        // The backoff is another window for a new deploy to start, and that
+        // deploy drives its own handoff.
+        if (!ownsAttempt()) return;
         triggerDeployRepairHandoff(entry, instanceId);
       }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
       // Never hold the process open for a retry.
@@ -7334,6 +7391,34 @@ function createRequestHandler(instanceId: string) {
         const entry = servers.get(instanceId);
         // Store deploy params
         if (entry) {
+          const repo =
+            data.targetRepo ||
+            entry.state.plannedRepo ||
+            entry.state.contextRepo ||
+            "";
+          // Resolve the branch to deploy. When the client doesn't specify
+          // one, fall back to the repo's real default branch (which may be
+          // master/develop, not main) so the dispatch --ref and the
+          // "branch not pushed" guard below target a branch that exists.
+          // Resolved up front, before any state is touched: beginDeployAttempt
+          // has to run without an await in front of it, or the previous attempt
+          // stays current across that window and its handoff can settle onto the
+          // deploy starting here.
+          let branch = data.branch || "";
+          if (!branch) {
+            const detectedDefault = (
+              (await runCommand("gh", [
+                "repo",
+                "view",
+                repo,
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name"
+              ]).catch(() => "")) || ""
+            ).trim();
+            branch = detectedDefault || "main";
+          }
           entry.state.deployParams = data;
           entry.state.envName = data.environment;
           entry.state.deployProvider = data.provider;
@@ -7359,57 +7444,15 @@ function createRequestHandler(instanceId: string) {
           entry.state.deployingResources = resources;
           entry.state.deployLogs = [];
           entry.state.deployLogBase = 0;
-          entry.state.deployStatus = "in_progress";
-          entry.state.deployError = null;
-          entry.state.deployErrorKind = null;
-          entry.state.deployErrorBranch = null;
-          entry.state.deployRunUrl = null;
-          entry.state.deployRunId = null;
-          // An agent redeploy is already inside a repair loop; a user
-          // deploy starts fresh and may hand off again on failure.
-          entry.state.deployRepairing = data.agentInitiated === true;
-          entry.state.deployHandoffState =
-            data.agentInitiated === true ? "delivered" : "idle";
-          entry.state.deployHandoffAttempts = 0;
-
-          const repo =
-            data.targetRepo ||
-            entry.state.plannedRepo ||
-            entry.state.contextRepo ||
-            "";
-          // Resolve the branch to deploy. When the client doesn't specify
-          // one, fall back to the repo's real default branch (which may be
-          // master/develop, not main) so the dispatch --ref and the
-          // "branch not pushed" guard below target a branch that exists.
-          let branch = data.branch || "";
-          if (!branch) {
-            const detectedDefault = (
-              (await runCommand("gh", [
-                "repo",
-                "view",
-                repo,
-                "--json",
-                "defaultBranchRef",
-                "--jq",
-                ".defaultBranchRef.name"
-              ]).catch(() => "")) || ""
-            ).trim();
-            branch = detectedDefault || "main";
-          }
-          entry.state.deployingBranch = branch;
           const provider = data.provider || "azure";
-          // Immutable identity for this attempt. A canvas panel is reused
-          // across deploys, so the repair loop binds to this snapshot
-          // instead of the panel: a stale repair cannot redeploy whatever
-          // the user started next.
-          entry.state.deployAttempt = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-            targetRepo: repo,
-            environment: entry.state.envName || data.environment || "",
+          beginDeployAttempt(entry.state, {
+            repo,
             branch,
             provider,
-            appFile: data.appFile || ".radius/app.bicep"
-          };
+            environment: entry.state.envName || data.environment || "",
+            appFile: data.appFile || ".radius/app.bicep",
+            agentInitiated: data.agentInitiated === true
+          });
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in
           // memory (and re-serializing the whole array to every 1.5s
@@ -8814,5 +8857,8 @@ export async function getOrCreateServer(
     }
     return entry;
   }
+  // Start warming the page assets only when a canvas is actually opened. The
+  // first HTML request awaits this same in-flight promise before rendering.
+  void ensureVendorScripts();
   return await startServer(instanceId, page);
 }
