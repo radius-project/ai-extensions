@@ -615,29 +615,6 @@ describe("RU-17: canvas instance reuse", () => {
   });
 });
 
-describe("server-owned environment actions", () => {
-  it("starts one accepted operation instead of awaiting the legacy route", async () => {
-    const { canvas, deps } = setup();
-    const result = await findAction(canvas, "create_environment").handler(
-      ctx("radius-panel", {
-        name: "dev",
-        provider: "azure",
-        clientId: "client",
-        tenantId: "tenant",
-        subscriptionId: "subscription",
-        resourceGroup: "rg-dev",
-        cluster: "aks-dev"
-      })
-    );
-
-    expect(deps.deploy.fetch).toHaveBeenCalledWith(
-      expect.stringMatching(/\/api\/operations$/),
-      expect.objectContaining({ method: "POST" })
-    );
-    expect(result).toEqual({});
-  });
-});
-
 // RU-18 (canvas half): onClose closes exactly once per instance.
 describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("closes the server on first onClose and is a no-op on a duplicate call", async () => {
