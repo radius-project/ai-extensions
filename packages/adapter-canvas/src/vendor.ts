@@ -3,7 +3,7 @@
 // Fetches the browser graph libraries (React, ReactDOM, React Flow + its CSS,
 // and dagre) once and inlines them directly into rendered HTML pages, avoiding
 // CSP/loading issues in the canvas webview that block external scripts.
-// Pre-fetched at module load so the first page render already has them cached.
+// Warmed when the first canvas server is created, then awaited before rendering.
 //
 // React Flow renders the application graph (modeled / planned / deployed / diff);
 // dagre computes the hierarchical node layout. The React Flow stylesheet is
@@ -26,6 +26,7 @@ const VENDOR_STYLE_URLS = {
   "reactflow-css": "https://unpkg.com/reactflow@11.11.4/dist/style.css"
 };
 const vendorCache = new Map<string, string>(); // name → content string
+let vendorLoad: Promise<void> | undefined;
 
 function fetchVendorScript(
   url: string,
@@ -64,12 +65,23 @@ function fetchVendorScript(
 
 // Ensure all vendor assets (scripts + styles) are loaded (called before rendering pages)
 export async function ensureVendorScripts(): Promise<void> {
-  const all = { ...VENDOR_URLS, ...VENDOR_STYLE_URLS };
-  for (const [name, url] of Object.entries(all)) {
-    if (!vendorCache.has(name)) {
-      const content = await fetchVendorScript(url);
-      if (content) vendorCache.set(name, content);
+  if (vendorLoad) return vendorLoad;
+  const load = (async () => {
+    const all = { ...VENDOR_URLS, ...VENDOR_STYLE_URLS };
+    for (const [name, url] of Object.entries(all)) {
+      if (!vendorCache.has(name)) {
+        const content = await fetchVendorScript(url);
+        if (content) vendorCache.set(name, content);
+      }
     }
+  })();
+  vendorLoad = load;
+  try {
+    await load;
+  } finally {
+    // Completed loads are cheap to re-check, and missing assets may retry on a
+    // later request. Concurrent callers still share the same in-flight work.
+    if (vendorLoad === load) vendorLoad = undefined;
   }
 }
 
@@ -94,13 +106,4 @@ export function getInlineVendorScripts(): string {
   const reactFlow = esc(vendorCache.get("reactflow"));
   const dagre = esc(vendorCache.get("dagre"));
   return `<script>${react}</script>\n<script>${reactDom}</script>\n<script>${reactFlow}</script>\n<script>${dagre}</script>`;
-}
-
-// Artifact smoke loads the complete production bundle in an isolated,
-// network-denied subprocess. It skips only this eager cache warm-up; any later
-// attempt to fetch, spawn, or bind still fails closed in that harness.
-if (process.env.RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH !== "1") {
-  (async () => {
-    await ensureVendorScripts();
-  })();
 }

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -68,6 +68,13 @@ interface PreRemovalFixture {
 }
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../../../..");
+
+function filesUnder(path: string): string[] {
+  return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
+    const child = resolve(path, entry.name);
+    return entry.isDirectory() ? filesUnder(child) : [child];
+  });
+}
 const fixture = JSON.parse(
   readFileSync(
     new URL("../../fixtures/runtime-compatibility.json", import.meta.url),
@@ -139,6 +146,28 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       ...fixture.acceptedSurface.removedTools
     ]) {
       expect(currentNames.has(removed), removed).toBe(false);
+    }
+  });
+
+  it("keeps removed action and tool names out of shipping prompts, docs, and runtime sources", () => {
+    const surfaces = [
+      resolve(REPO_ROOT, "README.md"),
+      resolve(REPO_ROOT, "plugins/radius/README.md"),
+      ...filesUnder(resolve(REPO_ROOT, "plugins/radius/skills")),
+      ...filesUnder(resolve(REPO_ROOT, "packages/adapter-canvas/src")).filter(
+        (path) => !path.endsWith(".test.ts")
+      )
+    ];
+    const removed = [
+      ...fixture.acceptedSurface.removedActions,
+      ...fixture.acceptedSurface.removedTools
+    ];
+
+    for (const path of surfaces) {
+      const content = readFileSync(path, "utf8");
+      for (const name of removed) {
+        expect(content, `${path}: ${name}`).not.toContain(name);
+      }
     }
   });
 

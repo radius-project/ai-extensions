@@ -98,8 +98,7 @@ export async function runArtifactSmoke(
         RADIUS_ARTIFACT_WORKSPACE: root,
         RADIUS_RAD_BINARY: fakeRad,
         RADIUS_RAD_SKIP_VERSION_CHECK: "1",
-        RADIUS_CANVAS_DEV: "0",
-        RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH: "1"
+        RADIUS_CANVAS_DEV: "0"
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true

@@ -108,6 +108,12 @@ describe("P0-A Radius runtime registration contract", () => {
         branch: 42
       })
     ).rejects.toThrow("canvas input.branch must be a string");
+    await expect(
+      harness.host.open("radius-panel", null as never)
+    ).rejects.toThrow("canvas input must be an object");
+    await expect(
+      harness.host.invoke("radius-panel", "get_graph_resources", null as never)
+    ).rejects.toThrow("get_graph_resources input must be an object");
     await harness.extension.shutdown("test");
   });
 

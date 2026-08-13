@@ -18,6 +18,7 @@ const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
 const ARTIFACT = join(DIST, "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
+const SOURCE_CHANGELOG = join(REPO_ROOT, "plugins", "radius", "CHANGELOG.md");
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -62,6 +63,7 @@ function assertCurrentArtifact(): void {
     join(REPO_ROOT, "plugins", "radius", "package.json"),
     join(REPO_ROOT, "plugins", "radius", "plugin.json"),
     join(REPO_ROOT, "plugins", "radius", "README.md"),
+    ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
     ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills"))
   ];
   const newestInput = Math.max(
@@ -85,13 +87,22 @@ describe("P0-C built Radius extension artifact", () => {
     expect(result.registration).toEqual(EXPECTED_REGISTRATION);
     expect(result.closeCount).toBe(1);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
-    // and reports them only on stderr, so pinning stderr to the exact benign
-    // shutdown line is the sole evidence that startup fully succeeded.
-    expect(
-      result.stderr.split(/\r?\n/).filter((line) => line.trim() !== "")
-    ).toEqual([
+    // and reports them only on stderr. The harness already requires exit code 0;
+    // here we require graceful shutdown and reject crash-shaped diagnostics
+    // without coupling ART to unrelated benign startup warnings.
+    const stderrLines = result.stderr
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== "");
+    expect(stderrLines).toContain(
       "[radius] received SIGTERM; shutting down 0 canvas server(s)..."
-    ]);
+    );
+    expect(stderrLines).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /uncaughtException|unhandledRejection|ECONNREFUSED|(?:^|\s)Error:/i
+        )
+      ])
+    );
   }, 30_000);
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
@@ -132,25 +143,73 @@ describe("P0-C built Radius extension artifact", () => {
       )
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
+    expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
 
     expect(
       readdirSync(DIST)
         .filter((name) => name.endsWith(".mjs"))
         .sort()
     ).toEqual(["extension.mjs"]);
-    for (const packagedPath of [
+    const packagedPaths = [
       "package.json",
       "plugin.json",
       "README.md",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"
-    ]) {
+    ];
+    if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
+    for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
-    expect(readFileSync(join(DIST, "package.json"), "utf8")).not.toContain(
-      "catalog:"
+    if (existsSync(SOURCE_CHANGELOG)) {
+      expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
+        readFileSync(SOURCE_CHANGELOG, "utf8")
+      );
+    } else {
+      expect(existsSync(join(DIST, "CHANGELOG.md"))).toBe(false);
+    }
+
+    const sourcePackage = JSON.parse(
+      readFileSync(join(REPO_ROOT, "plugins", "radius", "package.json"), "utf8")
+    ) as Record<string, unknown>;
+    const builtPackage = JSON.parse(
+      readFileSync(join(DIST, "package.json"), "utf8")
+    ) as Record<string, unknown>;
+    const workspace = readFileSync(
+      join(REPO_ROOT, "pnpm-workspace.yaml"),
+      "utf8"
     );
+    const catalogBlock =
+      workspace.match(/^catalog:\n((?:[ \t]+.*\n|\n)*)/m)?.[1] ?? "";
+    const catalog = Object.fromEntries(
+      catalogBlock.split("\n").flatMap((line) => {
+        if (line.trim().startsWith("#")) return [];
+        const entry = line.match(/^\s+"?([^":#\s]+)"?:\s*(\S+)\s*$/);
+        return entry ? [[entry[1], entry[2]]] : [];
+      })
+    );
+    const expectedPackage = structuredClone(sourcePackage);
+    expectedPackage.version = builtPackage.version;
+    for (const section of [
+      "dependencies",
+      "devDependencies",
+      "optionalDependencies",
+      "peerDependencies"
+    ]) {
+      const dependencies = expectedPackage[section];
+      if (!dependencies || typeof dependencies !== "object") continue;
+      for (const [name, specifier] of Object.entries(
+        dependencies as Record<string, unknown>
+      )) {
+        if (specifier !== "catalog:") continue;
+        expect(catalog[name], `${section}.${name}`).toBeTypeOf("string");
+        (dependencies as Record<string, unknown>)[name] = catalog[name];
+      }
+    }
+    expect(builtPackage.version).toEqual(expect.any(String));
+    expect(builtPackage).toEqual(expectedPackage);
+
     const sourcePlugin = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "plugin.json"), "utf8")
     ) as Record<string, unknown>;
