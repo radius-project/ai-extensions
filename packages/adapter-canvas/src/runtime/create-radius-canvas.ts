@@ -16,7 +16,7 @@ import { record, optionalString, errorMessage } from "./util.js";
 import {
   GRAPH_PAGES,
   DEFAULT_CANVAS_PAGE,
-  appBicepHandoffPrompt
+  appBicepHandoffMessage
 } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
@@ -99,7 +99,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
       try {
         const session = deps.session.get();
         Promise.resolve(
-          session.send(appBicepHandoffPrompt(repo, page, branches))
+          session.send(appBicepHandoffMessage(repo, page, branches))
         ).catch(() => {});
       } catch {
         /* session.send unavailable → ignore */

@@ -388,7 +388,9 @@ interface OpenSourceInput {
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
-type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+type SessionPromptHandler = (
+  prompt: string | SessionPromptMessage
+) => Promise<unknown>;
 
 interface IdValidationInput {
   tenantId?: string;
@@ -403,6 +405,14 @@ interface AzureLoginInput {
 interface AzureCliAssistInput {
   action?: string;
   tenantId?: string;
+}
+
+// A prompt paired with the shorter text the chat timeline shows in its place.
+// Mirrors the runtime's HandoffMessage: server-originated prompts are also
+// machine-authored, so they must not render as if the user typed them (#209).
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
 }
 
 interface DeployHandoffSummary {
@@ -860,7 +870,7 @@ export function azureLoginRequiredResponse({
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string
+  prompt: string | SessionPromptMessage
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
@@ -909,6 +919,29 @@ export function buildAzureCliAssistPrompt({
   ].join("\n\n");
 }
 
+// Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
+// Credentials on the user's behalf, so the turn it injects should read as a
+// status line, not as multi-paragraph instructions the user appears to have
+// typed. The agent still receives the full prompt.
+export function azureCliAssistDisplayPrompt({
+  action = "login"
+}: AzureCliAssistInput = {}): string {
+  return action === "install" ?
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+}
+
+// Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
+// cannot drift apart or be swapped at the call site.
+export function azureCliAssistMessage(
+  input: AzureCliAssistInput = {}
+): SessionPromptMessage {
+  return {
+    prompt: buildAzureCliAssistPrompt(input),
+    displayPrompt: azureCliAssistDisplayPrompt(input)
+  };
+}
+
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
@@ -953,7 +986,37 @@ export interface DeployAttemptInput {
   provider: string;
   environment: string;
   appFile: string;
-  agentInitiated: boolean;
+  // True only for a redeploy the agent makes from inside a repair loop it
+  // already owns. Resolved from the attempt id by resolveDeployRepairLoop, not
+  // taken from the client: an agent-initiated deploy is not by itself a repair.
+  repairLoop: boolean;
+  // The attempt this redeploy continues, so a loop keeps one identity across
+  // its retries. Empty for any deploy that opens a new attempt.
+  attemptId?: string;
+}
+
+// Decide, server-side, whether an incoming deploy continues an existing repair
+// loop. The tool validates the attempt before it POSTs, but another deploy can
+// start in between, so re-check here against the attempt this panel currently
+// holds: a stale repair must not overwrite the newer deploy or mark it as
+// already owned (which would suppress its own failure handoff). An unbound
+// request is an ordinary deploy and always proceeds.
+export function resolveDeployRepairLoop(
+  state: CanvasState,
+  requestedAttemptId: unknown
+): { repairLoop: boolean; attemptId: string; error?: string } {
+  const requested =
+    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
+  if (!requested) return { repairLoop: false, attemptId: "" };
+  const current = state?.deployAttempt?.id || "";
+  if (current !== requested) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -972,17 +1035,27 @@ export function beginDeployAttempt(
   state.deployErrorBranch = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
-  // An agent redeploy is already inside a repair loop; a user deploy starts
-  // fresh and may hand off again on failure.
-  state.deployRepairing = input.agentInitiated;
-  state.deployHandoffState = input.agentInitiated ? "delivered" : "idle";
-  state.deployHandoffAttempts = 0;
+  // Only a redeploy inside an existing repair loop is already owned by the
+  // agent. Every other deploy — including the agent's first one, which opens no
+  // loop — must stay eligible to hand its failure off; marking that one as
+  // repairing made triggerDeployRepairHandoff bail out and silently dropped the
+  // repair.
+  state.deployRepairing = input.repairLoop;
+  state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
+  // The delivery budget belongs to the loop, not to a single deploy: resetting
+  // it on every redeploy would let an undeliverable handoff retry forever.
+  state.deployHandoffAttempts =
+    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
-  // a stale repair cannot redeploy whatever the user started next.
+  // a stale repair cannot redeploy whatever the user started next. A redeploy
+  // inside a loop keeps the id it was handed, so the agent can keep addressing
+  // the same loop across retries instead of being told its attempt is inactive.
   state.deployAttempt = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    id:
+      (input.repairLoop && input.attemptId) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     targetRepo: input.repo,
     environment: input.environment,
     branch: input.branch,
@@ -3264,7 +3337,7 @@ function createRequestHandler(
         const requestedTenantId =
           typeof data.tenantId === "string" ? data.tenantId.trim() : "";
         const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+        const prompt = azureCliAssistMessage({ action, tenantId });
         const promptResult = await invokeSessionPrompt(
           sessionPromptHandler,
           prompt
@@ -8028,6 +8101,19 @@ function createRequestHandler(
       try {
         const data = JSON.parse(body);
         const entry = servers.get(instanceId);
+        // Re-validate the repair-loop attempt before touching any state: the
+        // tool checked it before sending, but a newer deploy may have started
+        // since, and a stale repair must not clobber it.
+        const loop = resolveDeployRepairLoop(
+          entry?.state || ({} as CanvasState),
+          data.attemptId
+        );
+        if (loop.error) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: loop.error }));
+          return;
+        }
         // Store deploy params
         if (entry) {
           const repo =
@@ -8090,7 +8176,8 @@ function createRequestHandler(
             provider,
             environment: entry.state.envName || data.environment || "",
             appFile: data.appFile || ".radius/app.bicep",
-            agentInitiated: data.agentInitiated === true
+            repairLoop: loop.repairLoop,
+            attemptId: loop.attemptId
           });
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in

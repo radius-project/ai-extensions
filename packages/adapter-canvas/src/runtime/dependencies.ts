@@ -8,7 +8,7 @@
 // I/O, binds a port, spawns a process, or calls joinSession — only invoking a
 // handler exercises the injected dependencies.
 
-import type { CanvasServerEntry } from "../server.js";
+import type { CanvasServerEntry, SessionPromptMessage } from "../server.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import type {
   DeployServerEntry,
@@ -223,7 +223,9 @@ export interface HostCallbackDependencies {
       state?: CanvasState;
     }) => Promise<unknown>
   ): void;
-  setSessionPromptHandler(fn: (prompt: string) => Promise<unknown>): void;
+  setSessionPromptHandler(
+    fn: (prompt: string | SessionPromptMessage) => Promise<unknown>
+  ): void;
 }
 
 export interface DeployRunnerDependencies {
