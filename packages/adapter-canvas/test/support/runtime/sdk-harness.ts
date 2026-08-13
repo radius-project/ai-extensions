@@ -111,7 +111,12 @@ export async function createRuntimeSdkHarness(
     ): Promise<unknown> {
       if (!canvasDeclaration)
         throw new Error("Radius canvas is not registered");
-      assertSchema(canvasDeclaration.inputSchema, input ?? {}, "canvas input");
+      const validatedInput = input === undefined ? {} : input;
+      assertSchema(
+        canvasDeclaration.inputSchema,
+        validatedInput,
+        "canvas input"
+      );
       lastInput[instanceId] = input;
       const context: CanvasContext = {
         extensionId: "plugin:radius",
@@ -130,7 +135,8 @@ export async function createRuntimeSdkHarness(
       if (!canvasDeclaration)
         throw new Error("Radius canvas is not registered");
       const action = actionByName(canvasDeclaration, actionName);
-      assertSchema(action.inputSchema, input ?? {}, `${actionName} input`);
+      const validatedInput = input === undefined ? {} : input;
+      assertSchema(action.inputSchema, validatedInput, `${actionName} input`);
       return action.handler({
         extensionId: "plugin:radius",
         canvasId: canvasDeclaration.id,
