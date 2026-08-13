@@ -18,15 +18,17 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
+  deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  projectDeployedGraph,
   resolveRecipeOutputs,
-  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
   buildEnvironmentSuffix
 } from "@radius-project/core";
+import type { DeployStatus } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
 import {
@@ -182,24 +184,20 @@ import {
   findWorkflowRun,
   getRunDetail,
   fetchRunLog,
-  fetchLiveDeployLog,
-  fetchLiveActivityLog,
-  fetchLiveControlPlaneLog,
-  fetchDeployState,
-  createDeployStatusReader,
-  appNameForGraphTag,
-  normalizeDeployedGraph,
-  rewireDeployedGraphChain,
-  reduceActivityLog,
-  applyActivityToResources,
   extractErrorLines,
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
-  explainRepoAccessForEnvSetup,
-  parseResourceProgress,
-  parseRadDeployLog
+  explainRepoAccessForEnvSetup
 } from "./deploy.js";
+import {
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  buildDeployMessageMap,
+  buildDeployStatusMap,
+  createDeployStatusReader,
+  settleDeployStatuses
+} from "./deploy-artifacts.js";
 import {
   graphPage,
   plannedGraphPage,
@@ -611,77 +609,81 @@ export function addGraphProgress(
   return true;
 }
 
-// deployStatusReaderFromState - build a GHCR-first deployed-graph/status reader
-// from a canvas instance's state. The graph registry/tag are derived the same
-// way the deploy workflow producer derives them (from the environment's GHCR
-// state registry + the environment/app names), so the reader pulls the exact
-// artifact the deploy published. Falls back to the radius-deploy-status branch
-// when the environment/app/registry can't be resolved or the artifact is
-// absent.
+// deployStatusReaderFromState - build a deployed-graph/status reader for a
+// canvas instance's state.
 //
-// The app name is required to build the producer's "<environment>-<app>-latest"
-// tag. It's populated during the deploy flow, but on a fresh session (or when
-// the Deployed tab is opened without first deploying) it's derived here from the
-// repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
-// — and cached back into state so GHCR retrieval works across reloads.
+// Deploy status and the deployed application graph are published by the deploy
+// workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
+// the run being monitored when there is one, so an in-flight deploy reports its
+// own status rather than the previous run's; otherwise read the newest matching
+// artifact repo-wide, which is what a fresh canvas session with no run in flight
+// needs.
+//
+// The application name only breaks ties between artifacts in the same
+// environment; it is never a lookup key and never a hard filter. That is why the
+// ordinary `resolveRepoAppName` is good enough here even though it falls back to
+// the repository's short name: a wrong guess cannot hide a real artifact.
 async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,
-  branch: string
+  branch: string,
+  runId?: number | string | null
 ) {
   const environment = state?.deployEnvName || state?.envName || "";
-  let app = state?.deployAppName || "";
-  if (!app && repo && environment) {
-    app = await resolveGraphAppName(
+  let application = state?.deployAppName || "";
+  if (!application && repo) {
+    application = await resolveRepoAppName(
       repo,
       branch || state?.deployingBranch || state?.graphBranch || ""
     );
-    if (app && state) state.deployAppName = app;
+    if (application && state) state.deployAppName = application;
   }
-  let stateRegistry = "";
-  if (repo && environment) {
-    try {
-      stateRegistry = stateRegistryForEnvironment(repo, environment);
-    } catch {
-      stateRegistry = "";
-    }
-  }
-  return createDeployStatusReader({ repo, environment, app, stateRegistry });
+  return cachedDeployStatusReader({
+    repo,
+    environment,
+    application,
+    runId: runId ?? state?.deployRunId ?? null
+  });
 }
 
-// resolveGraphAppName - extract the Radius app name for the GHCR graph tag using
-// the producer's exact rule (the first `name: '...'` literal in app.bicep). This
-// differs from resolveRepoAppName, which prefers the applications resource name
-// and falls back to the repo basename; the tag must match the producer's grep
-// byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
-async function resolveGraphAppName(
-  repo: string,
-  branch: string
-): Promise<string> {
-  const ref = branch || "main";
-  for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw: string;
-    try {
-      raw = await ghOrThrow([
-        "api",
-        `/repos/${repo}/contents/${p}?ref=${ref}`,
-        "--jq",
-        ".content"
-      ]);
-    } catch {
-      raw = "";
-    }
-    if (!raw) continue;
-    let decoded: string;
-    try {
-      decoded = Buffer.from(raw, "base64").toString("utf8");
-    } catch {
-      decoded = "";
-    }
-    const name = appNameForGraphTag(decoded);
-    if (name) return name;
+// createDeployStatusReader keeps its TTL cache, single-flight de-dup and
+// monotonic `sequence` guard in the reader instance, so building a fresh reader
+// per request makes all three inert and lets the deploy monitor and an
+// /api/deployed-graph poll download the same artifact concurrently. Cache
+// readers by their identity so callers reading the same deployment share one.
+const deployStatusReaders = new Map<
+  string,
+  ReturnType<typeof createDeployStatusReader>
+>();
+const MAX_DEPLOY_STATUS_READERS = 32;
+
+function cachedDeployStatusReader(
+  options: Parameters<typeof createDeployStatusReader>[0]
+): ReturnType<typeof createDeployStatusReader> {
+  const key = [
+    options.repo,
+    options.environment || "",
+    options.application || "",
+    options.runId ?? ""
+  ].join("\n");
+  const existing = deployStatusReaders.get(key);
+  if (existing) {
+    // Refresh LRU position so the cap evicts genuinely idle readers, not the
+    // one a live deploy is actively polling.
+    deployStatusReaders.delete(key);
+    deployStatusReaders.set(key, existing);
+    return existing;
   }
-  return "";
+  const reader = createDeployStatusReader(options);
+  deployStatusReaders.set(key, reader);
+  // Bounded: each run mints a new key (runId is part of it), so a long session
+  // cycling through deploys/environments must not grow the map without limit.
+  while (deployStatusReaders.size > MAX_DEPLOY_STATUS_READERS) {
+    const oldest = deployStatusReaders.keys().next().value;
+    if (oldest === undefined) break;
+    deployStatusReaders.delete(oldest);
+  }
+  return reader;
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -1245,6 +1247,16 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 // are not real application deployments and are filtered out.
 const DEPLOY_WORKFLOW_FILE = "run-rad-commands.yml";
 const DELETE_WORKFLOW_FILE = "delete-application.yml";
+
+// Name of the step inside the run-rad-commands composite action that executes
+// the `rad` commands (and therefore `rad deploy`). The deploy monitor keys its
+// in-flight handling — start time, per-resource status polling, the "still
+// running" heartbeat — on finding a step with this exact name, so a mismatch
+// silently disables all of it. It is exported so a test can pin it.
+//
+// Do not guess at this value: it must match
+// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
@@ -6720,51 +6732,147 @@ function createRequestHandler(
       res.setHeader("Content-Type", "application/json");
       if (!repo) {
         res.writeHead(200);
-        res.end(JSON.stringify({ resources: [], repo: "" }));
+        res.end(JSON.stringify({ resources: [], repo: "", mode: "greyed" }));
         return;
       }
-      // Prefer the deployed graph published to GHCR by the deploy workflow
-      // (radius-project/radius PR #12591), falling back to the legacy
-      // radius-deploy-status branch and then any graph captured in state.
-      const reader = await deployStatusReaderFromState(
-        entry?.state || {},
-        repo,
-        ""
-      );
-      let graph = (await reader.graph()).graph;
-      if (!graph && entry?.state?.deployedGraph)
-        graph = entry.state.deployedGraph;
+      const state = entry?.state || {};
+      const branch =
+        state.workspaceBranch && repoMatchesWorkspace(state, repo) ?
+          state.workspaceBranch
+        : "main";
+
+      // The page's selectors are authoritative: the user can pick an
+      // environment other than the one this session last deployed to, and the
+      // graph must follow the selection rather than silently rendering another
+      // environment's deploy under the selected environment's label.
+      const sessionEnv = state.deployEnvName || state.envName || "";
+      const requestedEnv =
+        (reqUrl.searchParams.get("environment") || "").trim() || sessionEnv;
+      const requestedApp =
+        (reqUrl.searchParams.get("application") || "").trim() ||
+        state.deployAppName ||
+        "";
+
+      // The Deployed view is a projection: a fixed topology (the modeled
+      // application) painted with a per-resource status that is resolved
+      // separately. Keeping them independent means the graph renders before any
+      // status is known and never changes shape when a deploy starts or ends.
+      //
+      //   live     - a deploy is in flight for this selection.
+      //   terminal - a deployment's status is known.
+      //   greyed   - nothing is known; every node renders pending.
+      //
+      // This session's own deploy status only describes the environment it
+      // deployed to, so it is used only when the selection matches.
+      const sessionMatchesSelection =
+        !requestedEnv ||
+        !sessionEnv ||
+        requestedEnv.toLowerCase() === sessionEnv.toLowerCase();
+      const deploying =
+        state.deployStatus === "in_progress" && sessionMatchesSelection;
+
+      const statusByKey = new Map<string, DeployStatus>();
+      // The resources the deploy monitor tracks are the freshest status this
+      // process has, both during a run and after it settles. Seed from them
+      // first so a terminal deploy keeps its colors even when the artifact read
+      // comes back empty — repainting a just-deployed app as pending would
+      // reproduce the very bug this transport replaced.
+      if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
+        for (const resource of state.deployingResources) {
+          const status = resource?.deployStatus as DeployStatus | undefined;
+          if (!status || status === "pending") continue;
+          for (const key of deployStatusKeys(resource)) {
+            if (!statusByKey.has(key)) statusByKey.set(key, status);
+          }
+        }
+      }
+
+      let graph: unknown = null;
+      let readOk = false;
+      let updatedAt: string | null = null;
+      // The app selector is a hint, not a hard filter: the reader falls back to
+      // an env-only match when the selected app has no artifact yet (the app
+      // name can itself be a guess from the repo short name). Surface the app it
+      // actually resolved so the page can say which one is on screen rather than
+      // mislabeling another app's status under the selected name.
+      let resolvedApp: string | null = requestedApp || null;
+      const messageByKey = new Map<string, string>();
+      try {
+        const reader = cachedDeployStatusReader({
+          repo,
+          environment: requestedEnv,
+          application: requestedApp,
+          // While a deploy is in flight, scope to its run so a previous
+          // deployment's newest-repo-wide artifact can't overwrite the live
+          // topology/status. The in-flight run hasn't uploaded yet, so this
+          // read is empty and the seeded live statuses stand.
+          runId: deploying ? (state.deployRunId ?? null) : null
+        });
+        const result = await reader.graph();
+        graph = result.graph;
+        readOk = result.status === "ok" || result.status === "stale";
+        const progress = await reader.progress();
+        updatedAt = progress?.updatedAt || null;
+        if (progress?.application) resolvedApp = progress.application;
+        for (const [key, status] of buildDeployStatusMap(progress)) {
+          if (!statusByKey.has(key)) statusByKey.set(key, status);
+        }
+        for (const [key, message] of buildDeployMessageMap(progress)) {
+          if (!messageByKey.has(key)) messageByKey.set(key, message);
+        }
+      } catch (e) {
+        // A status read failure must not blank the tab: fall through to the
+        // seeded statuses and the modeled topology.
+        if (entry?.state) {
+          if (!entry.state.progressMessages) entry.state.progressMessages = [];
+          entry.state.progressMessages.push(
+            `Deployed graph status read failed: ${errorMessage(e)}`
+          );
+        }
+      }
+      if (!graph && sessionMatchesSelection && state.deployedGraph)
+        graph = state.deployedGraph;
+
+      // A deployment is "terminal" when its status is known, which is not the
+      // same as having a published graph: the producer only attaches
+      // deploy-graph.json to its final upload, so a run can report real
+      // per-resource status with no graph at all.
+      const mode: "live" | "terminal" | "greyed" =
+        deploying ? "live"
+        : statusByKey.size > 0 || readOk || graph ? "terminal"
+        : "greyed";
+
+      // Topology: prefer the graph the deploy actually published (it reflects
+      // what is running), falling back to the modeled resources so the skeleton
+      // renders before anything has ever been deployed.
       const graphRecord = record(graph);
-      let resources = canvasGraphResources(
+      let topology: unknown[] =
         Array.isArray(graph) ? graph
         : Array.isArray(graphRecord.resources) ? graphRecord.resources
-        : []
+        : [];
+      if (topology.length === 0) {
+        topology =
+          (sessionMatchesSelection ? state.deployingResources : null) ||
+          state.plannedResources ||
+          state.graphResources ||
+          [];
+      }
+
+      const resources = canvasGraphResources(
+        projectDeployedGraph(topology as any[], statusByKey)
       );
-      // DEMO: present the deployed topology as container → cache → database.
-      resources = canvasGraphResources(
-        rewireDeployedGraphChain(resources) || []
-      );
-      // Re-derive connections (e.g. database→secret) that rad app graph
-      // omits, so the deployed graph renders connected like the planned one.
-      resources = canvasGraphResources(normalizeDeployedGraph(resources) || []);
-      // Hide implementation-detail resources (containerImages + their
-      // ghcr-registry-creds secret) from the deployed view too, matching
-      // every other graph state. Applied last so any edges the rewire/
-      // normalize steps synthesized toward those nodes are also stripped.
-      // The raw deploy-graph.json on the status branch is left untouched.
-      resources = filterGraphVisualizationResources(resources);
+      // Attach the producer's per-resource message so a red node can explain
+      // itself in the popup instead of just being red.
+      applyDeployMessages(resources, messageByKey);
       res.writeHead(200);
       res.end(
         JSON.stringify({
           resources,
           repo,
-          branch:
-            (
-              entry?.state?.workspaceBranch &&
-              repoMatchesWorkspace(entry.state, repo)
-            ) ?
-              entry.state.workspaceBranch
-            : "main"
+          branch,
+          mode,
+          updatedAt,
+          application: resolvedApp
         })
       );
       return;
@@ -8538,10 +8646,14 @@ function createRequestHandler(
                 const resolved = resolveDeployParams(parsed);
                 const { public: publicParams, secret: secretParams } =
                   partitionParams(parsed, resolved);
-                // Capture the app name (as the producer extracts it) so
-                // the deployed-graph reader can derive the GHCR artifact
-                // tag "<environment>-<app>-latest".
-                entry.state.deployAppName = appNameForGraphTag(bicepSource);
+                // Capture the app name so the deploy-status reader can prefer
+                // an artifact belonging to this application. It is a tiebreaker
+                // between artifacts in the same environment, never a lookup key
+                // and never a hard filter, so an unresolved name costs nothing.
+                entry.state.deployAppName =
+                  extractAppName(bicepSource) ||
+                  entry.state.deployAppName ||
+                  "";
                 // Ensure the environment carries the secret params the
                 // deployed app.bicep needs (e.g. an @secure() password).
                 // The workflow can ONLY read these from the
@@ -8832,87 +8944,80 @@ function createRequestHandler(
             let beatStep = "";
             let beatStepStartedAt = 0;
             let lastBeatAt = 0;
-            // Live `rad deploy` progress (published by the workflow to the
-            // radius-deploy-status branch). We track how many raw lines we've
-            // already surfaced so we only append new ones.
-            let liveLogShown = 0;
             let deployStarted = false;
-            // Track which activity-log status changes we've already
-            // streamed so we only announce new transitions.
-            const activitySeen = new Set<string>();
-            // Track how many control-plane / recipe log lines we've surfaced.
-            let cpLogShown = 0;
-            let cpLogTail = "";
-            const DEPLOY_STEP = "Deploy Application";
 
-            // Poll the Azure activity log the workflow publishes and
-            // drive FINE-GRAINED per-resource (output) status, coloring
-            // each planned graph node individually as Azure creates it.
-            const pollActivity = async () => {
-              if (provider !== "azure" || resources.length === 0) return;
-              const actText = await fetchLiveActivityLog(repo);
-              if (!actText) return;
-              const entries = reduceActivityLog(actText);
-              if (entries.length === 0) return;
-              const changes = applyActivityToResources(
-                entries,
+            // Deploy status and the deployed graph are published as a workflow
+            // artifact. This reader is scoped to the run we are tracking, so it
+            // reports this deploy's status rather than the previous one's.
+            const statusReader = await deployStatusReaderFromState(
+              entry.state,
+              repo,
+              branch,
+              dRunId
+            );
+            // Artifact uploads take seconds, so polling faster than this just
+            // re-reads the same bytes. The step-lifecycle stream and the
+            // heartbeat below keep the feed moving between refreshes.
+            const STATUS_POLL_MS = 15000;
+            let lastStatusPollAt = 0;
+
+            // Announce only new transitions, not the same status every tick.
+            const statusAnnounced = new Set<string>();
+
+            // pollDeployStatus - fold the newest published status map into the
+            // graph. Merging is conservative (see applyDeployStatusToResources):
+            // a resource missing from the payload keeps its current status, and
+            // a failure is never downgraded within the run.
+            const pollDeployStatus = async (force = false): Promise<void> => {
+              if (resources.length === 0) return;
+              if (!force && Date.now() - lastStatusPollAt < STATUS_POLL_MS)
+                return;
+              lastStatusPollAt = Date.now();
+              let statusMap;
+              let messageMap;
+              try {
+                const progress = await statusReader.progress();
+                statusMap = buildDeployStatusMap(progress);
+                messageMap = buildDeployMessageMap(progress);
+              } catch (e) {
+                addLog(
+                  "    ⚠ Could not read deploy status: " + errorMessage(e)
+                );
+                return;
+              }
+              applyDeployMessages(resources, messageMap);
+              const changes = applyDeployStatusToResources(
                 resources,
-                provider,
-                entry.state
+                statusMap
               );
-              for (const c of changes) {
-                if (!activitySeen.has(c)) {
-                  activitySeen.add(c);
-                  addLog("    ☁ " + c);
+              for (const change of changes) {
+                const line =
+                  (change.to === "failed" ? "✗"
+                  : change.to === "success" ? "✓"
+                  : "◐") +
+                  " " +
+                  (change.name || "resource") +
+                  " — " +
+                  change.to;
+                if (statusAnnounced.has(line)) continue;
+                statusAnnounced.add(line);
+                addLog("  " + line);
+              }
+              // Push each new status down onto the resource's outputs (and
+              // generate their portal links on success) the same way the rest
+              // of the deploy flow does.
+              if (changes.length > 0) {
+                for (const resource of resources) {
+                  if (resource.deployStatus)
+                    setStatus(resource, resource.deployStatus);
                 }
               }
             };
 
-            // Stream the Radius control-plane / recipe log (terraform/bicep
-            // execution from the radius-system pods). Real-time and carries
-            // the precise recipe failure cause. We append only new lines.
-            const pollControlPlane = async () => {
-              const cpText = await fetchLiveControlPlaneLog(repo);
-              if (!cpText) return;
-              cpLogTail = cpText;
-              const lines = cpText.split(/\r?\n/);
-              for (let i = cpLogShown; i < lines.length; i++) {
-                const t = lines[i].replace(/\s+$/, "");
-                if (t) addLog("    ⚙ " + t);
-              }
-              cpLogShown = lines.length;
-            };
-
-            // Advance per-resource status from any live log text so the
-            // graph shows gray→yellow→green/red per node. rad deploy in CI
-            // (non-TTY) prints no intermediate per-resource lines, so the
-            // control-plane/recipe log + activity log are the real signals.
-            const applyProgress = (text: string): void => {
-              if (!text) return;
-              const prog = parseResourceProgress(text, resources);
-              for (const r of resources) {
-                if (!r.name) continue;
-                const s = prog[r.name];
-                if (!s) continue;
-                const cur = r.deployStatus;
-                // Mid-deployment a node is NEVER painted red: a transient
-                // "error"/"failed"/"postponed" line in the live log does not
-                // mean the deployment failed. Such resources stay yellow
-                // (in_progress). Only the TERMINAL run conclusion (below)
-                // decides red vs green, so nodes go red solely on an actual
-                // failed deployment.
-                if (s === "success" && cur !== "success" && cur !== "failed") {
-                  setStatus(r, "success");
-                  addLog("  ✓ " + r.name + " deployed");
-                } else if (
-                  (s === "in_progress" || s === "failed") &&
-                  (cur === "pending" || !cur)
-                ) {
-                  setStatus(r, "in_progress");
-                  addLog("  ◐ " + r.name + " provisioning…");
-                }
-              }
-            };
+            // The step that runs `rad deploy`. This must match the step name in
+            // the upstream run-rad-commands composite action exactly — when it
+            // does not, none of the in-flight handling below ever executes.
+            const DEPLOY_STEP = DEPLOY_RAD_COMMANDS_STEP;
 
             for (let p = 0; p < 240; p++) {
               const detail = await getRunDetail(repo, dRunId);
@@ -8968,8 +9073,8 @@ function createRequestHandler(
                 }
               }
 
-              // While `rad deploy` runs, consume the live progress log
-              // the workflow publishes and drive REAL per-resource state.
+              // While the rad-commands step runs, fold in whatever per-resource
+              // status the deploy has published.
               const deployStep = detail.steps.find(
                 (s) => s.name === DEPLOY_STEP
               );
@@ -8990,27 +9095,16 @@ function createRequestHandler(
                   // Leave nodes gray; each flips to yellow when its own
                   // recipe/operation actually starts (see applyProgress).
                 }
-                const live = await fetchLiveDeployLog(repo);
-                if (live) {
-                  // Append any new raw rad-deploy output lines to the feed.
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
-                  }
-                  liveLogShown = lines.length;
-                  // Flip resources to their real status as the log reports them.
-                  applyProgress(live);
-                }
-                // Fine-grained Azure activity-log status per resource.
-                await pollActivity();
-                // Real-time control-plane / recipe (terraform) output.
-                await pollControlPlane();
-                // Drive per-node coloring from the control-plane/recipe log.
-                applyProgress(cpLogTail);
+                // Fold in whatever per-resource status the deploy has
+                // published so far. Nothing arrives mid-run yet: the producer
+                // publishes after `rad deploy` returns, because a composite
+                // step cannot invoke actions/upload-artifact while it runs.
+                // The poll is here regardless so that when the producer starts
+                // uploading during the deploy, this lights up unchanged.
+                await pollDeployStatus();
                 // Fallback: if nothing has advanced past pending ~25s into
-                // the deploy (no parseable per-resource signal), mark all
-                // pending nodes in_progress so the graph isn't stuck gray.
+                // the deploy, mark all pending nodes in_progress so the graph
+                // isn't stuck gray for the whole run.
                 if (
                   Date.now() - deployStepStartedAt > 25000 &&
                   !resources.some(
@@ -9026,48 +9120,29 @@ function createRequestHandler(
 
               if (detail.status === "completed") {
                 const conclusion = detail.conclusion;
-                // Final fine-grained activity sweep before settling.
-                await pollActivity();
-                await pollControlPlane();
 
-                // ── Finalize logs without cutting off ───────────
-                // The workflow writes the terminal deploy-state marker
-                // (succeeded/failed) LAST — only after the complete log
-                // and the deployed graph have been pushed to the status
-                // branch. Keep fetching the live log until the state is
-                // terminal AND its length stops growing, so we never drop
-                // the final rad-deploy output (e.g. the summary table).
-                let parsed;
-                let live = null;
-                let prevLen = -1;
-                let stableHits = 0;
-                for (let f = 0; f < 12; f++) {
-                  const ds = await fetchDeployState(repo);
-                  const cur = await fetchLiveDeployLog(repo);
-                  if (cur) live = cur;
-                  const len = cur ? cur.length : 0;
-                  const terminal = ds === "succeeded" || ds === "failed";
-                  if (len === prevLen) stableHits++;
-                  else stableHits = 0;
-                  prevLen = len;
-                  // Stream any control-plane lines that arrive late too.
-                  await pollControlPlane();
-                  if (terminal && (stableHits >= 1 || len === 0)) break;
-                  if (!terminal || stableHits < 1) await delay(2500);
-                }
-                if (live) {
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
+                // The producer publishes its artifact from a step that runs
+                // after `rad deploy` and before teardown, so by the time the
+                // run reports completed the upload has normally landed. Retry
+                // a few times anyway to absorb upload-finalization lag, since
+                // this read is the whole terminal graph.
+                addLog("🗺  Retrieving deploy status and application graph…");
+                let deployed: unknown = null;
+                let graphStatus: string | null = null;
+                for (let g = 0; g < 3; g++) {
+                  const gr = await statusReader.graph();
+                  graphStatus = gr.status;
+                  // Permission failures will not resolve by retrying.
+                  if (gr.status === "auth") break;
+                  if (gr.graph) {
+                    deployed = gr.graph;
+                    break;
                   }
-                  parsed = parseRadDeployLog(live, resources, {
-                    stripPrefix: false
-                  });
-                } else {
-                  const logText = await fetchRunLog(repo, dRunId);
-                  parsed = parseRadDeployLog(logText, resources);
+                  if (g < 2) await delay(5000);
                 }
+                // Final status sweep, forced past the poll interval so the
+                // last published state is always folded in.
+                await pollDeployStatus(true);
 
                 // Record stop time + duration.
                 const finishedAt = Date.now();
@@ -9085,63 +9160,42 @@ function createRequestHandler(
                   );
                 }
 
-                if (conclusion === "success") {
-                  // Overall success ⇒ every resource provisioned. Force all
-                  // nodes green; a transient "failed" token in the live log
-                  // must never leave a node red on a successful deployment.
-                  resources.forEach((r) => setStatus(r, "success"));
-                  // Fetch + store the REAL deployed application graph the
-                  // deploy published to GHCR (radius-project/radius PR
-                  // #12591), falling back to the legacy
-                  // radius-deploy-status branch when the artifact is
-                  // absent (older producers / git state backend).
-                  addLog("🗺  Retrieving deployed application graph…");
-                  const graphReader = await deployStatusReaderFromState(
-                    entry.state,
-                    repo,
-                    branch
+                // The run's own conclusion is authoritative for the overall
+                // outcome: it decides anything the published status left
+                // unfinished, without overwriting a resource the producer
+                // already reported as terminal.
+                settleDeployStatuses(resources, conclusion);
+                // Propagate onto output resources and generate portal links.
+                for (const resource of resources) {
+                  if (resource.deployStatus)
+                    setStatus(resource, resource.deployStatus);
+                }
+
+                if (deployed) {
+                  entry.state.deployedGraph =
+                    deployed as CanvasState["deployedGraph"];
+                  entry.state.deployedGraphRepo = repo;
+                  addLog("  ✓ Deployed graph saved (from workflow artifact).");
+                } else if (graphStatus === "auth") {
+                  addLog(
+                    "  ⚠ The deploy status artifact could not be read: access denied."
                   );
-                  let deployed = null;
-                  let graphSource = "none";
-                  let graphStatus = null;
-                  for (let g = 0; g < 6 && !deployed; g++) {
-                    const gr = await graphReader.graph();
-                    graphStatus = gr.status;
-                    if (gr.graph) {
-                      deployed = gr.graph;
-                      graphSource = gr.source;
-                      break;
-                    }
-                    // Permission failures won't resolve by retrying.
-                    if (gr.status === "auth") break;
-                    await delay(2500);
-                  }
-                  if (deployed) {
-                    entry.state.deployedGraph = deployed;
-                    entry.state.deployedGraphRepo = repo;
-                    addLog(
-                      graphSource === "ghcr" ?
-                        "  ✓ Deployed graph saved (from GHCR artifact " +
-                          graphReader.tag +
-                          ")."
-                      : "  ✓ Deployed graph saved (from radius-deploy-status branch)."
-                    );
-                  } else if (graphStatus === "auth") {
-                    addLog(
-                      "  ⚠ Deployed graph is published to a private GHCR package but access was denied."
-                    );
-                    addLog(
-                      "    Grant read access: gh auth refresh -s read:packages"
-                    );
-                  } else if (graphStatus === "malformed") {
-                    addLog(
-                      "  ⚠ Deployed graph artifact was found but could not be parsed (malformed). Continuing."
-                    );
-                  } else {
-                    addLog(
-                      "  ⚠ Deployed graph not available yet (continuing)."
-                    );
-                  }
+                  addLog(
+                    "    Check that the active gh account can read Actions artifacts for " +
+                      repo +
+                      "."
+                  );
+                } else if (graphStatus === "malformed") {
+                  addLog(
+                    "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
+                  );
+                } else {
+                  addLog(
+                    "  ⚠ Deployed graph not available (the deploy may not have published one)."
+                  );
+                }
+
+                if (conclusion === "success") {
                   entry.state.deployStatus = "complete";
                   addLog("");
                   addLog(
@@ -9155,17 +9209,6 @@ function createRequestHandler(
                       "."
                   );
                 } else {
-                  resources.forEach((r) => {
-                    const resourceName = r.name || "";
-                    if (parsed[resourceName] === "success")
-                      setStatus(r, "success");
-                    else if (
-                      parsed[resourceName] === "failed" ||
-                      r.deployStatus === "pending" ||
-                      r.deployStatus === "in_progress"
-                    )
-                      setStatus(r, "failed");
-                  });
                   entry.state.deployStatus = "failed";
                   addLog("");
                   addLog("❌ Deployment failed. Conclusion: " + conclusion);
@@ -9185,19 +9228,16 @@ function createRequestHandler(
                       " Failed step: " +
                       failedSteps.map((s) => s.name).join(", ") +
                       ".";
-                  // Surface the FULL detailed rad deploy failure block (root cause:
-                  // recipe/terraform/ARM operation errors). Prefer the live raw rad
-                  // output; fall back to the full run log.
-                  let failLog = live;
-                  if (!failLog) failLog = await fetchRunLog(repo, dRunId);
-                  // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the Azure Login
-                  // step, BEFORE rad runs — so it appears in the run log, not the live rad-deploy log.
-                  // A stale live-deploy log from a prior attempt (persisted on the status branch) could
-                  // otherwise mask it, so always consult the current run log for THIS run for the claim.
-                  const runLogForClaim =
-                    live ? await fetchRunLog(repo, dRunId) : failLog;
+                  // Surface the FULL detailed rad deploy failure block (root
+                  // cause: recipe/terraform/ARM operation errors). The run is
+                  // complete by now, so its log is readable in full — this is
+                  // the one signal the artifact transport does not carry.
+                  const failLog = await fetchRunLog(repo, dRunId);
+                  // The OIDC "enterprise claim" rejection (AADSTS7002381)
+                  // happens at the Azure Login step, before rad runs, so scope
+                  // the check to that step's log rather than the whole run.
                   const azureLoginLog = extractGitHubActionsStepLog(
-                    runLogForClaim,
+                    failLog,
                     "Azure Login (OIDC)"
                   );
                   const claimHelp = explainOidcEnterpriseClaim(azureLoginLog);
@@ -9211,26 +9251,29 @@ function createRequestHandler(
                     detailBlock.split("\n").forEach((l) => addLog("  " + l));
                     addLog("─────────────────────────────────");
                   }
-                  // The exact recipe (terraform/bicep) error is emitted by the
-                  // Radius control plane. Surface its tail if we captured it.
-                  if (cpLogTail) {
-                    const cpLines = cpLogTail
-                      .split(/\r?\n/)
-                      .filter((l) => l.trim());
-                    const cpErr = cpLines
-                      .filter((l) =>
-                        /error|failed|terraform|tofu|recipe/i.test(l)
-                      )
-                      .slice(-25);
-                    const cpShow = cpErr.length ? cpErr : cpLines.slice(-25);
-                    if (cpShow.length) {
-                      dErr +=
-                        "\n\n──── control-plane / recipe log ────\n" +
-                        cpShow.join("\n");
+                  // The producer ships a dedicated control-plane/recipe log in
+                  // the status artifact. It carries the precise recipe/terraform
+                  // failure cause, which the summarized run-log block above can
+                  // miss, so surface its tail when present.
+                  let cpLog: string | null = null;
+                  try {
+                    cpLog = await statusReader.controlPlaneLog();
+                  } catch {
+                    // Best-effort: a missing/unreadable control-plane log must
+                    // not mask the run-log failure details above.
+                  }
+                  if (cpLog) {
+                    const cpTail = cpLog
+                      .replace(/\s+$/, "")
+                      .split("\n")
+                      .slice(-40)
+                      .join("\n");
+                    if (cpTail.trim()) {
+                      dErr += "\n\n— control-plane log —\n" + cpTail;
                       addLog("");
-                      addLog("──────── control-plane / recipe log ────────");
-                      cpShow.forEach((l) => addLog("  " + l));
-                      addLog("─────────────────────────────────────────");
+                      addLog("──────── control-plane log ────────");
+                      cpTail.split("\n").forEach((l) => addLog("  " + l));
+                      addLog("───────────────────────────────────");
                     }
                   }
                   dErr +=
