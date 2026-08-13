@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   getOrCreateServer,
+  onEnvironmentTasksSettled,
   setEnvironmentOperationTestRunner
 } from "./server.js";
 import {
@@ -55,6 +56,28 @@ async function postJson(path, body) {
 }
 
 describe("POST /api/operations server-owned execution", () => {
+  it("notifies a settlement listener registered after tasks have already settled", async () => {
+    const listener = vi.fn();
+    const stop = onEnvironmentTasksSettled(listener);
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("isolates a throwing settlement listener from later listeners", async () => {
+    const throwing = vi.fn(() => {
+      throw new Error("listener failed");
+    });
+    const following = vi.fn();
+    const stopThrowing = onEnvironmentTasksSettled(throwing);
+    const stopFollowing = onEnvironmentTasksSettled(following);
+    await Promise.resolve();
+    expect(throwing).toHaveBeenCalledTimes(1);
+    expect(following).toHaveBeenCalledTimes(1);
+    stopThrowing();
+    stopFollowing();
+  });
+
   it("returns 202 before the scheduled task completes and finishes without polling", async () => {
     operations.clear();
     let release;
@@ -122,6 +145,35 @@ describe("POST /api/operations server-owned execution", () => {
       }
     });
   });
+
+  it("normalizes the environment name before persisting the operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const started = await postJson("/api/operations", {
+      repo: "contoso/normalized",
+      environment: "  dev  ",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+
+    expect(started.status).toBe(202);
+    expect(operations.get(started.body.operationId)?.environment).toBe("dev");
+  });
+
+  it.each(["/api/azure-auto-setup", "/api/create-environment"])(
+    "rejects direct calls to the internal mutation route %s",
+    async (path) => {
+      const response = await postJson(path, {});
+      expect(response).toMatchObject({
+        status: 403,
+        body: { code: "server-owned-operation-required" }
+      });
+    }
+  );
 
   it("resumes only the prompt currently owned by the operation", async () => {
     operations.clear();

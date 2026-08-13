@@ -515,7 +515,23 @@ export function hasActiveEnvironmentTasks(): boolean {
 
 export function onEnvironmentTasksSettled(listener: () => void): () => void {
   environmentTasksSettledListeners.add(listener);
-  return () => environmentTasksSettledListeners.delete(listener);
+  let listening = true;
+  const stop = () => {
+    if (!listening) return;
+    listening = false;
+    environmentTasksSettledListeners.delete(listener);
+  };
+  if (activeEnvironmentTasks.size === 0) {
+    queueMicrotask(() => {
+      if (!listening || activeEnvironmentTasks.size > 0) return;
+      try {
+        listener();
+      } catch {
+        // Listener failures must not affect task settlement.
+      }
+    });
+  }
+  return stop;
 }
 
 export function graphDefinitionHash(
@@ -2396,7 +2412,13 @@ function createRequestHandler(
         serverOwnedTasks.delete(operationId);
         activeEnvironmentTasks.delete(operationId);
         if (activeEnvironmentTasks.size === 0) {
-          for (const listener of environmentTasksSettledListeners) listener();
+          for (const listener of environmentTasksSettledListeners) {
+            try {
+              listener();
+            } catch {
+              // One shutdown consumer must not block the others.
+            }
+          }
         }
       });
     serverOwnedTasks.set(operationId, running);
@@ -2564,7 +2586,7 @@ function createRequestHandler(
         return;
       }
       const repo = String(data.repo || "");
-      const environment = String(data.environment || data.name || "dev");
+      const environment = String(data.environment || data.name || "dev").trim();
       const provider = data.provider === "aws" ? "aws" : "azure";
       if (!isValidRepoSlug(repo)) {
         res.setHeader("Content-Type", "application/json");
@@ -3477,6 +3499,17 @@ function createRequestHandler(
 
     // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
     if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Cleaned up in finally; declared here so it's reachable from finally.
@@ -5315,6 +5348,17 @@ function createRequestHandler(
     }
 
     if (pathname === "/api/create-environment" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Declared out here so the generic catch below can close it rather

@@ -342,12 +342,13 @@ export function requireInput(
   { code, message, checkpoint = null, metadata = null }: any = {}
 ): any {
   if (!op || isTerminalState(op.state)) return op;
+  const promptCode = code || "input-required";
   op.state = INPUT_REQUIRED_STATE;
   op.inputRequired = {
-    code: code || "input-required",
+    code: promptCode,
     message: message || "",
     checkpoint:
-      typeof checkpoint === "string" && checkpoint ? checkpoint : code || null,
+      typeof checkpoint === "string" && checkpoint ? checkpoint : promptCode,
     metadata:
       metadata && typeof metadata === "object" ?
         structuredClone(metadata)

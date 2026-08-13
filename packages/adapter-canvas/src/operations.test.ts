@@ -322,6 +322,15 @@ describe("journey capture", () => {
       expect(op.state).toBe("running");
       expect(op.inputRequired).toBeNull();
     });
+
+    it("uses the default prompt code as the default checkpoint", () => {
+      const op = newOp();
+      requireInput(op, { message: "Provide input." });
+      expect(op.inputRequired).toMatchObject({
+        code: "input-required",
+        checkpoint: "input-required"
+      });
+    });
   });
 
   it("rejects a resume target whose page is not in the canvas enum", () => {
