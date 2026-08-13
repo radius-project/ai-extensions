@@ -6,6 +6,7 @@ import {
   addLegacyStep,
   onOperationTerminal,
   isStale,
+  VERIFY_STALE_AFTER_MS,
   operations,
   setupInFlight,
   addStep,
@@ -29,6 +30,7 @@ import {
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  reconcileRestoredOperation,
   resumeAfterInput,
   sanitizeResumeTarget,
   setCloudContext,
@@ -36,6 +38,7 @@ import {
   shouldStop,
   summarize,
   toClientView,
+  toPersistedOperation,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -530,11 +533,50 @@ describe("client projection", () => {
     expect(JSON.stringify(view)).not.toContain("IGNORE-SETUP-LEDGER");
   });
 
+  it("never persists raw failure evidence", () => {
+    const op = newOp();
+    finish(op, "failed", {
+      failure: {
+        code: "az-failed",
+        message: "Azure failed",
+        classification: "user-fixable",
+        evidence: "SECRET RAW STDERR"
+      }
+    });
+    const persisted = toPersistedOperation(op);
+    expect(persisted.failure).toEqual({
+      code: "az-failed",
+      stage: null,
+      stepSeq: null,
+      message: "Azure failed",
+      classification: "user-fixable"
+    });
+    expect(JSON.stringify(persisted)).not.toContain("SECRET RAW STDERR");
+  });
+
   it("exposes a terminal marker so the panel does not re-derive it", () => {
     const op = newOp();
     expect(toClientView(op).terminalState).toBeNull();
     finishSucceeded(op);
     expect(toClientView(op).terminalState).toBe("succeeded");
+  });
+
+  it("projects only the verification dispatch time to the browser", () => {
+    const op = newOp();
+    op.verification = {
+      dispatchedAt: 1234,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "777",
+      runUrl: "https://github.com/contoso/store/actions/runs/777"
+    };
+
+    expect(toClientView(op).verification).toEqual({ dispatchedAt: 1234 });
+    const projected = JSON.stringify(toClientView(op));
+    expect(projected).not.toContain("radius-verify-credentials");
+    expect(projected).not.toContain("actions/runs");
+    expect(projected).not.toContain("runId");
   });
 
   it("projects removed resources, reusable artifacts, and a clean retry after rollback", () => {
@@ -782,6 +824,199 @@ describe("registry", () => {
     finishSucceeded(op);
     expect(reg.anyRunning()).toBe(false);
   });
+
+  it("hydrates and persists through an injected store", async () => {
+    let envelope = null;
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+    const first = createRegistry({ store });
+    const op = newOp();
+    requireInput(op, { code: "choose-app", message: "Choose an app." });
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    expect(restored.get(op.operationId)).toMatchObject({
+      operationId: op.operationId,
+      recoveryState: "waiting_input"
+    });
+  });
+
+  it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
+    const valid = newOp();
+    requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    let envelope = {
+      schemaVersion: 1,
+      operations: [
+        toPersistedOperation(valid),
+        { operationId: "op_invalid", schemaVersion: 1 }
+      ]
+    };
+    const diagnostics = [];
+    const store = {
+      report(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toHaveLength(1);
+    expect(restored.get(valid.operationId)).toMatchObject({
+      recoveryState: "waiting_input"
+    });
+    expect(envelope.operations).toHaveLength(1);
+    expect(envelope.operations[0].operationId).toBe(valid.operationId);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: "operation-store-invalid-record",
+        message: expect.stringContaining("op_invalid")
+      })
+    ]);
+  });
+
+  it("recovers from an envelope containing only invalid records", async () => {
+    let envelope = {
+      schemaVersion: 1,
+      operations: [{ operationId: "op_invalid", schemaVersion: 1 }]
+    };
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toEqual([]);
+    expect(restored.size()).toBe(0);
+    expect(envelope.operations).toEqual([]);
+  });
+
+  it("keeps valid restored records when rewriting a cleaned envelope fails", async () => {
+    const valid = newOp();
+    requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    const diagnostics = [];
+    const store = {
+      report(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+      async load() {
+        return {
+          schemaVersion: 1,
+          operations: [
+            toPersistedOperation(valid),
+            { operationId: "op_invalid", schemaVersion: 1 }
+          ]
+        };
+      },
+      async save() {
+        throw new Error("disk full");
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await expect(restored.hydrate()).resolves.toHaveLength(1);
+    expect(restored.get(valid.operationId)).toMatchObject({
+      recoveryState: "waiting_input"
+    });
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "operation-store-invalid-record" }),
+        expect.objectContaining({
+          code: "operation-store-cleanup-write-failed",
+          message: expect.stringContaining("disk full")
+        })
+      ])
+    );
+  });
+
+  it("reports persistence failures without retrying the failed write", async () => {
+    const diagnostics = [];
+    let saves = 0;
+    const reg = createRegistry({
+      store: {
+        report(diagnostic) {
+          diagnostics.push(diagnostic);
+        },
+        async load() {
+          return null;
+        },
+        async save() {
+          saves += 1;
+          throw new Error("disk full");
+        }
+      }
+    });
+
+    reg.report({
+      code: "operation-store-write-failed",
+      message: "Could not persist setup operation op_test: disk full"
+    });
+
+    expect(diagnostics).toEqual([
+      {
+        code: "operation-store-write-failed",
+        message: "Could not persist setup operation op_test: disk full"
+      }
+    ]);
+    await expect(reg.persist()).rejects.toThrow("disk full");
+    expect(saves).toBe(1);
+  });
+});
+
+describe("startup reconciliation", () => {
+  it("restores input-required operations without stale filtering", () => {
+    const op = newOp();
+    requireInput(op, { code: "choose-app", message: "Choose an app." });
+    op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    reconcileRestoredOperation(op);
+    expect(op.recoveryState).toBe("waiting_input");
+    expect(isStale(op)).toBe(false);
+  });
+
+  it("keeps dispatched verification pending", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    reconcileRestoredOperation(op);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_pending");
+  });
+
+  it("latches interrupted work without scheduling automatic cleanup", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-app"
+    });
+    reconcileRestoredOperation(op);
+    expect(op.state).toBe("failed_partial");
+    expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+    expect(op.failure.code).toBe("operation-interrupted");
+  });
 });
 
 describe("keepalive predicate", () => {
@@ -838,6 +1073,32 @@ describe("keepalive predicate", () => {
     op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     addStep(op, { label: "Assigning Contributor role" });
     expect(isStale(op)).toBe(false);
+  });
+
+  it("uses a bounded dispatch-based lifetime for live verification", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now() - 20 * 60 * 1000,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(false);
+    expect(
+      isStale(op, op.verification.dispatchedAt + VERIFY_STALE_AFTER_MS + 1)
+    ).toBe(true);
+  });
+
+  it("does not exempt incomplete verification identity from staleness", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = { dispatchedAt: Date.now() - 20 * 60 * 1000 };
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(true);
   });
 });
 
