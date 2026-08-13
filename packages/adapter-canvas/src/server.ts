@@ -384,7 +384,9 @@ interface OpenSourceInput {
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
-type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+type SessionPromptHandler = (
+  prompt: string | SessionPromptMessage
+) => Promise<unknown>;
 
 interface IdValidationInput {
   tenantId?: string;
@@ -399,6 +401,14 @@ interface AzureLoginInput {
 interface AzureCliAssistInput {
   action?: string;
   tenantId?: string;
+}
+
+// A prompt paired with the shorter text the chat timeline shows in its place.
+// Mirrors the runtime's HandoffMessage: server-originated prompts are also
+// machine-authored, so they must not render as if the user typed them (#209).
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
 }
 
 interface DeployHandoffSummary {
@@ -803,7 +813,7 @@ export function azureLoginRequiredResponse({
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string
+  prompt: string | SessionPromptMessage
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
@@ -850,6 +860,29 @@ export function buildAzureCliAssistPrompt({
     loginInstructions,
     "After the login finishes, return to the Radius canvas and click Verify Credentials again."
   ].join("\n\n");
+}
+
+// Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
+// Credentials on the user's behalf, so the turn it injects should read as a
+// status line, not as multi-paragraph instructions the user appears to have
+// typed. The agent still receives the full prompt.
+export function azureCliAssistDisplayPrompt({
+  action = "login"
+}: AzureCliAssistInput = {}): string {
+  return action === "install" ?
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+}
+
+// Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
+// cannot drift apart or be swapped at the call site.
+export function azureCliAssistMessage(
+  input: AzureCliAssistInput = {}
+): SessionPromptMessage {
+  return {
+    prompt: buildAzureCliAssistPrompt(input),
+    displayPrompt: azureCliAssistDisplayPrompt(input)
+  };
 }
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
@@ -2701,7 +2734,7 @@ function createRequestHandler(instanceId: string) {
         const requestedTenantId =
           typeof data.tenantId === "string" ? data.tenantId.trim() : "";
         const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+        const prompt = azureCliAssistMessage({ action, tenantId });
         const promptResult = await invokeSessionPrompt(
           sessionPromptHandler,
           prompt
