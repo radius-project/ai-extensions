@@ -91,161 +91,10 @@ export interface ActionDeclaration {
   inputSchema: Record<string, unknown>;
 }
 
-// The 6 canvas actions, in their current order. Declarative shape only — see
+// The 2 canvas actions, in their current order. Declarative shape only — see
 // canvas.ts for the handlers.
 export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
   deepFreeze([
-    {
-      name: "configure_oidc",
-      description:
-        "Configure OIDC identity federation for Azure or AWS and display the setup commands",
-      inputSchema: {
-        type: "object",
-        properties: {
-          provider: {
-            type: "string",
-            enum: ["azure", "aws"],
-            description: "Cloud provider to configure"
-          },
-          tenantId: { type: "string", description: "Azure Tenant ID" },
-          tenantName: {
-            type: "string",
-            description: "Azure Tenant display name"
-          },
-          subscriptionId: {
-            type: "string",
-            description: "Azure Subscription ID"
-          },
-          subscriptionName: {
-            type: "string",
-            description: "Azure Subscription display name"
-          },
-          clientId: {
-            type: "string",
-            description: "Azure Client ID (App Registration)"
-          },
-          clientName: {
-            type: "string",
-            description: "Azure App Registration display name"
-          },
-          accountId: { type: "string", description: "AWS Account ID" },
-          accountName: {
-            type: "string",
-            description: "AWS Account alias or display name"
-          },
-          region: { type: "string", description: "AWS Region" }
-        },
-        required: ["provider"]
-      }
-    },
-    {
-      name: "render_graph",
-      description:
-        "Render the application graph from ApplicationGraphResource data",
-      inputSchema: {
-        type: "object",
-        properties: {
-          resources: {
-            type: "array",
-            description:
-              "Array of ApplicationGraphResource objects with id, name, type, and connections",
-            items: { type: "object" }
-          }
-        }
-      }
-    },
-    {
-      name: "render_graph_diff",
-      description:
-        "Render a diff graph showing changes between base and head application models in a PR",
-      inputSchema: {
-        type: "object",
-        properties: {
-          baseResources: {
-            type: "array",
-            description: "Base branch resources",
-            items: { type: "object" }
-          },
-          headResources: {
-            type: "array",
-            description: "Head branch resources",
-            items: { type: "object" }
-          },
-          repo: {
-            type: "string",
-            description: "Repository in owner/repo format"
-          },
-          baseBranch: {
-            type: "string",
-            description: "Base branch represented by baseResources"
-          },
-          headBranch: {
-            type: "string",
-            description: "Head branch represented by headResources"
-          }
-        },
-        required: [
-          "baseResources",
-          "headResources",
-          "repo",
-          "baseBranch",
-          "headBranch"
-        ]
-      }
-    },
-    {
-      name: "create_environment",
-      description:
-        "Create a GitHub environment, private GHCR state package, cloud settings, and verification/deploy workflows",
-      inputSchema: {
-        type: "object",
-        properties: {
-          name: {
-            type: "string",
-            description: "Environment name (e.g. production)"
-          },
-          provider: {
-            type: "string",
-            enum: ["azure", "aws"],
-            description: "Cloud provider"
-          },
-          repo: {
-            type: "string",
-            description: "Repository in owner/repo format"
-          },
-          clientId: {
-            type: "string",
-            description: "Azure application (client) ID"
-          },
-          tenantId: { type: "string", description: "Azure tenant ID" },
-          subscriptionId: {
-            type: "string",
-            description: "Azure Subscription ID"
-          },
-          resourceGroup: {
-            type: "string",
-            description: "Azure Resource Group"
-          },
-          location: { type: "string", description: "Azure Location" },
-          roleArn: {
-            type: "string",
-            description: "AWS IAM role ARN used by GitHub OIDC"
-          },
-          accountId: { type: "string", description: "AWS Account ID" },
-          region: { type: "string", description: "AWS Region" },
-          cluster: {
-            type: "string",
-            description: "AKS or EKS cluster name"
-          },
-          vpcId: { type: "string", description: "Optional AWS VPC ID" },
-          subnetIds: {
-            type: "string",
-            description: "Optional comma-separated AWS subnet IDs"
-          }
-        },
-        required: ["name", "provider", "repo"]
-      }
-    },
     {
       name: "get_graph_resources",
       description:
@@ -343,24 +192,9 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-// The 10 tools, in their current order. Declarative shape only — see tools.ts
+// The 6 tools, in their current order. Declarative shape only — see tools.ts
 // for the handlers.
 export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
-  {
-    name: "radius_configure_oidc",
-    description:
-      "Opens the Radius OIDC configuration canvas to set up Azure or AWS identity federation for GitHub Actions",
-    parameters: {
-      type: "object",
-      properties: {
-        provider: {
-          type: "string",
-          enum: ["azure", "aws"],
-          description: "Cloud provider to configure"
-        }
-      }
-    }
-  },
   {
     name: "radius_generate_app",
     description:
@@ -373,61 +207,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
           description: "Path to the repository to analyze"
         }
       }
-    }
-  },
-  {
-    name: "radius_render_graph",
-    description:
-      "Renders an interactive application graph visualization from resource data",
-    parameters: {
-      type: "object",
-      properties: {
-        resources: {
-          type: "array",
-          description: "Array of ApplicationGraphResource objects",
-          items: { type: "object" }
-        }
-      },
-      required: ["resources"]
-    }
-  },
-  {
-    name: "radius_render_graph_diff",
-    description:
-      "Renders a diff visualization comparing base and head application graphs for a pull request",
-    parameters: {
-      type: "object",
-      properties: {
-        baseResources: {
-          type: "array",
-          description: "Base branch resources",
-          items: { type: "object" }
-        },
-        headResources: {
-          type: "array",
-          description: "Head branch resources",
-          items: { type: "object" }
-        },
-        repo: {
-          type: "string",
-          description: "Repository in owner/repo format"
-        },
-        baseBranch: {
-          type: "string",
-          description: "Base branch represented by baseResources"
-        },
-        headBranch: {
-          type: "string",
-          description: "Head branch represented by headResources"
-        }
-      },
-      required: [
-        "baseResources",
-        "headResources",
-        "repo",
-        "baseBranch",
-        "headBranch"
-      ]
     }
   },
   {
@@ -451,25 +230,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         }
       },
       required: ["repo", "baseBranch", "headBranch"]
-    }
-  },
-  {
-    name: "radius_create_environment",
-    description:
-      "Opens the GitHub environment creation canvas to set up a deployment environment with cloud provider secrets",
-    parameters: {
-      type: "object",
-      properties: {
-        provider: {
-          type: "string",
-          enum: ["azure", "aws"],
-          description: "Cloud provider"
-        },
-        repo: {
-          type: "string",
-          description: "Repository in owner/repo format"
-        }
-      }
     }
   },
   {

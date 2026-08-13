@@ -6,29 +6,37 @@ import {
 } from "./declarations.js";
 
 interface DeclarationFixture {
-  actions: string[];
-  tools: string[];
+  acceptedSurface: {
+    actions: string[];
+    tools: string[];
+    removedActions: string[];
+    removedTools: string[];
+  };
 }
 
 const fixture = JSON.parse(
   readFileSync(
-    new URL("../../test/fixtures/runtime-declarations.json", import.meta.url),
+    new URL("../../test/fixtures/runtime-compatibility.json", import.meta.url),
     "utf8"
   )
 ) as DeclarationFixture;
 
 describe("RU-04: current action/tool declaration fixture baseline", () => {
-  it("keeps exactly 6 actions matching the baseline fixture", () => {
+  it("keeps exactly the retained actions matching the accepted fixture", () => {
     const currentNames = RADIUS_ACTION_DECLARATIONS.map(
       (action) => action.name
-    ).sort();
-    expect(currentNames).toEqual(fixture.actions);
+    );
+    expect(currentNames).toEqual(fixture.acceptedSurface.actions);
+    for (const removed of fixture.acceptedSurface.removedActions) {
+      expect(currentNames, removed).not.toContain(removed);
+    }
   });
 
-  it("keeps exactly 10 tools matching the baseline fixture", () => {
-    const currentNames = RADIUS_TOOL_DECLARATIONS.map(
-      (tool) => tool.name
-    ).sort();
-    expect(currentNames).toEqual(fixture.tools);
+  it("keeps exactly the retained tools matching the accepted fixture", () => {
+    const currentNames = RADIUS_TOOL_DECLARATIONS.map((tool) => tool.name);
+    expect(currentNames).toEqual(fixture.acceptedSurface.tools);
+    for (const removed of fixture.acceptedSurface.removedTools) {
+      expect(currentNames, removed).not.toContain(removed);
+    }
   });
 });
