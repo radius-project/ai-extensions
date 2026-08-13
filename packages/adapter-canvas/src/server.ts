@@ -495,6 +495,7 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
     canvasServer.instances.get(instanceId)?.state,
   toSafeRepoRelPath
 });
+const serverRoutes = createServerRouteTable(livenessSourceRoutes);
 
 const canvasServer = createCanvasServer(
   createProductionCanvasServerDependencies({
@@ -502,7 +503,7 @@ const canvasServer = createCanvasServer(
       createScaffoldRequestHandler({
         instanceId,
         instances,
-        routes: createServerRouteTable(livenessSourceRoutes),
+        routes: serverRoutes,
         legacyFallback: createLegacyRequestHandler(instanceId),
         markActivity,
         preRoute: preRouteCanvasRequest

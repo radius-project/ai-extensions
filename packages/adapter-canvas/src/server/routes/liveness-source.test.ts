@@ -7,6 +7,7 @@ import {
   handleOpenSource,
   handlePing,
   type LivenessSourceDependencies,
+  type OpenSourceInvoker,
   type OpenSourceRequest
 } from "./liveness-source.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -15,16 +16,24 @@ import type { CanvasState } from "../../shared.js";
 type HttpServer = import("node:http").Server;
 
 interface Recording {
-  headers: [string, string][];
+  headers: Record<string, string>;
+  headerOrder: string[];
   status: number;
   body: string;
 }
 
 function recorder() {
-  const recording: Recording = { headers: [], status: 0, body: "" };
+  const recording: Recording = {
+    headers: {},
+    headerOrder: [],
+    status: 0,
+    body: ""
+  };
   const target = {
     setHeader(name: string, value: string) {
-      recording.headers.push([name, value]);
+      // Mirrors Node: re-setting a header overwrites it and keeps its position.
+      if (!(name in recording.headers)) recording.headerOrder.push(name);
+      recording.headers[name] = value;
       return this;
     },
     writeHead(status: number) {
@@ -96,6 +105,106 @@ function safePath(input: unknown): string {
   return value;
 }
 
+// Verbatim transcription of the two branches removed from the legacy
+// `createLegacyRequestHandler` if-chain. The differential cases below keep the
+// compatibility proof without duplicating the unit-test request harness.
+interface LegacyWorld {
+  instanceId: string;
+  openSourceHandler: OpenSourceInvoker | null;
+  servers: Map<string, { state: CanvasState }>;
+  toSafeRepoRelPath(input: unknown): string;
+}
+
+function legacyPing(
+  response: ServerResponse<IncomingMessage>,
+  instanceId: string
+): void {
+  response.setHeader("Content-Type", "application/json");
+  response.setHeader("Cache-Control", "no-store");
+  response.writeHead(200);
+  response.end(JSON.stringify({ ok: true, instanceId }));
+}
+
+async function legacyOpenSource(
+  incoming: IncomingMessage,
+  response: ServerResponse<IncomingMessage>,
+  world: LegacyWorld
+): Promise<void> {
+  let body = "";
+  for await (const chunk of incoming) body += chunk;
+  response.setHeader("Content-Type", "application/json");
+  response.setHeader("Cache-Control", "no-store");
+  let relPath: string;
+  let line: number;
+  try {
+    const data = JSON.parse(body || "{}");
+    relPath = world.toSafeRepoRelPath(data.path);
+    const lineRaw = Number.parseInt(data.line, 10);
+    line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
+  } catch {
+    response.writeHead(400);
+    response.end(JSON.stringify({ ok: false, error: "invalid path" }));
+    return;
+  }
+  if (typeof world.openSourceHandler !== "function") {
+    response.writeHead(503);
+    response.end(JSON.stringify({ ok: false, error: "unavailable" }));
+    return;
+  }
+  try {
+    const entry = world.servers.get(world.instanceId);
+    await Promise.resolve(
+      world.openSourceHandler({
+        path: relPath,
+        line,
+        instanceId: world.instanceId,
+        state: entry?.state
+      })
+    );
+    response.writeHead(200);
+    response.end(JSON.stringify({ ok: true }));
+  } catch (error) {
+    response.writeHead(500);
+    response.end(
+      JSON.stringify({
+        ok: false,
+        error: error instanceof Error ? error.message : "failed"
+      })
+    );
+  }
+}
+
+async function differential(
+  body: string,
+  openSourceHandler: OpenSourceInvoker | null
+): Promise<[Recording, Recording]> {
+  const state: CanvasState = { contextRepo: "octo/app" };
+  const world: LegacyWorld = {
+    instanceId: "panel-a",
+    openSourceHandler,
+    servers: new Map([["panel-a", { state }]]),
+    toSafeRepoRelPath: safePath
+  };
+  const legacy = recorder();
+  await legacyOpenSource(request(body), legacy.response, world);
+
+  const migrated = recorder();
+  await handleOpenSource(
+    createRequestContext(
+      request(body),
+      migrated.response,
+      "panel-a",
+      instances(state)
+    ),
+    {
+      getOpenSourceHandler: () => world.openSourceHandler,
+      readInstanceState: (instanceId) => world.servers.get(instanceId)?.state,
+      toSafeRepoRelPath: world.toSafeRepoRelPath
+    }
+  );
+  return [legacy.recording, migrated.recording];
+}
+
 async function runOpenSource(
   body: string,
   deps: LivenessSourceDependencies,
@@ -122,59 +231,12 @@ describe("liveness-source routes (SU-04)", () => {
     expect(routes["ANY /api/ping"]).toBe(handlePing);
   });
 
-  it("answers the liveness probe with the instance id and no-store", () => {
-    const { recording, response } = recorder();
-    const context = createRequestContext(
-      request("", "GET"),
-      response,
-      "panel-a",
-      instances()
-    );
-    handlePing(context);
-    expect(recording).toEqual({
-      headers: [
-        ["Content-Type", "application/json"],
-        ["Cache-Control", "no-store"]
-      ],
-      status: 200,
-      body: '{"ok":true,"instanceId":"panel-a"}'
-    });
-  });
-
-  it("rejects an unsafe path with 400 while still emitting both headers", async () => {
+  it("rejects an unsafe path before consulting the open handler", async () => {
     const recording = await runOpenSource(
       JSON.stringify({ path: "../../etc/passwd" }),
       dependencies({ toSafeRepoRelPath: safePath })
     );
     expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"ok":false,"error":"invalid path"}');
-    expect(recording.headers).toEqual([
-      ["Content-Type", "application/json"],
-      ["Cache-Control", "no-store"],
-      ["Content-Type", "application/json"],
-      ["Cache-Control", "no-store"]
-    ]);
-  });
-
-  it("rejects a malformed body with 400", async () => {
-    const recording = await runOpenSource(
-      "{not json",
-      dependencies({ toSafeRepoRelPath: safePath })
-    );
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"ok":false,"error":"invalid path"}');
-  });
-
-  it("returns 503 when no open handler is registered", async () => {
-    const recording = await runOpenSource(
-      JSON.stringify({ path: "src/app.ts" }),
-      dependencies({
-        toSafeRepoRelPath: safePath,
-        getOpenSourceHandler: () => null
-      })
-    );
-    expect(recording.status).toBe(503);
-    expect(recording.body).toBe('{"ok":false,"error":"unavailable"}');
   });
 
   it("opens the safe path with per-instance state and returns 200", async () => {
@@ -194,7 +256,6 @@ describe("liveness-source routes (SU-04)", () => {
       state
     );
     expect(recording.status).toBe(200);
-    expect(recording.body).toBe('{"ok":true}');
     expect(calls).toEqual([
       { path: "src/app.ts", line: 42, instanceId: "panel-a", state }
     ]);
@@ -218,41 +279,6 @@ describe("liveness-source routes (SU-04)", () => {
     }
     // "7x" still parses to 7 because the legacy branch used Number.parseInt.
     expect(seen).toEqual([0, 0, 0, 0, 7]);
-  });
-
-  it("threads `line` through without acting on it", async () => {
-    const calls: OpenSourceRequest[] = [];
-    await runOpenSource(
-      JSON.stringify({ path: "src/app.ts", line: 9 }),
-      dependencies({
-        toSafeRepoRelPath: safePath,
-        getOpenSourceHandler: () => (input) => {
-          calls.push(input);
-        },
-        readInstanceState: () => undefined
-      })
-    );
-    // The only observable effect of `line` is the value handed to the SDK hook;
-    // it is reserved and deliberately not interpreted by the route.
-    expect(calls[0]?.line).toBe(9);
-    expect(calls[0]?.path).toBe("src/app.ts");
-  });
-
-  it("surfaces a failed open as 500 with the error message", async () => {
-    const recording = await runOpenSource(
-      JSON.stringify({ path: "src/app.ts" }),
-      dependencies({
-        toSafeRepoRelPath: safePath,
-        getOpenSourceHandler: () => () => {
-          throw new Error("editor canvas unavailable");
-        },
-        readInstanceState: () => undefined
-      })
-    );
-    expect(recording.status).toBe(500);
-    expect(recording.body).toBe(
-      '{"ok":false,"error":"editor canvas unavailable"}'
-    );
   });
 
   it("falls back to `failed` when the thrown value is not an Error", async () => {
@@ -285,5 +311,62 @@ describe("liveness-source routes (SU-04)", () => {
     const after = await runOpenSource(body, deps);
     expect(after.status).toBe(200);
     expect(routes["POST /api/open-source"]).toBeTypeOf("function");
+  });
+});
+
+describe("liveness-source legacy/migrated differential contract", () => {
+  it("produces an identical liveness response", () => {
+    const legacy = recorder();
+    legacyPing(legacy.response, "panel-a");
+
+    const migrated = recorder();
+    handlePing(
+      createRequestContext(
+        request("", "GET"),
+        migrated.response,
+        "panel-a",
+        instances()
+      )
+    );
+
+    expect(migrated.recording).toEqual(legacy.recording);
+    expect(migrated.recording.headerOrder).toEqual([
+      "Content-Type",
+      "Cache-Control"
+    ]);
+  });
+
+  it.each([
+    ["invalid path", JSON.stringify({ path: "../secrets" }), 400],
+    ["malformed body", "{not json", 400],
+    ["unavailable handler", JSON.stringify({ path: "src/app.ts" }), 503]
+  ])("produces an identical %s response", async (_label, body, status) => {
+    const handler = status === 503 ? null : () => undefined;
+    const [legacy, migrated] = await differential(body, handler);
+    expect(migrated).toEqual(legacy);
+    expect(migrated.status).toBe(status);
+  });
+
+  it("produces identical success output and open input", async () => {
+    const calls: OpenSourceRequest[] = [];
+    const [legacy, migrated] = await differential(
+      JSON.stringify({ path: "src/app.ts", line: "12" }),
+      (input) => {
+        calls.push({ ...input });
+      }
+    );
+    expect(migrated).toEqual(legacy);
+    expect(calls[0]).toEqual(calls[1]);
+  });
+
+  it("produces an identical surfaced failure", async () => {
+    const [legacy, migrated] = await differential(
+      JSON.stringify({ path: "src/app.ts" }),
+      () => {
+        throw new Error("open failed");
+      }
+    );
+    expect(migrated).toEqual(legacy);
+    expect(migrated.status).toBe(500);
   });
 });
