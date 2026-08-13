@@ -23,6 +23,7 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../support/runtime/fakes.js";
+import { SERVER_ROUTE_TABLE } from "../../../src/server/route-table.js";
 
 interface CompatibilityFixture {
   canvas: {
@@ -172,33 +173,15 @@ describe("Phase 0 reviewed compatibility oracles", () => {
   });
 
   it("pins all 37 loopback route method and path declarations", () => {
-    const source = readFileSync(
-      resolve(REPO_ROOT, "packages/adapter-canvas/src/server.ts"),
-      "utf8"
-    );
-    const declaredRouteCount =
-      (source.match(/pathname === "\/api\//g) || []).length +
-      (source.match(/pathname\.startsWith\("\/api\//g) || []).length;
-
     expect(fixture.routes).toHaveLength(37);
+    expect(SERVER_ROUTE_TABLE).toHaveLength(37);
     expect(
-      new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
-        .size
-    ).toBe(37);
-    expect(declaredRouteCount).toBe(37);
-    for (const route of fixture.routes) {
-      const matcher =
-        route.match === "prefix" ?
-          `pathname.startsWith("${route.path}")`
-        : `pathname === "${route.path}"`;
-      const offset = source.indexOf(matcher);
-      expect(offset, `${route.method} ${route.path}`).toBeGreaterThan(-1);
-      if (route.method !== "ANY") {
-        expect(source.slice(offset, offset + 180)).toContain(
-          `req.method === "${route.method}"`
-        );
-      }
-    }
+      SERVER_ROUTE_TABLE.map(({ method, path, match }) => ({
+        method,
+        path,
+        match
+      }))
+    ).toEqual(fixture.routes);
   });
 
   it("pins selected stable markers for every page renderer", () => {

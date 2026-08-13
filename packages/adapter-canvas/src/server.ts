@@ -8,12 +8,7 @@
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
-import { createServer } from "node:http";
-import type {
-  IncomingMessage,
-  Server as HttpServer,
-  ServerResponse
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -36,7 +31,6 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
 import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
@@ -54,9 +48,7 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache,
-  primeGhIdentity,
-  setPreferredGhLogin
+  resetGhIdentityCache
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
 import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
@@ -201,14 +193,13 @@ import {
   environmentPage,
   deployingPage
 } from "./pages.js";
+import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
+import { SERVER_ROUTE_TABLE } from "./server/route-table.js";
+import type { CanvasServerEntry } from "./server/types.js";
 
-export interface CanvasServerEntry {
-  server: HttpServer;
-  baseUrl: string;
-  url: string;
-  page: string;
-  state: CanvasState;
-}
+export type { CanvasServerEntry } from "./server/types.js";
 
 interface CommandResult {
   code: string | number;
@@ -490,9 +481,23 @@ interface FederatedCredential {
   subject: string;
 }
 
-// Per-instance canvas servers: instanceId -> { server, url, page, state }.
-// Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map<string, CanvasServerEntry>();
+const canvasServer = createCanvasServer(
+  createProductionCanvasServerDependencies({
+    createRequestHandler: ({ instanceId, instances, markActivity }) =>
+      createScaffoldRequestHandler({
+        instanceId,
+        instances,
+        routes: SERVER_ROUTE_TABLE,
+        legacyFallback: createLegacyRequestHandler(instanceId),
+        markActivity
+      }),
+    defaultPage: DEFAULT_CANVAS_PAGE,
+    preferredPort: preferredPortForInstance
+  })
+);
+
+// Compatibility facade shared with the SDK runtime during the route migration.
+export const servers = canvasServer.instances;
 
 export function graphDefinitionHash(
   content: string,
@@ -2165,11 +2170,8 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-// request handler and read by the host-channel keepalive via the getter below
-// to tell whether a panel is actively open (so the process isn't idle-reaped).
-let lastWebviewActivityAt = 0;
 export function getLastWebviewActivityAt(): number {
-  return lastWebviewActivityAt;
+  return canvasServer.getLastActivityAt();
 }
 
 function accessForSelection(
@@ -2268,12 +2270,11 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(instanceId: string) {
+function createLegacyRequestHandler(instanceId: string) {
   return async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
-    lastWebviewActivityAt = Date.now();
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
     // CSRF defense-in-depth: reject cross-site state-changing requests before
@@ -8740,78 +8741,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server: HttpServer, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (err: Error) => {
-      server.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, "127.0.0.1");
-  });
-}
-
-async function startServer(
-  instanceId: string,
-  page = DEFAULT_CANVAS_PAGE
-): Promise<CanvasServerEntry> {
-  const handler = createRequestHandler(instanceId);
-  // Restore the user's explicitly chosen GitHub account (if any) before priming
-  // so the very first strategy resolution honors it. This is what makes the
-  // account choice stable across restarts.
-  const persistedLogin = getPreferredGitHubLogin();
-  if (persistedLogin) setPreferredGhLogin(persistedLogin);
-  // Warm the GitHub identity cache in the background at boot so the first gh
-  // calls find the token strategy already resolved instead of paying (or
-  // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
-  // self-healing, so a failure here just means the next caller re-primes.
-  primeGhIdentity().catch(() => {});
-  const server = createServer(handler);
-  let port: number;
-  // Try the stable, instanceId-derived port first; fall back to an ephemeral
-  // port (listen(0)) only if it's already taken/unavailable.
-  const preferred = await preferredPortForInstance(instanceId);
-  try {
-    await listenOn(server, preferred);
-    port = preferred;
-  } catch {
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve)
-    );
-    const address = server.address();
-    port = typeof address === "object" && address ? address.port : 0;
-  }
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const entry: CanvasServerEntry = {
-    server,
-    baseUrl,
-    url: `${baseUrl}/?page=${page}`,
-    page,
-    state: {}
-  };
-  servers.set(instanceId, entry);
-  return entry;
-}
-
 export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  let entry = servers.get(instanceId);
-  if (entry) {
-    if (page && entry.page !== page) {
-      entry.page = page;
-      entry.url = `${entry.baseUrl}/?page=${page}`;
-    }
-    return entry;
-  }
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.
-  void ensureVendorScripts();
-  return await startServer(instanceId, page);
+  if (!servers.has(instanceId)) void ensureVendorScripts();
+  return await canvasServer.getOrCreate(instanceId, page);
 }
