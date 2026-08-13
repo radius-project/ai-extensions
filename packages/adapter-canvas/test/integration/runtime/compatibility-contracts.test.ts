@@ -171,7 +171,7 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     }
   });
 
-  it("pins all 37 loopback route method and path declarations", () => {
+  it("pins all 38 loopback route method and path declarations", () => {
     const source = readFileSync(
       resolve(REPO_ROOT, "packages/adapter-canvas/src/server.ts"),
       "utf8"
@@ -180,23 +180,30 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       (source.match(/pathname === "\/api\//g) || []).length +
       (source.match(/pathname\.startsWith\("\/api\//g) || []).length;
 
-    expect(fixture.routes).toHaveLength(37);
+    expect(fixture.routes).toHaveLength(38);
     expect(
       new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
         .size
-    ).toBe(37);
-    expect(declaredRouteCount).toBe(37);
+    ).toBe(38);
+    expect(declaredRouteCount).toBe(38);
     for (const route of fixture.routes) {
       const matcher =
         route.match === "prefix" ?
           `pathname.startsWith("${route.path}")`
         : `pathname === "${route.path}"`;
-      const offset = source.indexOf(matcher);
+      const methodMatcher =
+        route.method === "ANY" ? "" : `req.method === "${route.method}"`;
+      let offset = source.indexOf(matcher);
+      while (
+        offset >= 0 &&
+        methodMatcher &&
+        !source.slice(offset, offset + 180).includes(methodMatcher)
+      ) {
+        offset = source.indexOf(matcher, offset + matcher.length);
+      }
       expect(offset, `${route.method} ${route.path}`).toBeGreaterThan(-1);
       if (route.method !== "ANY") {
-        expect(source.slice(offset, offset + 180)).toContain(
-          `req.method === "${route.method}"`
-        );
+        expect(source.slice(offset, offset + 180)).toContain(methodMatcher);
       }
     }
   });
