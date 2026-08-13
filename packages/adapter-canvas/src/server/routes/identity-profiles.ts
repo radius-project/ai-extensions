@@ -32,9 +32,16 @@ export interface IdentityProfilesDependencies {
   errorMessage(error: unknown): string;
 }
 
-function trimmed(value: unknown): string {
-  return String(value || "").trim();
-}
+// NOTE: there is deliberately no shared `trimmed()` helper for the
+// `(x || "").trim()` reads below, even though the expression repeats four
+// times. Extracting it is NOT behavior-neutral: a truthy non-string field
+// throws a TypeError whose message V8 builds from the *source text* of the
+// failing expression, and each handler serializes that message into its
+// response body via `errorMessage`. Through a helper every route answers
+// `(value || "").trim is not a function`; inlined, they answer
+// `(data.login || "")...`, `(data.repo || "")...` and so on, exactly as legacy
+// did. The reads are also typed as `string` rather than `unknown` so no cast is
+// needed, which keeps the compiled expression byte-for-byte what legacy emitted.
 
 // List the saved credential profiles for a repo.
 //
@@ -124,8 +131,8 @@ export async function handleGitHubAccount(
     // `body || "{}"` means an empty body yields `{}` and `login` becomes ""
     // rather than throwing, so the empty-login rejection comes from
     // `switchGhAccount`, not from the parse.
-    const data = JSON.parse(body || "{}") as { login?: unknown };
-    const login = trimmed(data.login);
+    const data = JSON.parse(body || "{}") as { login?: string };
+    const login = (data.login || "").trim();
     const result = await dependencies.switchGhAccount(login);
     if (!result.ok) {
       response.writeHead(400);
@@ -168,10 +175,10 @@ export async function handleSaveCredentialProfile(
   const body = await context.readTextBody();
   try {
     const data = JSON.parse(body || "{}") as CredentialProfileInput & {
-      repo?: unknown;
+      repo?: string;
     };
-    const repo = trimmed(data.repo);
-    const name = trimmed(data.name);
+    const repo = (data.repo || "").trim();
+    const name = (data.name || "").trim();
     if (!repo || !name) {
       response.setHeader("Content-Type", "application/json");
       response.writeHead(400);
@@ -204,9 +211,9 @@ export async function handleDeleteCredentialProfile(
   const { response } = context;
   const body = await context.readTextBody();
   try {
-    const data = JSON.parse(body || "{}") as { repo?: unknown; name?: unknown };
-    const repo = trimmed(data.repo);
-    const name = trimmed(data.name);
+    const data = JSON.parse(body || "{}") as { repo?: string; name?: string };
+    const repo = (data.repo || "").trim();
+    const name = (data.name || "").trim();
     const removed = dependencies.deleteCredentialProfile(repo, name);
     response.setHeader("Content-Type", "application/json");
     response.writeHead(200);
