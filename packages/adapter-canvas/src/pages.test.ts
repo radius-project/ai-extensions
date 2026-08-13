@@ -1139,9 +1139,7 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(
       html.match(/fetch\('\/api\/verify-status\?repo='/g) || []
     ).toHaveLength(1);
-    expect(html).toContain(
-      "If the extension restarts after"
-    );
+    expect(html).toContain("If the extension restarts after");
   });
 
   it("renders deliberate cancellation without failed styling", () => {

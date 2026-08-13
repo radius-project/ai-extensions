@@ -507,10 +507,7 @@ export function setEnvironmentOperationTestRunner(
 }
 
 const activeEnvironmentTasks = new Map<string, Set<string>>();
-const environmentTasksSettledListeners = new Map<
-  string,
-  Set<() => void>
->();
+const environmentTasksSettledListeners = new Map<string, Set<() => void>>();
 const shuttingDownInstances = new Set<string>();
 const activeVerificationMonitors = new Set<string>();
 
@@ -2440,8 +2437,9 @@ function createRequestHandler(
         activeForInstance?.delete(operationId);
         if (activeForInstance?.size === 0) {
           activeEnvironmentTasks.delete(instanceId);
-          for (const listener of
-            environmentTasksSettledListeners.get(instanceId) || []) {
+          for (const listener of environmentTasksSettledListeners.get(
+            instanceId
+          ) || []) {
             try {
               listener();
             } catch {

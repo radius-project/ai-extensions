@@ -715,13 +715,17 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     try {
       const { canvas, deps } = setup();
       const stopListening = vi.fn();
-      vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+      vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(
+        true
+      );
       vi.mocked(deps.operations.onEnvironmentTasksSettled).mockReturnValue(
         stopListening
       );
       await canvas.open(ctx("radius-panel", { page: "environment" }));
       const entry = deps.servers.get("radius-panel")!;
-      const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+      const closeSpy = entry.server.close as unknown as ReturnType<
+        typeof vi.fn
+      >;
 
       await canvas.onClose(ctx("radius-panel"));
       await vi.advanceTimersByTimeAsync(46 * 60 * 1000);

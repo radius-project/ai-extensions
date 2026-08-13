@@ -391,7 +391,8 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           const closeEntry = () => {
             stopListening();
             if (closeTimer) clearTimeout(closeTimer);
-            if (closeGenerations.get(ctx.instanceId) !== closeGeneration) return;
+            if (closeGenerations.get(ctx.instanceId) !== closeGeneration)
+              return;
             if (deps.servers.get(ctx.instanceId) !== entry) return;
             deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
             deps.servers.delete(ctx.instanceId);
