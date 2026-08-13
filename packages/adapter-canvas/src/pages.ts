@@ -4512,6 +4512,10 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
+// Keys (app\u0000env) whose real GitHub deployment record was present in the
+// last successful listing. Lets an in-flight deploy poll stop refreshing the
+// list once the real record has replaced its optimistic synthetic row.
+var DEPLOY_RECORDS_PRESENT = {};
 // Environments that currently have an IN-PROGRESS operation which blocks a NEW
 // deploy (status pending = a deploy run still in flight, or deleting = a delete
 // run still in flight), keyed by env name → status. Rebuilt from each successful
@@ -4675,34 +4679,60 @@ function statusCell(status) {
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
 
-function loadDeployments(fresh) {
+function loadDeployments(fresh, quiet) {
     var body = document.getElementById('deploy-table-body');
     if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
-    body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
+    // A background refresh (quiet) keeps the current rows on screen until the new
+    // data arrives, so periodic in-flight polling doesn't flash the table back to
+    // a "Loading…" placeholder on every tick.
+    if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
     fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + (fresh ? '&fresh=1' : ''))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             // A transient GitHub failure returns { deployments: [], error }. Don't
             // render that as "no deployments" (which would hide real rows); show a
             // load-error row and leave any previous state to the next refresh.
-            if (d && d.error) { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
+            if (d && d.error) { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
             var deps = (d && d.deployments) || [];
-            if (deps.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+            // Surface just-started operations GitHub hasn't recorded yet. A
+            // deployment record isn't created until the deploy job starts, so an
+            // optimistic "pending" OP_STATUS entry with no matching server row is
+            // rendered as a synthetic row. Without this, a brand-new deployment to
+            // an app+env with no prior record would stay invisible until the run
+            // reached a terminal state or Refresh was clicked. "deleting" is
+            // deliberately excluded: a delete always acts on an existing row, so
+            // its record is recolored in place; once the record is gone the delete
+            // is done, and a synthetic "Deleting…" row would be a phantom.
+            var present = {};
+            deps.forEach(function(dep) { present[opKey(dep.app, dep.environment)] = true; });
+            DEPLOY_RECORDS_PRESENT = present;
+            var synthetic = [];
+            Object.keys(OP_STATUS).forEach(function(k) {
+                if (present[k] || OP_STATUS[k] === 'deleting') return;
+                var parts = k.split('\\u0000');
+                if (parts.length !== 2 || !parts[0] || !parts[1]) return;
+                // synthetic: no GitHub deployment record exists yet, so this row
+                // must not offer Delete (it would dispatch against a nonexistent
+                // record and falsely report success).
+                synthetic.push({ app: parts[0], environment: parts[1], status: OP_STATUS[k], runUrl: '', synthetic: true });
+            });
+            var rows = synthetic.concat(deps);
+            if (rows.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
             // Rebuild the set of environments whose deployment blocks a new deploy,
             // honoring optimistic overrides, then refresh the Deploy button state.
             DEPLOYED_ENVS = {};
-            deps.forEach(function(dep) {
+            rows.forEach(function(dep) {
                 var st = OP_STATUS[opKey(dep.app, dep.environment)] || dep.status;
                 if (envIsBlocked(st)) DEPLOYED_ENVS[dep.environment] = st;
             });
             refreshDeployBtn();
             var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-            body.innerHTML = deps.map(function(dep) {
+            body.innerHTML = rows.map(function(dep) {
                 // A GitHub deployment record is only created once the deploy/delete
                 // job starts, so right after dispatch the newest record still shows
                 // the previous state. Force an in-flight op's status until it clears
                 // so the row reflects the action the user just took (Deleting…/Pending).
-                var forced = OP_STATUS[dep.app + '\\u0000' + dep.environment];
+                var forced = OP_STATUS[opKey(dep.app, dep.environment)];
                 var status = forced || dep.status;
                 var statusHtml = statusCell(status);
                 // The app name and the "Monitor Graph" link both route to the
@@ -4717,7 +4747,7 @@ function loadDeployments(fresh) {
                 // others use the subtle outline variant. A row that's mid-delete
                 // disables its button to prevent a duplicate dispatch.
                 var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
-                var delDisabled = status === 'deleting' ? ' disabled' : '';
+                var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
@@ -4729,7 +4759,7 @@ function loadDeployments(fresh) {
             }).join('');
             wireDeleteButtons();
         })
-        .catch(function() { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
+        .catch(function() { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
 // --- Delete deployment: 3-step type-to-confirm dialog (Figma) ---
@@ -4800,27 +4830,45 @@ function runDelete() {
     if (!pendingDelete) return;
     var dep = pendingDelete;
     closeDeleteModal();
+    // Acknowledge the action immediately: the delete workflow takes a moment to
+    // start, so without an instant cue the button click looks like it did
+    // nothing. Mirror the deploy flow — flip the row to "Deleting…" and show a
+    // banner right away, before the dispatch round-trip resolves. The delete
+    // run's deployment record doesn't exist yet, so the OP_STATUS override keeps
+    // the row showing "Deleting…" until it clears; refresh quietly so the
+    // existing row flips in place instead of flashing a loading placeholder.
+    OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
+    loadDeployments(true, true);
+    showInline('success', 'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app) + '</strong> in environment <strong>' + escapeHtmlClient(dep.environment) + '</strong> has started.', true);
     fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
-            if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            // Optimistically show "Deleting…" right away (the delete run's
-            // deployment record doesn't exist yet), and keep it until the row clears.
-            OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
-            loadDeployments(true);
+            if (!res.ok) {
+                // Dispatch failed — clear the optimistic override so the row
+                // reverts to its real status, then surface the error.
+                delete OP_STATUS[opKey(dep.app, dep.environment)];
+                loadDeployments(true, true);
+                showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.');
+                return;
+            }
             pollDeleteCompletion(dep.app, dep.environment, 0);
         })
-        .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
+        .catch(function() {
+            delete OP_STATUS[opKey(dep.app, dep.environment)];
+            loadDeployments(true, true);
+            showInline('error', 'Could not delete the deployment. Please try again.');
+        });
 }
 
 // Poll the deployments listing until the target app/env is gone (a successful
 // delete removes it), then show the green success banner. Refreshes the table
-// each cycle so the "Deleting…" status stays visible. Bounded so a stuck or
-// failed delete never polls forever — on timeout the override is cleared and the
-// row reverts to its real status (a failed delete falls back to its deploy
-// record, so the deployment remains visible).
+// quietly each cycle so the "Deleting…" status stays visible without flashing a
+// loading placeholder (matching the deploy flow's in-flight polling). Bounded so
+// a stuck or failed delete never polls forever — on timeout the override is
+// cleared and the row reverts to its real status (a failed delete falls back to
+// its deploy record, so the deployment remains visible).
 function pollDeleteCompletion(app, env, tries) {
-    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true); return; } // ~3 min at 4s
+    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true, true); return; } // ~3 min at 4s
     setTimeout(function() {
         fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + '&fresh=1')
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
@@ -4837,11 +4885,11 @@ function pollDeleteCompletion(app, env, tries) {
                 var stillThere = d.deployments.some(function(x) { return x.app === app && x.environment === env; });
                 if (!stillThere) {
                     delete OP_STATUS[opKey(app, env)];
-                    loadDeployments(true);
+                    loadDeployments(true, true);
                     showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong> has been successfully deleted.', true);
                     return;
                 }
-                loadDeployments(true); // keep the row showing "Deleting…"
+                loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)
                 pollDeleteCompletion(app, env, tries + 1);
             })
             .catch(function() { pollDeleteCompletion(app, env, tries + 1); });
@@ -4986,7 +5034,20 @@ deployBtn.addEventListener('click', function() {
     // and to surface a failure dialog if the deploy can't start (e.g. an unpushed
     // branch). We stay on the Deployments page throughout.
     var failedPolls = 0;
+    var wfTicks = 0;
+    // Once the real record replaces the synthetic row, keep polling deploy-status
+    // for the terminal transition but stop the per-tick fresh=1 list fetches.
+    var recordSeen = false;
     var wfPoll = setInterval(function() {
+        // Safety cap so a deploy-status that never reaches a terminal state can't
+        // poll forever (~30 min at 2.5s/tick); fall back to GitHub's real status.
+        if (++wfTicks > 720) {
+            clearInterval(wfPoll);
+            clearTimeout(autoHide);
+            delete OP_STATUS[opKey(app, env)];
+            loadDeployments(true);
+            return;
+        }
         fetch('/api/deploy-status')
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -5010,7 +5071,16 @@ deployBtn.addEventListener('click', function() {
                     clearInterval(wfPoll);
                     delete OP_STATUS[opKey(app, env)];
                     loadDeployments(true);
+                    return;
                 }
+                // Still in flight. Quietly refresh the table only until the real
+                // GitHub deployment record (with its "View Run" link) replaces the
+                // optimistic synthetic row; after that the row is real and driven
+                // by the OP_STATUS override, so further fresh=1 fetches (which
+                // bypass the cache and fan out per-environment) are wasted.
+                if (recordSeen) return;
+                if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }
+                loadDeployments(true, true);
             })
             .catch(function() {});
     }, 2500);
