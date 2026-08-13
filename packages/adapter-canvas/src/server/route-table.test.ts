@@ -13,6 +13,7 @@ import {
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
+import { createRepositoriesRoutes } from "./routes/repositories.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -42,6 +43,11 @@ const productionHandlers = {
     latestAny: () => null,
     get: () => null,
     toClientView: () => null
+  }),
+  ...createRepositoriesRoutes({
+    cliExec: () => {},
+    readInstanceState: () => undefined,
+    repoMatchesWorkspace: () => false
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -62,17 +68,20 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  it("owns the liveness-source and operations-status families and leaves 33 routes on the legacy fallback", () => {
+  it("owns the liveness-source, operations-status, and repositories families and leaves 30 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
       "GET /api/operations/",
-      "POST /api/open-source"
+      "POST /api/open-source",
+      "GET /api/user-repos",
+      "POST /api/repo-branches",
+      "POST /api/discover-branches"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(33);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(30);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)

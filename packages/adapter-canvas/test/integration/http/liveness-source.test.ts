@@ -147,7 +147,7 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
     );
 
     // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/user-repos`);
+    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
     expect(residual.status).toBe(418);
   });
 

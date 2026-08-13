@@ -157,7 +157,10 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "ANY /api/ping",
   "GET /api/operations",
   "GET /api/operations/",
-  "POST /api/open-source"
+  "POST /api/open-source",
+  "GET /api/user-repos",
+  "POST /api/repo-branches",
+  "POST /api/discover-branches"
 ];
 
 export function routeKey(

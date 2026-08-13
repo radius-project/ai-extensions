@@ -203,6 +203,7 @@ import { createProductionCanvasServerDependencies } from "./server/dependencies.
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -292,17 +293,6 @@ interface DiscoveryResult {
   vpcs: DiscoveryItem[];
   subnets: DiscoveryItem[];
   errors?: Record<string, string>;
-}
-
-interface BranchInfo {
-  name: string;
-  sha: string;
-}
-
-interface BranchResult {
-  branches?: BranchInfo[];
-  workspaceBranch?: string;
-  error?: string;
 }
 
 interface ChildProcessInput {
@@ -507,11 +497,25 @@ const operationsStatusRoutes = createOperationsStatusRoutes({
   toClientView
 });
 
+// Composition root for the migrated `repositories` family. Three seams: the
+// subprocess runner, a reader for the live instance state the branch cache is
+// written to, and the workspace-repo predicate, which stays defined here and is
+// injected rather than copied.
+const repositoriesRoutes = createRepositoriesRoutes({
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  repoMatchesWorkspace
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
-  ...operationsStatusRoutes
+  ...operationsStatusRoutes,
+  ...repositoriesRoutes
 });
 
 const canvasServer = createCanvasServer(
@@ -6810,133 +6814,6 @@ function createLegacyRequestHandler(instanceId: string) {
       return;
     }
 
-    if (pathname === "/api/user-repos" && req.method === "GET") {
-      try {
-        // Fetch personal repos and org repos in parallel
-        const [personalRepos, orgRepos] = await Promise.all([
-          new Promise<string[]>((resolve) => {
-            cliExec(
-              "gh",
-              [
-                "repo",
-                "list",
-                "--limit",
-                "30",
-                "--json",
-                "nameWithOwner",
-                "--jq",
-                ".[].nameWithOwner"
-              ],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err) {
-                  resolve([]);
-                  return;
-                }
-                resolve(stdout.trim().split("\n").filter(Boolean));
-              }
-            );
-          }),
-          new Promise<string[]>((resolve) => {
-            // Get orgs the user belongs to, then fetch repos from each
-            cliExec(
-              "gh",
-              ["org", "list"],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err || !stdout.trim()) {
-                  resolve([]);
-                  return;
-                }
-                const orgs = stdout.trim().split("\n").filter(Boolean);
-                const orgPromises = orgs.map(
-                  (org) =>
-                    new Promise<string[]>((res2) => {
-                      cliExec(
-                        "gh",
-                        [
-                          "repo",
-                          "list",
-                          org,
-                          "--limit",
-                          "20",
-                          "--json",
-                          "nameWithOwner",
-                          "--jq",
-                          ".[].nameWithOwner"
-                        ],
-                        { timeout: 15000 },
-                        (err2, stdout2) => {
-                          if (err2) {
-                            res2([]);
-                            return;
-                          }
-                          res2(stdout2.trim().split("\n").filter(Boolean));
-                        }
-                      );
-                    })
-                );
-                Promise.all(orgPromises).then((results) =>
-                  resolve(results.flat())
-                );
-              }
-            );
-          })
-        ]);
-        const allRepos = [...new Set([...personalRepos, ...orgRepos])];
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: allRepos }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/repo-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo;
-        if (!repo) {
-          res.writeHead(200);
-          res.end(JSON.stringify({ branches: [] }));
-          return;
-        }
-        const result = await new Promise<string[]>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/branches?per_page=100`,
-              "--jq",
-              ".[].name"
-            ],
-            { timeout: 15000 },
-            (err, stdout) => {
-              if (err) {
-                resolve([]);
-                return;
-              }
-              resolve(stdout.trim().split("\n").filter(Boolean));
-            }
-          );
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: result }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: [] }));
-      }
-      return;
-    }
-
     if (pathname === "/api/plan-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -7078,81 +6955,6 @@ function createLegacyRequestHandler(instanceId: string) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ reload: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/discover-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const result = await new Promise<BranchResult>((resolve) => {
-          cliExec(
-            "gh",
-            ["api", "--paginate", `/repos/${repo}/branches?per_page=100`],
-            { timeout: 15000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({ error: stderr || err.message });
-                return;
-              }
-              try {
-                const raw: unknown = JSON.parse(stdout.trim());
-                const branches =
-                  Array.isArray(raw) ?
-                    raw.map((value) => {
-                      const branch = record(value);
-                      return {
-                        name: optionalString(branch.name),
-                        sha: optionalString(record(branch.commit).sha)
-                      };
-                    })
-                  : [];
-                resolve({ branches });
-              } catch (e) {
-                resolve({ error: "Failed to parse branch data" });
-              }
-            }
-          );
-        });
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        if (
-          entry?.state?.workspaceBranch &&
-          repoMatchesWorkspace(entry.state, repo)
-        ) {
-          const branches = result.branches || [];
-          if (!branches.some((b) => b.name === entry.state.workspaceBranch)) {
-            branches.unshift({
-              name: entry.state.workspaceBranch,
-              sha: "worktree"
-            });
-          }
-          result.branches = branches;
-          result.workspaceBranch = entry.state.workspaceBranch;
-        }
-        if (entry && result.branches) {
-          entry.state.branches = result.branches.map((b) => b.name);
-          entry.state.branchShas = {};
-          for (const b of result.branches)
-            entry.state.branchShas[b.name] = b.sha;
-          entry.state.diffTargetRepo = repo;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
