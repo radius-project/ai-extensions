@@ -112,7 +112,10 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
+import {
+  DEFAULT_CANVAS_PAGE,
+  DEPLOY_REPAIR_ATTEMPT_CAP
+} from "./runtime/hooks.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -996,27 +999,47 @@ export interface DeployAttemptInput {
 }
 
 // Decide, server-side, whether an incoming deploy continues an existing repair
-// loop. The tool validates the attempt before it POSTs, but another deploy can
-// start in between, so re-check here against the attempt this panel currently
-// holds: a stale repair must not overwrite the newer deploy or mark it as
-// already owned (which would suppress its own failure handoff). An unbound
-// request is an ordinary deploy and always proceeds.
+// loop, and whether that loop still has budget. The tool validates the attempt
+// before it POSTs, but another deploy can start in between, so re-check here
+// against the attempt this panel currently holds: a stale repair must not
+// overwrite the newer deploy or mark it as already owned (which would suppress
+// its own failure handoff). An unbound request is an ordinary deploy and always
+// proceeds.
 export function resolveDeployRepairLoop(
   state: CanvasState,
   requestedAttemptId: unknown
-): { repairLoop: boolean; attemptId: string; error?: string } {
+): {
+  repairLoop: boolean;
+  attemptId: string;
+  repairAttempt: number;
+  error?: string;
+} {
   const requested =
     typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "" };
+  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
   const current = state?.deployAttempt?.id || "";
   if (current !== requested) {
     return {
       repairLoop: false,
       attemptId: "",
+      repairAttempt: 0,
       error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
     };
   }
-  return { repairLoop: true, attemptId: requested };
+  // The cap the handoff prompt states is also enforced here, because prompt
+  // text alone is an instruction the agent can lose track of across a long
+  // repair loop. Refusing before anything is dispatched keeps a runaway loop
+  // from burning CI runs.
+  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
+  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
+    return {
+      repairLoop: true,
+      attemptId: requested,
+      repairAttempt,
+      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested, repairAttempt };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -1046,6 +1069,12 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // Same lifetime as the delivery budget, and counted the way
+  // resolveDeployRepairLoop projected it, so the number the agent is told
+  // matches the one the next call is checked against. A deploy that opens a
+  // new attempt starts a fresh loop with a full budget.
+  state.deployRepairAttempts =
+    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
@@ -9199,7 +9228,20 @@ function createRequestHandler(
         }
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
+        // Report the loop's position back so the agent sees its remaining
+        // budget on every redeploy, instead of having to remember the cap from
+        // the single handoff that opened the loop.
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ...(loop.repairLoop ?
+              {
+                repairAttempt: loop.repairAttempt,
+                repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
+              }
+            : {})
+          })
+        );
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);

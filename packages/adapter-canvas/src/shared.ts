@@ -181,6 +181,10 @@ export interface CanvasState {
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
+  // Redeploys the agent has made inside the current repair loop. Bounds the
+  // automatic repair cycle server-side; reset whenever a deploy opens a new
+  // attempt rather than continuing one.
+  deployRepairAttempts?: number;
   verifyRunId?: string | number | null;
   verifyRunUrl?: string;
   deployedGraph?: CanvasGraphResource[] | null;

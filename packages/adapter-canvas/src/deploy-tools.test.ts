@@ -5,6 +5,7 @@ import {
   validateDeployPayload,
   validateDeployAttempt,
   summarizeDeployStatus,
+  describeDeployStarted,
   DEPLOY_LOG_TAIL_DEFAULT,
   DEPLOY_LOG_TAIL_MAX
 } from "./deploy-tools.js";
@@ -340,5 +341,37 @@ describe("summarizeDeployStatus", () => {
     expect(
       summarizeDeployStatus({ logs: "not-an-array" }).diagnostic
     ).toBeUndefined();
+  });
+});
+
+describe("describeDeployStarted", () => {
+  const payload = {
+    targetRepo: "octo/app",
+    branch: "feat",
+    environment: "dev"
+  };
+
+  it("says nothing about a budget for an ordinary deploy", () => {
+    const out = describeDeployStarted(payload, {});
+    expect(out).toContain("octo/app");
+    expect(out).toContain("branch feat");
+    expect(out).not.toMatch(/repair attempt/);
+  });
+
+  it("reports the loop position so the agent tracks its budget per call", () => {
+    // The cap is stated once in the handoff prompt; several repairs later the
+    // agent should not have to remember it.
+    expect(
+      describeDeployStarted(payload, { repairAttempt: 2, repairAttemptCap: 5 })
+    ).toContain("automatic repair attempt 2 of 5");
+  });
+
+  it("warns on the final attempt so the agent winds down instead of being cut off", () => {
+    const out = describeDeployStarted(payload, {
+      repairAttempt: 5,
+      repairAttemptCap: 5
+    });
+    expect(out).toContain("automatic repair attempt 5 of 5");
+    expect(out).toMatch(/last one/);
   });
 });

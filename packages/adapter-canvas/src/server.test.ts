@@ -32,6 +32,7 @@ import {
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
 } from "./server.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
   recordAzureApp,
@@ -1596,6 +1597,29 @@ describe("triggerDeployRepairHandoff", () => {
     expect(entry.state.deployHandoffAttempts).toBe(0);
   });
 
+  it("advances the repair count on a loop redeploy and resets it on a new deploy", () => {
+    // The count has to move exactly as resolveDeployRepairLoop projected it,
+    // or the number reported to the agent would not be the one the next call
+    // is checked against.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployRepairAttempts = 1;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployRepairAttempts).toBe(2);
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployRepairAttempts).toBe(0);
+  });
+
   describe("resolveDeployRepairLoop", () => {
     it("treats a deploy with no attempt as an ordinary deploy", () => {
       expect(
@@ -1603,10 +1627,11 @@ describe("triggerDeployRepairHandoff", () => {
           { deployAttempt: { id: "attempt-A" } } as CanvasState,
           ""
         )
-      ).toEqual({ repairLoop: false, attemptId: "" });
+      ).toEqual({ repairLoop: false, attemptId: "", repairAttempt: 0 });
       expect(resolveDeployRepairLoop({} as CanvasState, undefined)).toEqual({
         repairLoop: false,
-        attemptId: ""
+        attemptId: "",
+        repairAttempt: 0
       });
     });
 
@@ -1616,7 +1641,7 @@ describe("triggerDeployRepairHandoff", () => {
           { deployAttempt: { id: "attempt-A" } } as CanvasState,
           "attempt-A"
         )
-      ).toEqual({ repairLoop: true, attemptId: "attempt-A" });
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
     });
 
     it("rejects a stale repair rather than letting it clobber a newer deploy", () => {
@@ -1636,6 +1661,45 @@ describe("triggerDeployRepairHandoff", () => {
       const orphan = resolveDeployRepairLoop({} as CanvasState, "attempt-A");
       expect(orphan.repairLoop).toBe(false);
       expect(orphan.error).toMatch(/no longer the current attempt/);
+    });
+
+    it("counts each redeploy in the loop so the agent is told its budget", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployRepairAttempts: 2
+          } as CanvasState,
+          "attempt-A"
+        ).repairAttempt
+      ).toBe(3);
+    });
+
+    it("refuses a redeploy past the repair cap instead of dispatching another run", () => {
+      // The cap is stated in the handoff prompt, but prompt text is only an
+      // instruction: enforcing it here is what actually stops a runaway loop,
+      // and refusing before dispatch means it costs no workflow run.
+      const spent = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(spent.error).toMatch(/already used its/);
+      expect(spent.error).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    });
+
+    it("allows the final attempt within the cap", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP - 1
+          } as CanvasState,
+          "attempt-A"
+        ).error
+      ).toBeUndefined();
     });
   });
 
