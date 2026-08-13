@@ -150,7 +150,8 @@ describe("buildDeployPayload", () => {
       targetRepo: "octo/app",
       branch: "feat",
       appFile: ".radius/app.bicep",
-      agentInitiated: true
+      agentInitiated: true,
+      attemptId: ""
     });
   });
 
@@ -183,6 +184,25 @@ describe("buildDeployPayload", () => {
 
   it("always marks the deploy as agent-initiated so loop ownership is kept", () => {
     expect(buildDeployPayload({}, {}).agentInitiated).toBe(true);
+  });
+
+  it("forwards the attempt ID so the route can re-check the repair loop", () => {
+    // An unbound call carries no attempt: it is an ordinary deploy that must
+    // stay eligible for a handoff when it fails. A bound call forwards the ID
+    // so the route can validate it and keep the loop addressable.
+    expect(buildDeployPayload({}, {}).attemptId).toBe("");
+    expect(
+      buildDeployPayload(
+        { attemptId: "attempt-A" },
+        {
+          deployAttempt: {
+            id: "attempt-A",
+            targetRepo: "octo/app",
+            environment: "dev"
+          }
+        }
+      ).attemptId
+    ).toBe("attempt-A");
   });
 
   it("lets explicit arguments override the last deploy", () => {

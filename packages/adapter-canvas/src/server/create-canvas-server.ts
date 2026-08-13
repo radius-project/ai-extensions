@@ -111,6 +111,7 @@ export function createCanvasServer(
       state
     };
     instances.set(instanceId, entry);
+    dependencies.onStarted?.(instanceId, entry);
     return entry;
   }
 
