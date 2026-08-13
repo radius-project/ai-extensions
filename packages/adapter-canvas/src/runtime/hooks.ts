@@ -1,14 +1,16 @@
-// Pre-tool-use hook logic for auto-triggering app.bicep creation.
+// Pre-tool-use hook logic for auto-triggering app.bicep creation and refresh.
 //
 // With the recipe-pack refactor, .radius/app.bicep is authored exclusively by
 // the radius-app-bicep skill (the agent) — this adapter never fabricates bicep.
-// But the application-graph views require that file to exist. This module holds
-// the decision logic for a pre-tool-use hook that intercepts the tool calls
-// which generate a graph *from* app.bicep — opening a graph canvas page, or
-// producing the PR graph diff markdown — and, when no app.bicep exists yet,
-// denies the call and instructs the agent to run the radius-app-bicep skill to
-// create and SAVE .radius/app.bicep first, then retry. The extension itself
-// never writes bicep; it only triggers the skill.
+// But the application-graph views require that file to exist AND to still
+// describe the branch it sits on. This module holds the decision logic for a
+// pre-tool-use hook that intercepts the tool calls which generate a graph *from*
+// app.bicep (opening a graph canvas page, or producing the PR graph diff
+// markdown) and denies the call when there is no app.bicep yet, or when the one
+// on the workspace branch is stale, instructing the agent to run the
+// radius-app-bicep skill to create/refresh and SAVE .radius/app.bicep first,
+// then retry. The extension itself never writes bicep; it only triggers the
+// skill.
 //
 // Kept as a pure module (no SDK imports, no top-level joinSession) so the hook
 // decision can be unit-tested in isolation from extension.ts.
@@ -25,6 +27,7 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "../deploy-diagnostics.js";
+import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 
 interface GraphTriggerTarget {
@@ -39,12 +42,15 @@ interface AppBicepHookInput {
 
 interface AppBicepHookDependencies {
   workspaceState(): Promise<CanvasState>;
-  fetchBicep(
+  defaultBranchForState(state: CanvasState): string;
+  appModelStatus(
     repo: string,
     branch: string,
     state: CanvasState
-  ): Promise<string | null>;
-  defaultBranchForState(state: CanvasState): string;
+  ): Promise<AppModelStatus>;
+  // True the first time this exact staleness evidence is seen, false afterwards.
+  // Owned by the caller so the memo lives with the extension instance.
+  shouldRequestRefresh(key: string): boolean;
 }
 
 export interface AppBicepHookOutput {
@@ -183,13 +189,23 @@ export function graphTriggerTargets(
 
 // Core pre-tool-use decision. `deps` supplies the I/O so this stays pure:
 //   deps.workspaceState(): Promise<state>        — current workspace/repo/branch
-//   deps.fetchBicep(repo, branch, state): Promise<string|null>
 //   deps.defaultBranchForState(state): string
+//   deps.appModelStatus(repo, branch, state): Promise<AppModelStatus>
 //
 // Returns a PreToolUseHookOutput ({ permissionDecision: "deny", ... }) when the
-// graph trigger fires and no app.bicep is found on any target branch; otherwise
-// returns undefined (allow). For multi-branch triggers (graph-diff) a graph can
-// still render if only one side has bicep, so it denies only when ALL are empty.
+// graph trigger fires and either no app.bicep exists on any target branch, or
+// the one on the workspace branch is provably out of date. Otherwise returns
+// undefined (allow). For multi-branch triggers (graph-diff) a graph can still
+// render if only one side has bicep, so it denies only when ALL are empty.
+//
+// Two stale cases deliberately do NOT deny:
+//   • A model on a branch that is not the workspace's. Refreshing it would need
+//     a commit and a push, so blocking the view would strand the user with no
+//     action the skill is allowed to take.
+//   • A model whose content this extension cannot prove it generated (edited or
+//     unrecorded). Overwriting it destroys the user's own work, so it needs their
+//     agreement. The canvas raises that conversation while the graph renders,
+//     rather than blocking the view on it here.
 export async function evaluateAppBicepHook(
   input: AppBicepHookInput,
   deps: AppBicepHookDependencies
@@ -201,25 +217,87 @@ export async function evaluateAppBicepHook(
   const repo = targets.repo || state?.contextRepo || "";
   if (!repo) return undefined; // no repo context to check against → fail open
 
-  const found = await Promise.all(
+  const statuses = await Promise.all(
     targets.branches.map(async (candidate) => {
       const branch = candidate || deps.defaultBranchForState(state);
       try {
-        return !!(await deps.fetchBicep(repo, branch, state));
+        return await deps.appModelStatus(repo, branch, state);
       } catch {
-        return false;
+        return null;
       }
     })
   );
 
-  if (found.some(Boolean)) return undefined; // at least one branch has it → allow
+  const present = statuses.filter(
+    (status): status is AppModelStatus =>
+      !!status && status.freshness.status !== "missing"
+  );
+
+  if (!present.length) {
+    return {
+      permissionDecision: "deny",
+      permissionDecisionReason:
+        "No .radius/app.bicep found. It must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
+      additionalContext: appBicepReminder(repo, targets.branches)
+    };
+  }
+
+  const outdated = present.find(
+    (status) =>
+      status.refreshable &&
+      status.freshness.stale &&
+      !status.freshness.requiresConfirmation
+  );
+  if (!outdated) return undefined;
+
+  // Ask for a refresh once per distinct staleness signal. A regeneration that
+  // does not clear the drift (the branch head moves again when the refreshed
+  // model is committed, say) would otherwise deny every later graph open, so
+  // the second look at identical evidence renders the model instead of blocking
+  // the user on a fix that already ran.
+  if (!deps.shouldRequestRefresh(refreshRequestKey(outdated))) {
+    return undefined;
+  }
 
   return {
     permissionDecision: "deny",
-    permissionDecisionReason:
-      "No .radius/app.bicep found — it must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
-    additionalContext: appBicepReminder(repo, targets.branches)
+    permissionDecisionReason: `The .radius/app.bicep on \`${outdated.branch}\` is out of date. It must be regenerated by the radius-app-bicep skill before the application graph can be trusted.`,
+    additionalContext: appModelRefreshReminder(outdated)
   };
+}
+
+// Identifies one staleness signal: the same branch, classification, and recorded
+// origin describe the same request to regenerate. A regeneration changes the
+// record, so genuinely new drift produces a new key.
+export function refreshRequestKey(status: AppModelStatus): string {
+  const origin = status.freshness.origin;
+  return [
+    status.repo,
+    status.branch,
+    status.freshness.status,
+    origin?.sourceCommit ?? "",
+    origin?.skillVersion ?? ""
+  ].join("::");
+}
+
+// Instruction fed back to the agent when a graph tool is denied because the
+// model on the workspace branch no longer describes its source. Distinct from
+// appBicepReminder: the file exists, so the agent must be told what changed and
+// that the fix is a regeneration rather than a first-time authoring.
+export function appModelRefreshReminder(status: AppModelStatus): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return [
+    `The application model${where} on branch \`${status.branch}\` is out of date, so the application graph would not reflect the current source.`,
+    "",
+    status.freshness.reason,
+    "",
+    `Refresh it now before retrying. ${SKILL_HANDOFF}`,
+    "Regenerate from the current source rather than editing the existing file: the model is stale as a whole, not broken in one place.",
+    "The model is on your current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
+    "After the model is rewritten, retry the original action.",
+    "",
+    RECIPE_PACK_NOTE
+  ].join("\n");
 }
 
 // The two halves of an automated handoff turn. `prompt` is what the agent
@@ -284,6 +362,87 @@ export function appBicepHandoffMessage(
     prompt: appBicepHandoffPrompt(repo, page, branches),
     displayPrompt: appBicepHandoffDisplayPrompt(repo, page, branches)
   };
+}
+
+// Prompt sent when a graph view rendered a model whose source has moved on, on
+// a branch the skill can rewrite. The pre-tool-use hook normally catches this
+// first and denies the open so the model is refreshed before anything renders.
+// But the canvas also opens on paths the hook never sees (a programmatic reload
+// after source refs are attached, or the user opening the panel), and on those
+// the stale model would otherwise be shown with no signal at all.
+export function appModelRefreshPrompt(status: AppModelStatus): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return [
+    `The Radius graph${where} on branch \`${status.branch}\` just rendered from an application model that no longer describes the current source.`,
+    "",
+    status.freshness.reason,
+    "",
+    `Refresh it. ${SKILL_HANDOFF}`,
+    "Regenerate from the current source rather than editing the existing file, and tell the user the graph they are looking at predates the refresh so they know to reopen it.",
+    "The model is on the current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
+    "",
+    RECIPE_PACK_NOTE
+  ].join("\n");
+}
+
+// Timeline stand-in for appModelRefreshPrompt.
+export function appModelRefreshDisplayPrompt(status: AppModelStatus): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return `Refreshing the application model${where} (branch \`${status.branch}\`), which no longer matches the current source.`;
+}
+
+export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
+  return {
+    prompt: appModelRefreshPrompt(status),
+    displayPrompt: appModelRefreshDisplayPrompt(status)
+  };
+}
+
+// Prompt sent when a graph canvas renders a model this extension cannot prove it
+// generated: hand-edited since generation, or carrying no usable origin record.
+// The view is NOT blocked for these: the file on disk is what would deploy, so it
+// is the honest thing to render. But regenerating would destroy content the user
+// may have written deliberately, so the refresh is offered rather than taken.
+export function appModelUnverifiedPrompt(status: AppModelStatus): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return [
+    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model could not be verified against the current source.`,
+    "",
+    status.freshness.reason,
+    "",
+    "Tell the user what this means for the graph they are looking at, and ask whether they want the model regenerated from current source.",
+    "Regenerating overwrites .radius/app.bicep, so any changes they made by hand (tuned properties, custom types, recipe pack references) would be lost. Say that plainly and wait for their answer. Do not regenerate first and report afterwards.",
+    `If they agree: ${SKILL_HANDOFF}`,
+    "If they would rather keep their edits, leave the file alone. Repairing one specific problem in place is the alternative that preserves them.",
+    "",
+    RECIPE_PACK_NOTE
+  ].join("\n");
+}
+
+// Timeline stand-in for appModelUnverifiedPrompt.
+export function appModelUnverifiedDisplayPrompt(
+  status: AppModelStatus
+): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return `Checking whether the application model${where} (branch \`${status.branch}\`) still matches the current source.`;
+}
+
+export function appModelUnverifiedMessage(
+  status: AppModelStatus
+): HandoffMessage {
+  return {
+    prompt: appModelUnverifiedPrompt(status),
+    displayPrompt: appModelUnverifiedDisplayPrompt(status)
+  };
+}
+
+// Log line for a stale model on a branch that is not the workspace's. Modeling
+// only writes the working tree, so there is no action to hand off here: the
+// refresh would require committing and pushing to someone else's branch. State
+// the drift so the graph is not read as current, and stop there.
+export function appModelStaleNotice(status: AppModelStatus): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} Refreshing it would require regenerating and pushing to that branch.`;
 }
 
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
