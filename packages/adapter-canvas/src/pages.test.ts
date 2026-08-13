@@ -7,6 +7,11 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  CLIENT_REPO_BRANCH_JS,
+  CLIENT_GRAPH_JS,
+  CLIENT_DELETE_DIALOG_JS
+} from "./client.js";
+import {
   pageShell,
   oidcPage,
   graphHeader,
@@ -112,12 +117,78 @@ describe("pageShell", () => {
     expect(typeStyles).toContain("overflow: hidden");
     expect(typeStyles).toContain("white-space: nowrap");
   });
+
+  it("derives graph line colours from text/background, not host border tokens", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    // Primer's --border-color-muted is FAINTER than --border-color-default, so
+    // routing graph lines through --rad-stroke-strong (which falls back to it)
+    // made them the weakest thing on the canvas. Mixing text into background
+    // keeps contrast stable and inverts correctly in dark mode.
+    for (const token of [
+      "--rad-node-border",
+      "--rad-edge",
+      "--rad-edge-muted",
+      "--rad-grid"
+    ]) {
+      const value = html.match(new RegExp(`${token}:\\s*([^;]+);`))?.[1];
+      expect(value, `${token} should not be defined`).toBeTruthy();
+      expect(value).toContain("color-mix");
+      expect(value).toContain("var(--rad-text)");
+      expect(value).not.toContain("--rad-stroke");
+    }
+  });
+
+  it("keeps graph lines in a legible contrast order", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const pct = (token: string) =>
+      Number(
+        html
+          .match(new RegExp(`${token}:\\s*([^;]+);`))?.[1]
+          ?.match(/var\(--rad-text\)\s+(\d+)%/)?.[1]
+      );
+    // Edges read strongest, then node borders, then the muted edge; the
+    // background grid stays well below all of them so it never competes.
+    expect(pct("--rad-edge")).toBeGreaterThanOrEqual(pct("--rad-node-border"));
+    expect(pct("--rad-node-border")).toBeGreaterThan(pct("--rad-edge-muted"));
+    expect(pct("--rad-edge-muted")).toBeGreaterThan(pct("--rad-grid"));
+    // All load-bearing lines need enough mix to stay visible in both themes.
+    expect(pct("--rad-edge-muted")).toBeGreaterThanOrEqual(35);
+  });
 });
 
 describe("graphHeader / graphHeaderClose", () => {
   it("renders the nav header and matching close markup", () => {
     expect(graphHeader("graph")).toContain("<");
     expect(graphHeaderClose()).toContain("<");
+  });
+
+  it("links each mode named in the lede to its own sub-tab", () => {
+    const html = graphHeader("graph");
+    const expected: Array<[string, string]> = [
+      ["Modeled", "graph"],
+      ["Planned", "planned"],
+      ["Deployed", "deployed"],
+      ["Diff", "graph-diff"]
+    ];
+    for (const [label, page] of expected) {
+      expect(html).toContain(
+        `<a href="?page=${page}" class="rad-lede-link" onclick="radiusNavTo(event, '${page}')"><strong>${label}</strong></a>`
+      );
+    }
+  });
+
+  it("keeps the lede links pointing at the same routes as the nav", () => {
+    const html = graphHeader("planned");
+    // Every route referenced by a lede link must also exist as a nav sub-tab.
+    const ledeRoutes = [
+      ...html.matchAll(
+        /class="rad-lede-link" onclick="radiusNavTo\(event, '([^']+)'\)"/g
+      )
+    ];
+    expect(ledeRoutes).toHaveLength(4);
+    for (const [, route] of ledeRoutes) {
+      expect(html).toContain(`data-page="${route}"`);
+    }
   });
 });
 
@@ -292,9 +363,13 @@ describe("plannedGraphPage", () => {
       contextRepo: "octo/app",
       contextBranch: "main"
     });
-    expect(html).toContain("Plan Deployment");
+    expect(html).toContain('id="planned-subtitle"');
     expect(html).toContain(
-      "radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH)"
+      "The planned application graph previews the infrastructure"
+    );
+    expect(html).toContain(">Loading…</button>");
+    expect(html).toContain(
+      "radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV)"
     );
     for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
   });
@@ -308,6 +383,23 @@ describe("plannedGraphPage", () => {
     expect(html).toContain("plannedMode: true");
     expect(html).not.toContain("Cloud Resource");
     for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
+  });
+
+  it("serializes selector-triggered planning in both render paths", () => {
+    const empty = plannedGraphPage({
+      contextRepo: "octo/app",
+      contextBranch: "main"
+    });
+    const loaded = plannedGraphPage({
+      plannedResources: sampleResources,
+      plannedRepo: "octo/app",
+      plannedBranch: "main"
+    });
+    for (const html of [empty, loaded]) {
+      expect(html).toContain("radiusCreatePlanScheduler(runPlan");
+      expect(html).toContain("if (!isCurrent()) return;");
+      expect(html).toContain("RADIUS_PLAN_ENVS_STALE");
+    }
   });
 });
 
@@ -326,6 +418,14 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     // The active pane is the one NOT display:none'd.
     expect(html).toContain('id="pane-credentials"');
     expect(html).toContain("Create Credential Profile");
+  });
+
+  it("opens the creation form directly when deep-linked with ?new=1", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    // The "Create Environment" call to action on the graph pages links to
+    // /?page=environment&new=1 and must land on the form, not the table.
+    expect(html).toContain("get('new') === '1'");
+    expect(html).toContain("showEnvForm({ name: '' })");
   });
 
   it("drives environment creation from a saved credential profile, not inline tenant/sub", () => {
@@ -752,7 +852,22 @@ describe("deployingPage — Deployments landing", () => {
     // successful delete mid-deploy).
     expect(html).toContain("synthetic: true");
     expect(html).toContain(
-      "var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+      "var delDisabled = (status === 'pending' || status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+    );
+    expect(html).toContain("function resumeRedirectedDeployment()");
+    expect(html).toContain("OP_STATUS[key] = 'pending'");
+    expect(html).toContain(
+      "if (!recordSeen && DEPLOY_RECORDS_PRESENT[key]) recordSeen = true"
+    );
+    expect(html).toContain("if (!recordSeen) loadDeployments(true, true)");
+    expect(html).toContain(
+      "if (!resumeRedirectedDeployment()) loadDeployments()"
+    );
+    // A server-side 409 must unwind the optimistic row rather than pretending
+    // the conflicting deployment started successfully.
+    expect(html).toContain("if (result.ok) return;");
+    expect(html).toContain(
+      "(result.d && result.d.error) || 'Could not start the deployment.'"
     );
     // The in-flight list refresh stops once the real record shows up, and the
     // poll is capped so a stuck run can't fan out fresh=1 fetches forever.
@@ -915,6 +1030,205 @@ describe("deployedGraphPage", () => {
     // A slow in-flight fetch is aborted on hide so it cannot land after pause.
     expect(html).toContain("graphFetchController.abort()");
     expect(html).toContain("if (err && err.name === 'AbortError') { return; }");
+  });
+
+  it("renders the subtitle and wires the adaptive primary button", () => {
+    const html = deployedGraphPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    expect(html).toContain('id="deployed-subtitle"');
+    expect(html).toContain(
+      "The deployed application graph depicts the selected application"
+    );
+    expect(html).toContain('id="deployed-subtitle-hint"');
+    expect(html).toContain("radiusApplyDeployedEnvState(HAS_ENVS,");
+    expect(html).toContain("radiusDeployDeployedApp(");
+    expect(html).toContain("/api/list-deployments?repo=");
+    expect(html).toContain('var CONTEXT_BRANCH = "feature-x"');
+  });
+
+  // The disabled-while-deleting guard only works if the page actually feeds the
+  // selected environment's status into the adaptive state function, and then
+  // keeps polling so the button re-enables once the delete resolves.
+  it("passes the deployment status through and polls while a delete runs", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("deploymentStatus(app, env)");
+    expect(html).toContain("function deploymentStatus(");
+    expect(html).toContain("scheduleStatePoll(");
+    expect(html).toContain(
+      "status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE"
+    );
+  });
+
+  // A transient GitHub failure comes back as HTTP 200 with
+  // { deployments: [], error }. Clearing the map on that response would make an
+  // environment with an in-flight deploy/delete look empty, flipping the button
+  // back to "Deploy Application" and letting the user start a conflicting
+  // operation. This runs the emitted function for real, because the behavior
+  // only exists as a string in the page and a substring assertion would not
+  // prove the error path preserves anything.
+  describe("deployment-state loading survives a transient listing failure", () => {
+    // Pull the emitted loadDeploymentStates out of the page and run it against
+    // fake state, returning what it left behind.
+    async function runLoad(
+      response: unknown,
+      previous: Record<string, string>
+    ) {
+      const html = deployedGraphPage({ contextRepo: "octo/app" });
+      const start = html.indexOf("function loadDeploymentStates()");
+      expect(start).toBeGreaterThan(-1);
+      // Brace-match to the end of the function so the harness gets exactly it.
+      let depth = 0;
+      let end = -1;
+      for (let i = html.indexOf("{", start); i < html.length; i++) {
+        if (html[i] === "{") depth++;
+        else if (html[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i + 1;
+            break;
+          }
+        }
+      }
+      expect(end).toBeGreaterThan(start);
+      const source = html.slice(start, end);
+
+      const state = {
+        DEPLOYMENTS_BY_TARGET: { ...previous },
+        DEPLOYMENT_STATES_STALE: false
+      };
+      const fetchFake = () =>
+        response instanceof Error ?
+          Promise.reject(response)
+        : Promise.resolve({ json: () => Promise.resolve(response) });
+      const harness = new Function(
+        "CONTEXT_REPO",
+        "fetch",
+        "state",
+        `var DEPLOYMENTS_BY_TARGET = state.DEPLOYMENTS_BY_TARGET;
+         function deploymentKey(app, env) {
+          return encodeURIComponent(app) + '|' + encodeURIComponent(env);
+         }
+         var DEPLOYMENT_STATES_STALE = state.DEPLOYMENT_STATES_STALE;
+         ${source}
+         return loadDeploymentStates().then(function () {
+           return { map: DEPLOYMENTS_BY_TARGET, stale: DEPLOYMENT_STATES_STALE };
+         });`
+      );
+      return (await harness("octo/app", fetchFake, state)) as {
+        map: Record<string, string>;
+        stale: boolean;
+      };
+    }
+
+    it("keeps the last-known deployments and flags them stale on an error payload", async () => {
+      const result = await runLoad(
+        { deployments: [], error: "GitHub API rate limit exceeded" },
+        { "web-app|prod": "deleting" }
+      );
+      expect(result.map).toEqual({ "web-app|prod": "deleting" });
+      expect(result.stale).toBe(true);
+    });
+
+    it("keeps the last-known deployments when the request itself fails", async () => {
+      const result = await runLoad(new Error("network down"), {
+        "web-app|prod": "success"
+      });
+      expect(result.map).toEqual({ "web-app|prod": "success" });
+      expect(result.stale).toBe(true);
+    });
+
+    it("replaces the map and clears the stale flag on a good response", async () => {
+      const result = await runLoad(
+        {
+          deployments: [
+            { app: "web-app", environment: "staging", status: "success" }
+          ]
+        },
+        { "web-app|prod": "deleting" }
+      );
+      expect(result.map).toEqual({ "web-app|staging": "success" });
+      expect(result.stale).toBe(false);
+    });
+
+    it("keeps deployments for different applications in the same environment distinct", async () => {
+      const result = await runLoad(
+        {
+          deployments: [
+            { app: "frontend", environment: "prod", status: "success" },
+            { app: "worker", environment: "prod", status: "failed" }
+          ]
+        },
+        {}
+      );
+      expect(result.map).toEqual({
+        "frontend|prod": "success",
+        "worker|prod": "failed"
+      });
+    });
+
+    // An empty list is a real answer, unlike an error, so it must clear.
+    it("clears the map when the listing is genuinely empty", async () => {
+      const result = await runLoad(
+        { deployments: [] },
+        { "web-app|prod": "success" }
+      );
+      expect(result.map).toEqual({});
+      expect(result.stale).toBe(false);
+    });
+  });
+
+  // The button must be held disabled while the listing is unreadable, and the
+  // page must keep polling so it recovers without a manual reload.
+  it("feeds the stale flag into the button state and polls until it clears", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("DEPLOYMENT_STATES_STALE");
+    expect(html).toContain(
+      "deploymentStatus(app, env), DEPLOYMENT_STATES_STALE"
+    );
+    expect(html).toContain(
+      "status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE"
+    );
+  });
+
+  it("places the primary button inline with the selectors", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    const controls = html.match(
+      /<div class="rad-deployed-controls">([\s\S]*?)<\/div>\n/
+    )?.[0];
+    // The button must live INSIDE the controls row so it sits on the same
+    // line as the Application/Environment dropdowns.
+    expect(html).toMatch(
+      /<div class="rad-deployed-controls">[\s\S]*id="deployed-delete-btn"[\s\S]*?<\/div>/
+    );
+    expect(controls).toBeTruthy();
+  });
+
+  it("treats a failed deployment as deployed so it can be cleaned up", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "return !!DEPLOYMENTS_BY_TARGET[deploymentKey(app, env)];"
+    );
+    expect(html).toContain("dep.status || 'unknown'");
+  });
+});
+
+describe("graphDiffPage", () => {
+  it("renders the subtitle on both the empty and rendered paths", () => {
+    const empty = graphDiffPage({
+      branches: ["main", "dev"],
+      diffBase: "main",
+      diffHead: "dev"
+    });
+    const rendered = graphDiffPage({ diffResources: sampleResources });
+    for (const html of [empty, rendered]) {
+      expect(html).toContain('id="graph-diff-subtitle"');
+      expect(html).toContain(
+        "The application graph diff compares the application model"
+      );
+      expect(html).toContain("added, removed, or modified");
+    }
   });
 });
 
@@ -1342,5 +1656,143 @@ describe("operation status chip in the top navigation", () => {
     expect(shell).toMatch(
       /prefers-reduced-motion[\s\S]*rad-opchip--running \.rad-opchip__dot \{ animation: none; \}/
     );
+  });
+});
+
+// Inline <script> blocks in pages.ts are template-literal strings, so a syntax
+// error in one is invisible to tsc, eslint and prettier — it surfaces only at
+// runtime as a silently dead script (this has caused a real "perpetual
+// Loading…" bug). Parsing every emitted block is the only cheap guard.
+describe("inline scripts", () => {
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it.each(renderers)(
+    "%s emits only parseable script blocks",
+    (_name, render) => {
+      const blocks = render().match(/<script>([\s\S]*?)<\/script>/g) || [];
+      expect(blocks.length).toBeGreaterThan(0);
+      for (const block of blocks) {
+        const src = block.slice("<script>".length, -"</script>".length);
+        expect(() => new Function(src)).not.toThrow();
+      }
+    }
+  );
+});
+
+// Function declarations hoist within a <script> block but not across blocks, so
+// a page whose body script uses a shared helper injected *after* it dies with a
+// ReferenceError — taking every later statement with it, which surfaces as a
+// permanently stuck "Loading…". Each block parses fine alone, so only an
+// ordering check catches this. The shared libraries are exactly the code that
+// crosses block boundaries, so they are what this pins.
+describe("shared client helpers are injected before the page body uses them", () => {
+  const SHARED_LIBS = [
+    CLIENT_REPO_BRANCH_JS,
+    CLIENT_GRAPH_JS,
+    CLIENT_DELETE_DIALOG_JS
+  ];
+
+  // Top-level declarations of the shared libraries: the names pages may rely on.
+  const sharedHelpers = [
+    ...new Set(
+      SHARED_LIBS.flatMap((lib) =>
+        [...lib.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(
+          (m) => m[1]
+        )
+      )
+    )
+  ];
+
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it("finds the shared helpers to check", () => {
+    expect(sharedHelpers).toContain("radiusCreateDeleteDeploymentDialog");
+    expect(sharedHelpers).toContain("radiusApplyDeployedEnvState");
+  });
+
+  it.each(renderers)(
+    "%s uses no shared helper before it is defined",
+    (_name, render) => {
+      // Compare by block, not by character offset: within a single block a
+      // forward reference is fine, because declarations hoist to its top.
+      const blocks = (
+        render().match(/<script>([\s\S]*?)<\/script>/g) || []
+      ).map((b) => b.slice("<script>".length, -"</script>".length));
+      const violations: string[] = [];
+      for (const name of sharedHelpers) {
+        const declaredIn = blocks.findIndex((src) =>
+          new RegExp(`^function\\s+${name}\\s*\\(`, "m").test(src)
+        );
+        if (declaredIn === -1) continue;
+        const usedIn = blocks.findIndex(
+          (src, i) =>
+            i !== declaredIn && new RegExp(`\\b${name}\\s*\\(`).test(src)
+        );
+        if (usedIn !== -1 && usedIn < declaredIn) {
+          violations.push(
+            `${name} used in block ${usedIn} but defined in block ${declaredIn}`
+          );
+        }
+      }
+      expect(violations).toEqual([]);
+    }
+  );
+});
+
+// Deleting a deployment tears down live infrastructure irreversibly. Every
+// surface that offers it must use the same 3-step type-to-confirm dialog — a
+// page shipping a lighter confirmation of its own lowers the bar product-wide.
+describe("delete-deployment confirmation is uniform", () => {
+  const DIALOG_IDS = [
+    "deploy-delete-modal",
+    "deploy-delete-body",
+    "deploy-delete-app",
+    "deploy-delete-env",
+    "deploy-delete-close"
+  ];
+
+  it.each([
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["deployingPage", () => deployingPage({})]
+  ])("%s renders the shared dialog", (_name, render) => {
+    const html = render();
+    expect(html).toContain('class="rad-ddlg"');
+    for (const id of DIALOG_IDS) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain("radiusCreateDeleteDeploymentDialog");
+  });
+
+  it("the Deployed graph page no longer ships a one-click confirm", () => {
+    const html = deployedGraphPage({});
+    expect(html).not.toContain("deployed-delete-confirm");
+    expect(html).not.toContain("deployed-delete-cancel");
+    expect(html).not.toContain("Are you sure you want to delete");
+  });
+
+  it("both pages emit byte-identical dialog markup", () => {
+    const extract = (html: string) => {
+      const start = html.indexOf('<div id="deploy-delete-modal"');
+      expect(start).toBeGreaterThan(-1);
+      return html.slice(
+        start,
+        html.indexOf("</div>", html.indexOf('id="deploy-delete-body"'))
+      );
+    };
+    expect(extract(deployedGraphPage({}))).toBe(extract(deployingPage({})));
   });
 });
