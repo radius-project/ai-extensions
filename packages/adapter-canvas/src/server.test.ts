@@ -26,6 +26,7 @@ import {
   preflightGhcrPackageWriteAccess,
   resolveGitHubEnvironmentCreateState,
   resolveDeployStatus,
+  resolveDeployRepairLoop,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
 } from "./server.js";
@@ -1513,7 +1514,7 @@ describe("triggerDeployRepairHandoff", () => {
       provider: "azure",
       environment: "dev",
       appFile: ".radius/app.bicep",
-      agentInitiated: false
+      repairLoop: false
     });
     expect(entry.state.deployAttempt?.id).not.toBe("attempt-A");
 
@@ -1535,11 +1536,104 @@ describe("triggerDeployRepairHandoff", () => {
       provider: "azure",
       environment: "dev",
       appFile: ".radius/app.bicep",
-      agentInitiated: true
+      repairLoop: true,
+      attemptId: "attempt-A"
     });
     expect(entry.state.deployRepairing).toBe(true);
     expect(deployHandoffStatus(entry.state)).toMatchObject({
       state: "delivered"
+    });
+    // The loop keeps one identity across its retries, so the agent's next
+    // status call is not told its own attempt is inactive.
+    expect(entry.state.deployAttempt?.id).toBe("attempt-A");
+  });
+
+  it("hands off a failed first agent deploy, which opens no repair loop", async () => {
+    // Regression: radius_deploy sets agentInitiated on every call, so keying
+    // ownership off that flag pre-marked a first agent deploy as repairing and
+    // triggerDeployRepairHandoff bailed out — the agent never learned it failed.
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    const entry = failedEntry();
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+    entry.state.deployStatus = "failed";
+    expect(entry.state.deployRepairing).toBe(false);
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("carries the delivery budget across a repair loop but resets it otherwise", () => {
+    // The budget belongs to the loop: resetting it on every redeploy let an
+    // undeliverable handoff retry past DEPLOY_HANDOFF_MAX_ATTEMPTS forever.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployHandoffAttempts = 2;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployHandoffAttempts).toBe(2);
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployHandoffAttempts).toBe(0);
+  });
+
+  describe("resolveDeployRepairLoop", () => {
+    it("treats a deploy with no attempt as an ordinary deploy", () => {
+      expect(
+        resolveDeployRepairLoop(
+          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          ""
+        )
+      ).toEqual({ repairLoop: false, attemptId: "" });
+      expect(resolveDeployRepairLoop({} as CanvasState, undefined)).toEqual({
+        repairLoop: false,
+        attemptId: ""
+      });
+    });
+
+    it("keeps a redeploy on the attempt it was handed so the loop stays addressable", () => {
+      expect(
+        resolveDeployRepairLoop(
+          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          "attempt-A"
+        )
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A" });
+    });
+
+    it("rejects a stale repair rather than letting it clobber a newer deploy", () => {
+      // The tool validated the attempt before POSTing, but a newer deploy can
+      // start in between. Re-checking server-side keeps that race from marking
+      // the newer deploy as already owned and swallowing its handoff.
+      const stale = resolveDeployRepairLoop(
+        { deployAttempt: { id: "attempt-B" } } as CanvasState,
+        "attempt-A"
+      );
+      expect(stale.repairLoop).toBe(false);
+      expect(stale.attemptId).toBe("");
+      expect(stale.error).toMatch(/no longer the current attempt/);
+    });
+
+    it("rejects an attempt-bound deploy when the panel holds no attempt", () => {
+      const orphan = resolveDeployRepairLoop({} as CanvasState, "attempt-A");
+      expect(orphan.repairLoop).toBe(false);
+      expect(orphan.error).toMatch(/no longer the current attempt/);
     });
   });
 
