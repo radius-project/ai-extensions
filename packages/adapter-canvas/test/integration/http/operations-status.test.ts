@@ -135,7 +135,9 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
 
-    // Only GET is declared, so other methods still fall through.
+    // Only the GET routes are migrated. `POST /api/operations` is a declared
+    // route owned by this family but still served by the legacy fallback, so a
+    // POST must not reach the migrated handler.
     const posted = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST"
     });
@@ -144,6 +146,36 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     // Unmigrated routes still reach the fallback.
     const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
     expect(residual.status).toBe(418);
+  });
+
+  it("leaves main's undeclared POST sub-routes to the legacy fallback", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    // `main` matches these two with regexes in the legacy chain rather than
+    // declaring them, and they sit under this family's migrated GET prefix.
+    // Over a real socket they must still reach the fallback: the dispatcher
+    // consults the route table before the legacy chain, so GET/POST
+    // disjointness is now the only thing keeping them reachable.
+    for (const path of [
+      "/api/operations/op-running/resume/abc",
+      "/api/operations/op-running/abandon"
+    ]) {
+      const response = await fetch(`${entry.baseUrl}${path}`, {
+        method: "POST"
+      });
+      expect(response.status).toBe(418);
+      expect(await response.text()).toBe("legacy");
+    }
+
+    // The same paths as GET are claimed by the migrated prefix route and 404 on
+    // the composite tail read as an operation id. That matches legacy, whose
+    // GET prefix branch also claimed them, so it is pinned rather than fixed.
+    const asGet = await fetch(
+      `${entry.baseUrl}/api/operations/op-running/abandon`
+    );
+    expect(asGet.status).toBe(404);
+    expect(await asGet.text()).toBe('{"error":"Unknown operation."}');
   });
 
   it("decodes a percent-encoded operation id on the wire", async () => {
