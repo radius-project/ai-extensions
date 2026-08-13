@@ -3,25 +3,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { syncRequestedPage } from "../../../src/server/request-context.js";
-import { createServerRouteTable } from "../../../src/server/route-table.js";
+import {
+  createServerRouteTable,
+  MIGRATED_ROUTE_KEYS,
+  routeKey
+} from "../../../src/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
-// This scaffolding HIT only exercises the fallback path, so migrated routes are
-// declared with stubs that fail loudly if the dispatcher ever reaches them.
-const unreachableRoutes = createServerRouteTable({
-  "ANY /api/ping": () => {
-    throw new Error("unexpected liveness dispatch");
-  },
-  "POST /api/open-source": () => {
-    throw new Error("unexpected open-source dispatch");
-  },
-  "GET /api/operations": () => {
-    throw new Error("unexpected latest-operation dispatch");
-  },
-  "GET /api/operations/": () => {
-    throw new Error("unexpected operation-by-id dispatch");
-  }
-});
+// This scaffolding HIT only exercises the fallback path, so every migrated
+// route is stubbed to fail loudly if the dispatcher ever reaches one.
+const unreachableRoutes = createTestRouteTable();
 
 let container: CanvasServerContainer | undefined;
 
@@ -31,6 +23,33 @@ afterEach(async () => {
 });
 
 describe("server scaffolding real-loopback HIT", () => {
+  it("stubs every migrated route without relaxing table validation", () => {
+    // The helper exists so a test that ignores a family stops needing a manual
+    // stub edit each slice. It must stay test-support only: supplying handlers
+    // is all it does, and the real validation still rejects a migrated key with
+    // no handler so a production composition root cannot omit one.
+    expect(
+      unreachableRoutes
+        .filter((route) => route.migration === "migrated")
+        .map(routeKey)
+        .sort()
+    ).toEqual([...MIGRATED_ROUTE_KEYS].sort());
+    expect(
+      unreachableRoutes
+        .filter((route) => route.migration === "migrated")
+        .every((route) => typeof route.handler === "function")
+    ).toBe(true);
+    expect(() => createServerRouteTable({})).toThrow(
+      /^Missing handler for migrated server route: /
+    );
+    // A caller-supplied handler wins over the stub.
+    const supplied = () => {};
+    const table = createTestRouteTable({ "ANY /api/ping": supplied });
+    expect(
+      table.find((route) => routeKey(route) === "ANY /api/ping")?.handler
+    ).toBe(supplied);
+  });
+
   it("binds an OS-assigned loopback port and preserves facade lifecycle behavior", async () => {
     let clock = 1000;
     container = createCanvasServer({

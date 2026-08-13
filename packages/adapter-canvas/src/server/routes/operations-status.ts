@@ -45,10 +45,14 @@ export function handleOperationById(
   context: CanvasRequestContext,
   dependencies: OperationsStatusDependencies
 ): void {
-  // `decodeURIComponent` throws on a malformed escape such as `/api/operations/%`
-  // and that throw propagates out of the handler, exactly as it did from the
-  // legacy branch. Converting it into a 4xx or 5xx here would be observable
-  // hardening, which this structural slice deliberately excludes.
+  // `decodeURIComponent` throws a URIError on a malformed escape such as
+  // `/api/operations/%`, which Node's URL parser leaves intact in the pathname.
+  // The throw propagates out of the handler exactly as it did from the legacy
+  // branch: the async listener does not catch it, so it becomes an unhandled
+  // rejection, no response is written, and the request hangs until the client
+  // times out. That is a latent bug, deliberately preserved — converting it
+  // into a 4xx or 5xx here would be observable hardening, which this structural
+  // slice excludes. It belongs in the separately approved hardening slice.
   const operationId = decodeURIComponent(
     context.pathname.slice(OPERATIONS_PREFIX.length)
   );

@@ -2,9 +2,8 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
-import { createServerRouteTable } from "../../../src/server/route-table.js";
 import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
-import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import { toClientView } from "../../../src/operations.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
@@ -50,13 +49,8 @@ function start(): Harness {
   const latestCalls: string[] = [];
   let latest: unknown = null;
 
-  const routes = createServerRouteTable({
-    ...createLivenessSourceRoutes({
-      getOpenSourceHandler: () => null,
-      readInstanceState: () => undefined,
-      toSafeRepoRelPath: (input) => String(input)
-    }),
-    ...createOperationsStatusRoutes({
+  const routes = createTestRouteTable(
+    createOperationsStatusRoutes({
       latest: (repo) => {
         latestCalls.push(repo);
         return latest;
@@ -68,7 +62,7 @@ function start(): Harness {
       get: (operationId) => records.get(operationId) ?? null,
       toClientView
     })
-  });
+  );
 
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
