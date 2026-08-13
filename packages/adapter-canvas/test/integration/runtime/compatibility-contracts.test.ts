@@ -23,7 +23,7 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../support/runtime/fakes.js";
-import { SERVER_ROUTE_TABLE } from "../../../src/server/route-table.js";
+import { SERVER_ROUTE_DECLARATIONS } from "../../../src/server/route-table.js";
 
 interface CompatibilityFixture {
   canvas: {
@@ -174,9 +174,9 @@ describe("Phase 0 reviewed compatibility oracles", () => {
 
   it("pins all 37 loopback route method and path declarations", () => {
     expect(fixture.routes).toHaveLength(37);
-    expect(SERVER_ROUTE_TABLE).toHaveLength(37);
+    expect(SERVER_ROUTE_DECLARATIONS).toHaveLength(37);
     expect(
-      SERVER_ROUTE_TABLE.map(({ method, path, match }) => ({
+      SERVER_ROUTE_DECLARATIONS.map(({ method, path, match }) => ({
         method,
         path,
         match

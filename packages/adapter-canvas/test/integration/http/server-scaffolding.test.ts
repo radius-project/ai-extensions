@@ -3,8 +3,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { syncRequestedPage } from "../../../src/server/request-context.js";
-import { SERVER_ROUTE_TABLE } from "../../../src/server/route-table.js";
+import { createServerRouteTable } from "../../../src/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
+
+// This scaffolding HIT only exercises the fallback path, so migrated routes are
+// declared with stubs that fail loudly if the dispatcher ever reaches them.
+const unreachableRoutes = createServerRouteTable({
+  "ANY /api/ping": () => {
+    throw new Error("unexpected liveness dispatch");
+  },
+  "POST /api/open-source": () => {
+    throw new Error("unexpected open-source dispatch");
+  }
+});
 
 let container: CanvasServerContainer | undefined;
 
@@ -22,7 +33,7 @@ describe("server scaffolding real-loopback HIT", () => {
         createRequestHandler({
           instanceId,
           instances,
-          routes: SERVER_ROUTE_TABLE,
+          routes: unreachableRoutes,
           markActivity,
           preRoute: (context) => {
             syncRequestedPage(
