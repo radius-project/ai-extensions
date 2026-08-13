@@ -19,6 +19,11 @@ import {
  * a migrated key with no handler. Production composition roots must keep
  * passing a real handler for every migrated route, so this helper is
  * deliberately not exported from `src/`.
+ *
+ * This helper cannot hide a production wiring omission. `src/server.ts` builds
+ * its table once at module initialization, so a migrated key with no real
+ * handler throws while `src/server.js` is being imported and hard-fails every
+ * suite that imports it, including `src/server.test.ts`.
  */
 export function createTestRouteTable(
   handlers: RouteHandlerRegistry = {}
