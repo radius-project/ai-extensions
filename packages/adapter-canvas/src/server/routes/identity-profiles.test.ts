@@ -1072,33 +1072,37 @@ async function recordLegacy(input: DifferentialCase): Promise<Side> {
   return { recording, calls: calls.log, thrown: null, ran };
 }
 
-const HANDLERS: Record<Route, { method: string; handler: Handler }> = {
-  "credential-profiles": { method: "GET", handler: handleCredentialProfiles },
-  "github-identity": { method: "GET", handler: handleGitHubIdentity },
-  "github-account": { method: "POST", handler: handleGitHubAccount },
-  "save-credential-profile": {
-    method: "POST",
-    handler: handleSaveCredentialProfile
-  },
-  "delete-credential-profile": {
-    method: "POST",
-    handler: handleDeleteCredentialProfile
-  }
+// Only the method is declared here. The handler itself is deliberately NOT
+// mapped by hand — see `recordMigrated`.
+const ROUTE_METHODS: Record<Route, string> = {
+  "credential-profiles": "GET",
+  "github-identity": "GET",
+  "github-account": "POST",
+  "save-credential-profile": "POST",
+  "delete-credential-profile": "POST"
 };
 
 async function recordMigrated(input: DifferentialCase): Promise<Side> {
   const { calls, deps } = differentialPorts(input);
-  const registered = HANDLERS[input.route];
   const { recording, response } = recorder();
-  // Resolved from the registry the production route module exports, so a route
-  // this harness forgot to wire leaves `ran` false rather than quietly
-  // comparing two empty recordings.
+  const method = ROUTE_METHODS[input.route];
+  // Resolved out of the registry `createIdentityProfilesRoutes` actually
+  // returns, keyed exactly as the route table dispatches, rather than from a
+  // hand-written map of the same five functions. Two things follow: a route
+  // this harness forgot to wire leaves `ran` false instead of quietly comparing
+  // two empty recordings, and a handler bound to the wrong key in the factory
+  // fails these cases instead of passing because the harness re-derived the
+  // mapping correctly by hand.
+  const registered =
+    method ?
+      createIdentityProfilesRoutes(deps)[`${method} /api/${input.route}`]
+    : undefined;
   if (!registered) {
     return { recording, calls: calls.log, thrown: null, ran: false };
   }
   const context = createRequestContext(
     request(
-      registered.method,
+      method,
       `/api/${input.route}${input.query ?? ""}`,
       input.body ?? ""
     ),
@@ -1109,7 +1113,7 @@ async function recordMigrated(input: DifferentialCase): Promise<Side> {
   let ran = false;
   try {
     ran = true;
-    await registered.handler(context, deps);
+    await registered(context);
   } catch (e) {
     return {
       recording,
@@ -1302,6 +1306,61 @@ describe("identity-profiles legacy/migrated differential contract", () => {
     ],
     ["malformed body", { route: "github-account", body: "not json" }],
     ["null body", { route: "github-account", body: "null" }],
+    // Truthy non-string fields. `(value || "").trim()` has no `trim` to call on
+    // these, so legacy throws a TypeError into its own catch and answers 400
+    // WITHOUT reaching the port. Coercing them to strings instead would switch
+    // the account to "42" and answer 200. Falsy non-strings are covered
+    // separately below because `||` rescues those before the call.
+    [
+      "numeric login",
+      {
+        route: "github-account",
+        body: '{"login":42}',
+        identity: { switchResult: { ok: false } }
+      }
+    ],
+    [
+      "boolean login",
+      {
+        route: "github-account",
+        body: '{"login":true}',
+        identity: { switchResult: { ok: false } }
+      }
+    ],
+    [
+      "array login",
+      {
+        route: "github-account",
+        body: `{"login":[${JSON.stringify(SWITCH_TARGET_LOGIN)}]}`,
+        identity: { switchResult: { ok: false } }
+      }
+    ],
+    [
+      "object login",
+      {
+        route: "github-account",
+        body: '{"login":{"name":"octocat"}}',
+        identity: { switchResult: { ok: false } }
+      }
+    ],
+    // The falsy half of the same read: `||` replaces these with "" before
+    // `.trim()`, so both sides agree on an empty login and no TypeError occurs.
+    [
+      "zero login",
+      {
+        route: "github-account",
+        body: '{"login":0}',
+        identity: { switchResult: { ok: false } }
+      }
+    ],
+    [
+      "false login",
+      {
+        route: "github-account",
+        body: '{"login":false}',
+        identity: { switchResult: { ok: false } }
+      }
+    ],
     [
       "throwing switch",
       {
@@ -1366,6 +1425,42 @@ describe("identity-profiles legacy/migrated differential contract", () => {
     ["empty body", { route: "save-credential-profile", body: "" }],
     ["malformed body", { route: "save-credential-profile", body: "not json" }],
     ["null body", { route: "save-credential-profile", body: "null" }],
+    // Same truthy non-string trap as `github-account`, but the consequence is a
+    // write: coercion would hand `saveCredentialProfile` a stringified key and
+    // answer 200, where legacy throws into its catch and answers 400. Note the
+    // array case coerces to a *plausible* repo slug, so the wrong behavior
+    // looks correct in the response body.
+    [
+      "numeric repo",
+      { route: "save-credential-profile", body: '{"repo":42,"name":"prod"}' }
+    ],
+    [
+      "array repo and name",
+      {
+        route: "save-credential-profile",
+        body: '{"repo":["octo/app"],"name":["prod"]}'
+      }
+    ],
+    [
+      "object repo",
+      {
+        route: "save-credential-profile",
+        body: '{"repo":{"full":"octo/app"},"name":"prod"}'
+      }
+    ],
+    [
+      "boolean name",
+      {
+        route: "save-credential-profile",
+        body: '{"repo":"octo/app","name":true}'
+      }
+    ],
+    // Falsy non-strings still reach the shared `!repo || !name` guard rather
+    // than throwing, so these must stay 400-by-validation on both sides.
+    [
+      "zero repo",
+      { route: "save-credential-profile", body: '{"repo":0,"name":"prod"}' }
+    ],
     [
       "throwing store",
       {
@@ -1417,6 +1512,34 @@ describe("identity-profiles legacy/migrated differential contract", () => {
       { route: "delete-credential-profile", body: "not json" }
     ],
     ["null body", { route: "delete-credential-profile", body: "null" }],
+    // The most consequential instance of the trap. `delete` has no validation
+    // guard, so under coercion a truthy non-string reaches
+    // `deleteCredentialProfile` and performs a delete that legacy rejected with
+    // 400 before touching the store. Legacy throws on `.trim()` first.
+    [
+      "numeric repo",
+      { route: "delete-credential-profile", body: '{"repo":42,"name":"prod"}' }
+    ],
+    [
+      "array repo and name",
+      {
+        route: "delete-credential-profile",
+        body: '{"repo":["octo/app"],"name":["prod"]}'
+      }
+    ],
+    [
+      "object name",
+      {
+        route: "delete-credential-profile",
+        body: '{"repo":"octo/app","name":{"label":"prod"}}'
+      }
+    ],
+    // Falsy non-strings reach the store as empty strings on both sides, which
+    // is the documented `save`/`delete` asymmetry rather than the trap.
+    [
+      "false repo",
+      { route: "delete-credential-profile", body: '{"repo":false,"name":0}' }
+    ],
     [
       "throwing store",
       {
