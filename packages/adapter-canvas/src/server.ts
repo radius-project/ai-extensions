@@ -9174,7 +9174,8 @@ function createRequestHandler(
                   try {
                     cpLog = await statusReader.controlPlaneLog();
                   } catch {
-                    cpLog = null;
+                    // Best-effort: a missing/unreadable control-plane log must
+                    // not mask the run-log failure details above.
                   }
                   if (cpLog) {
                     const cpTail = cpLog
