@@ -82,19 +82,25 @@ type Handler = (
   deps: OperationsStatusDependencies
 ) => void;
 
+function context(
+  url: string,
+  response: ServerResponse<IncomingMessage>
+): ReturnType<typeof createRequestContext> {
+  return createRequestContext(
+    request(url),
+    response,
+    "panel-a",
+    new Map<string, CanvasServerEntry>()
+  );
+}
+
 function run(
   url: string,
   handler: Handler,
   deps: OperationsStatusDependencies
 ): Recording {
   const { recording, response } = recorder();
-  const context = createRequestContext(
-    request(url),
-    response,
-    "panel-a",
-    new Map<string, CanvasServerEntry>()
-  );
-  handler(context, deps);
+  handler(context(url, response), deps);
   return recording;
 }
 
@@ -391,11 +397,12 @@ function legacyById(
 
 function legacyOperations(
   records: Record<string, unknown>,
-  latest: unknown
+  latest: unknown,
+  latestAny: unknown = latest
 ): LegacyOperations {
   return {
     latest: () => latest,
-    latestAny: () => latest,
+    latestAny: () => latestAny,
     get: (operationId) => records[operationId] ?? null
   };
 }
@@ -461,16 +468,37 @@ const FAILED = {
   }
 };
 
+// `latestAny()` returns a different record from `latest(repo)` so the
+// differential cases fail if a handler calls the wrong lookup port.
+const LATEST_ANY = { ...RUNNING, operationId: "op-any", repo: "octo/other" };
+
 describe("operations-status legacy/migrated differential contract", () => {
   it.each([
-    ["latest by repo", "/api/operations?repo=octo%2Fapp", RUNNING],
-    ["latest without repo", "/api/operations", RUNNING],
-    ["latest terminal record", "/api/operations?repo=octo%2Fapp", FAILED],
-    ["latest empty state", "/api/operations", null]
-  ])("produces an identical %s response", (_label, url, latest) => {
+    ["latest by repo", "/api/operations?repo=octo%2Fapp", RUNNING, LATEST_ANY],
+    ["latest without repo", "/api/operations", RUNNING, LATEST_ANY],
+    [
+      "latest with a repeated repo parameter",
+      "/api/operations?repo=octo%2Fapp&repo=octo%2Fsecond",
+      RUNNING,
+      LATEST_ANY
+    ],
+    [
+      "latest with an empty repo parameter",
+      "/api/operations?repo=",
+      RUNNING,
+      LATEST_ANY
+    ],
+    [
+      "latest terminal record",
+      "/api/operations?repo=octo%2Fapp",
+      FAILED,
+      LATEST_ANY
+    ],
+    ["latest empty state", "/api/operations", null, null]
+  ])("produces an identical %s response", (_label, url, latest, latestAny) => {
     const [legacy, migrated] = differential(
       url,
-      legacyOperations({}, latest),
+      legacyOperations({}, latest, latestAny),
       "latest"
     );
     expect(migrated).toEqual(legacy);
@@ -506,15 +534,29 @@ describe("operations-status legacy/migrated differential contract", () => {
 
   it("throws identically on a malformed percent escape", () => {
     const operations = legacyOperations({}, null);
+
+    // Each implementation is invoked separately: routing both through
+    // `differential` would let the legacy throw hide whether the migrated
+    // handler throws at all.
     const legacyRecorder = recorder();
     expect(() =>
       legacyById("/api/operations/%", legacyRecorder.response, operations)
     ).toThrow(URIError);
-    expect(() => differential("/api/operations/%", operations, "byId")).toThrow(
-      URIError
-    );
+
+    const migratedRecorder = recorder();
+    expect(() =>
+      handleOperationById(
+        context("/api/operations/%", migratedRecorder.response),
+        dependencies({
+          get: (operationId) => operations.get(operationId),
+          toClientView
+        })
+      )
+    ).toThrow(URIError);
+
     // Neither implementation writes anything before throwing, which is why the
     // request is left unanswered rather than merely erroring.
+    expect(migratedRecorder.recording).toEqual(legacyRecorder.recording);
     expect(legacyRecorder.recording.status).toBe(0);
     expect(legacyRecorder.recording.headerOrder).toEqual([]);
   });
