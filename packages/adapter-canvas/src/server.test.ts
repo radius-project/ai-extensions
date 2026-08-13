@@ -30,7 +30,8 @@ import {
   resolveDeployStatus,
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
-  triggerDeployRepairHandoff
+  triggerDeployRepairHandoff,
+  DEPLOY_MONITOR_LOST_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
@@ -1721,6 +1722,40 @@ describe("triggerDeployRepairHandoff", () => {
       expect(running.repairLoop).toBe(false);
       expect(running.repairAttempt).toBe(0);
       expect(running.error).toMatch(/still running/);
+    });
+
+    it("refuses a redeploy when monitoring was lost, since the run may still be live", () => {
+      // The timeout path sets deployStatus to "failed" while saying the run may
+      // still be going. Without this, an attempt-bound retry would sail through
+      // the failed check and race a second workflow against the same target.
+      const lost = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
+          deployErrorKind: DEPLOY_MONITOR_LOST_KIND,
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/7"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(lost.repairLoop).toBe(false);
+      expect(lost.repairAttempt).toBe(0);
+      expect(lost.error).toMatch(/may still be running/);
+      expect(lost.error).toContain(
+        "https://github.com/acme/widgets/actions/runs/7"
+      );
+    });
+
+    it("still repairs a confirmed failure that carries an unrelated error kind", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployErrorKind: "branch-not-pushed"
+          } as CanvasState,
+          "attempt-A"
+        )
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
     });
 
     it("refuses a redeploy on an attempt that already succeeded", () => {

@@ -998,6 +998,12 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
+// Marks a deploy that failed only in the sense that we stopped watching it —
+// the monitor timed out or died before the workflow reported a conclusion, so
+// the run may still be in flight. Distinct from a confirmed workflow failure,
+// which is the only kind a repair redeploy may act on.
+export const DEPLOY_MONITOR_LOST_KIND = "monitor-lost";
+
 // Decide, server-side, whether an incoming deploy continues an existing repair
 // loop, and whether that loop still has budget. The tool validates the attempt
 // before it POSTs, but another deploy can start in between, so re-check here
@@ -1043,6 +1049,22 @@ export function resolveDeployRepairLoop(
         deployStatus === "in_progress" ?
           `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
         : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+    };
+  }
+  // "failed" covers two different things, and only one is safe to redeploy.
+  // When monitoring timed out or died, the workflow was never observed
+  // reaching a conclusion and may still be running, so a redeploy would race a
+  // second run against the same target — exactly what the in_progress check
+  // above prevents, arriving by a different route. Deciding this from stored
+  // state keeps the resolver synchronous; re-querying the run would put an
+  // await in front of beginDeployAttempt, which must not happen.
+  if ((state?.deployErrorKind || "") === DEPLOY_MONITOR_LOST_KIND) {
+    const runUrl = state?.deployRunUrl || "";
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `Deploy attempt "${requested}" stopped being monitored before the workflow reported a result, so it may still be running and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the run on GitHub"} and tell the user what it shows; once it has finished, they can start a new deploy.`
     };
   }
   // The cap the handoff prompt states is also enforced here, because prompt
@@ -9213,6 +9235,10 @@ function createRequestHandler(
               repo +
               "/actions/runs/" +
               dRunId;
+            // Monitoring gave up; the run itself may still be going. Mark it so
+            // an attempt-bound repair redeploy is refused rather than racing a
+            // second workflow against the same target.
+            entry.state.deployErrorKind = DEPLOY_MONITOR_LOST_KIND;
             entry.state.deployStatus = "failed";
           })()
             .catch((monErr) => {
@@ -9228,6 +9254,10 @@ function createRequestHandler(
                   entry.state.deployError =
                     "Deploy monitoring stopped unexpectedly: " +
                     (monErr && monErr.message ? monErr.message : monErr);
+                // Same reasoning as the timeout above: the monitor died, so
+                // the workflow's real outcome is unknown and a repair redeploy
+                // must not assume the run is over.
+                entry.state.deployErrorKind = DEPLOY_MONITOR_LOST_KIND;
                 entry.state.deployStatus = "failed";
               } catch {
                 /* ignore */
