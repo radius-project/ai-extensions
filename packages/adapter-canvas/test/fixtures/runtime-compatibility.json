@@ -1,0 +1,255 @@
+{
+  "canvas": {
+    "id": "radius",
+    "displayName": "Radius",
+    "description": "Application modeling and deployment: configure cloud credentials, generate app.bicep, visualize application graphs, view PR diffs, and create deployment environments.",
+    "pages": [
+      "credentials",
+      "graph",
+      "planned",
+      "graph-diff",
+      "deployed",
+      "environment",
+      "deploying"
+    ]
+  },
+  "acceptedSurface": {
+    "actions": ["get_graph_resources", "update_source_refs"],
+    "tools": [
+      "radius_generate_app",
+      "radius_generate_pr_diff_markdown",
+      "radius_publish_custom_type_extension",
+      "radius_publish_recipe",
+      "radius_deploy",
+      "radius_deploy_status"
+    ],
+    "removedActions": [
+      "configure_oidc",
+      "create_environment",
+      "render_graph",
+      "render_graph_diff"
+    ],
+    "removedTools": [
+      "radius_configure_oidc",
+      "radius_create_environment",
+      "radius_render_graph",
+      "radius_render_graph_diff"
+    ]
+  },
+  "routes": [
+    {
+      "method": "ANY",
+      "path": "/api/ping",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/operations",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/operations/",
+      "match": "prefix"
+    },
+    {
+      "method": "POST",
+      "path": "/api/open-source",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/oidc",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/verify-azure-login",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/azure-cli-assist",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/verify-aws-login",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/credential-profiles",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/github-identity",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/github-account",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/save-credential-profile",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/delete-credential-profile",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/delete-environment",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/azure-auto-setup",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/list-azure-app-registrations",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/azure-app-serves-repos",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/app-params",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/create-environment",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/load-graph-stream",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/progress",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/deployed-graph",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/deploy-status",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/load-graph",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/list-environments",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/list-applications",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/list-deployments",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/delete-deployment",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/verify-status",
+      "match": "exact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/user-repos",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/repo-branches",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/plan-graph",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/discover-branches",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/diff-branches",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/deploy",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/deploy-reset",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/discover",
+      "match": "exact"
+    }
+  ],
+  "htmlMarkers": {
+    "credentials": ["Cloud Accounts", "id=\"panel-azure\""],
+    "graph": ["id=\"graph-container\"", "/api/load-graph"],
+    "planned": ["Plan Deployment", "/api/plan-graph"],
+    "graph-diff": ["id=\"graph-container\"", "/api/diff-branches"],
+    "deployed": ["id=\"graph-container\"", "/api/deployed-graph"],
+    "environment": ["id=\"pane-credentials\"", "/api/operations"],
+    "deploying": ["id=\"deploy-branch-select\"", "/api/deploy"]
+  },
+  "branchBehavior": {
+    "workspace": {
+      "repo": "octo/app",
+      "worktreeBranch": "feature/test",
+      "ignoredInputBranch": "main"
+    },
+    "remote": {
+      "repo": "octo/remote",
+      "branch": "release"
+    }
+  },
+  "artifact": {
+    "path": "plugins/radius/dist/extension.mjs",
+    "sdkExternal": "@github/copilot-sdk/extension"
+  }
+}

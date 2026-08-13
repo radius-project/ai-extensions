@@ -2,34 +2,70 @@
 ---
 name: Build
 
+# Runs the full check suite and produces the installable plugin at
+# plugins/radius/dist, uploaded as the `plugin-dist` artifact.
+#
+# Triggered directly for pull requests, and called by publish.yml (edge channel,
+# on every push to main) and release.yml (release channel, on demand) so a
+# publish builds exactly once instead of duplicating this job.
+
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      channel:
+        description: >-
+          `edge` stamps a throwaway prerelease version computed by Changesets;
+          `release` ships the version already committed to the manifests.
+        type: string
+        default: edge
+      ref:
+        description: Git ref or commit to build. Defaults to the triggering ref.
+        type: string
+        default: ""
+    outputs:
+      version:
+        description: Version stamped into the built plugin manifests.
+        value: ${{ jobs.build.outputs.version }}
 
 permissions: {}
 
 jobs:
   build:
-    name: Build extension.mjs
+    name: Build plugin dist
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read # @changesets/changelog-github resolves each entry's PR
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # `changeset version` looks up the commit that added each changeset. In
+          # a shallow clone it recovers by running `git fetch --deepen`, which
+          # cannot authenticate once the checkout credential is dropped below.
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Must run before the version is resolved below, which rewrites
+      # plugins/radius/package.json in the workspace.
+      - name: Check derived versions
+        run: pnpm run version:check
 
       - name: Typecheck
         run: pnpm run typecheck
@@ -40,15 +76,78 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Run unit tests
-        run: pnpm run test
+      - name: Run Node tests with coverage
+        id: coverage
+        run: pnpm run coverage
 
-      - name: Build
-        run: pnpm run build
+      - name: Write coverage summary
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
+        run: node scripts/coverage-summary.mjs
 
-      - name: Upload extension.mjs artifact
+      - name: Upload coverage reports
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: extension-mjs
-          path: plugins/radius/extension.mjs
+          name: coverage-reports
+          path: |
+            coverage/coverage-summary.json
+            coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Check progress demo bundle
+        run: pnpm --filter @radius-project/adapter-canvas run demo:check
+
+      # edge:    Changesets owns versioning, so ask it what the next release
+      #          will be instead of guessing from the manifest. --snapshot
+      #          stamps the calculated version (see snapshot.useCalculatedVersion
+      #          in .changeset/config.json) with an `edge` prerelease tag, e.g.
+      #          0.1.0-edge-20260807014054. That sorts below the release it
+      #          precedes and above anything already shipped. This rewrites
+      #          plugins/radius/package.json in the CI workspace only — nothing
+      #          is committed. An ephemeral patch changeset makes documentation-
+      #          only pushes snapshot the next patch when no package changeset is
+      #          pending; an existing minor or major changeset still takes precedence.
+      # release: `changeset version` already committed the version to main, so
+      #          ship it verbatim. The release workflow tags it after checks.
+      - name: Resolve version
+        id: version
+        env:
+          CHANNEL: ${{ inputs.channel || 'edge' }}
+          # `changelog: @changesets/changelog-github` turns every entry into a
+          # GraphQL lookup, and it reads the token from the environment only.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "release" ]; then
+            version="$(node scripts/version.mjs)"
+          elif [ "$CHANNEL" = "edge" ]; then
+            pnpm exec changeset add --patch radius \
+              --message 'Publish the current commit to the rolling edge channel.'
+            pnpm exec changeset version --snapshot edge
+            version="$(node scripts/version.mjs)"
+          else
+            echo "::error::Unsupported build channel: $CHANNEL"
+            exit 1
+          fi
+          echo "Stamping plugin dist as ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
+        run: pnpm run build
+
+      # Runs against the exact bundle uploaded below. This intentionally stays
+      # after Build rather than relying on a pre-existing workspace artifact.
+      - name: Run built-artifact smoke tests
+        run: pnpm run test:integration:artifact
+      - name: Verify Bicep checker is packaged
+        run: test -f plugins/radius/dist/skills/radius-app-bicep/scripts/validate-bicep.mjs
+
+      - name: Upload plugin dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-dist
+          path: plugins/radius/dist
           if-no-files-found: error

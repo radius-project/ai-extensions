@@ -3,14 +3,16 @@ import babelParser from "@babel/eslint-parser";
 import globals from "globals";
 
 const sourceFiles = [
-  "eslint.config.js",
+  "eslint.config.mjs",
   "packages/**/*.{ts,mjs}",
+  "plugins/radius/skills/**/*.mjs",
+  "scripts/**/*.mjs",
   "vitest.config.ts"
 ];
 const restrictedCoreImports = [
   {
     selector:
-      "ImportExpression[source.value=/^(?:@github\\/copilot-sdk|@radius-project\\/(?:canvas|shared))(?:\\/|$)/]",
+      "ImportExpression[source.value=/^(?:@github\\/copilot-sdk|@radius-project\\/adapter-(?:canvas|shared))(?:\\/|$)/]",
     message: "Core must not dynamically import adapters or the Copilot SDK."
   },
   {
@@ -27,7 +29,7 @@ const restrictedCoreImports = [
 
 export default [
   {
-    ignores: ["plugins/radius/extension.mjs"]
+    ignores: ["plugins/radius/dist/**"]
   },
   {
     files: sourceFiles,
@@ -85,8 +87,8 @@ export default [
           paths: [
             "@github/copilot-sdk",
             "@github/copilot-sdk/extension",
-            "@radius-project/canvas",
-            "@radius-project/shared",
+            "@radius-project/adapter-canvas",
+            "@radius-project/adapter-shared",
             "http",
             "https",
             "node:http",
@@ -113,7 +115,10 @@ export default [
               message: "Core must not depend on the Copilot SDK."
             },
             {
-              group: ["@radius-project/canvas/**", "@radius-project/shared/**"],
+              group: [
+                "@radius-project/adapter-canvas/**",
+                "@radius-project/adapter-shared/**"
+              ],
               message: "Core must not depend on adapter packages."
             }
           ]
@@ -124,10 +129,7 @@ export default [
   },
   {
     files: ["packages/core/src/**/*.ts"],
-    ignores: [
-      "packages/core/src/**/*_test.ts",
-      "packages/core/src/**/*.live_test.ts"
-    ],
+    ignores: ["packages/core/src/**/*.test.ts"],
     rules: {
       "no-restricted-globals": [
         "error",

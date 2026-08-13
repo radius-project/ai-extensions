@@ -5,17 +5,31 @@ import {
   isAksClusterName,
   isResourceGroupName,
   buildAppCreateArgs,
+  buildAppDeleteArgs,
+  buildAppOwnerAddArgs,
+  buildAppOwnerListArgs,
+  buildAppTagPatchArgs,
+  buildAppTagShowArgs,
+  buildRadiusAppProvenanceTags,
   isServiceManagementReferenceError,
+  isAppOwnerAlreadyAssignedError,
   fetchGitHubJson,
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
+  missingRequiredAppTags,
+  parseAppTags,
+  parseRadiusAppProvenanceTags,
+  decideRadiusAppOwnership,
+  parseDirectoryObjectIds,
   discoverStatusText,
   decideAppSelection,
   parseServedReposFromSubjects,
   validateAppRegistrationName,
   formatServesReposLabel,
+  RADIUS_MANAGED_APP_TAG,
   type GitHubJsonResponse
 } from "./azure-oidc.js";
 
@@ -132,6 +146,116 @@ describe("buildAppCreateArgs", () => {
   });
 });
 
+describe("app owner/tag helpers", () => {
+  it("builds argv for adding and listing app owners", () => {
+    expect(
+      buildAppOwnerAddArgs({ appId: "app-id", ownerObjectId: "user-id" })
+    ).toEqual([
+      "ad",
+      "app",
+      "owner",
+      "add",
+      "--id",
+      "app-id",
+      "--owner-object-id",
+      "user-id"
+    ]);
+    expect(buildAppOwnerListArgs({ appId: "app-id" })).toEqual([
+      "ad",
+      "app",
+      "owner",
+      "list",
+      "--id",
+      "app-id",
+      "--query",
+      "[].id",
+      "-o",
+      "tsv"
+    ]);
+  });
+
+  it("parses owner ids from TSV and normalizes case", () => {
+    expect(parseDirectoryObjectIds("A\nb \t A \n")).toEqual(["a", "b"]);
+  });
+
+  it("treats duplicate-owner add errors as benign verification candidates", () => {
+    expect(
+      isAppOwnerAlreadyAssignedError(
+        "One or more added object references already exist for the following modified properties: 'owners'."
+      )
+    ).toBe(true);
+    expect(
+      isAppOwnerAlreadyAssignedError(
+        "Insufficient privileges to complete the operation"
+      )
+    ).toBe(false);
+  });
+
+  it("builds the Radius provenance tag set without blanks or duplicates", () => {
+    expect(
+      buildRadiusAppProvenanceTags({
+        repo: "octo-org/octo-repo",
+        environment: "dev",
+        operationId: "op_123"
+      })
+    ).toEqual([
+      RADIUS_MANAGED_APP_TAG,
+      "radius-repo:octo-org/octo-repo",
+      "radius-environment:dev",
+      "radius-operation:op_123"
+    ]);
+  });
+
+  it("builds the Graph PATCH argv for application tags", () => {
+    expect(
+      buildAppTagPatchArgs({
+        appId: "11111111-2222-3333-4444-555555555555",
+        tags: ["radius-managed", "radius-repo:octo/app"]
+      })
+    ).toEqual([
+      "rest",
+      "--method",
+      "PATCH",
+      "--url",
+      "https://graph.microsoft.com/v1.0/applications(appId='11111111-2222-3333-4444-555555555555')",
+      "--body",
+      '{"tags":["radius-managed","radius-repo:octo/app"]}'
+    ]);
+    expect(buildAppTagShowArgs({ appId: "app-id" })).toEqual([
+      "ad",
+      "app",
+      "show",
+      "--id",
+      "app-id",
+      "--query",
+      "tags",
+      "-o",
+      "json"
+    ]);
+    expect(buildAppDeleteArgs({ appId: "app-id" })).toEqual([
+      "ad",
+      "app",
+      "delete",
+      "--id",
+      "app-id"
+    ]);
+  });
+
+  it("parses tag JSON and reports missing required tags", () => {
+    expect(parseAppTags('["radius-managed","radius-repo:octo/app"]')).toEqual([
+      "radius-managed",
+      "radius-repo:octo/app"
+    ]);
+    expect(parseAppTags("{")).toBeNull();
+    expect(
+      missingRequiredAppTags(
+        ["radius-managed", "radius-repo:octo/app", "other"],
+        ["radius-managed", "radius-environment:dev", "radius-repo:octo/app"]
+      )
+    ).toEqual(["radius-environment:dev"]);
+  });
+});
+
 describe("isServiceManagementReferenceError", () => {
   it("detects the known error identifiers case-insensitively", () => {
     expect(
@@ -199,6 +323,85 @@ describe("fetchGitHubJson retry", () => {
   });
 });
 
+describe("findLegacyMutableCredentialName", () => {
+  const immutable = {
+    federatedCredentials: [],
+    fullName: "octo-org/octo-repo",
+    ownerId: 111,
+    repoId: 222,
+    subjectConfig: { useDefault: true, useImmutableSubject: true }
+  };
+
+  it("finds the legacy mutable credential for a proven immutable repository", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        immutable,
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-mutable",
+            "repo:octo-org/octo-repo:environment:prod"
+          ]
+        ])
+      )
+    ).toBe("github-octo-org-octo-repo-prod-mutable");
+  });
+
+  it("does not warn for an inconclusive default state", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        {
+          ...immutable,
+          subjectConfig: { useDefault: true }
+        },
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-mutable",
+            "repo:octo-org/octo-repo:environment:prod"
+          ]
+        ])
+      )
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { useDefault: false, useImmutableSubject: true },
+    { useDefault: true, useImmutableSubject: false }
+  ])(
+    "does not warn for subject config $useDefault/$useImmutableSubject",
+    (subjectConfig) => {
+      expect(
+        findLegacyMutableCredentialName(
+          { ...immutable, subjectConfig },
+          "environment:prod",
+          new Map([
+            [
+              "github-octo-org-octo-repo-prod-mutable",
+              "repo:octo-org/octo-repo:environment:prod"
+            ]
+          ])
+        )
+      ).toBeUndefined();
+    }
+  );
+
+  it("does not warn when no existing credential matches the mutable subject", () => {
+    expect(
+      findLegacyMutableCredentialName(
+        immutable,
+        "environment:prod",
+        new Map([
+          [
+            "github-octo-org-octo-repo-prod-immutable",
+            "repo:octo-org@111/octo-repo@222:environment:prod"
+          ]
+        ])
+      )
+    ).toBeUndefined();
+  });
+});
+
 describe("resolveOidcSubject", () => {
   const opts = { sleepFn: async () => {} };
 
@@ -212,6 +415,7 @@ describe("resolveOidcSubject", () => {
         stderr: "Not Found (HTTP 404)"
       }
     });
+
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -258,6 +462,183 @@ describe("resolveOidcSubject", () => {
     ]);
   });
 
+  it("creates only the immutable default FIC when GitHub explicitly enables immutable subjects", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          use_immutable_subject: true,
+          sub_claim_prefix: "repo:octo-org@111/octo-repo@222"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("creates both default FICs when a successful response omits immutable fields", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: { use_default: true }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-mutable",
+        subject: "repo:octo-org/octo-repo:environment:prod"
+      },
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("treats an exact immutable default prefix as proven immutable", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "repo:octo-org@111/octo-repo@222"
+        }
+      }
+    });
+
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("normalizes a canonical immutable prefix without repo:", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "octo-org@111/octo-repo@222"
+        }
+      }
+    });
+
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toEqual([
+      {
+        name: "github-octo-org-octo-repo-prod-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:prod"
+      }
+    ]);
+  });
+
+  it("matches a canonical immutable default prefix case-insensitively", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: true,
+          sub_claim_prefix: "repo:OCTO-ORG@111/OCTO-REPO@222"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "prod",
+        suffix: "environment:prod"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials).toHaveLength(1);
+    expect(res.subjectConfig.useImmutableSubject).toBe(true);
+  });
+
+  it.each(["repo:octo-org/octo-repo", "repo:team@corp/octo-repo"])(
+    "keeps both default FICs for an unverified prefix %s",
+    async (prefix) => {
+      const runner = makeRunner({
+        "/repos/octo-org/octo-repo": REPO_OK,
+        "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+          ok: true,
+          status: 200,
+          json: { use_default: true, sub_claim_prefix: prefix }
+        }
+      });
+      const res = await resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "prod",
+          suffix: "environment:prod"
+        },
+        runner,
+        opts
+      );
+      expect(res.federatedCredentials.map((fic) => fic.subject).sort()).toEqual(
+        [
+          "repo:octo-org/octo-repo:environment:prod",
+          "repo:octo-org@111/octo-repo@222:environment:prod"
+        ]
+      );
+      expect(res.subjectConfig.useImmutableSubject).toBe(
+        prefix.includes("@") ? undefined : false
+      );
+    }
+  );
+
   it("builds a single custom subject from include_claim_keys", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
@@ -302,6 +683,7 @@ describe("resolveOidcSubject", () => {
         }
       }
     });
+
     const res = await resolveOidcSubject(
       {
         targetRepo: "octo-org/octo-repo",
@@ -316,6 +698,33 @@ describe("resolveOidcSubject", () => {
     );
   });
 
+  it("infers a custom repository subject is mutable from a name-only prefix", async () => {
+    const runner = makeRunner({
+      "/repos/octo-org/octo-repo": REPO_OK,
+      "/repos/octo-org/octo-repo/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: false,
+          include_claim_keys: ["repository", "context"],
+          sub_claim_prefix: "repo:octo-org/octo-repo"
+        }
+      }
+    });
+    const res = await resolveOidcSubject(
+      {
+        targetRepo: "octo-org/octo-repo",
+        envName: "dev",
+        suffix: "environment:dev"
+      },
+      runner,
+      opts
+    );
+    expect(res.federatedCredentials[0].subject).toBe(
+      "repository:octo-org/octo-repo:environment:dev"
+    );
+  });
+
   it("prefers sub_claim_prefix for a custom immutable repository key", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,
@@ -325,7 +734,7 @@ describe("resolveOidcSubject", () => {
         json: {
           use_default: false,
           include_claim_keys: ["repository"],
-          sub_claim_prefix: "repo:octo-org@9/octo-repo@8"
+          sub_claim_prefix: "repository:octo-org@9/octo-repo@8"
         }
       }
     });
@@ -575,17 +984,43 @@ describe("decideExistingClientId", () => {
     ).toEqual({ action: "reuse" });
   });
 
-  it("errors client-id-not-owned when it exists but is not owned", () => {
-    expect(
-      decideExistingClientId({
-        clientId: "abc",
-        showStatus: "found",
-        owned: false
-      })
-    ).toEqual({
-      action: "error",
-      code: "client-id-not-owned"
+  it("reports that the current signed-in user is not listed as an owner", () => {
+    const result = decideExistingClientId({
+      clientId: "abc",
+      showStatus: "found",
+      owned: false
     });
+    expect(result).toMatchObject({
+      action: "error",
+      code: "app-registration-not-owned"
+    });
+    expect(result.reason).toContain(
+      "The current signed-in user is not listed as one of this App Registration's owners."
+    );
+  });
+
+  it("surfaces Radius-orphan guidance for an unowned AZURE_CLIENT_ID app whose tags match", () => {
+    const result = decideExistingClientId({
+      clientId: "abc",
+      showStatus: "found",
+      owned: false,
+      radiusProvenance: {
+        tags: [
+          "radius-managed",
+          "radius-repo:octo-org/octo-repo",
+          "radius-environment:dev"
+        ],
+        repo: "octo-org/octo-repo",
+        environment: "dev"
+      }
+    });
+    expect(result).toMatchObject({
+      action: "error",
+      code: "app-registration-radius-orphaned",
+      radiusOrphan: true
+    });
+    expect(result.reason).toContain("current signed-in user is not listed");
+    expect(result.reason).toContain("clean it up manually");
   });
 
   it("falls through when the wired app is not found (stale variable)", () => {
@@ -787,6 +1222,7 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [], hasUnownedMatch: true });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
+    expect(r.reason).toContain("current signed-in user is not listed");
   });
 
   it("reuses the single owned match", () => {
@@ -830,6 +1266,27 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [A], explicitAppId: "zzz" });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
+    expect(r.reason).toContain("current signed-in user is not listed");
+  });
+
+  it("surfaces Radius-orphan guidance when an explicit unowned app matches Radius provenance", () => {
+    const r = decideAppSelection({
+      ownedMatches: [A],
+      explicitAppId: "zzz",
+      radiusProvenance: {
+        tags: [
+          "radius-managed",
+          "radius-repo:octo-org/octo-repo",
+          "radius-environment:dev"
+        ],
+        repo: "octo-org/octo-repo",
+        environment: "dev"
+      }
+    });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-radius-orphaned");
+    expect(r.radiusOrphan).toBe(true);
+    expect(r.reason).toContain("clean it up manually");
   });
 
   it("explicitAppId takes precedence over createNew", () => {
@@ -840,6 +1297,155 @@ describe("decideAppSelection", () => {
         createNew: true
       })
     ).toEqual({ action: "reuse", appId: "aaa" });
+  });
+
+  it("preserves reuse for an owned app even if Radius tags are present", () => {
+    expect(
+      decideAppSelection({
+        ownedMatches: [A],
+        radiusProvenance: {
+          tags: [
+            "radius-managed",
+            "radius-repo:octo-org/octo-repo",
+            "radius-environment:dev"
+          ],
+          repo: "octo-org/octo-repo",
+          environment: "dev"
+        }
+      })
+    ).toEqual({ action: "reuse", appId: "aaa", duplicates: false });
+  });
+
+  it("reuses the owned tagged app and only creates the missing subject on the retry path", () => {
+    expect(
+      decideAppSelection({
+        ownedMatches: [A],
+        radiusProvenance: {
+          tags: [
+            "radius-managed",
+            "radius-repo:octo-org/octo-repo",
+            "radius-environment:dev",
+            "radius-operation:op_prior"
+          ],
+          repo: "octo-org/octo-repo",
+          environment: "dev"
+        }
+      })
+    ).toEqual({ action: "reuse", appId: "aaa", duplicates: false });
+
+    expect(
+      selectMissingFederatedCredentials(
+        [
+          {
+            name: "radius-dev",
+            subject: "repo:octo-org/octo-repo:environment:dev"
+          },
+          {
+            name: "radius-dev-immutable",
+            subject: "repo:octo-org@111/octo-repo@222:environment:dev"
+          }
+        ],
+        ["repo:octo-org/octo-repo:environment:dev"]
+      )
+    ).toEqual([
+      {
+        name: "radius-dev-immutable",
+        subject: "repo:octo-org@111/octo-repo@222:environment:dev"
+      }
+    ]);
+  });
+
+  it("reports a Radius-orphaned app with manual cleanup guidance when unowned", () => {
+    const r = decideAppSelection({
+      ownedMatches: [],
+      hasUnownedMatch: true,
+      radiusProvenance: {
+        tags: [
+          "radius-managed",
+          "radius-repo:octo-org/octo-repo",
+          "radius-environment:dev"
+        ],
+        repo: "octo-org/octo-repo",
+        environment: "dev"
+      }
+    });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-radius-orphaned");
+    expect(r.radiusOrphan).toBe(true);
+    expect(r.reason).toBeDefined();
+    expect(r.reason!.toLowerCase()).toContain(
+      "current signed-in user is not listed as one of its owners"
+    );
+    expect(r.reason).toContain("orphaned");
+    expect(r.reason).toContain("manual");
+  });
+
+  it("uses the precise not-listed-as-owner language for ordinary unowned apps", () => {
+    const r = decideAppSelection({ ownedMatches: [], hasUnownedMatch: true });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-not-owned");
+    expect(r.reason).toBeDefined();
+    expect(r.reason!.toLowerCase()).toContain(
+      "current signed-in user is not listed as one of this app registration's owners"
+    );
+    expect(r.reason).not.toContain("another user");
+  });
+});
+
+describe("Radius provenance ownership decisions", () => {
+  it("parses Radius provenance tags into repo/environment metadata", () => {
+    expect(
+      parseRadiusAppProvenanceTags([
+        "radius-managed",
+        "radius-repo:octo-org/octo-repo",
+        "radius-environment:dev",
+        "radius-operation:op_123",
+        "radius-managed"
+      ])
+    ).toEqual({
+      managed: true,
+      repo: "octo-org/octo-repo",
+      environment: "dev",
+      operationId: "op_123"
+    });
+  });
+
+  it("reuses any owned app regardless of Radius provenance", () => {
+    expect(
+      decideRadiusAppOwnership({
+        ownedBySignedInUser: true,
+        radiusProvenance: {
+          tags: [
+            "radius-managed",
+            "radius-repo:octo-org/octo-repo",
+            "radius-environment:dev"
+          ],
+          repo: "octo-org/octo-repo",
+          environment: "dev"
+        }
+      })
+    ).toEqual({ action: "reuse" });
+  });
+
+  it("returns the orphaned cleanup guidance for same-repo/environment Radius apps", () => {
+    const r = decideRadiusAppOwnership({
+      ownedBySignedInUser: false,
+      radiusProvenance: {
+        tags: [
+          "radius-managed",
+          "radius-repo:octo-org/octo-repo",
+          "radius-environment:dev"
+        ],
+        repo: "octo-org/octo-repo",
+        environment: "dev"
+      }
+    });
+    expect(r.action).toBe("error");
+    expect(r.code).toBe("app-registration-radius-orphaned");
+    expect(r.radiusOrphan).toBe(true);
+    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("orphaned");
+    expect(r.reason).toContain("manual");
   });
 });
 

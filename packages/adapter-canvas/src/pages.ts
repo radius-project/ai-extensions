@@ -15,10 +15,21 @@ import { getInlineVendorScripts, getInlineVendorStyles } from "./vendor.js";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
-  CLIENT_HEARTBEAT_JS
+  CLIENT_HEARTBEAT_JS,
+  CLIENT_OPCHIP_JS
 } from "./client.js";
 import { topNav, radiusMark, feedbackWidget } from "./ui.js";
 import { isWorkspaceSelection } from "./workspace.js";
+
+export function serializeBrowserFunction(
+  exportName: string,
+  fn: (...args: any[]) => unknown
+): string {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName)) {
+    throw new Error(`Invalid browser function name "${exportName}".`);
+  }
+  return `var ${exportName} = ${fn.toString()};`;
+}
 
 // Pick the active top-nav section from a page title.
 function navFromTitle(title: string): string {
@@ -141,6 +152,43 @@ ${getInlineVendorStyles()}
     background: transparent;
   }
   .rad-topnav__label { white-space: nowrap; }
+  /* Ambient operation chip. Sits at the far end of the nav bar, deliberately
+     quiet: it is a signal, not a summons. Nothing here moves the page or takes
+     focus. */
+  .rad-opchip {
+    margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 280px;
+    padding: 5px 12px;
+    border: 1px solid var(--rad-stroke);
+    border-radius: 999px;
+    background: var(--rad-surface);
+    color: var(--rad-text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .rad-opchip[hidden] { display: none; }
+  .rad-opchip:hover { border-color: var(--rad-brand); color: var(--rad-text); }
+  .rad-opchip__label { overflow: hidden; text-overflow: ellipsis; }
+  .rad-opchip__dot {
+    flex: 0 0 auto;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--rad-text-tertiary);
+  }
+  .rad-opchip--running .rad-opchip__dot { background: var(--rad-brand); animation: rad-opchip-pulse 1.6s ease-in-out infinite; }
+  .rad-opchip--done .rad-opchip__dot { background: var(--rad-success-solid, var(--rad-info)); }
+  .rad-opchip--warn .rad-opchip__dot { background: var(--rad-warning); }
+  .rad-opchip--failed .rad-opchip__dot { background: var(--rad-danger); }
+  @keyframes rad-opchip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) {
+    .rad-opchip--running .rad-opchip__dot { animation: none; }
+  }
 
   .main-content {
     flex: 1 1 auto;
@@ -425,6 +473,9 @@ ${feedbackWidget()}
 <script>
 ${CLIENT_HEARTBEAT_JS}
 </script>
+<script>
+${CLIENT_OPCHIP_JS}
+</script>
 </body>
 </html>`;
 }
@@ -437,17 +488,35 @@ export function oidcPage(state: CanvasState = {}): string {
   const azureResultHtml =
     azureResult ?
       `<div class="status success">${escapeHtml(azureResult.message)}</div>
-<div class="field"><span class="field-label">Tenant</span><div class="field-value">${escapeHtml(azureResult.tenantName || "")}${azureResult.tenantName ? " — " : ""}${escapeHtml(azureResult.tenantId)}</div></div>
-<div class="field"><span class="field-label">Subscription</span><div class="field-value">${escapeHtml(azureResult.subscriptionName || "")}${azureResult.subscriptionName ? " — " : ""}${escapeHtml(azureResult.subscriptionId)}</div></div>
-<div class="field"><span class="field-label">App Registration</span><div class="field-value">${escapeHtml(azureResult.clientName || "")}${azureResult.clientName ? " — " : ""}${escapeHtml(azureResult.clientId)}</div></div>
+<div class="field"><span class="field-label">Tenant</span><div class="field-value">${escapeHtml(
+        azureResult.tenantName || ""
+      )}${azureResult.tenantName ? " — " : ""}${escapeHtml(
+        azureResult.tenantId
+      )}</div></div>
+<div class="field"><span class="field-label">Subscription</span><div class="field-value">${escapeHtml(
+        azureResult.subscriptionName || ""
+      )}${azureResult.subscriptionName ? " — " : ""}${escapeHtml(
+        azureResult.subscriptionId
+      )}</div></div>
+<div class="field"><span class="field-label">App Registration</span><div class="field-value">${escapeHtml(
+        azureResult.clientName || ""
+      )}${azureResult.clientName ? " — " : ""}${escapeHtml(
+        azureResult.clientId
+      )}</div></div>
 `
     : "";
 
   const awsResultHtml =
     awsResult ?
       `<div class="status success">${escapeHtml(awsResult.message)}</div>
-<div class="field"><span class="field-label">Account</span><div class="field-value">${escapeHtml(awsResult.accountName || "")}${awsResult.accountName ? " — " : ""}${escapeHtml(awsResult.accountId)}</div></div>
-<div class="field"><span class="field-label">Region</span><div class="field-value">${escapeHtml(awsResult.region)}</div></div>`
+<div class="field"><span class="field-label">Account</span><div class="field-value">${escapeHtml(
+        awsResult.accountName || ""
+      )}${awsResult.accountName ? " — " : ""}${escapeHtml(
+        awsResult.accountId
+      )}</div></div>
+<div class="field"><span class="field-label">Region</span><div class="field-value">${escapeHtml(
+        awsResult.region
+      )}</div></div>`
     : "";
 
   return pageShell(
@@ -463,19 +532,29 @@ export function oidcPage(state: CanvasState = {}): string {
 </div>
 <div id="panel-azure">
   <label>Tenant ID</label>
-  <input id="az-tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(azureResult?.tenantId || savedAzure.tenantId || "")}" />
+  <input id="az-tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(
+    azureResult?.tenantId || savedAzure.tenantId || ""
+  )}" />
   <label>Subscription ID</label>
-  <input id="az-sub" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(azureResult?.subscriptionId || savedAzure.subscriptionId || "")}" />
+  <input id="az-sub" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(
+    azureResult?.subscriptionId || savedAzure.subscriptionId || ""
+  )}" />
   <label>Client ID (App Registration)</label>
-  <input id="az-client" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(azureResult?.clientId || savedAzure.clientId || "")}" />
+  <input id="az-client" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(
+    azureResult?.clientId || savedAzure.clientId || ""
+  )}" />
   <button id="btn-azure">Confirm authentication</button>
   <div id="result-azure">${azureResultHtml}</div>
 </div>
 <div id="panel-aws" style="display:none;">
   <label>Account ID</label>
-  <input id="aws-account" placeholder="123456789012" value="${escapeHtml(awsResult?.accountId || "")}" />
+  <input id="aws-account" placeholder="123456789012" value="${escapeHtml(
+    awsResult?.accountId || ""
+  )}" />
   <label>Region</label>
-  <input id="aws-region" placeholder="us-east-1" value="${escapeHtml(awsResult?.region || "")}" />
+  <input id="aws-region" placeholder="us-east-1" value="${escapeHtml(
+    awsResult?.region || ""
+  )}" />
   <button id="btn-aws">Validate</button>
   <div id="result-aws">${awsResultHtml}</div>
 </div>
@@ -947,7 +1026,9 @@ ${graphHeader("graph")}
   <div class="rad-field">
     <label>Branch</label>
     <select id="graph-branch" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
-      <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch || "main")}</option>
+      <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(
+        graphBranch || "main"
+      )}</option>
     </select>
   </div>
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
@@ -1269,13 +1350,17 @@ export function graphDiffPage(state: CanvasState = {}): string {
   const branchOptionsBase = branches
     .map((b) => {
       const sha = branchShas[b] ? ` (${branchShas[b].slice(0, 7)})` : "";
-      return `<option value="${b}"${b === baseBranch ? " selected" : ""}>${b}${sha}</option>`;
+      return `<option value="${b}"${
+        b === baseBranch ? " selected" : ""
+      }>${b}${sha}</option>`;
     })
     .join("");
   const branchOptionsHead = branches
     .map((b) => {
       const sha = branchShas[b] ? ` (${branchShas[b].slice(0, 7)})` : "";
-      return `<option value="${b}"${b === headBranch ? " selected" : ""}>${b}${sha}</option>`;
+      return `<option value="${b}"${
+        b === headBranch ? " selected" : ""
+      }>${b}${sha}</option>`;
     })
     .join("");
 
@@ -1307,7 +1392,9 @@ ${graphHeader("graph-diff")}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status ${state?.diffError ? "error" : "info"}">${state?.diffError ? escapeHtml(state.diffError) : "Loading branches…"}</div>
+<div id="diff-status" class="status ${state?.diffError ? "error" : "info"}">${
+        state?.diffError ? escapeHtml(state.diffError) : "Loading branches…"
+      }</div>
 <script>
 var STATE_BASE = '${escapeHtml(baseBranch)}';
 var STATE_HEAD = '${escapeHtml(headBranch)}';
@@ -1391,7 +1478,11 @@ ${graphHeader("graph-diff")}
     </select>
   </div>
 </div>
-<div id="diff-status" class="status ${state?.diffError ? "error" : "info"}" style="${state?.diffError ? "" : "display:none;"}">${state?.diffError ? escapeHtml(state.diffError) : ""}</div>
+<div id="diff-status" class="status ${
+      state?.diffError ? "error" : "info"
+    }" style="${state?.diffError ? "" : "display:none;"}">${
+      state?.diffError ? escapeHtml(state.diffError) : ""
+    }</div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
@@ -1400,7 +1491,13 @@ ${graphHeader("graph-diff")}
   <span style="color:var(--rad-warning)">~${modified} modified</span>,
   ${unchanged} unchanged
 </div>
-${added === 0 && removed === 0 && modified === 0 ? `<div style="margin-top:12px; padding:10px 14px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; color:var(--rad-text-tertiary);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(baseBranch)}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>` : ""}
+${
+  added === 0 && removed === 0 && modified === 0 ?
+    `<div style="margin-top:12px; padding:10px 14px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; color:var(--rad-text-tertiary);">✅ No application graph changes detected in this PR. The application model is identical between <strong>${escapeHtml(
+      baseBranch
+    )}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>`
+  : ""
+}
 
 <script>
 var resources = ${resourcesJson};
@@ -1808,9 +1905,23 @@ export function environmentPage(state: CanvasState = {}): string {
       r.error ? "Deployment Failed" : "Deployment Initiated",
       `
 <h1>${r.error ? "⚠ Deployment Failed" : "🚀 Deployment Initiated"}</h1>
-<div class="status ${r.error ? "error" : "success"}">${escapeHtml(r.error || r.message)}</div>
-${r.workflowUrl ? `<p style="margin-top:12px;"><a href="${escapeHtml(r.workflowUrl)}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>` : ""}
-${r.workflow ? `<h2>Generated Workflow</h2><pre style="max-height:400px; overflow:auto;">${escapeHtml(r.workflow)}</pre>` : ""}
+<div class="status ${r.error ? "error" : "success"}">${escapeHtml(
+        r.error || r.message
+      )}</div>
+${
+  r.workflowUrl ?
+    `<p style="margin-top:12px;"><a href="${escapeHtml(
+      r.workflowUrl
+    )}" target="_blank" style="color:var(--rad-brand, #da4c2a);">View GitHub Actions workflow run →</a></p>`
+  : ""
+}
+${
+  r.workflow ?
+    `<h2>Generated Workflow</h2><pre style="max-height:400px; overflow:auto;">${escapeHtml(
+      r.workflow
+    )}</pre>`
+  : ""
+}
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <script>
 document.getElementById('back-btn').addEventListener('click', function() {
@@ -1836,12 +1947,18 @@ document.getElementById('back-btn').addEventListener('click', function() {
   <h1>${radiusMark(26)}<span>Environments</span></h1>
 </div>
 <nav class="rad-subtabs" id="env-subtabs">
-  <a href="/?page=environment" data-subtab="environments" class="rad-subtab${activeSubtab === "environments" ? " rad-subtab--active" : ""}">Environments</a>
-  <a href="/?page=credentials" data-subtab="credentials" class="rad-subtab${activeSubtab === "credentials" ? " rad-subtab--active" : ""}">Credentials</a>
+  <a href="/?page=environment" data-subtab="environments" class="rad-subtab${
+    activeSubtab === "environments" ? " rad-subtab--active" : ""
+  }">Environments</a>
+  <a href="/?page=credentials" data-subtab="credentials" class="rad-subtab${
+    activeSubtab === "credentials" ? " rad-subtab--active" : ""
+  }">Credentials</a>
 </nav>
 
 <!-- ══════════════ ENVIRONMENTS SUBTAB ══════════════ -->
-<section id="pane-environments" style="${activeSubtab === "environments" ? "" : "display:none;"}">
+<section id="pane-environments" style="${
+      activeSubtab === "environments" ? "" : "display:none;"
+    }">
 <p class="rad-lede" style="margin-bottom:20px;">An Environment defines where applications are deployed, i.e. a landing zone for applications. Deploy your application into an environment to run it with a specific infrastructure configuration.</p>
 
 <!-- Landing: New Environment button + environments table -->
@@ -1860,6 +1977,62 @@ document.getElementById('back-btn').addEventListener('click', function() {
     <span class="env-warning-banner__icon" aria-hidden="true">⚠</span>
     <span id="env-warning-banner-text" class="env-warning-banner__text"></span>
     <button type="button" id="env-warning-banner-close" class="env-warning-banner__close" aria-label="Dismiss">×</button>
+  </div>
+  <!-- "Ready, action required": the pull-request path, which is neither success
+       nor failure. Setup completed, but the workflows landed on a branch, so
+       credential verification cannot run until the PR merges. -->
+  <div id="env-action-banner" role="status" style="display:none;">
+    <span class="env-action-banner__icon" aria-hidden="true">→</span>
+    <span id="env-action-banner-text" class="env-action-banner__text"></span>
+    <button type="button" id="env-action-banner-close" class="env-action-banner__close" aria-label="Dismiss">×</button>
+  </div>
+  <!-- Progress panel. This replaced a full-screen blocking overlay that showed a
+       spinner and the words "This may take a few moments" for up to eight
+       minutes. It is inline and non-blocking on purpose: the operation runs for
+       minutes, and trapping the user behind a modal for that long is the one
+       thing every comparable product avoids. It lives on the environments
+       landing, above the table the operation will eventually add a row to.
+
+       No percentage. The step count varies with branching — credentials are
+       skipped when they already exist, verification never runs on the pull
+       request path — so any percentage would be derived from an assumed shape.
+       Stage, current step and elapsed time are honest and sufficient. -->
+  <div id="env-progress-panel" style="display:none;" role="region" aria-label="Environment setup progress" tabindex="-1">
+    <div class="env-progress__head">
+      <div class="env-progress__spinner" aria-hidden="true"></div>
+      <div class="env-progress__headtext">
+        <div id="env-progress-title" class="env-progress__title"></div>
+        <div id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"></div>
+      </div>
+      <div id="env-progress-elapsed" class="env-progress__elapsed" aria-label="Elapsed time"></div>
+    </div>
+    <ol id="env-progress-stages" class="env-progress__stages"></ol>
+    <div id="env-progress-failure" class="env-progress__failure" style="display:none;" role="alert">
+      <div class="env-progress__failure-title">Setup didn’t finish</div>
+      <div id="env-progress-failure-message" class="env-progress__failure-copy"></div>
+      <div id="env-progress-cleanup-status" class="env-progress__failure-copy"></div>
+      <div id="env-progress-retry" class="env-progress__failure-copy"></div>
+      <div id="env-progress-cleanup-removed-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Removed resources</div>
+        <ul id="env-progress-cleanup-removed" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-cleanup-retained-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Retained reusable artifacts</div>
+        <ul id="env-progress-cleanup-retained" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-cleanup-warnings-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Cleanup warnings / manual guidance</div>
+        <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
+      </div>
+    </div>
+    <details id="env-progress-details" class="env-progress__details">
+      <summary>Show details</summary>
+      <ol id="env-progress-steps" class="env-progress__steps"></ol>
+    </details>
+    <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
+      <a id="env-progress-resume" class="rad-btn rad-btn--secondary" href="#">View planned graph</a>
+      <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
+    </div>
   </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>
   <div class="rad-table-wrap">
@@ -1884,12 +2057,16 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-section__title">1 · Name this environment</div>
       <div class="rad-field" style="max-width:420px;">
         <label>Environment name</label>
-        <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(envName)}" />
+        <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(
+          envName
+        )}" />
         <div class="rad-field__help">The deployment target you'll deploy apps into by name.</div>
       </div>
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
-      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(deployDefaultBranch || "main")}" />
+      <input type="hidden" id="deploy-branch-select" value="${escapeHtml(
+        deployDefaultBranch || "main"
+      )}" />
       <input type="hidden" id="az-client-id" value="" />
       <input type="hidden" id="env-selected-provider" value="" />
     </div>
@@ -1964,10 +2141,16 @@ document.getElementById('back-btn').addEventListener('click', function() {
       <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
         <label>Azure app registration</label>
-        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml((ctxRepo || "").replace("/", "-"))}" />
+        <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml(
+          (ctxRepo || "").replace("/", "-")
+        )}" data-default-name="radius-deploy-${escapeHtml(
+          (ctxRepo || "").replace("/", "-")
+        )}" />
         <input type="hidden" id="az-selected-app-id" value="" />
         <div class="rad-field__help">
-          Created in your tenant, federated to <code>repo:${escapeHtml(ctxRepo)}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
+          Created in your tenant, federated to <code>repo:${escapeHtml(
+            ctxRepo
+          )}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
          <a href="#" id="az-use-existing-link">use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
@@ -2046,7 +2229,9 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </div>
 </section>
 <!-- ══════════════ CREDENTIALS SUBTAB ══════════════ -->
-<section id="pane-credentials" style="${activeSubtab === "credentials" ? "" : "display:none;"}">
+<section id="pane-credentials" style="${
+      activeSubtab === "credentials" ? "" : "display:none;"
+    }">
 <p class="rad-lede" style="margin-bottom:20px;">Configure and manage the credentials needed to connect to your cloud account. Each environment requires credentials to deploy infrastructure.</p>
 
 <div id="cred-landing">
@@ -2085,6 +2270,17 @@ document.getElementById('back-btn').addEventListener('click', function() {
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="rad-section" id="cred-ghcr-section">
+      <div class="rad-section__title">GitHub Packages access</div>
+      <div class="rad-section__desc">Radius stores deployment state in a private GHCR package. Verify that the active GitHub account can publish packages before saving this profile.</div>
+      <div id="cred-ghcr-status" style="margin-top:12px; font-size:13px; color:var(--rad-text-tertiary);">Checking GitHub Packages access…</div>
+      <div id="cred-ghcr-command-row" style="display:none; margin-top:10px; align-items:center; gap:8px; background:var(--rad-code-bg); border:1px solid var(--rad-stroke); border-radius:6px; padding:8px 10px;">
+        <code id="cred-ghcr-command" style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:pre-wrap; overflow-wrap:anywhere;"></code>
+        <button type="button" id="cred-ghcr-copy" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy command</button>
+      </div>
+      <button type="button" id="cred-ghcr-retry" class="rad-btn rad-btn--neutral" style="display:none; margin:10px 0 0;">I’ve updated permissions — retry</button>
     </div>
 
     <!-- Azure account -->
@@ -2127,15 +2323,6 @@ document.getElementById('back-btn').addEventListener('click', function() {
 </div>
 </section>
 
-<div id="env-creating-modal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="display:flex; align-items:center; gap:16px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:340px;">
-    <div class="env-pie-spinner" style="flex:0 0 auto; width:34px; height:34px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite;"></div>
-    <div style="min-width:0;">
-      <div id="env-creating-title" style="font-size:14px; line-height:1.4;">Creating environment…</div>
-      <div style="font-size:12px; color:var(--rad-text-tertiary); margin-top:2px;">This may take a few moments</div>
-    </div>
-  </div>
-</div>
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:420px; width:90%;">
@@ -2212,6 +2399,45 @@ document.getElementById('back-btn').addEventListener('click', function() {
 .env-warning-banner__text strong { font-weight:600; }
 .env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-warning-banner__close:hover { color:var(--rad-text); }
+/* "Ready, action required" banner — the pull-request terminal state. Reads as
+   informational rather than as a failure, because nothing went wrong. */
+#env-action-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-action-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-primary); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-action-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.5; }
+.env-action-banner__text strong { font-weight:600; }
+.env-action-banner__text a { color:var(--rad-primary); }
+.env-action-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-action-banner__close:hover { color:var(--rad-text); }
+/* Progress panel — inline, non-blocking, and deliberately not a progress bar. */
+#env-progress-panel { margin:0 0 16px; padding:14px 16px; border:1px solid var(--rad-stroke); border-radius:10px; background:var(--rad-surface); box-shadow:0 1px 2px var(--rad-shadow); }
+.env-progress__head { display:flex; align-items:flex-start; gap:12px; }
+.env-progress__spinner { flex:0 0 auto; width:22px; height:22px; margin-top:1px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }
+.env-progress--done .env-progress__spinner { animation:none; background:var(--rad-success-solid, var(--rad-info)); }
+.env-progress--failed .env-progress__spinner { animation:none; background:var(--rad-danger); }
+/* State is never carried by motion or color alone. */
+@media (prefers-reduced-motion: reduce) { .env-progress__spinner { animation:none; } }
+.env-progress__headtext { flex:1 1 auto; min-width:0; }
+.env-progress__title { font-size:14px; font-weight:600; color:var(--rad-text); line-height:1.4; }
+.env-progress__activity { font-size:12px; color:var(--rad-text-tertiary); margin-top:2px; line-height:1.4; }
+.env-progress__elapsed { flex:0 0 auto; font-size:12px; color:var(--rad-text-tertiary); font-variant-numeric:tabular-nums; }
+.env-progress__stages { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:6px; }
+.env-progress__stage { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--rad-text-tertiary); }
+.env-progress__stage--running { color:var(--rad-text); font-weight:600; }
+.env-progress__stage--succeeded { color:var(--rad-text); }
+.env-progress__glyph { flex:0 0 auto; width:16px; text-align:center; font-size:11px; }
+.env-progress__failure { margin-top:12px; padding:12px 14px; border-radius:8px; background:var(--rad-danger-bg); border:1px solid color-mix(in srgb, var(--rad-danger) 55%, transparent); display:flex; flex-direction:column; gap:8px; }
+.env-progress__failure-title { font-size:13px; font-weight:600; color:var(--rad-text); }
+.env-progress__failure-copy { font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__failure-label { font-size:12px; font-weight:600; color:var(--rad-text); margin-bottom:4px; }
+.env-progress__failure-block { display:flex; flex-direction:column; gap:4px; }
+.env-progress__failure-list { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__details { margin-top:12px; }
+.env-progress__details > summary { font-size:12px; color:var(--rad-text-tertiary); cursor:pointer; }
+.env-progress__steps { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; }
+.env-progress__step { display:flex; gap:8px; font-size:12px; color:var(--rad-text-tertiary); line-height:1.45; }
+.env-progress__step--warning { color:var(--rad-text); }
+.env-progress__step--failed { color:var(--rad-danger); }
+.env-progress__actions { display:flex; gap:8px; margin-top:12px; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
@@ -2415,8 +2641,7 @@ function wireRowActions() {
 
 function showEnvForm(preset) {
     preset = preset || {};
-    var sb = document.getElementById('env-success-banner');
-    if (sb) sb.style.display = 'none';
+    hideEnvTerminalBanners();
     envNameInput.value = preset.name !== undefined ? preset.name : '';
     document.getElementById('az-client-id').value = '';
     clearSharedAppPin();
@@ -2444,6 +2669,13 @@ var envSuccessClose = document.getElementById('env-success-banner-close');
 if (envSuccessClose) envSuccessClose.addEventListener('click', function() {
     document.getElementById('env-success-banner').style.display = 'none';
 });
+
+function hideEnvTerminalBanners() {
+    ['env-success-banner', 'env-error-banner', 'env-warning-banner', 'env-action-banner'].forEach(function(id) {
+        var banner = document.getElementById(id);
+        if (banner) banner.style.display = 'none';
+    });
+}
 
 // Show a red error banner on the environments landing (e.g. when an environment
 // can't be deleted because an app is still deployed to it). Message may contain
@@ -2481,6 +2713,465 @@ var envWarningClose = document.getElementById('env-warning-banner-close');
 if (envWarningClose) envWarningClose.addEventListener('click', function() {
     document.getElementById('env-warning-banner').style.display = 'none';
 });
+
+// The pull-request terminal state. When Radius lacks push access to the default
+// branch it commits the workflows to a branch and opens a PR instead — and it
+// deliberately does NOT dispatch credential verification, because the workflow
+// file does not exist on the default branch yet and the dispatch would 404.
+// Nothing failed, and nothing is still running; the operation is finished and
+// waiting on the user. Before this existed the client polled for a verify run
+// that was never going to appear and, eight minutes later, reported this
+// correct outcome as "Timed out waiting for credential verification".
+function showEnvActionRequired(provider, name, pullRequestUrl, terminal) {
+    var banner = document.getElementById('env-action-banner');
+    var text = document.getElementById('env-action-banner-text');
+    if (!banner || !text) return;
+    var hasPr = typeof pullRequestUrl === 'string' && pullRequestUrl.indexOf('https://github.com/') === 0;
+    var html = '<strong>' + escapeHtmlClient(providerLabel(provider)) + '</strong> Environment <strong>' +
+        escapeHtmlClient(name) + '</strong> is set up, but one step is left for you. ';
+    if (hasPr) {
+        html += 'Radius could not push the deploy workflows to the default branch, so it opened a pull request. ' +
+            'Credential verification and deploys start working once it merges.';
+    } else {
+        var branch = terminal && terminal.branch ? terminal.branch : 'the setup branch';
+        var base = terminal && terminal.baseBranch ? terminal.baseBranch : 'the default branch';
+        html += 'Radius committed the deploy workflows to <code>' + escapeHtmlClient(branch) +
+            '</code>, but could not open a pull request automatically. Open a pull request into <code>' +
+            escapeHtmlClient(base) + '</code> and merge it to finish setup.';
+    }
+    // Only render a link for a URL we recognise; anything else is shown as text
+    // so a malformed value can never become an anchor target.
+    if (hasPr) {
+        html += ' <a href="' + escapeHtmlClient(pullRequestUrl) + '" target="_blank" rel="noopener noreferrer">Review the pull request →</a>';
+    }
+    text.innerHTML = html;
+    banner.style.display = 'flex';
+    banner.scrollIntoView({ block: 'nearest' });
+}
+var envActionClose = document.getElementById('env-action-banner-close');
+if (envActionClose) envActionClose.addEventListener('click', function() {
+    document.getElementById('env-action-banner').style.display = 'none';
+});
+
+// ---------------- Environment setup progress (non-blocking) ----------------
+//
+// The panel is a view over the server's operation record, not over the fetch
+// that started it. That indirection is the whole point: the record outlives the
+// request, so closing the page, navigating to the graph, or reloading the canvas
+// mid-operation all rejoin the same operation instead of losing it.
+var envProgressTimer = null;
+var envProgressElapsedTimer = null;
+// The Actions step the verify run is on. Held here rather than in the record
+// because it comes from a different poll on a slower cadence, and the panel
+// re-renders faster than that poll refreshes.
+var envVerifyActivity = '';
+
+function formatElapsed(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var mins = Math.floor(total / 60);
+    var secs = total % 60;
+    return mins + ':' + (secs < 10 ? '0' : '') + secs;
+}
+
+var ENV_STAGE_GLYPH = { pending: '○', running: '◐', succeeded: '✓', warning: '⚠', failed: '✗', skipped: '–' };
+
+function setFailureList(items, listId, blockId) {
+    var list = document.getElementById(listId);
+    var block = document.getElementById(blockId);
+    if (!list || !block) return;
+    list.innerHTML = '';
+    if (!items || !items.length) {
+        block.style.display = 'none';
+        return;
+    }
+    items.forEach(function(item) {
+        var li = document.createElement('li');
+        li.textContent = item;
+        list.appendChild(li);
+    });
+    block.style.display = '';
+}
+
+function renderEnvFailureCard(op) {
+    var card = document.getElementById('env-progress-failure');
+    var messageEl = document.getElementById('env-progress-failure-message');
+    var cleanupEl = document.getElementById('env-progress-cleanup-status');
+    var retryEl = document.getElementById('env-progress-retry');
+    if (!card || !messageEl || !cleanupEl || !retryEl) return;
+    var failed = op && (op.terminalState === 'failed' || op.terminalState === 'failed_partial');
+    if (!failed) {
+        card.style.display = 'none';
+        return;
+    }
+
+    var cleanup = op.cleanup || {};
+    var retry = cleanup.retry || {};
+    var removed = (cleanup.removed || []).map(function(entry) {
+        return entry && entry.target ? entry.target : '';
+    }).filter(Boolean);
+    var retained = (cleanup.retained || []).map(function(entry) {
+        return entry && entry.target ? entry.target : '';
+    }).filter(Boolean);
+    var warnings = (cleanup.warnings || []).filter(Boolean);
+    var cleanupStatus = cleanup.state === 'running' ? 'Cleanup is still running.' :
+        cleanup.state === 'pending' ? 'Cleanup has not started yet.' :
+        cleanup.rollbackBeforeCommit === false ? 'Cleanup stopped at the commit point, so reusable artifacts were left in place.' :
+        cleanup.state === 'succeeded_with_warnings' ? 'Cleanup finished with warnings.' :
+        cleanup.state === 'succeeded' ? 'Cleanup finished.' :
+        'Cleanup was not needed.';
+
+    messageEl.textContent = op.failure && op.failure.message ? op.failure.message : 'The setup request failed.';
+    cleanupEl.textContent = cleanupStatus;
+    retryEl.textContent = retry.guidance ? ('Retry starts cleanly: ' + (retry.startsCleanly ? 'Yes' : 'No') + '. ' + retry.guidance) : '';
+    setFailureList(removed, 'env-progress-cleanup-removed', 'env-progress-cleanup-removed-block');
+    setFailureList(retained, 'env-progress-cleanup-retained', 'env-progress-cleanup-retained-block');
+    setFailureList(warnings, 'env-progress-cleanup-warnings', 'env-progress-cleanup-warnings-block');
+    card.style.display = '';
+}
+
+function renderEnvProgress(op) {
+    var panel = document.getElementById('env-progress-panel');
+    if (!panel) return;
+    if (!op) {
+        panel.style.display = 'none';
+        renderEnvFailureCard(null);
+        return;
+    }
+    panel.style.display = '';
+    panel.classList.toggle('env-progress--done', op.terminalState === 'succeeded' || op.terminalState === 'succeeded_with_warnings' || op.terminalState === 'action_required');
+    panel.classList.toggle('env-progress--failed', op.terminalState === 'failed' || op.terminalState === 'failed_partial');
+
+    document.getElementById('env-progress-title').textContent = op.summary || '';
+
+    // The current step doubles as the activity line. When the record has nothing
+    // to say we clear it rather than substitute filler.
+    var activity = '';
+    for (var i = op.steps.length - 1; i >= 0; i--) {
+        if (op.steps[i].state === 'running') { activity = op.steps[i].label; break; }
+    }
+    if (!activity && op.steps.length) activity = op.steps[op.steps.length - 1].label;
+    if (op.currentStage === 'verify' && envVerifyActivity && !op.terminalState) {
+        activity = 'Verifying credentials — ' + envVerifyActivity;
+    }
+    if (op.failure && op.failure.message) activity = op.failure.message;
+    document.getElementById('env-progress-activity').textContent = activity;
+
+    var stagesEl = document.getElementById('env-progress-stages');
+    stagesEl.innerHTML = '';
+    op.stages.forEach(function(stage) {
+        var li = document.createElement('li');
+        li.className = 'env-progress__stage env-progress__stage--' + stage.state;
+        var glyph = document.createElement('span');
+        glyph.className = 'env-progress__glyph';
+        glyph.setAttribute('aria-hidden', 'true');
+        glyph.textContent = ENV_STAGE_GLYPH[stage.state] || '○';
+        var label = document.createElement('span');
+        // The glyph is decorative, so the state has to reach a screen reader as
+        // words. Color and shape alone would not.
+        label.textContent = stage.label + ' — ' + stage.state;
+        li.appendChild(glyph);
+        li.appendChild(label);
+        stagesEl.appendChild(li);
+    });
+
+    var stepsEl = document.getElementById('env-progress-steps');
+    stepsEl.innerHTML = '';
+    op.steps.forEach(function(step) {
+        var li = document.createElement('li');
+        li.className = 'env-progress__step env-progress__step--' + step.state;
+        // Server-built copy, but it still goes in as text: a step label can
+        // quote an Azure CLI error, and that is not ours to trust as markup.
+        li.textContent = (ENV_STAGE_GLYPH[step.state] || '·') + ' ' + step.label;
+        stepsEl.appendChild(li);
+    });
+    renderEnvFailureCard(op);
+    document.getElementById('env-progress-details').style.display = op.steps.length ? '' : 'none';
+    var actions = document.getElementById('env-progress-actions');
+    var resume = document.getElementById('env-progress-resume');
+    var dismiss = document.getElementById('env-progress-dismiss');
+    var target = op.journey && op.journey.resumeTarget;
+    var canResume = op.terminalState && target && target.page === 'planned' && target.repo;
+    if (resume && canResume) {
+        var href = '/?page=planned&repo=' + encodeURIComponent(target.repo);
+        if (target.branch) href += '&branch=' + encodeURIComponent(target.branch);
+        resume.href = href;
+        resume.textContent = op.journey.resumeReason || 'View planned graph';
+    }
+    if (resume) resume.style.display = canResume ? '' : 'none';
+    if (dismiss) dismiss.style.display = op.terminalState ? '' : 'none';
+    if (actions) actions.style.display = op.terminalState ? 'flex' : 'none';
+}
+
+function stopEnvProgress() {
+    envVerifyActivity = '';
+    if (envProgressTimer) { clearTimeout(envProgressTimer); envProgressTimer = null; }
+    if (envProgressElapsedTimer) { clearInterval(envProgressElapsedTimer); envProgressElapsedTimer = null; }
+}
+
+function hideEnvProgress() {
+    stopEnvProgress();
+    var panel = document.getElementById('env-progress-panel');
+    if (panel) panel.style.display = 'none';
+}
+
+var envProgressDismiss = document.getElementById('env-progress-dismiss');
+if (envProgressDismiss) envProgressDismiss.addEventListener('click', function() {
+    hideEnvProgress();
+});
+
+function focusEnvProgressPanel() {
+    var panel = document.getElementById('env-progress-panel');
+    if (!panel) return;
+    try { panel.focus({ preventScroll: true }); }
+    catch (e) { panel.focus(); }
+    var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    panel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+}
+
+function syncEnvFailureOperation(data) {
+    var operationId = data && typeof data.operationId === 'string' ? data.operationId : '';
+    var url = operationId ? '/api/operations/' + encodeURIComponent(operationId) : '';
+    if (!url) return Promise.resolve(false);
+    return fetch(url)
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(payload) {
+            var op = payload && payload.operation;
+            if (!op) return false;
+            renderEnvProgress(op);
+            var detailsEl = document.getElementById('env-progress-details');
+            if (detailsEl && (op.terminalState === 'failed' || op.terminalState === 'failed_partial')) {
+                detailsEl.open = true;
+            }
+            var errorBanner = document.getElementById('env-error-banner');
+            if (errorBanner) errorBanner.style.display = 'none';
+            return true;
+        })
+        .catch(function() { return false; });
+}
+
+// Poll the record for the given repo. Returns nothing — the panel is driven entirely by
+// what the server reports, so a caller that also holds the POST promise and this
+// poller can never show two different truths.
+function trackEnvProgress(repo, environment, provider, onTerminal) {
+    stopEnvProgress();
+    var startedAtMs = Date.now();
+    var observedOperation = false;
+    var operationId = '';
+    var verifyDispatchedAtMs = 0;
+    var verifyDeadlineMs = 45 * 60 * 1000;
+    var promptingRequestedAt = '';
+    var elapsedEl = document.getElementById('env-progress-elapsed');
+    envProgressElapsedTimer = setInterval(function() {
+        if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - startedAtMs);
+    }, 1000);
+
+    function tick() {
+        fetch('/api/operations?repo=' + encodeURIComponent(repo))
+            .then(function(r) { return r.json(); })
+            .then(function(payload) {
+                var op = payload && payload.operation;
+                // The registry retains the latest terminal operation for this
+                // repository. During the short gap before a new POST registers,
+                // that record belongs to the previous environment and must not
+                // replace the optimistic panel for the setup just requested.
+                if (!observedOperation && op && (op.environment !== environment || op.terminalState)) {
+                    envProgressTimer = setTimeout(tick, 1500);
+                    return;
+                }
+                if (!op) {
+                    // A just-started setup has not necessarily reached the server
+                    // operation registry yet. Verification status is historical
+                    // and can still report the previous successful run for this
+                    // environment name, so only use it for restart recovery after
+                    // this poller has first observed the current operation.
+                    if (!observedOperation) {
+                        envProgressTimer = setTimeout(tick, 1500);
+                        return;
+                    }
+                    // Verification is tracked separately from the process-local
+                    // operation registry. If the extension restarts after
+                    // dispatch, the record can disappear while the Actions run
+                    // still reaches a terminal result.
+                    if (!environment) { envProgressTimer = setTimeout(tick, 1500); return; }
+                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId))
+                        .then(function(r) { return r.json(); })
+                        .then(function(v) {
+                            if (v.state === 'expired' || v.terminal) {
+                                stopEnvProgress();
+                                var expiredActivity = document.getElementById('env-progress-activity');
+                                if (expiredActivity) expiredActivity.textContent = v.error || 'Credential verification is no longer being tracked.';
+                                return;
+                            }
+                            if (verifyDispatchedAtMs && Date.now() - verifyDispatchedAtMs > verifyDeadlineMs) {
+                                stopEnvProgress();
+                                var timedOutActivity = document.getElementById('env-progress-activity');
+                                if (timedOutActivity) timedOutActivity.textContent = 'Credential verification exceeded its tracking window. Check the GitHub Actions run before retrying.';
+                                return;
+                            }
+                            if (v.state === 'success') {
+                                hideEnvProgress();
+                                showEnvSuccessBanner(provider || 'azure', environment);
+                                loadEnvTable();
+                                return;
+                            }
+                            if (v.state === 'failed') {
+                                stopEnvProgress();
+                                var panel = document.getElementById('env-progress-panel');
+                                if (panel) {
+                                    panel.style.display = 'block';
+                                    panel.classList.remove('env-progress--done');
+                                    panel.classList.add('env-progress--failed');
+                                }
+                                var activity = document.getElementById('env-progress-activity');
+                                if (activity) activity.textContent = 'Credential verification failed. ' + (v.error || '');
+                                var details = document.getElementById('env-progress-details');
+                                if (details && v.runUrl) details.textContent = 'View the run: ' + v.runUrl;
+                                return;
+                            }
+                            if (v.activity) envVerifyActivity = v.activity;
+                            envProgressTimer = setTimeout(tick, 1500);
+                        })
+                        .catch(function() { envProgressTimer = setTimeout(tick, 3000); });
+                    return;
+                }
+                observedOperation = true;
+                operationId = op.operationId || operationId;
+                if (op.verification && op.verification.dispatchedAt) verifyDispatchedAtMs = Number(op.verification.dispatchedAt);
+                startedAtMs = new Date(op.startedAt).getTime();
+                if (elapsedEl) {
+                    elapsedEl.textContent = formatElapsed((op.endedAt ? new Date(op.endedAt).getTime() : Date.now()) - startedAtMs);
+                }
+                renderEnvProgress(op);
+                if (op.terminalState) {
+                    stopEnvProgress();
+                    if (onTerminal) onTerminal(op);
+                    return;
+                }
+                if (op.state === 'input_required' && op.inputRequired && op.inputRequired.requestedAt !== promptingRequestedAt) {
+                    promptingRequestedAt = op.inputRequired.requestedAt;
+                    var prompt = op.inputRequired;
+                    var answer;
+                    if (prompt.code === 'service-management-reference-required') {
+                        answer = promptSmr().then(function(smr) {
+                            return { serviceManagementReference: smr };
+                        });
+                    } else if (prompt.code === 'app-selection-required') {
+                        answer = showAppPicker({
+                            title: 'Choose a deploy identity',
+                            intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
+                            candidates: (prompt.metadata && prompt.metadata.candidates) || [],
+                            defaultAppId: prompt.metadata && prompt.metadata.defaultAppId,
+                            allowCreateNew: true
+                        }).then(function(choice) {
+                            return choice.createNew ? { createNew: true } : { appId: choice.appId };
+                        });
+                    }
+                    if (answer) {
+                        answer.then(function(values) {
+                            values.checkpoint = prompt.checkpoint;
+                            values.repo = repo;
+                            values.environment = environment;
+                            values.provider = provider;
+                            return fetch('/api/operations/' + encodeURIComponent(operationId) + '/resume/' + encodeURIComponent(prompt.code), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(values)
+                            }).then(function(response) {
+                                if (response.ok) return response;
+                                return response.json().catch(function() { return {}; }).then(function(payload) {
+                                    var error = new Error(payload.error || payload.message || 'Unable to resume environment setup.');
+                                    error.retryPrompt = payload.code !== 'operation-input-expired';
+                                    error.operation = payload.operation;
+                                    throw error;
+                                });
+                            });
+                        }).then(function() {
+                            envProgressTimer = setTimeout(tick, 0);
+                        }).catch(function(error) {
+                            if (error && error.abandonOperation) {
+                                fetch('/api/operations/' + encodeURIComponent(operationId) + '/abandon', { method: 'POST' })
+                                    .then(function(response) {
+                                        if (!response.ok) {
+                                            promptingRequestedAt = '';
+                                            throw new Error('Unable to cancel environment setup.');
+                                        }
+                                        envProgressTimer = setTimeout(tick, 0);
+                                    })
+                                    .catch(function() { envProgressTimer = setTimeout(tick, 1500); });
+                                return;
+                            }
+                            if (error && error.operation && error.operation.failure && error.operation.failure.code === 'operation-input-expired') {
+                                stopEnvProgress();
+                                applyEnvTerminal(error.operation);
+                                return;
+                            }
+                            if (error && error.retryPrompt) promptingRequestedAt = '';
+                            envProgressTimer = setTimeout(tick, 1500);
+                        });
+                        return;
+                    }
+                }
+                envProgressTimer = setTimeout(tick, 1500);
+            })
+            .catch(function() {
+                // A dropped poll is routine — the server respawns after an idle
+                // reap and the next tick reconnects. Never surface it as failure.
+                envProgressTimer = setTimeout(tick, 3000);
+            });
+    }
+    tick();
+}
+
+// On load, rejoin an operation that is already running for this repo. This is
+// what makes navigating away safe: the user can leave the page mid-setup and
+// find the same panel, with the same history, when they come back.
+function resumeEnvProgress(repo) {
+    if (!repo) return;
+    fetch('/api/operations?repo=' + encodeURIComponent(repo))
+        .then(function(r) { return r.json(); })
+        .then(function(payload) {
+            var op = payload && payload.operation;
+            if (!op || op.terminalState) return;
+            renderEnvProgress(op);
+            trackEnvProgress(repo, op.environment || '', op.provider || '', function(finished) { applyEnvTerminal(finished); });
+        })
+        .catch(function() { /* nothing to resume */ });
+}
+
+// One place that turns a terminal record into what the landing shows, so the
+// resumed path and the just-clicked path cannot disagree.
+function applyEnvTerminal(op) {
+    var btn = document.getElementById('deploy-btn');
+    if (btn) { btn.textContent = 'Create Environment'; btn.disabled = false; }
+    var warnings = op.steps.filter(function(s) { return s.state === 'warning'; })
+        .map(function(s) { return '⚠️ ' + s.label; });
+    if (op.terminalState === 'action_required') {
+        showEnvSetupWarnings(warnings);
+        showEnvActionRequired(op.provider, op.environment, op.terminal && op.terminal.pullRequestUrl, op.terminal);
+    } else if (op.terminalState === 'succeeded' || op.terminalState === 'succeeded_with_warnings') {
+        showEnvSuccessBanner(op.provider, op.environment);
+        showEnvSetupWarnings(warnings);
+    } else if (op.terminalState === 'cancelled') {
+        var cancelledPanel = document.getElementById('env-progress-panel');
+        if (cancelledPanel) {
+            cancelledPanel.classList.remove('env-progress--done', 'env-progress--failed');
+        }
+        var cancelledActivity = document.getElementById('env-progress-activity');
+        if (cancelledActivity) cancelledActivity.textContent = 'Environment setup cancelled.';
+        showEnvSetupWarnings(warnings);
+    } else {
+        var message = 'Environment setup failed: ' + ((op.failure && op.failure.message) || 'unknown error');
+        var panel = document.getElementById('env-progress-panel');
+        if (panel) {
+            panel.classList.remove('env-progress--done');
+            panel.classList.add('env-progress--failed');
+        }
+        var activityEl = document.getElementById('env-progress-activity');
+        if (activityEl) activityEl.textContent = message;
+        showEnvError(message);
+    }
+    loadEnvTable();
+}
 
 function findProfile(name) {
     for (var i = 0; i < PROFILES.length; i++) { if (PROFILES[i].name === name) return PROFILES[i]; }
@@ -2804,7 +3495,11 @@ function clearSharedAppPin() {
     var clearLink = document.getElementById('az-clear-pin-link');
     if (clearLink) clearLink.style.display = 'none';
     var nameEl = document.getElementById('az-app-name-input');
-    if (nameEl) { nameEl.disabled = false; nameEl.style.opacity = ''; }
+    if (nameEl) {
+        nameEl.value = nameEl.getAttribute('data-default-name') || '';
+        nameEl.disabled = false;
+        nameEl.style.opacity = '';
+    }
 }
 (function(){
     var clearLink = document.getElementById('az-clear-pin-link');
@@ -2841,7 +3536,11 @@ function clearSharedAppPin() {
                 var clearLink = document.getElementById('az-clear-pin-link');
                 if (clearLink) clearLink.style.display = 'inline';
                 var nameEl = document.getElementById('az-app-name-input');
-                if (nameEl) { nameEl.disabled = true; nameEl.style.opacity = '0.6'; }
+                if (nameEl) {
+                    nameEl.value = (picked && picked.displayName) || choice.appId;
+                    nameEl.disabled = true;
+                    nameEl.style.opacity = '0.6';
+                }
             }).catch(function(){ /* cancelled */ });
         }).catch(function(err){
             link.textContent = 'Use an existing application…';
@@ -2994,42 +3693,6 @@ function findAzureClusterResourceGroup(clusterId) {
     }
     return '';
 }
-function runAzureAutoSetup(params) {
-    var payload = {
-        repo: params.repo, environment: params.environment,
-        resourceGroup: params.resourceGroup, cluster: params.cluster,
-        subscriptionId: params.subscriptionId || '', tenantId: params.tenantId || ''
-    };
-    // The cluster's own resource group (from discovery), used server-side to
-    // scope the AKS Cluster Admin grant. Sent only when known.
-    if (params.clusterResourceGroup) payload.clusterResourceGroup = params.clusterResourceGroup;
-    // Only sent on a retry after the tenant demands it (progressive disclosure).
-    if (params.serviceManagementReference) payload.serviceManagementReference = params.serviceManagementReference;
-    // ROUND 9: editable create name + explicit identity selection. Send appName
-    // whenever the field was populated in params (even ''), so the server can
-    // distinguish an explicit blank (invalid) from an omitted field (derive).
-    if (params.appName !== undefined) payload.appName = params.appName;
-    if (params.appId) payload.appId = params.appId;
-    if (params.createNew) payload.createNew = true;
-    return fetch('/api/azure-auto-setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    }).then(function(r) { return r.json(); }).then(function(data) {
-        if (data.error) {
-            var detail = data.steps && data.steps.length ? ' — ' + data.steps.join('; ') : '';
-            var err = new Error(data.error + detail);
-            err.code = data.code;
-            // Carry selection metadata so the interactive wrapper can prompt.
-            err.candidates = data.candidates;
-            err.defaultAppId = data.defaultAppId;
-            throw err;
-        }
-        if (data.clientId) document.getElementById('az-client-id').value = data.clientId;
-        return data;
-    });
-}
-
 // Prompt for a Service Management Reference (GUID) via the modal; resolves the
 // entered GUID or rejects if the user cancels.
 function promptSmr() {
@@ -3058,22 +3721,20 @@ function promptSmr() {
             cleanup();
             resolve(smr);
         }
-        function onCancel() { cleanup(); reject(new Error('Service Management Reference is required to continue.')); }
+        function onCancel() { cleanup(); var error = new Error('Service Management Reference is required to continue.'); error.abandonOperation = true; reject(error); }
         retryBtn.addEventListener('click', onRetry);
         cancelBtn.addEventListener('click', onCancel);
     });
 }
 
 // Single source of truth: these two pure helpers are authored and unit-tested
-// in azure-oidc.ts, then serialized into this browser bundle via .toString()
-// so the SHIPPING client runs the exact tested code instead of a hand-copied
-// twin that drifts and has no coverage. Emitted as function declarations (they
-// hoist, so earlier call sites in this script — e.g. discoverResources — resolve
-// them). Both are self-contained (no external refs) and the build runs with
-// minify off, so their source round-trips cleanly. The pages_test init-halt
-// guard compiles the emitted scripts, catching any serialization breakage.
-${formatServesReposLabel.toString()}
-${discoverStatusText.toString()}
+// in azure-oidc.ts, then serialized into this browser bundle so the SHIPPING
+// client runs the exact tested code instead of a hand-copied twin. Assign each
+// helper to its stable browser name explicitly: the Node bundle is minified, so
+// Function#toString returns mangled declaration names even with keepNames=true.
+// Function declarations inside the assigned expression remain self-contained.
+${serializeBrowserFunction("formatServesReposLabel", formatServesReposLabel)}
+${serializeBrowserFunction("discoverStatusText", discoverStatusText)}
 
 // Render the identity picker. opts.candidates is a list of
 // {appId, displayName, createdDateTime, servesRepos?}. Resolves with
@@ -3190,38 +3851,9 @@ function showAppPicker(opts) {
             if (chosen.value === '__create__') resolve({ createNew: true });
             else resolve({ appId: chosen.value });
         }
-        function onCancel() { cleanup(); reject(new Error('Identity selection cancelled.')); }
+        function onCancel() { cleanup(); var error = new Error('Identity selection cancelled.'); error.abandonOperation = true; reject(error); }
         confirmBtn.addEventListener('click', onConfirm);
         cancelBtn.addEventListener('click', onCancel);
-    });
-}
-
-// Run auto-setup, resolving both progressive-disclosure prompts:
-//   - service-management-reference-required → SMR modal, retry with the GUID
-//   - app-selection-required → identity picker, retry with appId/createNew
-// Retries recursively so a create-after-picking can still surface the SMR prompt.
-function runAzureAutoSetupInteractive(params) {
-    return runAzureAutoSetup(params).catch(function(err) {
-        if (err.code === 'service-management-reference-required') {
-            return promptSmr().then(function(smr) {
-                return runAzureAutoSetupInteractive(Object.assign({}, params, { serviceManagementReference: smr }));
-            });
-        }
-        if (err.code === 'app-selection-required') {
-            return showAppPicker({
-                title: 'Choose a deploy identity',
-                intro: 'You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.',
-                candidates: err.candidates || [],
-                defaultAppId: err.defaultAppId,
-                allowCreateNew: true
-            }).then(function(choice) {
-                var next = Object.assign({}, params);
-                if (choice.createNew) { next.createNew = true; delete next.appId; }
-                else { next.appId = choice.appId; delete next.createNew; }
-                return runAzureAutoSetupInteractive(next);
-            });
-        }
-        throw err;
     });
 }
 
@@ -3260,89 +3892,109 @@ deployBtn.addEventListener('click', function() {
     statusEl.style.display = 'none';
     var staleWarn = document.getElementById('env-warning-banner');
     if (staleWarn) staleWarn.style.display = 'none';
-    var creatingModal = document.getElementById('env-creating-modal');
-    var creatingTitle = document.getElementById('env-creating-title');
     var label = providerLabel(provider);
+    // The panel and the operation record own the narration now; this only has to
+    // say what went wrong. The panel is deliberately left on screen with its step
+    // history intact — collapsing a twenty-five step operation into one red
+    // sentence is what destroyed the context before.
+    //
+    // The message goes to the landing's error banner, not the form's status line:
+    // by the time this runs the user is on the landing, and the form's status
+    // element is hidden, so writing there would say nothing at all.
     function failEnv(msg) {
-        creatingModal.style.display = 'none';
+        stopEnvProgress();
         btn.textContent = 'Create Environment'; btn.disabled = false;
-        statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = msg;
+        statusEl.style.display = 'none';
+        var panel = document.getElementById('env-progress-panel');
+        if (panel) {
+            panel.classList.remove('env-progress--done');
+            panel.classList.add('env-progress--failed');
+            var activityEl = document.getElementById('env-progress-activity');
+            if (activityEl) activityEl.textContent = msg;
+            var detailsEl = document.getElementById('env-progress-details');
+            if (detailsEl) detailsEl.open = true;
+        }
+        showEnvError(msg);
     }
-
-    var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
-    if (needsAzureCreds && !(selectedProfile.subscriptionId || '').trim()) {
-        fail('The selected profile has no subscription ID. Edit the profile to add one so setup targets the correct tenant/subscription.');
+    if (provider === 'azure' && (!(selectedProfile.subscriptionId || '').trim() || !(selectedProfile.tenantId || '').trim())) {
+        // Still a form-level error, so it belongs on the form, which is still on
+        // screen: nothing has started yet.
+        btn.textContent = 'Create Environment'; btn.disabled = false;
+        fail('The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment.');
         return;
     }
-    var preflight;
-    if (needsAzureCreds) {
-        creatingTitle.innerHTML = 'Creating credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
-        creatingModal.style.display = 'flex';
-        var appNameEl = document.getElementById('az-app-name-input');
-        var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
-        preflight = runAzureAutoSetupInteractive({
-            repo: targetRepo, environment: env, resourceGroup: resourceGroup, cluster: cluster,
-            clusterResourceGroup: clusterResourceGroup,
-            subscriptionId: selectedProfile.subscriptionId, tenantId: selectedProfile.tenantId,
-            appName: appNameEl ? appNameEl.value.trim() : '',
-            appId: selectedAppId
-        });
-    } else {
-        creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
-        creatingModal.style.display = 'flex';
-        preflight = Promise.resolve(null);
-    }
 
-    preflight.then(function(setupResult) {
-        // Auto-setup's step log (incl. any ⚠️ AKS Cluster Admin warning) rides on
-        // the resolved payload; keep it so we can surface warnings once the
-        // environment is created (below), instead of discarding it as before.
-        var setupSteps = (setupResult && setupResult.steps) || [];
-        creatingTitle.innerHTML = 'Creating <strong>' + label + '</strong> Environment <strong>' + escapeHtmlClient(env) + '</strong>…';
-        var envData = { repo: targetRepo, environment: env, provider: provider, cluster: cluster, namespace: namespace, profileName: selectedProfile.name };
-        envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
-        if (provider === 'azure') {
-            envData.clientId = document.getElementById('az-client-id').value.trim();
-            envData.tenantId = selectedProfile.tenantId || '';
-            envData.subscriptionId = selectedProfile.subscriptionId || '';
-            envData.resourceGroup = resourceGroup;
-        } else {
-            envData.roleArn = selectedProfile.roleArn || '';
-            envData.region = selectedProfile.region || '';
-            envData.accountId = selectedProfile.accountId || '';
-            envData.vpcId = vpc; envData.subnetIds = subnets;
-        }
-        return fetch('/api/create-environment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(envData) })
-            .then(function(r) { return r.json(); })
-            .then(function(envResult) {
-                if (envResult.error) { failEnv('Environment setup failed: ' + envResult.error); return; }
-                creatingTitle.innerHTML = 'Verifying credentials for <strong>' + escapeHtmlClient(env) + '</strong>…';
-                btn.textContent = 'Verifying credentials…';
-                var pollStart = Date.now();
-                var VERIFY_TIMEOUT_MS = 8 * 60 * 1000;
-                function pollVerify() {
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(targetRepo) + '&environment=' + encodeURIComponent(env))
-                        .then(function(r) { return r.json(); })
-                        .then(function(v) {
-                            if (v.state === 'success') {
-                                creatingModal.style.display = 'none';
-                                btn.textContent = 'Create Environment'; btn.disabled = false;
-                                statusEl.style.display = 'none';
-                                showEnvLanding(); showEnvSuccessBanner(provider, env); showEnvSetupWarnings(setupSteps); loadEnvTable();
-                                return;
-                            }
-                            if (v.state === 'failed') { failEnv('Credential verification failed. ' + (v.error || '') + (v.runUrl ? '\\nView the run: ' + v.runUrl : '')); return; }
-                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.' + (v.runUrl ? ' It may still be running — view it at ' + v.runUrl : '')); return; }
-                            setTimeout(pollVerify, 5000);
-                        })
-                        .catch(function() {
-                            if (Date.now() - pollStart > VERIFY_TIMEOUT_MS) { failEnv('Timed out waiting for credential verification to complete.'); return; }
-                            setTimeout(pollVerify, 5000);
+    // Everything below mutates cloud and GitHub state, so this is the moment the
+    // operation begins. Show the landing now: creation takes minutes, and the
+    // user should be free to watch the panel, look at the graph, or leave
+    // entirely — the record on the server is what lets them come back to any of
+    // it.
+    showEnvLanding();
+    hideEnvTerminalBanners();
+    renderEnvProgress({
+        summary: 'Creating ' + env + '…', provider: provider, environment: env,
+        stages: [], steps: [], terminalState: null, failure: null, startedAt: new Date().toISOString(),
+    });
+    focusEnvProgressPanel();
+
+    var appNameEl = document.getElementById('az-app-name-input');
+    var selectedAppId = (document.getElementById('az-selected-app-id') || {}).value || '';
+    var envData = {
+            repo: targetRepo,
+            environment: env,
+            provider: provider,
+            cluster: cluster,
+            namespace: namespace,
+            profileName: selectedProfile.name,
+            origin: 'environment',
+            resumeTarget: { page: 'planned', repo: targetRepo, branch: CTX_BRANCH },
+            resumeBranch: CTX_BRANCH,
+            resumeReason: 'View planned graph'
+    };
+    envData.branch = (document.getElementById('deploy-branch-select') || {}).value || 'main';
+    if (provider === 'azure') {
+        envData.clientId = document.getElementById('az-client-id').value.trim();
+        envData.tenantId = selectedProfile.tenantId || '';
+        envData.subscriptionId = selectedProfile.subscriptionId || '';
+        envData.resourceGroup = resourceGroup;
+        envData.clusterResourceGroup = clusterResourceGroup;
+        envData.appName = appNameEl ? appNameEl.value.trim() : '';
+        envData.appId = selectedAppId;
+    } else {
+        envData.roleArn = selectedProfile.roleArn || '';
+        envData.region = selectedProfile.region || '';
+        envData.accountId = selectedProfile.accountId || '';
+        envData.vpcId = vpc; envData.subnetIds = subnets;
+    }
+    fetch('/api/operations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(envData) })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(startResult) {
+                var envResult = startResult.d || {};
+                if (envResult.error) {
+                    stopEnvProgress();
+                    btn.textContent = 'Create Environment'; btn.disabled = false;
+                    statusEl.style.display = 'none';
+                    syncEnvFailureOperation(envResult)
+                        .then(function(rendered) {
+                            if (!rendered) failEnv('Environment setup failed: ' + envResult.error);
                         });
+                    return;
                 }
-                pollVerify();
+                envProgressTimer = setTimeout(function() {
+                    trackEnvProgress(targetRepo, env, provider, function(finished) {
+                        applyEnvTerminal(finished);
+                    });
+                }, 0);
+            })
+    .catch(function(err) {
+        stopEnvProgress();
+        btn.textContent = 'Create Environment'; btn.disabled = false;
+        statusEl.style.display = 'none';
+        syncEnvFailureOperation(err)
+            .then(function(rendered) {
+                if (!rendered) failEnv('Failed: ' + (err.message || 'unknown error'));
             });
-    }).catch(function(err) { failEnv('Failed: ' + (err.message || 'unknown error')); });
+    });
 });
 
 // ============================ Credentials =============================
@@ -3350,6 +4002,8 @@ var credLanding = document.getElementById('cred-landing');
 var credForm = document.getElementById('cred-form');
 var credProviderSelect = document.getElementById('cred-provider-select');
 var credVerified = null;
+var credPackagesVerified = false;
+var credGhChecking = false;
 
 function loadCredTable() {
     var body = document.getElementById('cred-table-body');
@@ -3416,7 +4070,54 @@ function resetCredVerify() {
     var st = document.getElementById('cred-verify-status');
     st.style.display = 'none'; st.innerHTML = '';
     document.getElementById('cred-verify-hint').style.display = '';
-    document.getElementById('save-cred-btn').disabled = true;
+    updateCredSaveState();
+}
+function updateCredSaveState() {
+    document.getElementById('save-cred-btn').disabled = !(credVerified && credPackagesVerified);
+}
+function renderCredGitHubAccess(id) {
+    var status = document.getElementById('cred-ghcr-status');
+    var commandRow = document.getElementById('cred-ghcr-command-row');
+    var command = document.getElementById('cred-ghcr-command');
+    var retry = document.getElementById('cred-ghcr-retry');
+    credPackagesVerified = !!(id && id.actingLogin && id.actingHasPackages);
+    commandRow.style.display = 'none';
+    retry.style.display = 'none';
+    if (!id || id.error || !id.actingLogin) {
+        status.textContent = 'Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.';
+        status.style.color = 'var(--rad-danger)';
+    } else if (credPackagesVerified) {
+        status.innerHTML = '✓ GitHub Packages access verified for <strong>@' + escapeHtmlClient(id.actingLogin) + '</strong>.';
+        status.style.color = 'var(--rad-primary)';
+    } else {
+        var refreshCmd = 'gh auth switch -h github.com -u ' + id.actingLogin +
+            ' && gh auth refresh -h github.com -s read:packages -s write:packages';
+        status.innerHTML = 'The active account <strong>@' + escapeHtmlClient(id.actingLogin) +
+            '</strong> cannot publish packages. Run the command below, complete the GitHub authorization, then retry. <strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.';
+        status.style.color = 'var(--rad-warning, #9a6700)';
+        command.textContent = refreshCmd;
+        commandRow.style.display = 'flex';
+        retry.style.display = '';
+    }
+    updateCredSaveState();
+}
+function loadCredGitHubAccess(fresh) {
+    if (credGhChecking) return;
+    credGhChecking = true;
+    var status = document.getElementById('cred-ghcr-status');
+    var retry = document.getElementById('cred-ghcr-retry');
+    status.textContent = 'Checking GitHub Packages access…';
+    status.style.color = 'var(--rad-text-tertiary)';
+    if (retry) { retry.disabled = true; retry.textContent = 'Checking…'; }
+    var url = '/api/github-identity' + (fresh ? '?fresh=1' : '');
+    fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(renderCredGitHubAccess)
+        .catch(function(err) { renderCredGitHubAccess({ error: err && err.message ? err.message : 'GitHub identity check failed' }); })
+        .then(function() {
+            credGhChecking = false;
+            if (retry) { retry.disabled = false; retry.textContent = 'I’ve updated permissions — retry'; }
+        });
 }
 function showCredForm(profile) {
     document.getElementById('cred-success-banner').style.display = 'none';
@@ -3430,8 +4131,11 @@ function showCredForm(profile) {
     var reg = document.getElementById('aws-region'); if (reg) reg.value = editing ? (profile.region || '') : '';
     var role = document.getElementById('aws-role-arn'); if (role) role.value = editing ? (profile.roleArn || '') : '';
     resetCredVerify();
+    credPackagesVerified = false;
+    updateCredSaveState();
     credLanding.style.display = 'none';
     credForm.style.display = '';
+    loadCredGitHubAccess(true);
     document.getElementById('cred-name-input').focus();
 }
 function showCredLanding() {
@@ -3457,8 +4161,22 @@ function markVerified(user, extra) {
     st.innerHTML = '<span class="rad-verified-pill">✓ Credentials verified</span>' +
         (user ? '<span class="rad-verified-meta">Logged in as <strong>' + escapeHtmlClient(user) + '</strong></span>' : '');
     document.getElementById('cred-verify-hint').style.display = 'none';
-    document.getElementById('save-cred-btn').disabled = false;
+    updateCredSaveState();
 }
+
+var credGhRetry = document.getElementById('cred-ghcr-retry');
+if (credGhRetry) credGhRetry.addEventListener('click', function() { loadCredGitHubAccess(true); });
+var credGhCopy = document.getElementById('cred-ghcr-copy');
+if (credGhCopy) credGhCopy.addEventListener('click', function() {
+    var command = document.getElementById('cred-ghcr-command').textContent || '';
+    var done = function() {
+        credGhCopy.textContent = 'Copied';
+        setTimeout(function() { credGhCopy.textContent = 'Copy command'; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(command).then(done).catch(function() {});
+    }
+});
 
 function credVerifyError(msg) {
     var st = document.getElementById('cred-verify-status');
@@ -3607,6 +4325,10 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
 
 // ============================ Init =============================
 if (document.getElementById('pane-credentials').style.display !== 'none') { loadCredTable(); } else { loadEnvTable(); }
+// Rejoin an operation already in flight. Without this the panel would only ever
+// exist for the tab that started the work, and a reload — or a trip to the graph
+// and back — would look exactly like nothing was happening.
+resumeEnvProgress(CTX_REPO);
 <\/script>`
   );
 }
@@ -3651,7 +4373,9 @@ function deployLandingView(state: CanvasState): string {
   </div>
   <div class="rad-field">
     <label for="deploy-branch-select">Branch:</label>
-    <div class="rad-select-wrap"><select id="deploy-branch-select"><option value="${escapeHtml(ctxBranch)}">${escapeHtml(ctxBranch)}</option></select></div>
+    <div class="rad-select-wrap"><select id="deploy-branch-select"><option value="${escapeHtml(
+      ctxBranch
+    )}">${escapeHtml(ctxBranch)}</option></select></div>
   </div>
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
@@ -3786,6 +4510,10 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
+// Keys (app\u0000env) whose real GitHub deployment record was present in the
+// last successful listing. Lets an in-flight deploy poll stop refreshing the
+// list once the real record has replaced its optimistic synthetic row.
+var DEPLOY_RECORDS_PRESENT = {};
 // Environments that currently have an IN-PROGRESS operation which blocks a NEW
 // deploy (status pending = a deploy run still in flight, or deleting = a delete
 // run still in flight), keyed by env name → status. Rebuilt from each successful
@@ -3949,34 +4677,60 @@ function statusCell(status) {
     return '<span class="rad-dot rad-dot--' + m[0] + '"></span><span class="rad-status-label">' + m[1] + '</span>';
 }
 
-function loadDeployments(fresh) {
+function loadDeployments(fresh, quiet) {
     var body = document.getElementById('deploy-table-body');
     if (!CTX_REPO) { body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
-    body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
+    // A background refresh (quiet) keeps the current rows on screen until the new
+    // data arrives, so periodic in-flight polling doesn't flash the table back to
+    // a "Loading…" placeholder on every tick.
+    if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>';
     fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + (fresh ? '&fresh=1' : ''))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             // A transient GitHub failure returns { deployments: [], error }. Don't
             // render that as "no deployments" (which would hide real rows); show a
             // load-error row and leave any previous state to the next refresh.
-            if (d && d.error) { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
+            if (d && d.error) { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>'; return; }
             var deps = (d && d.deployments) || [];
-            if (deps.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
+            // Surface just-started operations GitHub hasn't recorded yet. A
+            // deployment record isn't created until the deploy job starts, so an
+            // optimistic "pending" OP_STATUS entry with no matching server row is
+            // rendered as a synthetic row. Without this, a brand-new deployment to
+            // an app+env with no prior record would stay invisible until the run
+            // reached a terminal state or Refresh was clicked. "deleting" is
+            // deliberately excluded: a delete always acts on an existing row, so
+            // its record is recolored in place; once the record is gone the delete
+            // is done, and a synthetic "Deleting…" row would be a phantom.
+            var present = {};
+            deps.forEach(function(dep) { present[opKey(dep.app, dep.environment)] = true; });
+            DEPLOY_RECORDS_PRESENT = present;
+            var synthetic = [];
+            Object.keys(OP_STATUS).forEach(function(k) {
+                if (present[k] || OP_STATUS[k] === 'deleting') return;
+                var parts = k.split('\\u0000');
+                if (parts.length !== 2 || !parts[0] || !parts[1]) return;
+                // synthetic: no GitHub deployment record exists yet, so this row
+                // must not offer Delete (it would dispatch against a nonexistent
+                // record and falsely report success).
+                synthetic.push({ app: parts[0], environment: parts[1], status: OP_STATUS[k], runUrl: '', synthetic: true });
+            });
+            var rows = synthetic.concat(deps);
+            if (rows.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
             // Rebuild the set of environments whose deployment blocks a new deploy,
             // honoring optimistic overrides, then refresh the Deploy button state.
             DEPLOYED_ENVS = {};
-            deps.forEach(function(dep) {
+            rows.forEach(function(dep) {
                 var st = OP_STATUS[opKey(dep.app, dep.environment)] || dep.status;
                 if (envIsBlocked(st)) DEPLOYED_ENVS[dep.environment] = st;
             });
             refreshDeployBtn();
             var arrowSvg = '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-            body.innerHTML = deps.map(function(dep) {
+            body.innerHTML = rows.map(function(dep) {
                 // A GitHub deployment record is only created once the deploy/delete
                 // job starts, so right after dispatch the newest record still shows
                 // the previous state. Force an in-flight op's status until it clears
                 // so the row reflects the action the user just took (Deleting…/Pending).
-                var forced = OP_STATUS[dep.app + '\\u0000' + dep.environment];
+                var forced = OP_STATUS[opKey(dep.app, dep.environment)];
                 var status = forced || dep.status;
                 var statusHtml = statusCell(status);
                 // The app name and the "Monitor Graph" link both route to the
@@ -3991,7 +4745,7 @@ function loadDeployments(fresh) {
                 // others use the subtle outline variant. A row that's mid-delete
                 // disables its button to prevent a duplicate dispatch.
                 var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
-                var delDisabled = status === 'deleting' ? ' disabled' : '';
+                var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
@@ -4003,7 +4757,7 @@ function loadDeployments(fresh) {
             }).join('');
             wireDeleteButtons();
         })
-        .catch(function() { body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
+        .catch(function() { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
 // --- Delete deployment: 3-step type-to-confirm dialog (Figma) ---
@@ -4074,27 +4828,45 @@ function runDelete() {
     if (!pendingDelete) return;
     var dep = pendingDelete;
     closeDeleteModal();
+    // Acknowledge the action immediately: the delete workflow takes a moment to
+    // start, so without an instant cue the button click looks like it did
+    // nothing. Mirror the deploy flow — flip the row to "Deleting…" and show a
+    // banner right away, before the dispatch round-trip resolves. The delete
+    // run's deployment record doesn't exist yet, so the OP_STATUS override keeps
+    // the row showing "Deleting…" until it clears; refresh quietly so the
+    // existing row flips in place instead of flashing a loading placeholder.
+    OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
+    loadDeployments(true, true);
+    showInline('success', 'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app) + '</strong> in environment <strong>' + escapeHtmlClient(dep.environment) + '</strong> has started.', true);
     fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: dep.environment, application: dep.app }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
         .then(function(res) {
-            if (!res.ok) { showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.'); return; }
-            // Optimistically show "Deleting…" right away (the delete run's
-            // deployment record doesn't exist yet), and keep it until the row clears.
-            OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';
-            loadDeployments(true);
+            if (!res.ok) {
+                // Dispatch failed — clear the optimistic override so the row
+                // reverts to its real status, then surface the error.
+                delete OP_STATUS[opKey(dep.app, dep.environment)];
+                loadDeployments(true, true);
+                showInline('error', (res.d && res.d.error) || 'Could not start the delete workflow.');
+                return;
+            }
             pollDeleteCompletion(dep.app, dep.environment, 0);
         })
-        .catch(function() { showInline('error', 'Could not delete the deployment. Please try again.'); });
+        .catch(function() {
+            delete OP_STATUS[opKey(dep.app, dep.environment)];
+            loadDeployments(true, true);
+            showInline('error', 'Could not delete the deployment. Please try again.');
+        });
 }
 
 // Poll the deployments listing until the target app/env is gone (a successful
 // delete removes it), then show the green success banner. Refreshes the table
-// each cycle so the "Deleting…" status stays visible. Bounded so a stuck or
-// failed delete never polls forever — on timeout the override is cleared and the
-// row reverts to its real status (a failed delete falls back to its deploy
-// record, so the deployment remains visible).
+// quietly each cycle so the "Deleting…" status stays visible without flashing a
+// loading placeholder (matching the deploy flow's in-flight polling). Bounded so
+// a stuck or failed delete never polls forever — on timeout the override is
+// cleared and the row reverts to its real status (a failed delete falls back to
+// its deploy record, so the deployment remains visible).
 function pollDeleteCompletion(app, env, tries) {
-    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true); return; } // ~3 min at 4s
+    if (tries > 45) { delete OP_STATUS[opKey(app, env)]; loadDeployments(true, true); return; } // ~3 min at 4s
     setTimeout(function() {
         fetch('/api/list-deployments?repo=' + encodeURIComponent(CTX_REPO) + '&fresh=1')
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
@@ -4111,11 +4883,11 @@ function pollDeleteCompletion(app, env, tries) {
                 var stillThere = d.deployments.some(function(x) { return x.app === app && x.environment === env; });
                 if (!stillThere) {
                     delete OP_STATUS[opKey(app, env)];
-                    loadDeployments(true);
+                    loadDeployments(true, true);
                     showInline('success', 'Deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong> has been successfully deleted.', true);
                     return;
                 }
-                loadDeployments(true); // keep the row showing "Deleting…"
+                loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)
                 pollDeleteCompletion(app, env, tries + 1);
             })
             .catch(function() { pollDeleteCompletion(app, env, tries + 1); });
@@ -4260,7 +5032,20 @@ deployBtn.addEventListener('click', function() {
     // and to surface a failure dialog if the deploy can't start (e.g. an unpushed
     // branch). We stay on the Deployments page throughout.
     var failedPolls = 0;
+    var wfTicks = 0;
+    // Once the real record replaces the synthetic row, keep polling deploy-status
+    // for the terminal transition but stop the per-tick fresh=1 list fetches.
+    var recordSeen = false;
     var wfPoll = setInterval(function() {
+        // Safety cap so a deploy-status that never reaches a terminal state can't
+        // poll forever (~30 min at 2.5s/tick); fall back to GitHub's real status.
+        if (++wfTicks > 720) {
+            clearInterval(wfPoll);
+            clearTimeout(autoHide);
+            delete OP_STATUS[opKey(app, env)];
+            loadDeployments(true);
+            return;
+        }
         fetch('/api/deploy-status')
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -4284,7 +5069,16 @@ deployBtn.addEventListener('click', function() {
                     clearInterval(wfPoll);
                     delete OP_STATUS[opKey(app, env)];
                     loadDeployments(true);
+                    return;
                 }
+                // Still in flight. Quietly refresh the table only until the real
+                // GitHub deployment record (with its "View Run" link) replaces the
+                // optimistic synthetic row; after that the row is real and driven
+                // by the OP_STATUS override, so further fresh=1 fetches (which
+                // bypass the cache and fan out per-environment) are wasted.
+                if (recordSeen) return;
+                if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }
+                loadDeployments(true, true);
             })
             .catch(function() {});
     }, 2500);

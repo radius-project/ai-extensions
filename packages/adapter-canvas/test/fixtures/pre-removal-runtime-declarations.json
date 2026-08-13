@@ -1,0 +1,23 @@
+{
+  "recordedBeforePhase0": true,
+  "actions": [
+    "configure_oidc",
+    "create_environment",
+    "get_graph_resources",
+    "render_graph",
+    "render_graph_diff",
+    "update_source_refs"
+  ],
+  "tools": [
+    "radius_configure_oidc",
+    "radius_create_environment",
+    "radius_deploy",
+    "radius_deploy_status",
+    "radius_generate_app",
+    "radius_generate_pr_diff_markdown",
+    "radius_publish_custom_type_extension",
+    "radius_publish_recipe",
+    "radius_render_graph",
+    "radius_render_graph_diff"
+  ]
+}

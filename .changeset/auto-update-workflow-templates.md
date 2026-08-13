@@ -1,5 +1,5 @@
 ---
-"@radius-project/canvas": patch
+"radius": patch
 ---
 
 Auto-update committed Radius workflow files when the upstream templates change.

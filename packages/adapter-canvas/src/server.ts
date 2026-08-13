@@ -14,7 +14,7 @@ import type {
   Server as HttpServer,
   ServerResponse
 } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
@@ -29,7 +29,7 @@ import {
   buildEnvironmentSuffix
 } from "@radius-project/core";
 import type { DeployStatus } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/shared";
+import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
@@ -61,14 +61,27 @@ import {
   setPreferredGhLogin
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
+import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   buildAppCreateArgs,
+  buildAppDeleteArgs,
+  buildAppOwnerAddArgs,
+  buildAppOwnerListArgs,
+  buildAppTagPatchArgs,
+  buildAppTagShowArgs,
+  buildRadiusAppProvenanceTags,
   isServiceManagementReferenceError,
+  isAppOwnerAlreadyAssignedError,
   selectMissingFederatedCredentials,
   decideExistingClientId,
   isAzResourceNotFound,
+  decideRadiusAppOwnership,
   decideAppSelection,
+  missingRequiredAppTags,
+  parseAppTags,
+  parseDirectoryObjectIds,
   parseServedReposFromSubjects,
   validateAppRegistrationName,
   isUuid,
@@ -77,7 +90,11 @@ import {
   isResourceGroupName,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
-import type { GitHubJsonResponse, GitHubJsonRunner } from "./azure-oidc.js";
+import type {
+  GitHubJsonResponse,
+  GitHubJsonRunner,
+  RadiusAppProvenanceInput
+} from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
   appParams,
@@ -97,7 +114,46 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
+import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
+import {
+  buildVerifyWorkflowDispatchArgs,
+  planCredentialVerification
+} from "./verification-plan.js";
+import {
+  operations,
+  isTerminalState,
+  isStale,
+  hasCompleteVerificationIdentity,
+  toClientView,
+  createOperation,
+  buildStages,
+  enterStage,
+  setStageState,
+  hasWarnings,
+  addLegacyStep,
+  setContext,
+  setCloudContext,
+  getSetupArtifactLedger,
+  recordAzureApp,
+  recordServicePrincipal,
+  recordCreatedFederatedCredential,
+  recordCreatedRoleAssignment,
+  recordGitHubEnvironment,
+  recordCommitState,
+  recordCommittedWorkflowFile,
+  recordCleanupState,
+  projectCleanupSummary,
+  finish,
+  finishSucceeded,
+  canResumeInput,
+  requireInput,
+  resumeAfterInput,
+  setExecutionActive,
+  INPUT_REQUIRED_STATE,
+  STAGE_AUTHORIZE_IDENTITY,
+  STAGE_CONFIGURE_ENVIRONMENT,
+  STAGE_VERIFY
+} from "./operations.js";
 import {
   radArtifactsDirForSelection,
   radArtifactsFingerprint
@@ -120,11 +176,13 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE
 } from "./infra.js";
+import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
   getRunDetail,
   fetchRunLog,
   extractErrorLines,
+  extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
   explainRepoAccessForEnvSetup
@@ -163,6 +221,57 @@ interface CommandResult {
 interface PullRequestState {
   branch: string;
   base: string;
+}
+
+export async function persistMutationCheckpoint({
+  operation,
+  persist,
+  report,
+  fail
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+  fail: (status: number, error: string, code: string) => Promise<void>;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    // Do not retry the same deterministic write or continue making cloud
+    // changes without durable provenance for what already succeeded.
+    await fail(
+      500,
+      "Radius changed no further cloud resources because it could not save the setup recovery record.",
+      "operation-persistence-failed"
+    );
+    return false;
+  }
+}
+
+export async function persistBestEffort({
+  operation,
+  persist,
+  report
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    return false;
+  }
 }
 
 interface EnvironmentListResult {
@@ -277,7 +386,9 @@ interface OpenSourceInput {
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
-type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+type SessionPromptHandler = (
+  prompt: string | SessionPromptMessage
+) => Promise<unknown>;
 
 interface IdValidationInput {
   tenantId?: string;
@@ -292,6 +403,14 @@ interface AzureLoginInput {
 interface AzureCliAssistInput {
   action?: string;
   tenantId?: string;
+}
+
+// A prompt paired with the shorter text the chat timeline shows in its place.
+// Mirrors the runtime's HandoffMessage: server-originated prompts are also
+// machine-authored, so they must not render as if the user typed them (#209).
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
 }
 
 interface DeployHandoffSummary {
@@ -386,6 +505,59 @@ interface FederatedCredential {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map<string, CanvasServerEntry>();
+let environmentOperationTestRunner:
+  ((operationId: string) => Promise<void>) | null = null;
+
+export function setEnvironmentOperationTestRunner(
+  runner: ((operationId: string) => Promise<void>) | null
+): void {
+  environmentOperationTestRunner = runner;
+}
+
+const activeEnvironmentTasks = new Map<string, Set<string>>();
+const environmentTasksSettledListeners = new Map<string, Set<() => void>>();
+const shuttingDownInstances = new Set<string>();
+const activeVerificationMonitors = new Set<string>();
+
+export function hasActiveEnvironmentTasks(instanceId: string): boolean {
+  return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
+}
+
+export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
+  shuttingDownInstances.add(instanceId);
+}
+
+export function onEnvironmentTasksSettled(
+  instanceId: string,
+  listener: () => void
+): () => void {
+  let listeners = environmentTasksSettledListeners.get(instanceId);
+  if (!listeners) {
+    listeners = new Set();
+    environmentTasksSettledListeners.set(instanceId, listeners);
+  }
+
+  listeners.add(listener);
+  let listening = true;
+  const stop = () => {
+    if (!listening) return;
+    listening = false;
+    listeners?.delete(listener);
+    if (listeners?.size === 0)
+      environmentTasksSettledListeners.delete(instanceId);
+  };
+  if (!hasActiveEnvironmentTasks(instanceId)) {
+    queueMicrotask(() => {
+      if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
+      try {
+        listener();
+      } catch {
+        // Listener failures must not affect task settlement.
+      }
+    });
+  }
+  return stop;
+}
 
 export function graphDefinitionHash(
   content: string,
@@ -515,7 +687,11 @@ function kickoffWorkflowSync(
     .then((r) => {
       if (r && r.updated && r.updated.length) {
         console.error(
-          `[radius workflow-sync] ${repo}: updated ${r.updated.length} workflow file(s) across ${(r.branches || []).join(", ")}: ${r.updated.join(", ")}`
+          `[radius workflow-sync] ${repo}: updated ${
+            r.updated.length
+          } workflow file(s) across ${(r.branches || []).join(
+            ", "
+          )}: ${r.updated.join(", ")}`
         );
       }
     })
@@ -526,24 +702,29 @@ function kickoffWorkflowSync(
 
 // Bare filename of the shared verify-credentials workflow (matches
 // infra.ts's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
+const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
+
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
-// are in sync with the upstream Radius templates so the run never executes a
-// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
-// is scoped to just the workflow about to run (`only`) and is awaited so any
-// in-place update lands before the dispatch — but a sync failure never blocks
-// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
-// and delete workflow content is provider-agnostic, so it only matters for
-// verify. `workingBranch` (when it matches the repo) is synced alongside the
-// default branch so a worktree-consistent run uses current files on both.
+// are present on the branch it runs from AND in sync with the upstream Radius
+// templates, so the dispatch never 404s on a missing file or executes a drifted
+// copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
+// scoped to just the workflow about to run (`only`), authors a missing file
+// (`create`), and is awaited so any create/update lands before the dispatch —
+// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// may be "" when unknown; deploy and delete workflow content is
+// provider-agnostic, so it only matters for verify. `workingBranch` (when it
+// matches the repo) is synced alongside the default branch so a
+// worktree-consistent run uses current files on both.
 async function ensureWorkflowsCurrent(
   repo: string,
   environment: string,
   provider: string,
   only: string[],
   workingBranch = ""
-): Promise<void> {
-  if (!repo || !environment || !only || only.length === 0) return;
+): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
+  if (!repo || !environment || !only || only.length === 0)
+    return { created: [], failed: [] };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -551,16 +732,27 @@ async function ensureWorkflowsCurrent(
       {
         workingBranch: workingBranch || "",
         only,
+        // Author the workflow if it's missing on the branch it will run from,
+        // not just update drift. `gh workflow run` resolves the workflow from
+        // the default branch, so a never-committed (or wrongly-refed) file 404s;
+        // creating it here makes the dispatch self-healing.
+        create: true,
         log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
       }
     );
-    if (r && r.updated && r.updated.length) {
+    if (
+      r &&
+      ((r.updated && r.updated.length) || (r.created && r.created.length))
+    ) {
+      const changed = [...(r.updated || []), ...(r.created || [])];
       console.error(
-        `[radius workflow-presync] ${repo}: updated ${r.updated.join(", ")} before dispatch`
+        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
+    return { created: r.created || [], failed: r.failed || [] };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
+    return { created: [], failed: [] };
   }
 }
 
@@ -640,7 +832,7 @@ export function azureLoginRequiredResponse({
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string
+  prompt: string | SessionPromptMessage
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
@@ -667,7 +859,9 @@ export function buildAzureCliAssistPrompt({
     typeof tenantId === "string" && isUuid(tenantId.trim()) ?
       tenantId.trim()
     : "";
-  const loginCommand = `az login --use-device-code${safeTenantId ? ` --tenant ${safeTenantId}` : ""}`;
+  const loginCommand = `az login --use-device-code${
+    safeTenantId ? ` --tenant ${safeTenantId}` : ""
+  }`;
   const loginInstructions = [
     `Run \`${loginCommand}\` in this Copilot session.`,
     "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
@@ -685,6 +879,29 @@ export function buildAzureCliAssistPrompt({
     loginInstructions,
     "After the login finishes, return to the Radius canvas and click Verify Credentials again."
   ].join("\n\n");
+}
+
+// Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
+// Credentials on the user's behalf, so the turn it injects should read as a
+// status line, not as multi-paragraph instructions the user appears to have
+// typed. The agent still receives the full prompt.
+export function azureCliAssistDisplayPrompt({
+  action = "login"
+}: AzureCliAssistInput = {}): string {
+  return action === "install" ?
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+}
+
+// Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
+// cannot drift apart or be swapped at the call site.
+export function azureCliAssistMessage(
+  input: AzureCliAssistInput = {}
+): SessionPromptMessage {
+  return {
+    prompt: buildAzureCliAssistPrompt(input),
+    displayPrompt: azureCliAssistDisplayPrompt(input)
+  };
 }
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
@@ -725,7 +942,93 @@ function triggerAppBicepHandoff(
 // browser stops polling once a deploy is terminal: a rejected send has no later
 // poll to piggyback on, so the status route keeps the poll alive while delivery
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
+export interface DeployAttemptInput {
+  repo: string;
+  branch: string;
+  provider: string;
+  environment: string;
+  appFile: string;
+  // True only for a redeploy the agent makes from inside a repair loop it
+  // already owns. Resolved from the attempt id by resolveDeployRepairLoop, not
+  // taken from the client: an agent-initiated deploy is not by itself a repair.
+  repairLoop: boolean;
+  // The attempt this redeploy continues, so a loop keeps one identity across
+  // its retries. Empty for any deploy that opens a new attempt.
+  attemptId?: string;
+}
+
+// Decide, server-side, whether an incoming deploy continues an existing repair
+// loop. The tool validates the attempt before it POSTs, but another deploy can
+// start in between, so re-check here against the attempt this panel currently
+// holds: a stale repair must not overwrite the newer deploy or mark it as
+// already owned (which would suppress its own failure handoff). An unbound
+// request is an ordinary deploy and always proceeds.
+export function resolveDeployRepairLoop(
+  state: CanvasState,
+  requestedAttemptId: unknown
+): { repairLoop: boolean; attemptId: string; error?: string } {
+  const requested =
+    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
+  if (!requested) return { repairLoop: false, attemptId: "" };
+  const current = state?.deployAttempt?.id || "";
+  if (current !== requested) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested };
+}
+
+// Open a new deploy attempt on a reused canvas state. Deliberately
+// synchronous: the reset and the new attempt id must land together, because
+// a previous attempt's handoff settling between them would still see itself
+// as the current attempt and could mark the incoming deploy as repairing,
+// suppressing its own repair handoff for good. Anything that needs awaiting
+// (branch resolution) has to happen before this is called.
+export function beginDeployAttempt(
+  state: CanvasState,
+  input: DeployAttemptInput
+): void {
+  state.deployStatus = "in_progress";
+  state.deployError = null;
+  state.deployErrorKind = null;
+  state.deployErrorBranch = null;
+  state.deployRunUrl = null;
+  state.deployRunId = null;
+  // Only a redeploy inside an existing repair loop is already owned by the
+  // agent. Every other deploy — including the agent's first one, which opens no
+  // loop — must stay eligible to hand its failure off; marking that one as
+  // repairing made triggerDeployRepairHandoff bail out and silently dropped the
+  // repair.
+  state.deployRepairing = input.repairLoop;
+  state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
+  // The delivery budget belongs to the loop, not to a single deploy: resetting
+  // it on every redeploy would let an undeliverable handoff retry forever.
+  state.deployHandoffAttempts =
+    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  state.deployingBranch = input.branch;
+  // Immutable identity for this attempt. A canvas panel is reused across
+  // deploys, so the repair loop binds to this snapshot instead of the panel:
+  // a stale repair cannot redeploy whatever the user started next. A redeploy
+  // inside a loop keeps the id it was handed, so the agent can keep addressing
+  // the same loop across retries instead of being told its attempt is inactive.
+  state.deployAttempt = {
+    id:
+      (input.repairLoop && input.attemptId) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    targetRepo: input.repo,
+    environment: input.environment,
+    branch: input.branch,
+    provider: input.provider,
+    appFile: input.appFile
+  };
+}
+
 export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
+// Backoff before re-sending a handoff whose delivery was rejected.
+export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
 
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
@@ -750,18 +1053,41 @@ export function triggerDeployRepairHandoff(
     const attemptId = state.deployAttempt?.id || "";
     state.deployHandoffState = "pending";
     state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
+    // A canvas panel is reused across deploys and these callbacks settle
+    // asynchronously, so a user deploy started in the meantime would otherwise
+    // be mutated by the previous attempt's handoff. Binding to the attempt that
+    // opened this handoff keeps a stale settle from marking the new attempt as
+    // delivered/owned, which would suppress its own handoff for good. Compare
+    // both sides normalized so an attempt-less handoff still settles against an
+    // attempt-less state - refusing to settle there would strand it as pending
+    // and block every later trigger - while a new deploy's id still revokes it.
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
     const delivered = () => {
+      if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
       state.deployRepairing = true;
     };
     // A handoff that never reached the agent must not leave the loop marked as
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
+      if (!ownsAttempt()) return;
       state.deployRepairing = false;
-      state.deployHandoffState =
-        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS ?
-          "failed"
-        : "retryable";
+      const exhausted =
+        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
+      state.deployHandoffState = exhausted ? "failed" : "retryable";
+      // Retry from the server too. /api/deploy-status also retries, but only
+      // while the webview polls it, so a transient delivery failure would
+      // otherwise strand the handoff as retryable with budget left over -
+      // exactly the unmounted-panel case this trigger exists to cover.
+      if (exhausted) return;
+      const timer = setTimeout(() => {
+        // The backoff is another window for a new deploy to start, and that
+        // deploy drives its own handoff.
+        if (!ownsAttempt()) return;
+        triggerDeployRepairHandoff(entry, instanceId);
+      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      // Never hold the process open for a retry.
+      timer.unref?.();
     };
     try {
       Promise.resolve(
@@ -831,6 +1157,645 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
   });
 }
 
+export function resolveGitHubEnvironmentCreateState(
+  result: Partial<CommandResult> | null | undefined
+): "created_candidate" | "reused" | null {
+  if (!result) return null;
+  if (result.code === 0 || result.code === "0") return "reused";
+  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
+  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
+}
+
+export async function deleteNewlyCreatedGitHubEnvironment(
+  artifact:
+    | { state?: string | null; repo?: string | null; name?: string | null }
+    | null
+    | undefined,
+  runDelete: (args: string[]) => Promise<unknown> = (args) =>
+    ghOrThrow(args, 20000)
+): Promise<boolean> {
+  if (!artifact || artifact.state !== "created") return false;
+  const repo = optionalString(artifact.repo);
+  const name = optionalString(artifact.name);
+  if (!repo || !name) return false;
+  await runDelete([
+    "api",
+    "--method",
+    "DELETE",
+    `/repos/${repo}/environments/${encodeURIComponent(name)}`
+  ]);
+  return true;
+}
+
+function buildRoleAssignmentDeleteArgs({
+  objectId,
+  role,
+  scope
+}: {
+  objectId: string;
+  role: string;
+  scope: string;
+}): string[] {
+  return [
+    "role",
+    "assignment",
+    "delete",
+    "--assignee-object-id",
+    objectId,
+    "--assignee-principal-type",
+    "ServicePrincipal",
+    "--role",
+    role,
+    "--scope",
+    scope,
+    "--output",
+    "none"
+  ];
+}
+
+function buildFederatedCredentialDeleteArgs({
+  appId,
+  name
+}: {
+  appId: string;
+  name: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "delete",
+    "--id",
+    appId,
+    "--federated-credential-id",
+    name
+  ];
+}
+
+function buildServicePrincipalDeleteArgs({ id }: { id: string }): string[] {
+  return ["ad", "sp", "delete", "--id", id];
+}
+
+function isAzureCleanupNotFound(
+  artifactType: string,
+  result: Partial<CommandResult> | null | undefined
+): boolean {
+  const detail = `${result?.stderr || ""}\n${result?.stdout || ""}`;
+  if (artifactType === "role_assignment") {
+    return /No matched assignments were found to delete|No matching role assignments were found|The role assignment does not exist/i.test(
+      detail
+    );
+  }
+  return (
+    isAzResourceNotFound(detail) ||
+    /FederatedIdentityCredential.*not found|service principal.*not found|application.*not found|does not exist/i.test(
+      detail
+    )
+  );
+}
+
+function cleanupTargetLabel(
+  artifactType: string,
+  artifact: Record<string, unknown>
+): string {
+  if (artifactType === "role_assignment") {
+    return `${String(artifact.role || "")} @ ${String(artifact.scope || "")}`;
+  }
+  if (artifactType === "federated_credential") {
+    return `${String(artifact.name || "")} @ ${String(artifact.subject || "")}`;
+  }
+  if (artifactType === "service_principal") {
+    return String(artifact.appId || artifact.objectId || "");
+  }
+  return String(artifact.appId || "");
+}
+
+export async function ensureServicePrincipal(
+  clientId: string,
+  runAz: (args: string[]) => Promise<Partial<CommandResult>>
+): Promise<
+  | { ok: true; state: "created" | "reused"; objectId: string | null }
+  | { ok: false; stderr: string }
+> {
+  const showArgs = [
+    "ad",
+    "sp",
+    "show",
+    "--id",
+    clientId,
+    "--query",
+    "id",
+    "-o",
+    "tsv"
+  ];
+  const before = await runAz(showArgs);
+  const existingObjectId = String(before.stdout || "").trim();
+  if ((before.code === 0 || before.code === "0") && existingObjectId) {
+    return { ok: true, state: "reused", objectId: existingObjectId };
+  }
+  if (before.code === 0 || before.code === "0") {
+    return {
+      ok: false,
+      stderr: "The Service Principal lookup returned an empty object id."
+    };
+  }
+  if (before.code !== 0 && !isAzResourceNotFound(before.stderr)) {
+    return {
+      ok: false,
+      stderr:
+        String(before.stderr || "").trim() ||
+        "Failed to look up the Service Principal before creation."
+    };
+  }
+
+  const create = await runAz(["ad", "sp", "create", "--id", clientId]);
+  if (create.code === 0 || create.code === "0") {
+    return { ok: true, state: "created", objectId: null };
+  }
+
+  const after = await runAz(showArgs);
+  const racedObjectId = String(after.stdout || "").trim();
+  if ((after.code === 0 || after.code === "0") && racedObjectId) {
+    return { ok: true, state: "reused", objectId: racedObjectId };
+  }
+
+  return {
+    ok: false,
+    stderr:
+      String(create.stderr || "").trim() ||
+      String(after.stderr || "").trim() ||
+      "Could not create or find the Service Principal."
+  };
+}
+
+export async function cleanupAzureSetupArtifacts(
+  op: any,
+  {
+    runAz,
+    steps
+  }: {
+    runAz: (args: string[]) => Promise<Partial<CommandResult>>;
+    steps?: string[];
+  }
+): Promise<{
+  attempt: number;
+  state: "not_needed" | "succeeded" | "succeeded_with_warnings";
+  results: Array<{
+    attempt: number;
+    artifactType:
+      | "role_assignment"
+      | "federated_credential"
+      | "service_principal"
+      | "azure_app";
+    target: string;
+    outcome: "deleted" | "not_found" | "warning" | "skipped";
+    detail: string | null;
+  }>;
+  warnings: string[];
+}> {
+  const ledger = getSetupArtifactLedger(op);
+  const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
+  const priorResults =
+    Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
+  if (!ledger) {
+    return { attempt, state: "not_needed", results: [], warnings: [] };
+  }
+
+  const deletions: Array<{
+    artifactType:
+      | "role_assignment"
+      | "federated_credential"
+      | "service_principal"
+      | "azure_app";
+    artifact: Record<string, unknown>;
+    args?: string[];
+    missingDetail?: string;
+  }> = [];
+
+  for (const roleAssignment of [...ledger.roleAssignments].reverse()) {
+    const objectId = String(roleAssignment.principalObjectId || "").trim();
+    deletions.push({
+      artifactType: "role_assignment",
+      artifact: roleAssignment as Record<string, unknown>,
+      ...(objectId ?
+        {
+          args: buildRoleAssignmentDeleteArgs({
+            objectId,
+            role: String(roleAssignment.role || ""),
+            scope: String(roleAssignment.scope || "")
+          })
+        }
+      : {
+          missingDetail:
+            "Missing the Service Principal object id needed to target this role assignment precisely."
+        })
+    });
+  }
+
+  const cleanupAppId = String(
+    ledger.azureApp.appId || ledger.servicePrincipal.appId || ""
+  ).trim();
+  for (const credential of [...ledger.federatedCredentials].reverse()) {
+    deletions.push({
+      artifactType: "federated_credential",
+      artifact: credential as Record<string, unknown>,
+      ...(cleanupAppId ?
+        {
+          args: buildFederatedCredentialDeleteArgs({
+            appId: cleanupAppId,
+            name: String(credential.name || "")
+          })
+        }
+      : {
+          missingDetail:
+            "Missing the App Registration id needed to target this federated credential."
+        })
+    });
+  }
+
+  if (ledger.servicePrincipal.state === "created") {
+    const spId = String(
+      ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || ""
+    ).trim();
+    deletions.push({
+      artifactType: "service_principal",
+      artifact: ledger.servicePrincipal as Record<string, unknown>,
+      ...(spId ?
+        { args: buildServicePrincipalDeleteArgs({ id: spId }) }
+      : {
+          missingDetail:
+            "Missing the Service Principal id needed to delete the created identity."
+        })
+    });
+  }
+
+  if (ledger.azureApp.state === "created") {
+    const appId = String(ledger.azureApp.appId || "").trim();
+    deletions.push({
+      artifactType: "azure_app",
+      artifact: ledger.azureApp as Record<string, unknown>,
+      ...(appId ?
+        { args: buildAppDeleteArgs({ appId }) }
+      : {
+          missingDetail:
+            "Missing the App Registration id needed to delete the created application."
+        })
+    });
+  }
+
+  if (deletions.length === 0) {
+    recordCleanupState(op, { attempts: attempt, state: "not_needed" });
+    return { attempt, state: "not_needed", results: [], warnings: [] };
+  }
+
+  recordCleanupState(op, { attempts: attempt, state: "running" });
+  steps?.push(
+    "Cleaning up Azure artifacts created during this setup attempt..."
+  );
+
+  const warnings: string[] = [];
+  const attemptResults: Array<{
+    attempt: number;
+    artifactType:
+      | "role_assignment"
+      | "federated_credential"
+      | "service_principal"
+      | "azure_app";
+    target: string;
+    outcome: "deleted" | "not_found" | "warning" | "skipped";
+    detail: string | null;
+  }> = [];
+  const pushResult = (
+    artifactType:
+      | "role_assignment"
+      | "federated_credential"
+      | "service_principal"
+      | "azure_app",
+    artifact: Record<string, unknown>,
+    outcome: "deleted" | "not_found" | "warning" | "skipped",
+    detail: string | null
+  ) => {
+    attemptResults.push({
+      attempt,
+      artifactType,
+      target: cleanupTargetLabel(artifactType, artifact),
+      outcome,
+      detail
+    });
+  };
+
+  for (const deletion of deletions) {
+    const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
+    if (deletion.missingDetail) {
+      warnings.push(deletion.missingDetail);
+      steps?.push(`⚠ ${deletion.missingDetail}`);
+      pushResult(
+        deletion.artifactType,
+        deletion.artifact,
+        "skipped",
+        deletion.missingDetail
+      );
+      continue;
+    }
+
+    let result: Partial<CommandResult>;
+    try {
+      result = await runAz(deletion.args || []);
+    } catch (error) {
+      const detail =
+        error instanceof Error ?
+          error.message
+        : String(error || "Unknown error");
+      const warning = `Failed to delete ${label}: ${detail}`;
+      warnings.push(warning);
+      steps?.push(`⚠ ${warning}`);
+      pushResult(deletion.artifactType, deletion.artifact, "warning", detail);
+      continue;
+    }
+
+    if (result.code === 0 || result.code === "0") {
+      steps?.push(`✅ Deleted ${label}`);
+      pushResult(deletion.artifactType, deletion.artifact, "deleted", null);
+      continue;
+    }
+
+    if (isAzureCleanupNotFound(deletion.artifactType, result)) {
+      steps?.push(`✅ ${label} was already absent`);
+      pushResult(deletion.artifactType, deletion.artifact, "not_found", null);
+      continue;
+    }
+
+    const detail =
+      String(result.stderr || "").trim() ||
+      String(result.stdout || "").trim() ||
+      "Unknown Azure CLI error.";
+    const warning = `Failed to delete ${label}: ${detail}`;
+    warnings.push(warning);
+    steps?.push(`⚠ ${warning}`);
+    pushResult(deletion.artifactType, deletion.artifact, "warning", detail);
+  }
+
+  const finalState = warnings.length ? "succeeded_with_warnings" : "succeeded";
+  const results = [...priorResults, ...attemptResults];
+  recordCleanupState(op, {
+    state: finalState,
+    attempts: attempt,
+    results
+  });
+  return { attempt, state: finalState, results: attemptResults, warnings };
+}
+
+function hasReachedSetupCommitPoint(op: any): boolean {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return false;
+  return (
+    ledger.commit.mode !== "not_started" ||
+    ledger.commit.workflowFiles.length > 0
+  );
+}
+
+function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
+  const safe = { ...(extra || {}) };
+  delete safe.azError;
+  delete safe.ghError;
+  return safe;
+}
+
+export async function finalizeSetupFailure(
+  op: any,
+  {
+    status,
+    error,
+    code,
+    stage,
+    classification,
+    evidence = null,
+    extra = {},
+    steps,
+    runAz,
+    runDeleteEnvironment
+  }: {
+    status: number;
+    error: string;
+    code: string;
+    stage?: string | null;
+    classification?: string;
+    evidence?: string | null;
+    extra?: Record<string, unknown>;
+    steps?: string[];
+    runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
+    runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+  }
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const safeExtra = sanitizeFailureExtra(extra || {});
+  const body: Record<string, unknown> = {
+    error,
+    ...(code ? { code } : {}),
+    ...(op ? { operationId: op.operationId } : {}),
+    ...safeExtra
+  };
+  const ledger = getSetupArtifactLedger(op);
+  const commitPointReached = hasReachedSetupCommitPoint(op);
+  let terminalState: "failed" | "failed_partial" = "failed";
+  let cleanupSummary:
+    | {
+        attempt: number;
+        rollbackAttempted: boolean;
+        rollbackBeforeCommit: boolean;
+        state: "not_needed" | "succeeded" | "succeeded_with_warnings";
+        warnings: string[];
+        results: Array<{
+          attempt: number;
+          artifactType:
+            | "github_environment"
+            | "role_assignment"
+            | "federated_credential"
+            | "service_principal"
+            | "azure_app";
+          target: string;
+          outcome: "deleted" | "not_found" | "warning" | "skipped";
+          detail: string | null;
+        }>;
+      }
+    | undefined;
+
+  if (ledger) {
+    if (commitPointReached) {
+      recordCleanupState(op, { state: "not_needed" });
+      cleanupSummary = projectCleanupSummary(op);
+      if (ledger.commit.workflowFiles.length > 0)
+        terminalState = "failed_partial";
+    } else {
+      const attempt = Number(ledger.cleanup.attempts || 0) + 1;
+      const warnings: string[] = [];
+      let results: Array<{
+        attempt: number;
+        artifactType:
+          | "github_environment"
+          | "role_assignment"
+          | "federated_credential"
+          | "service_principal"
+          | "azure_app";
+        target: string;
+        outcome: "deleted" | "not_found" | "warning" | "skipped";
+        detail: string | null;
+      }> = [];
+      let cleanupState: "not_needed" | "succeeded" | "succeeded_with_warnings" =
+        "not_needed";
+
+      if (runAz) {
+        const azureCleanup = await cleanupAzureSetupArtifacts(op, {
+          runAz,
+          steps
+        });
+        warnings.push(...azureCleanup.warnings);
+        results = [
+          ...results,
+          ...(azureCleanup.results as Array<{
+            attempt: number;
+            artifactType:
+              | "role_assignment"
+              | "federated_credential"
+              | "service_principal"
+              | "azure_app";
+            target: string;
+            outcome: "deleted" | "not_found" | "warning" | "skipped";
+            detail: string | null;
+          }>)
+        ];
+        cleanupState = azureCleanup.state;
+      } else {
+        recordCleanupState(op, { attempts: attempt, state: "not_needed" });
+      }
+
+      const envRepo = optionalString(ledger.githubEnvironment.repo);
+      const envName = optionalString(ledger.githubEnvironment.name);
+      if (ledger.githubEnvironment.state === "created") {
+        const target =
+          envRepo && envName ?
+            `${envRepo}:${envName}`
+          : envName || envRepo || "GitHub environment";
+        if (!runDeleteEnvironment) {
+          const detail =
+            "Missing the GitHub delete helper needed to remove the newly created environment.";
+          warnings.push(detail);
+          steps?.push(`⚠️ ${detail}`);
+          results.push({
+            attempt,
+            artifactType: "github_environment",
+            target,
+            outcome: "warning",
+            detail
+          });
+          cleanupState = "succeeded_with_warnings";
+        } else {
+          try {
+            const deleted = await deleteNewlyCreatedGitHubEnvironment(
+              ledger.githubEnvironment,
+              runDeleteEnvironment
+            );
+            if (deleted) {
+              steps?.push(`✅ Deleted GitHub environment "${envName}"`);
+              results.push({
+                attempt,
+                artifactType: "github_environment",
+                target,
+                outcome: "deleted",
+                detail: null
+              });
+              if (cleanupState === "not_needed") cleanupState = "succeeded";
+            } else {
+              const detail =
+                "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
+              warnings.push(detail);
+              steps?.push(`⚠️ ${detail}`);
+              results.push({
+                attempt,
+                artifactType: "github_environment",
+                target,
+                outcome: "warning",
+                detail
+              });
+              cleanupState = "succeeded_with_warnings";
+            }
+          } catch (cleanupError) {
+            const detail = errorMessage(cleanupError);
+            const warning = `Failed to delete GitHub environment "${envName}": ${detail}`;
+            warnings.push(warning);
+            steps?.push(`⚠️ ${warning}`);
+            results.push({
+              attempt,
+              artifactType: "github_environment",
+              target,
+              outcome: "warning",
+              detail
+            });
+            cleanupState = "succeeded_with_warnings";
+          }
+        }
+      } else if (ledger.githubEnvironment.state === "created_candidate") {
+        const target =
+          envRepo && envName ?
+            `${envRepo}:${envName}`
+          : envName || envRepo || "GitHub environment";
+        const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
+        warnings.push(detail);
+        steps?.push(`⚠️ ${detail}`);
+        results.push({
+          attempt,
+          artifactType: "github_environment",
+          target,
+          outcome: "skipped",
+          detail
+        });
+        cleanupState = "succeeded_with_warnings";
+      }
+
+      if (results.length > 0) {
+        const priorResults =
+          Array.isArray(ledger.cleanup.results) ?
+            ledger.cleanup.results.filter(
+              (entry: any) => entry.attempt < attempt
+            )
+          : [];
+        if (warnings.length > 0) cleanupState = "succeeded_with_warnings";
+        else if (cleanupState === "not_needed") cleanupState = "succeeded";
+        recordCleanupState(op, {
+          attempts: attempt,
+          state: cleanupState,
+          results: [...priorResults, ...results]
+        });
+      }
+
+      cleanupSummary = projectCleanupSummary(op);
+      if (warnings.length > 0 || ledger.commit.workflowFiles.length > 0) {
+        terminalState = "failed_partial";
+      }
+    }
+  }
+
+  if (cleanupSummary) {
+    body.cleanup = cleanupSummary;
+    if (cleanupSummary.warnings.length > 0) {
+      body.cleanupWarning = cleanupSummary.warnings[0];
+    }
+  }
+  if (op) {
+    finish(op, terminalState, {
+      failure: {
+        code: code || "setup-failed",
+        stage: stage || op.currentStage,
+        message: error,
+        classification:
+          classification ||
+          (status === 403 ? "needs-someone-else" : "user-fixable"),
+        evidence
+      }
+    });
+  }
+  return { status, body };
+}
+
 // Preflight the acting gh account's access to `repo` BEFORE any Azure/GitHub
 // mutation (App Registration create, environment PUT). Uses ghApiJson, which
 // routes through cliExec→ghChildEnv and therefore acts as the same active
@@ -866,6 +1831,93 @@ async function preflightRepoAdmin(repo: string): Promise<string> {
   });
 }
 
+type GhcrPackageCredentialLoader = typeof getGhPackageCredentials;
+type GhcrPackageIdentityLoader = typeof getGitHubIdentity;
+type GhcrPackageCredentials = Awaited<ReturnType<GhcrPackageCredentialLoader>>;
+type GhcrPackageIdentity = Awaited<ReturnType<GhcrPackageIdentityLoader>>;
+type GhcrPackagePreflightResult =
+  | {
+      ok: true;
+      credentials: GhcrPackageCredentials;
+      identity: GhcrPackageIdentity;
+      login: string;
+    }
+  | {
+      ok: false;
+      status: 403;
+      code: "ghcr-auth-failed" | "ghcr-scope-required";
+      error: string;
+    };
+
+// Resolve the exact GitHub Packages credential GHCR writes will use, then check
+// that very account for write:packages. The package credential is authoritative:
+// on multi-account machines it can differ from a merely-active gh login, and the
+// packages scope is read keyring-first to match getGhPackageCredentials.
+export async function preflightGhcrPackageWriteAccess(
+  loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
+  loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity
+): Promise<GhcrPackagePreflightResult> {
+  let packageCredentials: GhcrPackageCredentials;
+  try {
+    packageCredentials = await loadCredentials();
+  } catch (e) {
+    return {
+      ok: false,
+      status: 403,
+      code: "ghcr-auth-failed",
+      error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
+        e
+      )}`
+    };
+  }
+
+  let ghPkgIdentity: GhcrPackageIdentity;
+  try {
+    ghPkgIdentity = await loadIdentity();
+  } catch (e) {
+    return {
+      ok: false,
+      status: 403,
+      code: "ghcr-auth-failed",
+      error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
+        e
+      )}`
+    };
+  }
+
+  const ghPkgLogin = (packageCredentials.username || "").trim();
+  if (!ghPkgLogin) {
+    return {
+      ok: false,
+      status: 403,
+      code: "ghcr-auth-failed",
+      error:
+        "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry."
+    };
+  }
+  const ghPkgAccount =
+    (ghPkgIdentity.accounts || []).find((a) => a.login === ghPkgLogin) || null;
+  const ghPkgHasPackages =
+    ghPkgAccount ? ghPkgAccount.hasPackages
+    : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
+    : false;
+  if (!ghPkgHasPackages) {
+    return {
+      ok: false,
+      status: 403,
+      code: "ghcr-scope-required",
+      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+    };
+  }
+
+  return {
+    ok: true,
+    credentials: packageCredentials,
+    identity: ghPkgIdentity,
+    login: ghPkgLogin
+  };
+}
+
 // How many of an environment's newest deployment records to resolve
 // concurrently before falling back to a serial walk. The relevant deploy/delete
 // record is almost always in the newest handful.
@@ -884,7 +1936,7 @@ async function resolveRepoAppName(
   let appName = repo.split("/").pop() || repo;
   const ref = branch || "main";
   for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw = "";
+    let raw: string;
     try {
       raw = await ghOrThrow([
         "api",
@@ -896,7 +1948,7 @@ async function resolveRepoAppName(
       raw = "";
     }
     if (!raw) continue;
-    let decoded = "";
+    let decoded: string;
     try {
       decoded = Buffer.from(raw, "base64").toString("utf8");
     } catch {
@@ -1033,6 +2085,10 @@ export function pickAksResourceGroup(
   return own || resourceGroup;
 }
 
+// Read the `default:` of the `environment` input under `on.workflow_dispatch.inputs`.
+// Indentation-aware rather than a bare regex, because `environment:` also appears as a
+// job-level key and matching the wrong one would silently mis-target a deploy. Kept as
+// hand-rolled parsing to avoid pulling a YAML dependency into the adapter for one field.
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -1057,7 +2113,9 @@ async function resolveEnvDeployment(
   try {
     const varsRaw = await ghOrThrow([
       "api",
-      `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`,
+      `/repos/${repo}/environments/${encodeURIComponent(
+        environment
+      )}/variables?per_page=100`,
       "--jq",
       ".variables[].name"
     ]);
@@ -1070,7 +2128,9 @@ async function resolveEnvDeployment(
   // Newest-first deployment records for THIS environment only.
   const idsRaw = await ghOrThrow([
     "api",
-    `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(environment)}`,
+    `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
+      environment
+    )}`,
     "--jq",
     ".[].id"
   ]);
@@ -1123,7 +2183,7 @@ async function resolveEnvDeployment(
     if (rec.isDelete && rec.runConclusion === "success") return null;
     if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success")
       return "skip";
-    let status = "pending";
+    let status: string;
     if (rec.isDelete) {
       status = "deleting"; // delete still in progress
     } else {
@@ -1227,7 +2287,9 @@ async function ensureDeployWorkflowsOnBranch(
         "gh",
         [
           "api",
-          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
+          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
+            branch
+          )}`,
           "--jq",
           ".sha"
         ],
@@ -1365,14 +2427,213 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(instanceId: string) {
-  return async (
+function createRequestHandler(
+  instanceId: string,
+  resolveBaseUrl: () => string
+) {
+  const serverOwnedTasks = new Map<string, Promise<void>>();
+  const serverOwnedToken = randomUUID();
+
+  function scheduleServerOwnedTask(
+    operationId: string,
+    task: () => Promise<void>
+  ): void {
+    let instanceTasks = activeEnvironmentTasks.get(instanceId);
+    if (!instanceTasks) {
+      instanceTasks = new Set();
+      activeEnvironmentTasks.set(instanceId, instanceTasks);
+    }
+    instanceTasks.add(operationId);
+    const op = operations.get(operationId);
+    if (op) setExecutionActive(op, true);
+    const prior = serverOwnedTasks.get(operationId);
+    const running = (prior || Promise.resolve())
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            setImmediate(() => resolve());
+          })
+      )
+      .then(task)
+      .catch(async (error) => {
+        const current = operations.get(operationId);
+        if (shuttingDownInstances.has(instanceId)) return;
+        if (current && !current.endedAt) {
+          finish(current, "failed", {
+            failure: {
+              code: "server-owned-task-failed",
+              stage: current.currentStage,
+              stepSeq: null,
+              message: errorMessage(error),
+              classification: "unknown",
+              evidence: error instanceof Error ? error.stack || null : null
+            }
+          });
+          await operations.persist().catch(() => {});
+        }
+      })
+      .finally(() => {
+        if (serverOwnedTasks.get(operationId) !== running) return;
+        const current = operations.get(operationId);
+        if (current && !current.endedAt) setExecutionActive(current, false);
+        serverOwnedTasks.delete(operationId);
+        const activeForInstance = activeEnvironmentTasks.get(instanceId);
+        activeForInstance?.delete(operationId);
+        if (activeForInstance?.size === 0) {
+          activeEnvironmentTasks.delete(instanceId);
+          for (const listener of environmentTasksSettledListeners.get(
+            instanceId
+          ) || []) {
+            try {
+              listener();
+            } catch {
+              // One shutdown consumer must not block the others.
+            }
+          }
+        }
+      });
+    serverOwnedTasks.set(operationId, running);
+  }
+
+  async function postInternal(pathname: string, data: unknown): Promise<any> {
+    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": serverOwnedToken
+      },
+      body: JSON.stringify(data)
+    });
+    const result: any = await response.json();
+    if (!response.ok && !result?.inputRequired) {
+      throw new Error(
+        result?.error || `Request failed with HTTP ${response.status}.`
+      );
+    }
+    return result;
+  }
+
+  async function monitorVerification(operationId: string): Promise<void> {
+    const deadline = Date.now() + 45 * 60 * 1000;
+    let delayMs = 5000;
+    while (Date.now() < deadline) {
+      const op = operations.get(operationId);
+      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
+      const params = new URLSearchParams({
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      const response = await fetch(
+        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
+        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
+      );
+      const result: any = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          result?.error ||
+            `Verification status failed with HTTP ${response.status}.`
+        );
+      }
+      if (result?.state === "success" || result?.state === "failed") return;
+      if (result?.terminal || result?.state === "expired") {
+        const current = operations
+          .all()
+          .find((candidate: any) => candidate.operationId === operationId);
+        if (current && !current.endedAt) {
+          finish(current, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: current.currentStage,
+              stepSeq: null,
+              message:
+                result?.error ||
+                "Credential verification is no longer being tracked.",
+              classification: "user-fixable",
+              evidence: null
+            }
+          });
+          await persistBestEffort({
+            operation: current,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        }
+        return;
+      }
+      const jitterMs = Math.floor(Math.random() * 1000);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
+      );
+      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
+    }
+    throw new Error(
+      "Credential verification did not complete within 45 minutes."
+    );
+  }
+
+  async function runEnvironmentOperation(operationId: string): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId);
+      return;
+    }
+    const op = operations.get(operationId);
+    if (!op) return;
+    const request = op.request || op.resumeRequest || {};
+    let setupResult: any = null;
+    if (op.provider === "azure" && request.needsAzureCredentials) {
+      setupResult = await postInternal("/api/azure-auto-setup", {
+        ...request.azure,
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      if (setupResult?.inputRequired || op.state === "input_required") return;
+    }
+    const current = operations.get(operationId);
+    if (!current || current.state === "input_required" || current.endedAt)
+      return;
+    await postInternal("/api/create-environment", {
+      ...request.environment,
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider,
+      operationId,
+      clientId: setupResult?.clientId || request.environment?.clientId || ""
+    });
+    await monitorVerification(operationId);
+  }
+
+  function startRecoveredVerificationTasks(): void {
+    for (const op of operations.all()) {
+      if (
+        op.recoveryState !== "verification_pending" ||
+        op.currentStage !== STAGE_VERIFY ||
+        op.endedAt ||
+        activeVerificationMonitors.has(op.operationId)
+      )
+        continue;
+      activeVerificationMonitors.add(op.operationId);
+      scheduleServerOwnedTask(op.operationId, async () => {
+        try {
+          await monitorVerification(op.operationId);
+        } finally {
+          activeVerificationMonitors.delete(op.operationId);
+        }
+      });
+    }
+  }
+
+  const handler = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
-    lastWebviewActivityAt = Date.now();
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    const isServerOwnedRequest =
+      req.headers["x-radius-server-owned"] === serverOwnedToken;
+    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
     // CSRF defense-in-depth: reject cross-site state-changing requests before
     // any routing or body parse. See isCrossSiteMutation for the rules.
     if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
@@ -1412,7 +2673,391 @@ function createRequestHandler(instanceId: string) {
       return;
     }
 
-    // Open a source file from the local workspace in the Copilot editor
+    // Operation status. The panel polls this instead of waiting on the POST,
+    // which is what lets it stop blocking: the record outlives the request
+    // that created it, so a reload or a trip to another page can rejoin an
+    // operation already in flight.
+    //
+    // Polled rather than streamed on purpose. SSE would be smoother, but the
+    // canvas reloads on navigation and a reload mid-operation is a routine
+    // event here, not an edge case — a plain GET is trivially resumable and
+    // a reconnecting EventSource is not.
+    if (pathname === "/api/operations" && req.method === "GET") {
+      const repo = url.searchParams.get("repo") || "";
+      const record = repo ? operations.latest(repo) : operations.latestAny();
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({ operation: record ? toClientView(record) : null })
+      );
+      return;
+    }
+    if (pathname === "/api/operations" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
+        );
+        return;
+      }
+      const repo = String(data.repo || "");
+      const environment = String(data.environment || data.name || "dev").trim();
+      const provider = data.provider === "aws" ? "aws" : "azure";
+      if (!isValidRepoSlug(repo)) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: `Invalid repository "${repo}". Expected "owner/repo".`,
+            code: "invalid-repo"
+          })
+        );
+        return;
+      }
+      if (!environment.trim()) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Environment name is required.",
+            code: "environment-required"
+          })
+        );
+        return;
+      }
+      if (provider === "azure") {
+        if (
+          !isResourceGroupName(String(data.resourceGroup || "")) ||
+          !isAksClusterName(String(data.cluster || "")) ||
+          !isUuid(String(data.tenantId || "")) ||
+          !isUuid(String(data.subscriptionId || ""))
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error:
+                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+              code: "invalid-azure-operation-input"
+            })
+          );
+          return;
+        }
+      } else if (
+        !String(data.roleArn || "").trim() ||
+        !String(data.accountId || "").trim() ||
+        !String(data.region || "").trim() ||
+        !String(data.cluster || "").trim()
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error:
+              "AWS setup requires roleArn, accountId, region, and cluster.",
+            code: "invalid-aws-operation-input"
+          })
+        );
+        return;
+      }
+      const needsAzureCredentials =
+        provider === "azure" && !String(data.clientId || "").trim();
+      const op = createOperation({
+        provider,
+        repo,
+        environment,
+        stages: buildStages({ includeIdentity: needsAzureCredentials }),
+        journey: {
+          origin: data.origin || null,
+          resumeTarget: data.resumeTarget || null,
+          resumeBranch: data.resumeBranch || data.branch || null,
+          resumeReason: data.resumeReason || null
+        }
+      });
+      op.request = {
+        needsAzureCredentials,
+        azure: {
+          resourceGroup: data.resourceGroup || "",
+          cluster: data.cluster || "",
+          clusterResourceGroup: data.clusterResourceGroup || "",
+          subscriptionId: data.subscriptionId || "",
+          tenantId: data.tenantId || "",
+          appName: data.appName,
+          appId: data.appId || "",
+          createNew: data.createNew === true,
+          serviceManagementReference: data.serviceManagementReference || ""
+        },
+        environment: { ...data, environment, provider }
+      };
+      if (provider === "azure") {
+        op.resumeRequest = {
+          needsAzureCredentials,
+          azure: structuredClone(op.request.azure),
+          environment: {
+            repo,
+            environment,
+            provider,
+            cluster: data.cluster || "",
+            namespace: data.namespace || "",
+            profileName: data.profileName || "",
+            branch: data.branch || "",
+            tenantId: data.tenantId || "",
+            subscriptionId: data.subscriptionId || "",
+            resourceGroup: data.resourceGroup || "",
+            origin: data.origin || null,
+            resumeTarget: data.resumeTarget || null,
+            resumeBranch: data.resumeBranch || null,
+            resumeReason: data.resumeReason || null
+          }
+        };
+      }
+      const started = operations.start(op);
+      if (!started.ok) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: `Setup is already running for ${repo}.`,
+            code: "operation-in-progress",
+            operationId: started.conflict.operationId
+          })
+        );
+        return;
+      }
+      try {
+        await operations.persist();
+      } catch (error) {
+        finish(op, "failed", {
+          failure: {
+            code: "operation-registration-persist-failed",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not durably register the environment operation.",
+            classification: "unknown",
+            evidence: errorMessage(error)
+          }
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not durably register the environment operation. No setup work was started.",
+            code: "operation-registration-persist-failed"
+          })
+        );
+        return;
+      }
+      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Location", statusUrl);
+      res.writeHead(202);
+      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
+    }
+    const resumeMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
+    );
+    if (resumeMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(resumeMatch[1]);
+      const code = decodeURIComponent(resumeMatch[2]);
+      const op = operations.get(operationId);
+      if (!op) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(404);
+        res.end(
+          JSON.stringify({
+            error: "Unknown operation.",
+            code: "unknown-operation"
+          })
+        );
+        return;
+      }
+      if (
+        op.state === "failed_partial" &&
+        op.failure?.code === "operation-input-expired"
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(410);
+        res.end(
+          JSON.stringify({
+            error: op.failure.message,
+            code: "operation-input-expired",
+            operation: toClientView(op)
+          })
+        );
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = {};
+      }
+      if (
+        !canResumeInput(op, {
+          code,
+          checkpoint: data.checkpoint,
+          repo: data.repo,
+          environment: data.environment,
+          provider: data.provider
+        })
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: "The operation is not waiting for this input.",
+            code: "operation-resume-mismatch",
+            operationId
+          })
+        );
+        return;
+      }
+      if (!op.request && op.resumeRequest) {
+        op.request = structuredClone(op.resumeRequest);
+      }
+      const resumeSnapshot = {
+        inputRequired: structuredClone(op.inputRequired),
+        request: structuredClone(op.request),
+        resumeRequest:
+          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
+      };
+      if (code === "service-management-reference-required") {
+        op.request.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.serviceManagementReference =
+            data.serviceManagementReference || "";
+        }
+      } else if (code === "app-selection-required") {
+        op.request.azure.appId = data.appId || "";
+        op.request.azure.createNew = data.createNew === true;
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.appId = data.appId || "";
+          op.resumeRequest.azure.createNew = data.createNew === true;
+        }
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Unsupported resume prompt.",
+            code: "unsupported-resume"
+          })
+        );
+        return;
+      }
+      resumeAfterInput(op);
+      try {
+        await operations.persist();
+      } catch (error) {
+        op.request = resumeSnapshot.request;
+        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
+        else op.resumeRequest = resumeSnapshot.resumeRequest;
+        requireInput(op, resumeSnapshot.inputRequired);
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+            code: "operation-resume-persist-failed",
+            operationId,
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(202);
+      res.end(
+        JSON.stringify({
+          operationId,
+          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
+        })
+      );
+      scheduleServerOwnedTask(operationId, () =>
+        runEnvironmentOperation(operationId)
+      );
+      return;
+    }
+    const abandonMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/abandon$/
+    );
+    if (abandonMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(abandonMatch[1]);
+      const op = operations.get(operationId);
+      if (
+        !op ||
+        op.state !== INPUT_REQUIRED_STATE ||
+        op.executionActive ||
+        isTerminalState(op.state)
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(op ? 409 : 404);
+        res.end(
+          JSON.stringify({
+            error:
+              op ?
+                "The operation is not waiting for input."
+              : "Unknown operation.",
+            code: op ? "operation-abandon-mismatch" : "unknown-operation"
+          })
+        );
+        return;
+      }
+      finish(op, "cancelled");
+      try {
+        await operations.persist();
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Radius could not persist the abandoned operation.",
+            code: "operation-abandon-persist-failed",
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(JSON.stringify({ operation: toClientView(op) }));
+      return;
+    }
+    if (pathname.startsWith("/api/operations/") && req.method === "GET") {
+      const operationId = decodeURIComponent(
+        pathname.slice("/api/operations/".length)
+      );
+      const record = operations.get(operationId);
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.writeHead(record ? 200 : 404);
+      res.end(
+        JSON.stringify(
+          record ?
+            { operation: toClientView(record) }
+          : { error: "Unknown operation." }
+        )
+      );
+      return;
+    }
+
     // canvas (side pane). Only the webview for a local-workspace graph calls
     // this (client passes localSource); the actual open is delegated to the
     // SDK session via the handler registered in extension.ts. Status codes
@@ -1423,11 +3068,11 @@ function createRequestHandler(instanceId: string) {
       for await (const chunk of req) body += chunk;
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-store");
-      let relPath = "";
+      let relPath: string;
       // `line` is reserved: the editor canvas has no line-selection input
       // yet, so it is validated and threaded through but not acted on. When
       // the canvas gains line support, the handler can start honoring it.
-      let line = 0;
+      let line: number;
       try {
         const data = JSON.parse(body || "{}");
         relPath = toSafeRepoRelPath(data.path);
@@ -1479,7 +3124,9 @@ function createRequestHandler(instanceId: string) {
           const entry = servers.get(instanceId);
           if (validation.success) {
             const result = {
-              message: `✅ Azure authentication confirmed — logged in as ${validation.userName || "user"}`,
+              message: `✅ Azure authentication confirmed — logged in as ${
+                validation.userName || "user"
+              }`,
               validated: true,
               tenantId: validation.tenantId,
               subscriptionId: validation.subscriptionId,
@@ -1662,7 +3309,7 @@ function createRequestHandler(instanceId: string) {
         const requestedTenantId =
           typeof data.tenantId === "string" ? data.tenantId.trim() : "";
         const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+        const prompt = azureCliAssistMessage({ action, tenantId });
         const promptResult = await invokeSessionPrompt(
           sessionPromptHandler,
           prompt
@@ -1919,13 +3566,17 @@ function createRequestHandler(instanceId: string) {
           // deployed (e.g. GitHub is unavailable), do NOT delete — that
           // could orphan the application's cloud resources.
           console.error(
-            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${errorMessage(e)}`
+            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${errorMessage(
+              e
+            )}`
           );
           res.setHeader("Content-Type", "application/json");
           res.writeHead(503);
           res.end(
             JSON.stringify({
-              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${errorMessage(e)}). The environment was not deleted — please try again.`
+              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${errorMessage(
+                e
+              )}). The environment was not deleted — please try again.`
             })
           );
           return;
@@ -1943,7 +3594,9 @@ function createRequestHandler(instanceId: string) {
               code: "app-deployed",
               app: active.app,
               environment: envName,
-              redirect: `/?page=deploying&app=${encodeURIComponent(active.app)}&env=${encodeURIComponent(envName)}`
+              redirect: `/?page=deploying&app=${encodeURIComponent(
+                active.app
+              )}&env=${encodeURIComponent(envName)}`
             })
           );
           return;
@@ -1983,10 +3636,27 @@ function createRequestHandler(instanceId: string) {
 
     // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
     if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Cleaned up in finally; declared here so it's reachable from finally.
       let fedTmpFile = null;
+      // Declared out here so the generic catch below can close it. Null
+      // until the pure input-validation guards have passed, because those
+      // reject before any operation conceptually starts.
+      let op: any = null;
+      let steps: string[] = [];
+      let runCmd: typeof runCliCommand | null = null;
       try {
         const data = JSON.parse(body);
         const targetRepo = data.repo || "";
@@ -2019,25 +3689,72 @@ function createRequestHandler(instanceId: string) {
         // the az CLI context to it before the Graph calls (issue #125).
         const requestedSubscriptionId = (data.subscriptionId || "").trim();
 
-        const fail = (
+        const fail = async (
           status: number,
           error: string,
           code: string,
           extra: Record<string, unknown> = {}
-        ): void => {
+        ): Promise<void> => {
+          // Every early return through here is a terminal state. Closing
+          // the record in one place beats remembering to do it at each of
+          // the thirty-odd call sites.
+          const retryablePrompt =
+            code === "app-selection-required" ||
+            code === "service-management-reference-required";
+          if (op && retryablePrompt) {
+            requireInput(op, {
+              code,
+              message: error,
+              checkpoint:
+                code === "app-selection-required" ?
+                  "azure-app-selection"
+                : "azure-service-management-reference",
+              metadata:
+                code === "app-selection-required" ?
+                  {
+                    candidates:
+                      Array.isArray(extra.candidates) ? extra.candidates : [],
+                    defaultAppId: extra.defaultAppId || null
+                  }
+                : null
+            });
+            await operations.persist();
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(status);
+            res.end(
+              JSON.stringify({
+                error,
+                inputRequired: true,
+                ...(code ? { code } : {}),
+                ...(op ? { operationId: op.operationId } : {}),
+                ...sanitizeFailureExtra(extra || {})
+              })
+            );
+            return;
+          }
+          const failure = await finalizeSetupFailure(op, {
+            status,
+            error,
+            code,
+            extra,
+            steps,
+            evidence: typeof extra.azError === "string" ? extra.azError : null,
+            runAz: runCmd ? (args) => runCmd!("az", args) : null
+          });
           res.setHeader("Content-Type", "application/json");
-          res.writeHead(status);
-          res.end(
-            JSON.stringify({
-              error,
-              ...(code ? { code } : {}),
-              ...(extra || {})
-            })
-          );
+          res.writeHead(failure.status);
+          res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         if (!targetRepo || !resourceGroup || !clusterName) {
-          fail(
+          await fail(
             400,
             "repo, resourceGroup, and cluster are required.",
             "missing-params"
@@ -2048,7 +3765,7 @@ function createRequestHandler(instanceId: string) {
         // does not use a shell, but a leading '-' could still be parsed
         // as a flag, and a bad repo slug would corrupt the OIDC subject.
         if (!isValidRepoSlug(targetRepo)) {
-          fail(
+          await fail(
             400,
             `Invalid repository "${targetRepo}". Expected "owner/repo".`,
             "invalid-repo"
@@ -2056,7 +3773,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         if (!isResourceGroupName(resourceGroup)) {
-          fail(
+          await fail(
             400,
             `Invalid resource group name "${resourceGroup}".`,
             "invalid-resource-group"
@@ -2064,7 +3781,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         if (!isAksClusterName(clusterName)) {
-          fail(
+          await fail(
             400,
             `Invalid cluster name "${clusterName}".`,
             "invalid-cluster"
@@ -2075,7 +3792,7 @@ function createRequestHandler(instanceId: string) {
           clusterResourceGroup &&
           !isResourceGroupName(clusterResourceGroup)
         ) {
-          fail(
+          await fail(
             400,
             `Invalid cluster resource group name "${clusterResourceGroup}".`,
             "invalid-cluster-resource-group"
@@ -2083,7 +3800,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         if (data.tenantId && !isUuid(data.tenantId)) {
-          fail(
+          await fail(
             400,
             `Invalid tenantId "${data.tenantId}" (expected a GUID).`,
             "invalid-tenant"
@@ -2091,7 +3808,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         if (data.subscriptionId && !isUuid(data.subscriptionId)) {
-          fail(
+          await fail(
             400,
             `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
             "invalid-subscription"
@@ -2104,7 +3821,7 @@ function createRequestHandler(instanceId: string) {
         // it must be a GUID (for Microsoft-internal tenants this is the
         // Service Tree ID).
         if (serviceManagementReference && !isUuid(serviceManagementReference)) {
-          fail(
+          await fail(
             400,
             `Invalid Service Management Reference "${serviceManagementReference}". It must be a GUID (for Microsoft-internal tenants, your Service Tree ID).`,
             "invalid-smr"
@@ -2117,12 +3834,168 @@ function createRequestHandler(instanceId: string) {
         // below fall back to the ambient default context and create the
         // App Registration / SP in the wrong tenant (issue #125).
         if (!requestedSubscriptionId) {
-          fail(
+          await fail(
             400,
             "subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.",
             "subscription-required"
           );
           return;
+        }
+
+        steps = [];
+
+        // The operation record. Created before the first mutation-adjacent
+        // call so a failure has something to describe: the repo-admin
+        // preflight below is one of the most common failure points, and it
+        // used to run before any state existed at all, leaving nothing but
+        // a bare 403 string.
+        const continuationId =
+          typeof data.operationId === "string" ? data.operationId : "";
+        if (continuationId) {
+          const existing = operations.get(continuationId);
+          if (
+            !existing ||
+            isStale(existing) ||
+            existing.repo !== targetRepo ||
+            existing.environment !== envName ||
+            existing.provider !== "azure" ||
+            existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
+            (!isServerOwnedRequest && !existing.inputRequired)
+          ) {
+            await fail(
+              409,
+              "The setup operation cannot be resumed with these inputs.",
+              "operation-continuation-mismatch"
+            );
+            return;
+          }
+          op = existing;
+          if (existing.inputRequired) resumeAfterInput(op);
+        } else {
+          op = createOperation({
+            provider: "azure",
+            repo: targetRepo,
+            environment: envName,
+            stages: buildStages(),
+            journey: {
+              origin: data.origin || null,
+              resumeTarget: data.resumeTarget || null,
+              resumeBranch: data.resumeBranch || null,
+              resumeReason: data.resumeReason || null
+            }
+          });
+          setContext(op, {
+            resourceGroup,
+            clusterName,
+            clusterResourceGroup,
+            requestedAppName: requestedAppName || null
+          });
+          setCloudContext(op, "azure", {
+            subscriptionId: requestedSubscriptionId,
+            tenantId: (data.tenantId || "").trim(),
+            resourceGroup,
+            clusterName
+          });
+          const started = operations.start(op);
+          if (!started.ok) {
+            // One setup per repository. Two concurrent runs would race on
+            // the same App Registration, federated credentials and
+            // environment secrets, and the loser would silently overwrite
+            // the winner.
+            op = null;
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error: `Setup is already running for ${targetRepo}.`,
+                code: "operation-in-progress",
+                operationId: started.conflict.operationId
+              })
+            );
+            return;
+          }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
+        }
+        enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+
+        // Mirror every step into the record as it is pushed. Wrapping the
+        // instance's push keeps the two representations in sync by
+        // construction, which is worth more than converting fifty-odd call
+        // sites in one diff and hoping none were missed.
+        //
+        // The step strings carry their own state, and that convention is
+        // now load-bearing — `addLegacyStep` parses it. When adding a step:
+        //
+        //   'Doing the thing...'  trailing ellipsis  -> running
+        //   '✅ Did the thing'                        -> succeeded
+        //   '⚠️ Did it, with a caveat'                -> warning
+        //   '❌ Could not do it'                      -> failed
+        //   '⏭️ Did not need to do it'                -> skipped
+        //   '👉 Now go do this yourself'              -> prompt
+        //   'Anything else'                          -> succeeded (default)
+        //
+        // An unmarked step lands on that last line, so mark anything that
+        // is not a plain successful observation.
+        const rawPush = steps.push.bind(steps);
+        steps.push = (...items) => {
+          for (const item of items) {
+            try {
+              addLegacyStep(op, item);
+            } catch {
+              /* narration must never break setup */
+            }
+          }
+          return rawPush(...items);
+        };
+
+        // Record the GitHub identity setup is acting as, so the setup
+        // log makes it obvious when mutations run as a different account
+        // than the one the host UI shows (e.g. an enterprise/EMU login
+        // that may lack access to the target repo or Azure tenant).
+        // Captured before the preflight, not after, so a preflight 403 can
+        // still say which account it was acting as — which is usually the
+        // whole explanation.
+        try {
+          const ghId = await getGitHubIdentity();
+          if (ghId && ghId.actingLogin) {
+            setContext(op, { githubLogin: ghId.actingLogin });
+            steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
+            if (ghId.mismatch && ghId.displayLogin) {
+              steps.push(
+                `⚠️ Note: the app shows @${ghId.displayLogin} but setup is acting as @${ghId.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`
+              );
+            }
+          }
+        } catch {
+          /* identity is advisory — never block setup on it */
         }
 
         // Preflight repo access + admin BEFORE creating any App
@@ -2131,13 +4004,25 @@ function createRequestHandler(instanceId: string) {
         // returns as bare, unhelpful 404s later in the flow.
         const accessMsg = await preflightRepoAdmin(targetRepo);
         if (accessMsg) {
-          fail(403, accessMsg, "repo-admin-required");
+          await fail(403, accessMsg, "repo-admin-required");
+          return;
+        }
+        const ghcrPreflight = await preflightGhcrPackageWriteAccess();
+        if (!ghcrPreflight.ok) {
+          await fail(
+            ghcrPreflight.status,
+            ghcrPreflight.error,
+            ghcrPreflight.code,
+            {
+              steps
+            }
+          );
           return;
         }
 
         // Run `az` non-interactively: close stdin so it can never block on
         // an interactive prompt inside this GUI host process.
-        const runCmd = runCliCommand;
+        runCmd = runCliCommand;
         const ghJsonRunner: GitHubJsonRunner = async (
           apiPath: string
         ): Promise<GitHubJsonResponse> => {
@@ -2159,26 +4044,6 @@ function createRequestHandler(instanceId: string) {
           };
         };
 
-        const steps: string[] = [];
-
-        // Record the GitHub identity setup is acting as, so the setup
-        // log makes it obvious when mutations run as a different account
-        // than the one the host UI shows (e.g. an enterprise/EMU login
-        // that may lack access to the target repo or Azure tenant).
-        try {
-          const ghId = await getGitHubIdentity();
-          if (ghId && ghId.actingLogin) {
-            steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
-            if (ghId.mismatch && ghId.displayLogin) {
-              steps.push(
-                `Note: the app shows @${ghId.displayLogin} but setup is acting as @${ghId.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`
-              );
-            }
-          }
-        } catch {
-          /* identity is advisory — never block setup on it */
-        }
-
         // Step 1: Pin the az CLI context to the SELECTED profile, then
         // confirm login and align the tenant. Microsoft Graph / AAD
         // commands (`az ad app create`, `az ad sp create`, `az ad app
@@ -2191,7 +4056,7 @@ function createRequestHandler(instanceId: string) {
         let subscriptionId = requestedSubscriptionId;
 
         steps.push(`Selecting subscription ${subscriptionId}...`);
-        const setResult = await runCmd("az", [
+        const setResult = await runCmd!("az", [
           "account",
           "set",
           "--subscription",
@@ -2202,9 +4067,11 @@ function createRequestHandler(instanceId: string) {
           // session, expired credentials, or a tenant restriction, not
           // just an unknown subscription.
           const detail = (setResult.stderr || "").trim();
-          fail(
+          await fail(
             400,
-            `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${detail ? " Azure CLI: " + detail : ""}`,
+            `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${
+              detail ? " Azure CLI: " + detail : ""
+            }`,
             "az-subscription-set-failed",
             { steps }
           );
@@ -2214,14 +4081,14 @@ function createRequestHandler(instanceId: string) {
         // Read the now-active account — the source of truth for what the
         // subsequent `az ad` (Graph) calls will actually target.
         steps.push("Checking Azure CLI login...");
-        const acctResult = await runCmd("az", [
+        const acctResult = await runCmd!("az", [
           "account",
           "show",
           "--output",
           "json"
         ]);
         if (acctResult.code !== 0) {
-          fail(
+          await fail(
             400,
             'Azure CLI not logged in. Run "az login" first.',
             "az-not-logged-in",
@@ -2234,7 +4101,7 @@ function createRequestHandler(instanceId: string) {
           const parsed: unknown = JSON.parse(acctResult.stdout);
           account = record(parsed);
         } catch (e) {
-          fail(
+          await fail(
             400,
             'Could not parse "az account show" output.',
             "az-account-parse",
@@ -2254,7 +4121,7 @@ function createRequestHandler(instanceId: string) {
           activeTenantId &&
           tenantId.toLowerCase() !== activeTenantId.toLowerCase()
         ) {
-          fail(
+          await fail(
             400,
             `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
               `Run "az login --tenant ${tenantId}" and retry.`,
@@ -2268,7 +4135,7 @@ function createRequestHandler(instanceId: string) {
         // Validate the resolved subscription id before it reaches an
         // `az` scope argument, and ensure the tenant is known.
         if (!isUuid(subscriptionId)) {
-          fail(
+          await fail(
             400,
             `Resolved subscription id "${subscriptionId}" is not a valid GUID.`,
             "invalid-subscription",
@@ -2277,7 +4144,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         if (!activeTenantId) {
-          fail(
+          await fail(
             400,
             'Could not determine the active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
             "az-account-incomplete",
@@ -2291,34 +4158,41 @@ function createRequestHandler(instanceId: string) {
 
         // Step 2: Resolve the federated credential(s) BEFORE creating
         // anything. This reads the canonical repo + subject customization
-        // from GitHub. For the default (not customized) subject we create
-        // BOTH the mutable and immutable forms so whichever GitHub mints
-        // at token time matches; for a customized subject we build the
-        // single exact subject (failing loud only if a repo/repository
-        // claim needs an immutability decision it cannot make).
+        // from GitHub. A proven immutable default creates only ID-bound trust;
+        // an inconclusive default creates both forms for rollout compatibility.
+        // A customized subject builds the single exact subject (failing loud
+        // only if a repo/repository claim needs an immutability decision).
         steps.push("Resolving GitHub OIDC subject...");
         // Note: enterprise-claim rejection (AADSTS7002381) is handled at
         // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
         // which surfaces a tenant-agnostic explanation. Package-scope /
         // workflow-permission changes remain out of scope for this fix.
-        let oidc;
+        const oidcSuffix = buildEnvironmentSuffix(envName);
+        let oidc: ResolveOidcSubjectResult;
         try {
           oidc = await resolveOidcSubject(
             {
               targetRepo,
               envName,
-              suffix: buildEnvironmentSuffix(envName)
+              suffix: oidcSuffix
             },
             ghJsonRunner
           );
         } catch (e) {
-          fail(400, errorMessage(e), errorCode(e, "oidc-subject-failed"), {
-            steps
-          });
+          await fail(
+            400,
+            errorMessage(e),
+            errorCode(e, "oidc-subject-failed"),
+            {
+              steps
+            }
+          );
           return;
         }
         steps.push(
-          `✅ OIDC subject(s): ${oidc.federatedCredentials.map((f) => f.subject).join(", ")}`
+          `✅ OIDC subject(s): ${oidc.federatedCredentials
+            .map((f) => f.subject)
+            .join(", ")}`
         );
 
         // Step 3: Resolve the target App Registration idempotently
@@ -2344,14 +4218,14 @@ function createRequestHandler(instanceId: string) {
           if (appNameProvided) {
             const nameCheck = validateAppRegistrationName(requestedAppName);
             if (!nameCheck.ok) {
-              fail(400, nameCheck.reason, "invalid-app-name", { steps });
+              await fail(400, nameCheck.reason, "invalid-app-name", { steps });
               return;
             }
             appName = nameCheck.name;
           } else {
             const nameCheck = validateAppRegistrationName(appName);
             if (!nameCheck.ok) {
-              fail(
+              await fail(
                 400,
                 "The derived App Registration name is invalid: " +
                   nameCheck.reason +
@@ -2372,7 +4246,9 @@ function createRequestHandler(instanceId: string) {
         let existingClientId = (data.clientId || "").trim();
         if (!existingClientId) {
           const varRes = await ghJsonRunner(
-            `/repos/${oidc.fullName}/environments/${encodeURIComponent(envName)}/variables/AZURE_CLIENT_ID`
+            `/repos/${oidc.fullName}/environments/${encodeURIComponent(
+              envName
+            )}/variables/AZURE_CLIENT_ID`
           );
           if (
             varRes?.ok &&
@@ -2393,7 +4269,7 @@ function createRequestHandler(instanceId: string) {
           { ok: true; id: string } | { ok: false; stderr: string }
         > => {
           if (signedInUserId !== null) return { ok: true, id: signedInUserId };
-          const meRes = await runCmd("az", [
+          const meRes = await runCmd!("az", [
             "ad",
             "signed-in-user",
             "show",
@@ -2409,24 +4285,21 @@ function createRequestHandler(instanceId: string) {
         const isOwnedBySignedInUser = async (appId: string) => {
           const me = await getSignedInUserId();
           if (!me.ok) return { ok: false, stderr: me.stderr };
-          const ownRes = await runCmd("az", [
-            "ad",
-            "app",
-            "owner",
-            "list",
-            "--id",
-            appId,
-            "--query",
-            "[].id",
-            "-o",
-            "tsv"
-          ]);
+          const ownRes = await runCmd!("az", buildAppOwnerListArgs({ appId }));
           if (ownRes.code !== 0) return { ok: false, stderr: ownRes.stderr };
-          const owners = ownRes.stdout
-            .split(/\s+/)
-            .map((s) => s.trim().toLowerCase())
-            .filter(Boolean);
+          const owners = parseDirectoryObjectIds(ownRes.stdout);
           return { ok: true, owned: owners.includes(me.id) };
+        };
+        const readRadiusProvenance = async (
+          appId: string
+        ): Promise<RadiusAppProvenanceInput | undefined> => {
+          const tagRes = await runCmd!("az", buildAppTagShowArgs({ appId }));
+          if (tagRes.code !== 0) return undefined;
+          return {
+            tags: parseAppTags(tagRes.stdout) || [],
+            repo: oidc.fullName,
+            environment: envName
+          };
         };
 
         // TODO(defer): TOCTOU race — two concurrent requests could both
@@ -2435,6 +4308,17 @@ function createRequestHandler(instanceId: string) {
         // same-repo setup is implausible; a mutex+re-list+delete-loser is
         // disproportionate.
         let clientId = "";
+        const rollbackCreatedAppAndFail = async (
+          error: string,
+          code: string,
+          azError: string
+        ) =>
+          fail(400, error, code, {
+            steps,
+            azError,
+            clientId,
+            appName
+          });
 
         // Step 3a: existingClientId-first. If AZURE_CLIENT_ID already
         // points at an app we own, reuse it directly — the wired identity
@@ -2444,7 +4328,7 @@ function createRequestHandler(instanceId: string) {
           steps.push(
             `Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`
           );
-          const showRes = await runCmd("az", [
+          const showRes = await runCmd!("az", [
             "ad",
             "app",
             "show",
@@ -2464,10 +4348,11 @@ function createRequestHandler(instanceId: string) {
             showStatus = "lookup-failed";
           }
           let owned = false;
+          let radiusProvenance: RadiusAppProvenanceInput | undefined;
           if (showStatus === "found") {
             const own = await isOwnedBySignedInUser(existingClientId);
             if (!own.ok) {
-              fail(
+              await fail(
                 400,
                 `Could not read owners of the existing AZURE_CLIENT_ID app ${existingClientId}: ` +
                   own.stderr,
@@ -2477,14 +4362,18 @@ function createRequestHandler(instanceId: string) {
               return;
             }
             owned = own.owned === true;
+            if (!owned) {
+              radiusProvenance = await readRadiusProvenance(existingClientId);
+            }
           }
           const decision = decideExistingClientId({
             clientId: existingClientId,
             showStatus,
-            owned
+            owned,
+            radiusProvenance
           });
           if (decision.action === "fatal") {
-            fail(
+            await fail(
               400,
               `Could not verify the repository's AZURE_CLIENT_ID (${existingClientId}): ` +
                 showRes.stderr,
@@ -2494,9 +4383,10 @@ function createRequestHandler(instanceId: string) {
             return;
           }
           if (decision.action === "error") {
-            fail(
+            await fail(
               400,
-              `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration owned by another user. Verify or clear the variable and retry.`,
+              decision.reason ||
+                `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration the current signed-in user does not own. Verify or clear the variable and retry.`,
               decision.code || "existing-client-id-not-owned",
               { steps }
             );
@@ -2509,6 +4399,40 @@ function createRequestHandler(instanceId: string) {
             steps.push(
               `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${clientId}`
             );
+            recordAzureApp(op, {
+              state: "reused",
+              appId: clientId,
+              displayName: null
+            });
+            try {
+              await operations.persist();
+            } catch (error) {
+              operations.report?.({
+                code: "operation-store-write-failed",
+                message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+              });
+              finish(op, "failed", {
+                failure: {
+                  code: "operation-persistence-failed",
+                  stage: op.currentStage,
+                  stepSeq: null,
+                  message:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  classification: "unknown"
+                }
+              });
+              res.setHeader("Content-Type", "application/json");
+              res.writeHead(500);
+              res.end(
+                JSON.stringify({
+                  error:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  code: "operation-persistence-failed",
+                  operationId: op.operationId
+                })
+              );
+              return;
+            }
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
@@ -2519,7 +4443,7 @@ function createRequestHandler(instanceId: string) {
           // Per-candidate FIC → served-repos enrichment. Best-effort: a
           // FIC-list failure just omits servesRepos for that candidate.
           const listServesRepos = async (appId: string) => {
-            const ficRes = await runCmd("az", [
+            const ficRes = await runCmd!("az", [
               "ad",
               "app",
               "federated-credential",
@@ -2548,7 +4472,7 @@ function createRequestHandler(instanceId: string) {
           // could hijack another user's identity).
           if (explicitAppId) {
             if (!isUuid(explicitAppId)) {
-              fail(
+              await fail(
                 400,
                 "The selected App Registration id is not a valid GUID.",
                 "invalid-app-id",
@@ -2558,7 +4482,7 @@ function createRequestHandler(instanceId: string) {
             }
             const own = await isOwnedBySignedInUser(explicitAppId);
             if (!own.ok) {
-              fail(
+              await fail(
                 400,
                 `Could not read owners of App Registration ${explicitAppId}: ` +
                   own.stderr,
@@ -2568,10 +4492,15 @@ function createRequestHandler(instanceId: string) {
               return;
             }
             if (!own.owned) {
-              fail(
+              const ownershipDecision = decideRadiusAppOwnership({
+                ownedBySignedInUser: false,
+                radiusProvenance: await readRadiusProvenance(explicitAppId)
+              });
+              await fail(
                 400,
-                "The selected App Registration is owned by another user. Choose one you own or create a new application.",
-                "app-registration-not-owned",
+                ownershipDecision.reason ||
+                  "The selected App Registration is not owned by the current signed-in user. Choose one you own or create a new application.",
+                ownershipDecision.code || "app-registration-not-owned",
                 { steps, appName }
               );
               return;
@@ -2579,11 +4508,16 @@ function createRequestHandler(instanceId: string) {
             clientId = explicitAppId;
             // Reuse path: never touch SMR (may be approval-gated).
             steps.push(`✅ Using the selected App Registration: ${clientId}`);
+            recordAzureApp(op, {
+              state: "reused",
+              appId: clientId,
+              displayName: null
+            });
           }
 
           if (!clientId) {
             steps.push(`Looking up existing App Registration: ${appName}...`);
-            const listRes = await runCmd("az", [
+            const listRes = await runCmd!("az", [
               "ad",
               "app",
               "list",
@@ -2594,14 +4528,14 @@ function createRequestHandler(instanceId: string) {
               "--filter",
               `displayName eq '${appName}'`,
               "--query",
-              "[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime}",
+              "[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime,tags:tags}",
               "-o",
               "json"
             ]);
             if (listRes.code !== 0) {
               // FATAL: a silent fall-through to create would resurrect
               // the sprawl bug this fix exists to prevent.
-              fail(
+              await fail(
                 400,
                 "Failed to look up existing App Registrations: " +
                   listRes.stderr,
@@ -2618,7 +4552,7 @@ function createRequestHandler(instanceId: string) {
             try {
               const parsed = JSON.parse(listRes.stdout);
               if (!Array.isArray(parsed)) {
-                fail(
+                await fail(
                   400,
                   "The App Registration lookup returned an unexpected (non-array) result.",
                   "app-lookup-parse",
@@ -2628,7 +4562,7 @@ function createRequestHandler(instanceId: string) {
               }
               matches = parsed;
             } catch (e) {
-              fail(
+              await fail(
                 400,
                 "Could not parse the App Registration lookup result.",
                 "app-lookup-parse",
@@ -2641,11 +4575,12 @@ function createRequestHandler(instanceId: string) {
             // app we don't own would fail on FIC/role writes and risks
             // hijacking another user's app in a shared tenant.
             let ownedMatches = [];
+            let unownedRadiusProvenance;
             for (const m of matches) {
               if (!m || !m.appId) continue;
               const own = await isOwnedBySignedInUser(m.appId);
               if (!own.ok) {
-                fail(
+                await fail(
                   400,
                   `Could not read owners of App Registration ${m.appId}: ` +
                     own.stderr,
@@ -2655,17 +4590,25 @@ function createRequestHandler(instanceId: string) {
                 return;
               }
               if (own.owned) ownedMatches.push(m);
+              else if (!unownedRadiusProvenance) {
+                unownedRadiusProvenance = {
+                  tags: Array.isArray(m.tags) ? m.tags : [],
+                  repo: oidc.fullName,
+                  environment: envName
+                };
+              }
             }
 
             const selection = decideAppSelection({
               ownedMatches,
               hasUnownedMatch: matches.length > ownedMatches.length,
+              radiusProvenance: unownedRadiusProvenance,
               existingClientId,
               createNew: createNewApp
             });
 
             if (selection.action === "error") {
-              fail(
+              await fail(
                 400,
                 selection.reason || "Could not select an App Registration.",
                 selection.code || "app-selection-failed",
@@ -2689,7 +4632,7 @@ function createRequestHandler(instanceId: string) {
                   ...(servesRepos ? { servesRepos } : {})
                 });
               }
-              fail(
+              await fail(
                 400,
                 "Multiple owned App Registrations found — choose which identity to use.",
                 "app-selection-required",
@@ -2709,15 +4652,49 @@ function createRequestHandler(instanceId: string) {
               // Reference — it may be approval-gated. SMR only applies
               // when creating a new app below.
               steps.push(`✅ Reusing existing App Registration: ${clientId}`);
+              recordAzureApp(op, {
+                state: "reused",
+                appId: clientId,
+                displayName: appName
+              });
+              try {
+                await operations.persist();
+              } catch (error) {
+                operations.report?.({
+                  code: "operation-store-write-failed",
+                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+                });
+                finish(op, "failed", {
+                  failure: {
+                    code: "operation-persistence-failed",
+                    stage: op.currentStage,
+                    stepSeq: null,
+                    message:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    classification: "unknown"
+                  }
+                });
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(500);
+                res.end(
+                  JSON.stringify({
+                    error:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    code: "operation-persistence-failed",
+                    operationId: op.operationId
+                  })
+                );
+                return;
+              }
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
               // rejects it do we ask the user for one (progressive
               // disclosure) — `az ad app create` fails atomically, so
-              // the retry is clean with no orphaned app. The creator is
-              // automatically an owner.
+              // the retry is clean with no orphaned app. Ownership and
+              // provenance tagging are enforced immediately below.
               steps.push(`Creating App Registration: ${appName}...`);
-              const appResult = await runCmd(
+              const appResult = await runCmd!(
                 "az",
                 buildAppCreateArgs({
                   appName,
@@ -2729,7 +4706,7 @@ function createRequestHandler(instanceId: string) {
                   !serviceManagementReference &&
                   isServiceManagementReferenceError(appResult.stderr)
                 ) {
-                  fail(
+                  await fail(
                     400,
                     "This Entra tenant requires a Service Management Reference on new App Registrations. " +
                       "Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.",
@@ -2738,7 +4715,7 @@ function createRequestHandler(instanceId: string) {
                   );
                   return;
                 }
-                fail(
+                await fail(
                   400,
                   "Failed to create App Registration: " + appResult.stderr,
                   "app-create-failed",
@@ -2748,49 +4725,163 @@ function createRequestHandler(instanceId: string) {
               }
               clientId = appResult.stdout.trim();
               steps.push(`✅ App Registration created: ${clientId}`);
+              recordAzureApp(op, {
+                state: "created",
+                appId: clientId,
+                displayName: appName,
+                serviceManagementReference: serviceManagementReference || null
+              });
+              if (!(await checkpoint())) return;
+              const me = await getSignedInUserId();
+              if (!me.ok) {
+                await rollbackCreatedAppAndFail(
+                  "Failed to read the signed-in Entra user after creating the App Registration: " +
+                    me.stderr,
+                  "app-owner-lookup-failed",
+                  me.stderr
+                );
+                return;
+              }
+
+              steps.push(
+                "Assigning the signed-in user as an owner of the new App Registration..."
+              );
+              const ownerAddRes = await runCmd!(
+                "az",
+                buildAppOwnerAddArgs({
+                  appId: clientId,
+                  ownerObjectId: me.id
+                })
+              );
+              if (
+                ownerAddRes.code !== 0 &&
+                !isAppOwnerAlreadyAssignedError(ownerAddRes.stderr)
+              ) {
+                await rollbackCreatedAppAndFail(
+                  "Failed to assign the signed-in user as an owner of the new App Registration: " +
+                    ownerAddRes.stderr,
+                  "app-owner-add-failed",
+                  ownerAddRes.stderr
+                );
+                return;
+              }
+
+              steps.push(
+                "Verifying the signed-in user owns the new App Registration..."
+              );
+              const ownerListRes = await runCmd!(
+                "az",
+                buildAppOwnerListArgs({ appId: clientId })
+              );
+              if (ownerListRes.code !== 0) {
+                await rollbackCreatedAppAndFail(
+                  "Failed to verify owners of the new App Registration: " +
+                    ownerListRes.stderr,
+                  "app-owner-lookup-failed",
+                  ownerListRes.stderr
+                );
+                return;
+              }
+              const ownerIds = parseDirectoryObjectIds(ownerListRes.stdout);
+              if (!ownerIds.includes(me.id.toLowerCase())) {
+                await rollbackCreatedAppAndFail(
+                  "The signed-in user was not present in the App Registration owners after creation.",
+                  "app-owner-verify-failed",
+                  ownerListRes.stdout
+                );
+                return;
+              }
+              steps.push(
+                "✅ Signed-in user verified as App Registration owner"
+              );
+
+              const provenanceTags = buildRadiusAppProvenanceTags({
+                repo: oidc.fullName,
+                environment: envName,
+                operationId: op.operationId
+              });
+              steps.push(
+                "Applying Radius provenance tags to the new App Registration..."
+              );
+              const tagPatchRes = await runCmd!(
+                "az",
+                buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
+              );
+              if (tagPatchRes.code !== 0) {
+                await rollbackCreatedAppAndFail(
+                  "Failed to apply Radius provenance tags to the new App Registration: " +
+                    tagPatchRes.stderr,
+                  "app-tag-update-failed",
+                  tagPatchRes.stderr
+                );
+                return;
+              }
+
+              steps.push("Verifying Radius provenance tags...");
+              const tagShowRes = await runCmd!(
+                "az",
+                buildAppTagShowArgs({ appId: clientId })
+              );
+              if (tagShowRes.code !== 0) {
+                await rollbackCreatedAppAndFail(
+                  "Failed to read the App Registration tags after update: " +
+                    tagShowRes.stderr,
+                  "app-tag-read-failed",
+                  tagShowRes.stderr
+                );
+                return;
+              }
+              const actualTags = parseAppTags(tagShowRes.stdout);
+              if (!actualTags) {
+                await rollbackCreatedAppAndFail(
+                  "Could not parse the App Registration tags after update.",
+                  "app-tag-parse-failed",
+                  tagShowRes.stdout
+                );
+                return;
+              }
+              const missingTags = missingRequiredAppTags(
+                actualTags,
+                provenanceTags
+              );
+              if (missingTags.length > 0) {
+                await rollbackCreatedAppAndFail(
+                  `The new App Registration is missing required Radius provenance tags: ${missingTags.join(
+                    ", "
+                  )}.`,
+                  "app-tag-verify-failed",
+                  JSON.stringify(actualTags)
+                );
+                return;
+              }
+              steps.push("✅ Radius provenance tags verified");
             }
           }
         }
 
-        // Step 4: Create Service Principal (FATAL on failure). Once the
-        // app exists, any later failure returns clientId/appName so the
-        // user can find and clean it up manually (full rollback deferred).
+        // Step 4: Create Service Principal (FATAL on failure). By this
+        // point a NEW app has already passed owner/tag verification, so
+        // any later failure returns clientId/appName for manual cleanup.
         steps.push("Creating Service Principal...");
-        const spResult = await runCmd("az", [
-          "ad",
-          "sp",
-          "create",
-          "--id",
-          clientId
-        ]);
-        if (
-          spResult.code !== 0 &&
-          !spResult.stderr.includes("already exists")
-        ) {
-          // The SP may already exist under a different identity; confirm.
-          const spShow = await runCmd("az", [
-            "ad",
-            "sp",
-            "show",
-            "--id",
-            clientId,
-            "--query",
-            "id",
-            "-o",
-            "tsv"
-          ]);
-          if (spShow.code !== 0) {
-            fail(
-              400,
-              "Could not create or find the Service Principal: " +
-                spResult.stderr,
-              "sp-failed",
-              { steps, clientId, appName, azError: spResult.stderr }
-            );
-            return;
-          }
+        const spReady = await ensureServicePrincipal(clientId, (args) =>
+          runCmd!("az", args)
+        );
+        if (!spReady.ok) {
+          await fail(
+            400,
+            "Could not create or find the Service Principal: " + spReady.stderr,
+            "sp-failed",
+            { steps, clientId, appName, azError: spReady.stderr }
+          );
+          return;
         }
         steps.push("✅ Service Principal ready");
+        recordServicePrincipal(op, {
+          state: spReady.state,
+          appId: clientId,
+          ...(spReady.objectId ? { objectId: spReady.objectId } : {})
+        });
+        if (!(await checkpoint())) return;
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -2801,14 +4892,14 @@ function createRequestHandler(instanceId: string) {
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join } = await import("node:path");
-        let existingSubjects = [];
-        let existingNameToSubject = new Map();
+        let existingSubjects: string[] = [];
+        let existingNameToSubject = new Map<string, string>();
         // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
         // on SUBJECT (below), but we also need the NAME→subject map to
         // detect a name collision: clean() collapses ':' and '-' to the
         // same FIC name while the subject keeps '%3A', so two distinct
         // environments can map to one name with different subjects.
-        const ficListRes = await runCmd("az", [
+        const ficListRes = await runCmd!("az", [
           "ad",
           "app",
           "federated-credential",
@@ -2837,6 +4928,19 @@ function createRequestHandler(instanceId: string) {
             /* fall back to attempting all, guarded by the read-back below */
           }
         }
+        const mutableCredentialName = findLegacyMutableCredentialName(
+          oidc,
+          oidcSuffix,
+          existingNameToSubject
+        );
+        if (mutableCredentialName) {
+          steps.push(
+            `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
+              `After immutable OIDC verification succeeds, remove it with: ` +
+              `az ad app federated-credential delete --id ${clientId} ` +
+              `--federated-credential-id ${mutableCredentialName}`
+          );
+        }
         const ficsToCreate = selectMissingFederatedCredentials(
           oidc.federatedCredentials,
           existingSubjects
@@ -2857,7 +4961,7 @@ function createRequestHandler(instanceId: string) {
           existingNameToSubject
         );
         if (ficCollision) {
-          fail(
+          await fail(
             400,
             `Federated credential name "${ficCollision.name}" already exists with a different subject ` +
               `("${ficCollision.existingSubject}" vs required "${ficCollision.desiredSubject}"). Two environment ` +
@@ -2883,7 +4987,7 @@ function createRequestHandler(instanceId: string) {
             `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
           );
           writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
-          const fedResult = await runCmd("az", [
+          const fedResult = await runCmd!("az", [
             "ad",
             "app",
             "federated-credential",
@@ -2899,9 +5003,10 @@ function createRequestHandler(instanceId: string) {
             /* best-effort */
           }
           fedTmpFile = null;
+          const createdFederatedCredential = fedResult.code === 0;
           if (fedResult.code !== 0) {
             if (!fedResult.stderr.includes("already exists")) {
-              fail(
+              await fail(
                 400,
                 `Failed to create federated credential "${fic.name}": ` +
                   fedResult.stderr,
@@ -2914,7 +5019,7 @@ function createRequestHandler(instanceId: string) {
             // create won the race. Never trust "already exists" as
             // success — read the FIC back and confirm its subject
             // matches before reporting the credential as created.
-            const showRes = await runCmd("az", [
+            const showRes = await runCmd!("az", [
               "ad",
               "app",
               "federated-credential",
@@ -2930,7 +5035,7 @@ function createRequestHandler(instanceId: string) {
             ]);
             const actualSubject = (showRes.stdout || "").trim();
             if (showRes.code !== 0 || actualSubject !== fic.subject) {
-              fail(
+              await fail(
                 400,
                 `Federated credential "${fic.name}" already exists but its subject ` +
                   `("${actualSubject}") does not match the required subject ("${fic.subject}"). Rename this ` +
@@ -2942,6 +5047,13 @@ function createRequestHandler(instanceId: string) {
             }
           }
           steps.push(`✅ Federated credential "${fic.name}" created`);
+          if (createdFederatedCredential) {
+            recordCreatedFederatedCredential(op, {
+              name: fic.name,
+              subject: fic.subject
+            });
+            if (!(await checkpoint())) return;
+          }
         }
 
         // Step 6: Assign Contributor role on the resource group (FATAL).
@@ -2972,7 +5084,7 @@ function createRequestHandler(instanceId: string) {
         const resolveSpObjectId = async () => {
           let lastErr = "";
           for (let attempt = 0; attempt < 6; attempt++) {
-            const show = await runCmd("az", [
+            const show = await runCmd!("az", [
               "ad",
               "sp",
               "show",
@@ -2999,41 +5111,62 @@ function createRequestHandler(instanceId: string) {
         ) => {
           let last: CommandResult = { code: 1, stdout: "", stderr: "" };
           for (let attempt = 0; attempt < 6; attempt++) {
-            last = await runCmd(
+            last = await runCmd!(
               "az",
               buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId })
             );
             if (last.code === 0 || last.stderr.includes("already exists"))
-              return { ok: true, stderr: "" };
+              return {
+                ok: true,
+                created:
+                  last.code === 0 && !last.stderr.includes("already exists"),
+                stderr: ""
+              };
             if (!isReplicationLagError(last.stderr)) break;
             if (attempt < 5)
               await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           }
-          return { ok: false, stderr: last.stderr };
+          return { ok: false, created: false, stderr: last.stderr };
         };
 
-        steps.push("Resolving Service Principal object id...");
-        const spObjLookup = await resolveSpObjectId();
-        if (!spObjLookup.objectId) {
-          fail(
+        let spObjectId = spReady.objectId;
+        if (!spObjectId) {
+          steps.push("Resolving Service Principal object id...");
+          const spObjLookup = await resolveSpObjectId();
+          if (!spObjLookup.objectId) {
+            await fail(
+              400,
+              "Could not resolve the Service Principal object id needed to assign Azure roles: " +
+                spObjLookup.error,
+              "sp-objectid-failed",
+              { steps, clientId, appName, azError: spObjLookup.error }
+            );
+            return;
+          }
+          spObjectId = spObjLookup.objectId;
+        }
+        if (!spObjectId) {
+          await fail(
             400,
             "Could not resolve the Service Principal object id needed to assign Azure roles: " +
-              spObjLookup.error,
+              "missing object id",
             "sp-objectid-failed",
-            { steps, clientId, appName, azError: spObjLookup.error }
+            { steps, clientId, appName, azError: "missing object id" }
           );
           return;
         }
-        const spObjectId = spObjLookup.objectId;
+        recordServicePrincipal(op, { objectId: spObjectId });
+        if (!(await checkpoint())) return;
 
+        const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
         steps.push(`Assigning Contributor role on ${resourceGroup}...`);
         const roleResult = await assignRoleByObjectId(
           spObjectId,
           "Contributor",
-          `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`
+          contributorScope
         );
         if (!roleResult.ok) {
-          fail(
+          await fail(
             400,
             "Failed to assign Contributor role: " + roleResult.stderr,
             "role-assignment-failed",
@@ -3042,6 +5175,14 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         steps.push("✅ Contributor role assigned");
+        if (roleResult.created) {
+          recordCreatedRoleAssignment(op, {
+            role: "Contributor",
+            scope: contributorScope,
+            principalObjectId: spObjectId
+          });
+          if (!(await checkpoint())) return;
+        }
 
         // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
         // cluster (best-effort). Contributor on the resource group is a
@@ -3081,6 +5222,14 @@ function createRequestHandler(instanceId: string) {
         );
         if (aksRoleResult.ok) {
           steps.push("✅ AKS RBAC Cluster Admin role assigned");
+          if (aksRoleResult.created) {
+            recordCreatedRoleAssignment(op, {
+              role: "Azure Kubernetes Service RBAC Cluster Admin",
+              scope: clusterScope,
+              principalObjectId: spObjectId
+            });
+            if (!(await checkpoint())) return;
+          }
         } else {
           // Non-fatal: control-plane access is already in place, and
           // clusters without Azure RBAC for Kubernetes don't need this.
@@ -3095,12 +5244,30 @@ function createRequestHandler(instanceId: string) {
           );
         }
 
+        // Credentials are done, but the operation is not: the client
+        // immediately POSTs /api/create-environment, which adopts this same
+        // record. Leaving it running is what makes the two requests read as
+        // one operation to the panel, and to the user.
+        setStageState(
+          op,
+          STAGE_AUTHORIZE_IDENTITY,
+          hasWarnings(op) ? "warning" : "succeeded"
+        );
+        setContext(op, { clientId, appName });
+        setCloudContext(op, "azure", {
+          subscriptionId,
+          tenantId,
+          resourceGroup,
+          clusterName
+        });
+
         // Return all credentials for the environment setup
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(
           JSON.stringify({
             success: true,
+            operationId: op.operationId,
             clientId,
             tenantId,
             subscriptionId,
@@ -3112,9 +5279,21 @@ function createRequestHandler(instanceId: string) {
           })
         );
       } catch (e) {
+        // The generic catch used to discard everything the route had
+        // learned. Close the record first so the panel gets a stage, a
+        // step history and a classification instead of one bare string.
+        const failure = await finalizeSetupFailure(op, {
+          status: 400,
+          error: errorMessage(e),
+          code: "setup-unhandled",
+          classification: "unknown",
+          evidence: e instanceof Error ? e.stack || null : null,
+          steps,
+          runAz: runCmd ? (args) => runCmd!("az", args) : null
+        });
         res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
+        res.writeHead(failure.status);
+        res.end(JSON.stringify(failure.body));
       } finally {
         if (fedTmpFile) {
           try {
@@ -3306,8 +5485,25 @@ function createRequestHandler(instanceId: string) {
     }
 
     if (pathname === "/api/create-environment" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
+      // Declared out here so the generic catch below can close it rather
+      // than discarding everything the route had learned.
+      let op: any = null;
+      let steps: string[] = [];
+      let deleteGitHubEnvironmentRunner:
+        ((args: string[]) => Promise<unknown>) | null = null;
       try {
         const data = JSON.parse(body);
         const targetRepo = data.repo || "";
@@ -3333,16 +5529,129 @@ function createRequestHandler(instanceId: string) {
           return;
         }
 
+        // Adopt the record /api/azure-auto-setup left running, so the two
+        // POSTs read as one operation. When credentials already exist that
+        // route never ran, so start a record here instead — with the
+        // identity stage omitted rather than shown as skipped, because a
+        // stage that cannot happen has no business in the checklist.
+        const continuationId =
+          typeof data.operationId === "string" ? data.operationId : "";
+        if (continuationId) {
+          const existing = operations.get(continuationId);
+          if (
+            !existing ||
+            isStale(existing) ||
+            existing.repo !== targetRepo ||
+            existing.environment !== envName ||
+            existing.provider !== provider ||
+            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
+              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
+            existing.inputRequired
+          ) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error:
+                  "The environment request does not match the setup operation it is continuing.",
+                code: "operation-continuation-mismatch",
+                operationId: continuationId
+              })
+            );
+            return;
+          }
+          op = existing;
+          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
+        } else {
+          op = createOperation({
+            provider,
+            repo: targetRepo,
+            environment: envName,
+            stages: buildStages({ includeIdentity: false }),
+            journey: {
+              origin: data.origin || null,
+              resumeTarget: data.resumeTarget || null,
+              resumeBranch: data.resumeBranch || data.branch || null,
+              resumeReason: data.resumeReason || null
+            }
+          });
+          const started = operations.start(op);
+          if (!started.ok) {
+            op = null;
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error: `Setup is already running for ${targetRepo}.`,
+                code: "operation-in-progress",
+                operationId: started.conflict.operationId
+              })
+            );
+            return;
+          }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
+          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
+        }
+
+        steps = [];
+        const rawPush = steps.push.bind(steps);
+        steps.push = (...items: string[]) => {
+          for (const item of items) {
+            try {
+              addLegacyStep(op, item);
+            } catch {
+              /* narration must never break setup */
+            }
+          }
+          return rawPush(...items);
+        };
+
         // Preflight repo access + admin BEFORE any GitHub mutation.
         // Reachable directly when credentials already exist and
         // azure-auto-setup is skipped, so guarding here too is required.
         const accessMsg = await preflightRepoAdmin(targetRepo);
         if (accessMsg) {
+          const failure = await finalizeSetupFailure(op, {
+            status: 403,
+            error: accessMsg,
+            code: "repo-admin-required",
+            stage: STAGE_CONFIGURE_ENVIRONMENT,
+            classification: "needs-someone-else",
+            steps,
+            runAz:
+              provider === "azure" ? (args) => runCliCommand("az", args) : null
+          });
           res.setHeader("Content-Type", "application/json");
-          res.writeHead(403);
-          res.end(
-            JSON.stringify({ error: accessMsg, code: "repo-admin-required" })
-          );
+          res.writeHead(failure.status);
+          res.end(JSON.stringify(failure.body));
           return;
         }
 
@@ -3402,6 +5711,45 @@ function createRequestHandler(instanceId: string) {
           );
           return true;
         };
+        deleteGitHubEnvironmentRunner = async (args) => {
+          const result = await runGh(args);
+          if (result.code !== 0) {
+            const detail = (result.stderr || result.stdout || "").trim();
+            throw new Error(detail || "GitHub API request failed.");
+          }
+        };
+
+        const fail = async (
+          status: number,
+          error: string,
+          code: string,
+          extra: Record<string, unknown> = {}
+        ): Promise<void> => {
+          const failure = await finalizeSetupFailure(op, {
+            status,
+            error,
+            code,
+            extra,
+            steps,
+            evidence:
+              typeof extra.azError === "string" ? extra.azError
+              : typeof extra.ghError === "string" ? extra.ghError
+              : null,
+            runAz:
+              provider === "azure" ? (args) => runCliCommand("az", args) : null,
+            runDeleteEnvironment: deleteGitHubEnvironmentRunner
+          });
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(failure.status);
+          res.end(JSON.stringify(failure.body));
+        };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
         // `workflow` scope, which is required to create/update files under
@@ -3436,57 +5784,18 @@ function createRequestHandler(instanceId: string) {
           // original error, which is usually the more meaningful one.
           return retry.code === 0 ? retry : first;
         };
-
-        const steps: string[] = [];
+        const defaultBranch = (await getDefaultBranch(targetRepo)) || "main";
         const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
 
         steps.push(
           'Creating private GHCR state package "' + stateRegistry + '"...'
         );
-        // Authenticate GHCR as the identity setup acts as (the account
-        // shown/selected in the dialog), not whatever keyring account is
-        // active. On multi-account machines the active keyring login can
-        // be an enterprise/EMU account GHCR rejects, even though the rest
-        // of setup runs as the intended account.
-        let packageCredentials;
-        try {
-          packageCredentials = await getGhPackageCredentials();
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(403);
-          res.end(
-            JSON.stringify({
-              error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(e)}`,
-              code: "ghcr-auth-failed",
-              steps
-            })
-          );
+        const ghcrPreflight = await preflightGhcrPackageWriteAccess();
+        if (!ghcrPreflight.ok) {
+          await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
           return;
         }
-        // Fail fast when the acting account lacks write:packages, BEFORE
-        // the bootstrap push. GHCR's token endpoint silently issues a
-        // pull-only token for a read-only credential, so without this gate
-        // the missing scope only surfaces as a cryptic 403 deep in the blob
-        // upload — after the rest of setup has already run. actingHasPackages
-        // is read keyring-first, matching the credential getGhPackageCredentials
-        // pins, so it reflects the token this push actually uses.
-        const ghPkgIdentity = await getGitHubIdentity();
-        if (
-          ghPkgIdentity &&
-          ghPkgIdentity.actingLogin &&
-          !ghPkgIdentity.actingHasPackages
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(403);
-          res.end(
-            JSON.stringify({
-              error: `The GitHub account @${ghPkgIdentity.actingLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgIdentity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`,
-              code: "ghcr-scope-required",
-              steps
-            })
-          );
-          return;
-        }
+        const packageCredentials = ghcrPreflight.credentials;
         const statePackage = await bootstrapGHCRStatePackage({
           targetRepository: targetRepo,
           registry: stateRegistry,
@@ -3621,7 +5930,9 @@ function createRequestHandler(instanceId: string) {
             } catch (e) {
               return {
                 ok: false,
-                stderr: `${direct.stderr} (PR fallback failed: ${errorMessage(e)})`,
+                stderr: `${direct.stderr} (PR fallback failed: ${errorMessage(
+                  e
+                )})`,
                 viaPr: false
               };
             }
@@ -3637,16 +5948,36 @@ function createRequestHandler(instanceId: string) {
         };
 
         // Step 1: Create the GitHub environment
+        const environmentPath =
+          "/repos/" +
+          targetRepo +
+          "/environments/" +
+          encodeURIComponent(envName);
+        const environmentLookup = await runGh(["api", environmentPath]);
+        const environmentState =
+          resolveGitHubEnvironmentCreateState(environmentLookup);
+        if (!environmentState) {
+          const detail =
+            (
+              environmentLookup.stderr ||
+              environmentLookup.stdout ||
+              ""
+            ).trim() || "The GitHub API lookup failed.";
+          throw new Error(
+            `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
+          );
+        }
         steps.push('Creating GitHub environment "' + envName + '"...');
         await runGhOrThrow(
-          [
-            "api",
-            "--method",
-            "PUT",
-            "/repos/" + targetRepo + "/environments/" + envName
-          ],
+          ["api", "--method", "PUT", environmentPath],
           'Failed to create GitHub environment "' + envName + '"'
         );
+        recordGitHubEnvironment(op, {
+          state: environmentState,
+          repo: targetRepo,
+          name: envName
+        });
+        if (!(await checkpoint())) return;
         // Tag the environment as Radius-managed so the listing can filter
         // out environments created outside this extension.
         await setEnvironmentVariable("RADIUS_MANAGED", "true");
@@ -3729,136 +6060,6 @@ function createRequestHandler(instanceId: string) {
           await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
         }
 
-        // Step 2b: Provision application parameters. Parse the app.bicep the
-        // deploy will run against and auto-generate a value for every required
-        // parameter that has no Bicep default (e.g. an @secure() password),
-        // skipping params that do have a default (Bicep applies it). Values are
-        // no longer collected from the UI. The result is stored as a single
-        // JSON secret the deploy workflow reads and expands into
-        // `--parameters name=value` pairs.
-        try {
-          // Detect the repo's real default branch once so both the
-          // requested-branch resolution and the fallback below use it
-          // (a repo may default to master/develop, not main).
-          const detectedDefault = (
-            (await runCommand("gh", [
-              "repo",
-              "view",
-              targetRepo,
-              "--json",
-              "defaultBranchRef",
-              "--jq",
-              ".defaultBranchRef.name"
-            ]).catch(() => "")) || ""
-          ).trim();
-          const defaultBranch = detectedDefault || "main";
-          let paramBranch = data.branch || defaultBranch;
-          let bicepSource = await fetchFileFromRepo(
-            targetRepo,
-            ".radius/app.bicep",
-            paramBranch
-          );
-          let bicepPath = ".radius/app.bicep";
-          if (!bicepSource) {
-            bicepSource = await fetchFileFromRepo(
-              targetRepo,
-              "app.bicep",
-              paramBranch
-            );
-            bicepPath = "app.bicep";
-          }
-          // Fall back to the repo default branch if the requested branch
-          // has no app.bicep (e.g. an unpushed worktree branch). Without
-          // this, step 2b would silently write neither RADIUS_DEPLOY_PARAMS
-          // nor RADIUS_RAD_COMMANDS, leaving the deploy with no password
-          // and a missing rad command.
-          if (!bicepSource && paramBranch !== defaultBranch) {
-            const fallbackBranch = defaultBranch;
-            bicepPath = ".radius/app.bicep";
-            bicepSource = await fetchFileFromRepo(
-              targetRepo,
-              ".radius/app.bicep",
-              fallbackBranch
-            );
-            if (!bicepSource) {
-              bicepSource = await fetchFileFromRepo(
-                targetRepo,
-                "app.bicep",
-                fallbackBranch
-              );
-              bicepPath = "app.bicep";
-            }
-            if (bicepSource) {
-              steps.push(
-                `ℹ️ No app.bicep on "${paramBranch}"; resolved deploy parameters from "${fallbackBranch}".`
-              );
-            }
-          }
-          if (bicepSource) {
-            const parsed = appParams(bicepSource);
-            const resolved = resolveDeployParams(parsed);
-            // Split into secret (provisioned as a secret, appended by the
-            // workflow) and non-secret (inlined into the rad deploy command).
-            const { secret: secretParams, public: publicParams } =
-              partitionParams(parsed, resolved);
-            await runGhOrThrow(
-              [
-                "secret",
-                "set",
-                "RADIUS_DEPLOY_PARAMS",
-                "--env",
-                envName,
-                "--repo",
-                targetRepo
-              ],
-              `Failed to set RADIUS_DEPLOY_PARAMS on GitHub environment "${envName}"`,
-              Object.keys(secretParams).length ?
-                JSON.stringify(secretParams)
-              : "{}"
-            );
-
-            // Build the rad deploy command with non-secret params inline and
-            // store it as an environment variable. The deploy workflow reads
-            // it via `inputs.rad_commands || vars.RADIUS_RAD_COMMANDS`, so it
-            // applies on both explicit dispatch and the verify→deploy auto
-            // trigger (where inputs are empty). Secret params are appended by
-            // the workflow from RADIUS_DEPLOY_PARAMS.
-            //
-            // Store a JSON array so the deploy also runs `rad app graph`
-            // after `rad deploy`, matching the dispatch-time path — otherwise
-            // the verify→deploy auto trigger (which relies on this variable)
-            // would deploy without rendering the application graph.
-            const radDeployCommand = buildDeployRadCommand(
-              bicepPath,
-              envName,
-              publicParams
-            );
-            const radCommands = [radDeployCommand];
-            const appName = extractAppName(bicepSource);
-            if (appName) radCommands.push(buildAppGraphRadCommand(appName));
-            await setEnvironmentVariable(
-              "RADIUS_RAD_COMMANDS",
-              JSON.stringify(radCommands)
-            );
-
-            const names = Object.keys(resolved);
-            if (names.length > 0) {
-              steps.push(
-                `Provisioned ${names.length} application parameter(s) (auto-generated: ${names.join(", ")}).`
-              );
-            }
-          } else {
-            steps.push(
-              `⚠️ Could not read app.bicep on "${paramBranch}" (or the default branch), so RADIUS_DEPLOY_PARAMS / RADIUS_RAD_COMMANDS were not set for "${envName}". Deploys will fail until the branch has a committed .radius/app.bicep.`
-            );
-          }
-        } catch (paramErr) {
-          steps.push(
-            "⚠️ Could not resolve application parameters: " +
-              errorMessage(paramErr)
-          );
-        }
-
         // Step 3: Commit the verify-credentials workflow
         steps.push("Committing verify-credentials workflow...");
         const verifyWorkflow = await generateVerifyWorkflow(envName, provider);
@@ -3877,25 +6078,28 @@ function createRequestHandler(instanceId: string) {
             needsWorkflowScope(verifyCommit.stderr) ?
               ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
             : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error:
-                "Failed to commit the verify-credentials workflow (" +
-                verifyPath +
-                ") to " +
-                targetRepo +
-                ". " +
-                ((verifyCommit.stderr || "").trim() ||
-                  "The GitHub API request failed.") +
-                scopeHint,
-              steps
-            })
+          await fail(
+            400,
+            "Failed to commit the verify-credentials workflow (" +
+              verifyPath +
+              ") to " +
+              targetRepo +
+              ". " +
+              ((verifyCommit.stderr || "").trim() ||
+                "The GitHub API request failed.") +
+              scopeHint,
+            "verify-workflow-commit-failed",
+            { steps, ghError: verifyCommit.stderr || "" }
           );
           return;
         }
         steps.push("✅ Verify workflow committed.");
+        recordCommittedWorkflowFile(op, {
+          path: verifyPath,
+          branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
+          mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
+        });
+        if (!(await checkpoint())) return;
 
         // Step 4: Also commit the deploy workflows (dispatcher + both
         // provider workflows). The dispatcher references both provider
@@ -3925,24 +6129,28 @@ function createRequestHandler(instanceId: string) {
               needsWorkflowScope(deployCommit.stderr) ?
                 ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
               : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Failed to commit the deploy workflow (" +
-                  deployPath +
-                  ") to " +
-                  targetRepo +
-                  ". " +
-                  ((deployCommit.stderr || "").trim() ||
-                    "The GitHub API request failed.") +
-                  scopeHint2,
-                steps
-              })
+            await fail(
+              400,
+              "Failed to commit the deploy workflow (" +
+                deployPath +
+                ") to " +
+                targetRepo +
+                ". " +
+                ((deployCommit.stderr || "").trim() ||
+                  "The GitHub API request failed.") +
+                scopeHint2,
+              "deploy-workflow-commit-failed",
+              { steps, ghError: deployCommit.stderr || "" }
             );
             return;
           }
+          recordCommittedWorkflowFile(op, {
+            path: deployPath,
+            branch:
+              deployCommit.viaPr ? prState?.branch || null : defaultBranch,
+            mode: deployCommit.viaPr ? "pull_request" : "default_branch"
+          });
+          if (!(await checkpoint())) return;
         }
         // Best-effort: remove the legacy monolithic deploy workflow so it
         // does not double-trigger alongside the new dispatcher. Skipped in
@@ -3978,6 +6186,15 @@ function createRequestHandler(instanceId: string) {
                   ((delCommit.stderr || "").trim() ||
                     "GitHub API request failed.")
               );
+            }
+            if (delCommit.ok) {
+              recordCommittedWorkflowFile(op, {
+                path: delPath,
+                branch:
+                  delCommit.viaPr ? prState?.branch || null : defaultBranch,
+                mode: delCommit.viaPr ? "pull_request" : "default_branch"
+              });
+              if (!(await checkpoint())) return;
             }
           }
           steps.push("✅ Delete workflows committed.");
@@ -4040,19 +6257,37 @@ function createRequestHandler(instanceId: string) {
             );
           }
         }
-
-        // Step 5: Dispatch the verify workflow. Skipped when the workflows
-        // only exist on a PR branch — the workflow file isn't on the
-        // default branch yet, so `workflow run` would 404. It runs
-        // automatically once the PR merges.
+        // Step 5: Dispatch the verify workflow.
+        //
+        // On the PR path this used to be an unconditional skip, which was
+        // right for a first-time setup and wrong for every repository that
+        // already had the workflows on its default branch. planCredentialVerification
+        // decides instead, and returns an empty pullRequestUrl when it
+        // dispatches so a merely informational PR is not mistaken for a
+        // blocking one.
         let verifyRunUrl = "";
         let verifyRunId = null;
         const dispatchedAt = Date.now();
-        if (prState) {
+        const verifyPlan = await planCredentialVerification({
+          targetRepo,
+          prState: prState || null,
+          pullRequestUrl,
+          fetchFile: fetchFileFromRepo,
+          resolveDefaultBranch: getDefaultBranch
+        });
+        pullRequestUrl = verifyPlan.pullRequestUrl;
+        if (!verifyPlan.shouldDispatch) {
           steps.push(
-            "Skipping credential verification until the pull request is merged."
+            `⏭️ Skipping credential verification until the pull request is merged — ${
+              verifyPlan.skipReason ||
+              "the workflows are not on the default branch yet"
+            }.`
           );
         } else {
+          if (verifyPlan.ref)
+            steps.push(
+              `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
+            );
           steps.push("Dispatching verify-credentials workflow...");
           // Wait briefly for GitHub to index the workflow, then dispatch with
           // a few retries to ride out indexing/propagation races.
@@ -4065,15 +6300,14 @@ function createRequestHandler(instanceId: string) {
           };
           for (const delay of dispatchDelays) {
             if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-            dispatchResult = await runGhWorkflow([
-              "workflow",
-              "run",
-              "radius-verify-credentials.yml",
-              "-f",
-              "environment=" + envName,
-              "--repo",
-              targetRepo
-            ]);
+            dispatchResult = await runGhWorkflow(
+              buildVerifyWorkflowDispatchArgs({
+                workflowFile: VERIFY_WORKFLOW_FILE,
+                targetRepo,
+                envName,
+                ref: verifyPlan.ref
+              })
+            );
             if (dispatchResult.code === 0) break;
           }
 
@@ -4112,21 +6346,21 @@ function createRequestHandler(instanceId: string) {
               (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
               "The GitHub CLI request failed.";
             steps.push("❌ Could not dispatch verify workflow: " + detail);
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
-                  detail,
+            await fail(
+              400,
+              "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
+                detail,
+              "verify-dispatch-failed",
+              {
                 environment: envName,
                 provider,
                 repo: targetRepo,
                 stateBackend: OCI_STATE_BACKEND,
                 stateRegistry,
                 stateArchive: DEFAULT_STATE_ARCHIVE,
-                steps
-              })
+                steps,
+                ghError: detail
+              }
             );
             return;
           }
@@ -4135,6 +6369,16 @@ function createRequestHandler(instanceId: string) {
         // Record dispatch markers so the deploy monitor can track the
         // correct (newly-triggered) runs rather than any stale runs.
         {
+          op.verification = {
+            dispatchedAt,
+            workflow: VERIFY_WORKFLOW_FILE,
+            ref: verifyPlan.ref || defaultBranch,
+            environment: envName,
+            runId: verifyRunId == null ? null : String(verifyRunId),
+            runUrl: verifyRunUrl || null
+          };
+          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
+          if (!(await checkpoint())) return;
           const entry = servers.get(instanceId);
           if (entry) {
             entry.state.deployDispatchedAt = dispatchedAt;
@@ -4143,11 +6387,64 @@ function createRequestHandler(instanceId: string) {
           }
         }
 
+        const actionRequired = !verifyPlan.shouldDispatch;
+        recordCleanupState(op, { state: "not_needed" });
+        if (actionRequired) {
+          recordCommitState(op, {
+            mode: "pull_request",
+            branch: prState?.branch || defaultBranch,
+            baseBranch:
+              prState?.base || verifyPlan.defaultBranch || defaultBranch,
+            pullRequestUrl: pullRequestUrl || null
+          });
+          // The third terminal state, and the one the product kept
+          // getting wrong. Verification was never dispatched, so there
+          // is nothing to wait for and nothing failed — the operation is
+          // finished and the remaining work is the user's. The client
+          // used to poll for a verify run that could not exist and, eight
+          // minutes later, reported this as a timeout.
+          setStageState(op, STAGE_VERIFY, "skipped");
+          finish(op, "action_required", {
+            terminal: {
+              reason: "pr-merge-required",
+              pullRequestUrl: pullRequestUrl || null,
+              branch: prState?.branch || null,
+              baseBranch: prState?.base || verifyPlan.defaultBranch || null,
+              userMessage:
+                pullRequestUrl ?
+                  "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+                : `Open and merge a pull request from "${
+                    prState?.branch || "the setup branch"
+                  }" into "${
+                    prState?.base ||
+                    verifyPlan.defaultBranch ||
+                    "the default branch"
+                  }" to finish setup.`
+            }
+          });
+          await persistBestEffort({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        } else {
+          recordCommitState(op, {
+            mode: prState ? "pull_request" : "default_branch",
+            branch: prState?.branch || defaultBranch,
+            baseBranch:
+              prState?.base || verifyPlan.defaultBranch || defaultBranch,
+            pullRequestUrl: pullRequestUrl || null
+          });
+          // Verification is dispatched but still running; stage and exact
+          // dispatch identity were persisted together above.
+        }
+
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(
           JSON.stringify({
             success: true,
+            operationId: op.operationId,
             environment: envName,
             provider,
             repo: targetRepo,
@@ -4155,14 +6452,36 @@ function createRequestHandler(instanceId: string) {
             stateRegistry,
             stateArchive: DEFAULT_STATE_ARCHIVE,
             verifyRunUrl,
+            // Stated, not inferred. A pull request can exist on a run that
+            // verified perfectly well, so the client must not read a URL as
+            // a control-flow decision — that inference is what #247 was.
+            actionRequired,
             pullRequestUrl,
+            pullRequestBranch: actionRequired ? prState?.branch || null : null,
+            pullRequestBaseBranch:
+              actionRequired ?
+                prState?.base || verifyPlan.defaultBranch || null
+              : null,
             steps
           })
         );
       } catch (e) {
+        const failure = await finalizeSetupFailure(op, {
+          status: 400,
+          error: errorMessage(e),
+          code: "create-environment-unhandled",
+          classification: "unknown",
+          evidence: e instanceof Error ? e.stack || null : null,
+          steps,
+          runAz:
+            op && op.provider === "azure" ?
+              (args) => runCliCommand("az", args)
+            : null,
+          runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        });
         res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
+        res.writeHead(failure.status);
+        res.end(JSON.stringify(failure.body));
       }
       return;
     }
@@ -4791,14 +7110,18 @@ function createRequestHandler(instanceId: string) {
             const [varsRaw, depIdsRaw] = await Promise.all([
               gh([
                 "api",
-                `/repos/${repo}/environments/${encodeURIComponent(name)}/variables?per_page=100`,
+                `/repos/${repo}/environments/${encodeURIComponent(
+                  name
+                )}/variables?per_page=100`,
                 "--jq",
                 '.variables[] | .name + "\\t" + (.value // "")'
               ]),
               verifyRuns.size > 0 ?
                 gh([
                   "api",
-                  `/repos/${repo}/deployments?environment=${encodeURIComponent(name)}&per_page=10`,
+                  `/repos/${repo}/deployments?environment=${encodeURIComponent(
+                    name
+                  )}&per_page=10`,
                   "--jq",
                   ".[].id"
                 ])
@@ -5051,15 +7374,47 @@ function createRequestHandler(instanceId: string) {
         // GitHub Environment (and its credentials) intact.
         //
         // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy. Delete
-        // workflow content is provider-agnostic, and workflow_dispatch runs
-        // from the default branch, so provider/workingBranch aren't needed.
-        await ensureWorkflowsCurrent(repo, environment, "", [
+        // dispatching, so the run never executes a drifted copy — and author
+        // them if they're missing (the #273 case). Delete workflow content is
+        // provider-agnostic, and workflow_dispatch runs from the default
+        // branch, so provider/workingBranch aren't needed.
+        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
           DELETE_APP_DISPATCHER_FILE,
           DELETE_AZURE_FILE
         ]);
+        // If the sync couldn't commit the dispatcher to the default branch
+        // (e.g. it's protected, or the token lacks write access), the dispatch
+        // below will 404 on a genuinely-absent workflow. Fail fast with a
+        // specific message naming the branch instead of the generic hint.
+        const commitFail = sync.failed.find(
+          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
+        if (commitFail) {
+          respond(400, {
+            error:
+              "Couldn't commit the delete workflow (" +
+              DELETE_APP_DISPATCHER_FILE +
+              ') to the "' +
+              commitFail.branch +
+              '" branch of ' +
+              repo +
+              ", so there's nothing to dispatch. The branch may be protected" +
+              " or your GitHub token may lack write access to " +
+              repo +
+              "."
+          });
+          return;
+        }
+        // A just-authored workflow isn't registered by GitHub synchronously, so
+        // an immediate workflow_dispatch would 404. When we created it, wait
+        // briefly and retry the not-found race a few times (mirroring the
+        // create-environment verify dispatch); when it was already present, the
+        // single [0]-delay attempt keeps the common path fast.
+        const justCreated = sync.created.some(
+          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
         const dispatchedAt = Date.now();
-        const dispatch = await ghWorkflow([
+        const dispatchArgs = [
           "workflow",
           "run",
           DELETE_APP_DISPATCHER_FILE,
@@ -5069,17 +7424,28 @@ function createRequestHandler(instanceId: string) {
           "application=" + application,
           "--repo",
           repo
-        ]);
+        ];
+        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
+        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
+        for (const delay of dispatchDelays) {
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          dispatch = await ghWorkflow(dispatchArgs);
+          if (dispatch.code === 0) break;
+          // Only the not-found registration race self-resolves; any other
+          // failure (scope, Actions disabled, …) won't, so stop retrying.
+          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+        }
         if (dispatch.code !== 0) {
           const de = (dispatch.stderr || "").trim();
           const hint =
             /workflow.{0,20}scope/i.test(de) ?
               ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " Ensure " +
-              DELETE_APP_DISPATCHER_FILE +
-              " exists on the default branch (recreate the environment to commit it) and that Actions are enabled for " +
+            : " The delete workflow is committed to the default branch" +
+              " automatically before dispatch, so a persistent failure usually" +
+              " means GitHub Actions is disabled for " +
               repo +
-              ".";
+              " or the default branch is protected — check both and retry.";
           respond(400, {
             error:
               "Failed to start the delete workflow (" +
@@ -5116,6 +7482,7 @@ function createRequestHandler(instanceId: string) {
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
+      const operationId = url.searchParams.get("operationId") || "";
       const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -5129,16 +7496,58 @@ function createRequestHandler(instanceId: string) {
 
       try {
         const entry = servers.get(instanceId);
-        const dispatchedAt = entry?.state?.deployDispatchedAt || 0;
-        let runId = entry?.state?.verifyRunId || null;
+        const verifyOp = operationId ? operations.get(operationId) : null;
+        if (
+          operationId &&
+          (!verifyOp ||
+            verifyOp.repo !== repo ||
+            verifyOp.environment !==
+              (url.searchParams.get("environment") || verifyOp.environment))
+        ) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error: "The verification operation does not match this request."
+          });
+          return;
+        }
+        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error:
+              "The verification operation has incomplete dispatch identity."
+          });
+          return;
+        }
+        const dispatchedAt =
+          verifyOp?.verification?.dispatchedAt ||
+          entry?.state?.deployDispatchedAt ||
+          0;
+        let runId =
+          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
         if (!runId) {
           runId = await findWorkflowRun(
             repo,
-            "radius-verify-credentials.yml",
+            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
             dispatchedAt,
             null
           );
-          if (runId && entry) entry.state.verifyRunId = runId;
+          if (runId && verifyOp) {
+            verifyOp.verification = {
+              dispatchedAt: verifyOp.verification.dispatchedAt,
+              workflow: verifyOp.verification.workflow,
+              ref: verifyOp.verification.ref,
+              environment: verifyOp.verification.environment,
+              runId: String(runId),
+              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
+            };
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          } else if (runId && entry) entry.state.verifyRunId = runId;
         }
         if (!runId) {
           respond({ state: "pending", runId: null });
@@ -5153,10 +7562,32 @@ function createRequestHandler(instanceId: string) {
         }
 
         if (detail.status !== "completed") {
-          respond({ state: "in_progress", runId, runUrl });
+          // Name what the run is doing right now instead of leaving the
+          // caller with nothing but elapsed time. getRunDetail already
+          // returns per-step status, so this costs no extra API surface.
+          // Its jobs sub-resource 503s intermittently and the fallback
+          // deliberately returns no steps, so the activity line has to
+          // degrade silently rather than announce its own absence.
+          const active = (detail.steps || []).find(
+            (s) => s.status === "in_progress"
+          );
+          respond({
+            state: "in_progress",
+            runId,
+            runUrl,
+            activity: active ? active.name : null
+          });
           return;
         }
         if (detail.conclusion === "success") {
+          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
+            finishSucceeded(verifyOp);
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          }
           respond({ state: "success", runId, runUrl });
           return;
         }
@@ -5177,9 +7608,35 @@ function createRequestHandler(instanceId: string) {
         const log = await fetchRunLog(repo, runId);
         const lines = extractErrorLines(log, 8);
         if (lines.length) errMsg += "\n" + lines.join("\n");
-        const oidcClaimHelp = explainOidcEnterpriseClaim(log);
+        const azureLoginLog = extractGitHubActionsStepLog(
+          log,
+          "Azure Login (OIDC)"
+        );
+        const oidcClaimHelp = explainOidcEnterpriseClaim(azureLoginLog);
         if (oidcClaimHelp)
           errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
+        if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
+          // Everything before verification succeeded and still exists, so
+          // this is partial rather than total failure.
+          finish(verifyOp, "failed_partial", {
+            failure: {
+              code: "verify-run-failed",
+              stage: STAGE_VERIFY,
+              message:
+                "Credential verification failed. " +
+                (failed.length ?
+                  "Failed step: " + failed.map((st) => st.name).join(", ") + "."
+                : ""),
+              classification: "user-fixable",
+              evidence: errMsg
+            }
+          });
+          await persistBestEffort({
+            operation: verifyOp,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        }
         respond({ state: "failed", runId, runUrl, error: errMsg });
       } catch (e) {
         respond({ state: "unknown", error: errorMessage(e) });
@@ -5396,7 +7853,9 @@ function createRequestHandler(instanceId: string) {
         addProgress("Fetching the default recipe pack from GitHub...");
         recipes = await fetchRecipePack(github, provider);
         addProgress(
-          `Loaded ${Array.isArray(recipes) ? recipes.length : 0} recipe(s) from the default recipe pack.`
+          `Loaded ${
+            Array.isArray(recipes) ? recipes.length : 0
+          } recipe(s) from the default recipe pack.`
         );
 
         // Surface pack recipes we couldn't map to a concrete resource so
@@ -5409,7 +7868,11 @@ function createRequestHandler(instanceId: string) {
         });
         if (unmappedRecipes.length) {
           addProgress(
-            `Note: ${unmappedRecipes.length} pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes.map((recipe) => optionalString(record(recipe).resourceType)).join(", ")}); those nodes show their abstract Radius type.`
+            `Note: ${
+              unmappedRecipes.length
+            } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
+              .map((recipe) => optionalString(record(recipe).resourceType))
+              .join(", ")}); those nodes show their abstract Radius type.`
           );
         }
 
@@ -5685,8 +8148,49 @@ function createRequestHandler(instanceId: string) {
       try {
         const data = JSON.parse(body);
         const entry = servers.get(instanceId);
+        // Re-validate the repair-loop attempt before touching any state: the
+        // tool checked it before sending, but a newer deploy may have started
+        // since, and a stale repair must not clobber it.
+        const loop = resolveDeployRepairLoop(
+          entry?.state || ({} as CanvasState),
+          data.attemptId
+        );
+        if (loop.error) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: loop.error }));
+          return;
+        }
         // Store deploy params
         if (entry) {
+          const repo =
+            data.targetRepo ||
+            entry.state.plannedRepo ||
+            entry.state.contextRepo ||
+            "";
+          // Resolve the branch to deploy. When the client doesn't specify
+          // one, fall back to the repo's real default branch (which may be
+          // master/develop, not main) so the dispatch --ref and the
+          // "branch not pushed" guard below target a branch that exists.
+          // Resolved up front, before any state is touched: beginDeployAttempt
+          // has to run without an await in front of it, or the previous attempt
+          // stays current across that window and its handoff can settle onto the
+          // deploy starting here.
+          let branch = data.branch || "";
+          if (!branch) {
+            const detectedDefault = (
+              (await runCommand("gh", [
+                "repo",
+                "view",
+                repo,
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name"
+              ]).catch(() => "")) || ""
+            ).trim();
+            branch = detectedDefault || "main";
+          }
           entry.state.deployParams = data;
           entry.state.envName = data.environment;
           entry.state.deployProvider = data.provider;
@@ -5712,57 +8216,16 @@ function createRequestHandler(instanceId: string) {
           entry.state.deployingResources = resources;
           entry.state.deployLogs = [];
           entry.state.deployLogBase = 0;
-          entry.state.deployStatus = "in_progress";
-          entry.state.deployError = null;
-          entry.state.deployErrorKind = null;
-          entry.state.deployErrorBranch = null;
-          entry.state.deployRunUrl = null;
-          entry.state.deployRunId = null;
-          // An agent redeploy is already inside a repair loop; a user
-          // deploy starts fresh and may hand off again on failure.
-          entry.state.deployRepairing = data.agentInitiated === true;
-          entry.state.deployHandoffState =
-            data.agentInitiated === true ? "delivered" : "idle";
-          entry.state.deployHandoffAttempts = 0;
-
-          const repo =
-            data.targetRepo ||
-            entry.state.plannedRepo ||
-            entry.state.contextRepo ||
-            "";
-          // Resolve the branch to deploy. When the client doesn't specify
-          // one, fall back to the repo's real default branch (which may be
-          // master/develop, not main) so the dispatch --ref and the
-          // "branch not pushed" guard below target a branch that exists.
-          let branch = data.branch || "";
-          if (!branch) {
-            const detectedDefault = (
-              (await runCommand("gh", [
-                "repo",
-                "view",
-                repo,
-                "--json",
-                "defaultBranchRef",
-                "--jq",
-                ".defaultBranchRef.name"
-              ]).catch(() => "")) || ""
-            ).trim();
-            branch = detectedDefault || "main";
-          }
-          entry.state.deployingBranch = branch;
           const provider = data.provider || "azure";
-          // Immutable identity for this attempt. A canvas panel is reused
-          // across deploys, so the repair loop binds to this snapshot
-          // instead of the panel: a stale repair cannot redeploy whatever
-          // the user started next.
-          entry.state.deployAttempt = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-            targetRepo: repo,
-            environment: entry.state.envName || data.environment || "",
+          beginDeployAttempt(entry.state, {
+            repo,
             branch,
             provider,
-            appFile: data.appFile || ".radius/app.bicep"
-          };
+            environment: entry.state.envName || data.environment || "",
+            appFile: data.appFile || ".radius/app.bicep",
+            repairLoop: loop.repairLoop,
+            attemptId: loop.attemptId
+          });
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in
           // memory (and re-serializing the whole array to every 1.5s
@@ -6073,7 +8536,9 @@ function createRequestHandler(instanceId: string) {
                   const deployParamsPresent = async () => {
                     const r = await runGhDeploy([
                       "api",
-                      `/repos/${repo}/environments/${encodeURIComponent(envForDeploy)}/secrets`,
+                      `/repos/${repo}/environments/${encodeURIComponent(
+                        envForDeploy
+                      )}/secrets`,
                       "--jq",
                       ".secrets[].name"
                     ]);
@@ -6623,9 +9088,13 @@ function createRequestHandler(instanceId: string) {
                   // the one signal the artifact transport does not carry.
                   const failLog = await fetchRunLog(repo, dRunId);
                   // The OIDC "enterprise claim" rejection (AADSTS7002381)
-                  // happens at the Azure Login step, before rad runs, so it is
-                  // in the run log rather than any rad output.
-                  const claimHelp = explainOidcEnterpriseClaim(failLog);
+                  // happens at the Azure Login step, before rad runs, so scope
+                  // the check to that step's log rather than the whole run.
+                  const azureLoginLog = extractGitHubActionsStepLog(
+                    failLog,
+                    "Azure Login (OIDC)"
+                  );
+                  const claimHelp = explainOidcEnterpriseClaim(azureLoginLog);
                   if (claimHelp)
                     dErr = claimHelp + "\n\n\u2014 raw error \u2014\n" + dErr;
                   const detailBlock = extractRadDeployError(failLog);
@@ -6654,24 +9123,36 @@ function createRequestHandler(instanceId: string) {
               "/actions/runs/" +
               dRunId;
             entry.state.deployStatus = "failed";
-          })().catch((monErr) => {
-            // Never let the background monitor die silently (which would
-            // leave the page stuck polling an 'in_progress' that never
-            // resolves). Surface the error and settle the status.
-            try {
-              addLog(
-                "❌ Deploy monitor stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr)
-              );
-              if (!entry.state.deployError)
-                entry.state.deployError =
-                  "Deploy monitoring stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr);
-              entry.state.deployStatus = "failed";
-            } catch {
-              /* ignore */
-            }
-          });
+          })()
+            .catch((monErr) => {
+              // Never let the background monitor die silently (which would
+              // leave the page stuck polling an 'in_progress' that never
+              // resolves). Surface the error and settle the status.
+              try {
+                addLog(
+                  "❌ Deploy monitor stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr)
+                );
+                if (!entry.state.deployError)
+                  entry.state.deployError =
+                    "Deploy monitoring stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr);
+                entry.state.deployStatus = "failed";
+              } catch {
+                /* ignore */
+              }
+            })
+            .finally(() => {
+              // The monitor owns every terminal transition of this deploy, so
+              // firing here makes the repair loop independent of the webview.
+              // Previously the only trigger was the /api/deploy-status route,
+              // which the browser polls solely while the deployments page is
+              // mounted: closing the panel, navigating away, or reopening onto
+              // another page left a failed deploy orphaned with the handoff
+              // never attempted. The route keeps its own call as a fallback,
+              // and triggerDeployRepairHandoff is idempotent per repair loop.
+              triggerDeployRepairHandoff(entry, instanceId);
+            });
         }
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
@@ -6951,6 +9432,7 @@ function createRequestHandler(instanceId: string) {
       res.end(environmentPage(state));
     }
   };
+  return { handler, startRecoveredVerificationTasks };
 }
 
 const PAGE_RENDERERS = {
@@ -7009,7 +9491,8 @@ async function startServer(
   instanceId: string,
   page = DEFAULT_CANVAS_PAGE
 ): Promise<CanvasServerEntry> {
-  const handler = createRequestHandler(instanceId);
+  let baseUrl = "";
+  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
   // Restore the user's explicitly chosen GitHub account (if any) before priming
   // so the very first strategy resolution honors it. This is what makes the
   // account choice stable across restarts.
@@ -7020,8 +9503,8 @@ async function startServer(
   // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
   // self-healing, so a failure here just means the next caller re-primes.
   primeGhIdentity().catch(() => {});
-  const server = createServer(handler);
-  let port = 0;
+  const server = createServer(requestHandler.handler);
+  let port: number;
   // Try the stable, instanceId-derived port first; fall back to an ephemeral
   // port (listen(0)) only if it's already taken/unavailable.
   const preferred = await preferredPortForInstance(instanceId);
@@ -7035,7 +9518,7 @@ async function startServer(
     const address = server.address();
     port = typeof address === "object" && address ? address.port : 0;
   }
-  const baseUrl = `http://127.0.0.1:${port}`;
+  baseUrl = `http://127.0.0.1:${port}`;
   const entry: CanvasServerEntry = {
     server,
     baseUrl,
@@ -7044,6 +9527,8 @@ async function startServer(
     state: {}
   };
   servers.set(instanceId, entry);
+  shuttingDownInstances.delete(instanceId);
+  requestHandler.startRecoveredVerificationTasks();
   return entry;
 }
 
@@ -7059,5 +9544,8 @@ export async function getOrCreateServer(
     }
     return entry;
   }
+  // Start warming the page assets only when a canvas is actually opened. The
+  // first HTML request awaits this same in-flight promise before rendering.
+  void ensureVendorScripts();
   return await startServer(instanceId, page);
 }

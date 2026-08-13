@@ -247,6 +247,44 @@ export function extractErrorLines(logText?: string | null, max = 12): string[] {
   return out.slice(-max);
 }
 
+export function extractGitHubActionsStepLog(
+  logText: string | null | undefined,
+  stepName: string
+): string {
+  if (!logText || !stepName) return "";
+  const lines = logText.split(/\r?\n/);
+  const exact = lines.filter((line) => {
+    const fields = line.split("\t");
+    return fields.length >= 3 && fields[1] === stepName;
+  });
+  if (exact.length > 0) return exact.join("\n");
+
+  // `gh run view --log` can label every row UNKNOWN STEP even though the jobs
+  // API reports real step names. In that format action boundaries survive as
+  // runner group markers. Recognize the Azure Login action itself, then retain
+  // its group and the adjacent ungrouped CLI-login output until the next group.
+  if (stepName !== "Azure Login (OIDC)") return "";
+  const out: string[] = [];
+  let capturing = false;
+  let groupEnded = false;
+  for (const line of lines) {
+    const fields = line.split("\t");
+    if (fields.length < 3 || fields[1] !== "UNKNOWN STEP") continue;
+    const message = fields.slice(2).join("\t");
+    if (/##\[group\]Run azure\/login@/i.test(message)) {
+      capturing = true;
+      groupEnded = false;
+    } else if (capturing && groupEnded && /##\[group\]/.test(message)) {
+      break;
+    }
+    if (capturing) {
+      out.push(line);
+      if (/##\[endgroup\]/.test(message)) groupEnded = true;
+    }
+  }
+  return out.join("\n");
+}
+
 // Detects the Entra "enterprise claim" rejection (AADSTS7002381) that GitHub
 // Actions OIDC hits when a repo is NOT owned by an org in a GitHub Enterprise.
 // Tenant-agnostic: the accepted enterprise values and the actual value are parsed

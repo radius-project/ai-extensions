@@ -33,11 +33,13 @@ fixes, features) as long as they follow a few guidelines:
 This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 `@radius-project` scope.
 
-| Path                       | npm name                 | Responsibility                                                                  |
-|----------------------------|--------------------------|---------------------------------------------------------------------------------|
-| `packages/core/`           | `@radius-project/core`   | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
-| `packages/adapter-shared/` | `@radius-project/shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
-| `packages/adapter-canvas/` | `@radius-project/canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+| Path                       | npm name                         | Responsibility                                                                  |
+|----------------------------|----------------------------------|---------------------------------------------------------------------------------|
+| `packages/core/`           | `@radius-project/core`           | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
+| `packages/adapter-shared/` | `@radius-project/adapter-shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
+| `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+
+The `adapter-` directory prefix is deliberate: it marks a package as an adapter at a glance and is what the core boundary lint rule in [`eslint.config.mjs`](./eslint.config.mjs) matches on to reject relative imports that escape into an adapter. The npm names stay unprefixed, so a directory name and its npm name differ by that prefix.
 
 ### The dependency rule
 
@@ -65,7 +67,7 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/extension.mjs
+pnpm build           # bundles the canvas extension -> plugins/radius/dist/
 ```
 
 Other useful scripts:
@@ -93,7 +95,7 @@ pnpm coverage          # run every project with unified V8 coverage
 Run a single test file:
 
 ```bash
-pnpm test -- packages/core/src/graph/diff_test.ts
+pnpm test -- packages/core/src/graph/diff.test.ts
 ```
 
 ## Before you open a pull request
@@ -116,8 +118,10 @@ pnpm changeset
 
 Select the affected packages, the bump level (`patch` / `minor` / `major`), and
 write a user-facing summary. Commit the generated `.changeset/*.md` file with
-your PR. See [`RELEASING.md`](./RELEASING.md) for the version/tag convention and
+your PR. Do not hand-edit any version: Changesets bumps `plugins/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
+
+Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr/no-changeset`, which replaces the reminder with a note that it was waived.
 
 ## Developer Certificate of Origin
 

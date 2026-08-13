@@ -1,16 +1,13 @@
-import { fillTemplate } from "./template.js";
+import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
 // The ref of radius-project/radius that hosts the delete workflow templates and
-// the `delete-resource` composite action. These landed in PR #12367
-// (radius-project/radius) and are NOT yet on `main`, so both the template fetch
-// and the `{{RADIUS_REF}}` the provider workflows pin their composite actions to
-// must point at the PR branch. Once #12367 merges, switch this back to
-// RADIUS_REF ("main") and delete this constant. It can be overridden via the
-// RADIUS_DELETE_REF env var (e.g. pin to a commit SHA) so it can be updated
-// without releasing a new core package if the PR branch moves.
-export const DELETE_RADIUS_REF =
-  process.env.RADIUS_DELETE_REF || "sk593-custom-types-recipe-packs";
+// the `delete-resource` composite action. These now live on `main`, so both the
+// template fetch and the `{{RADIUS_REF}}` the provider workflows pin their
+// composite actions to default to RADIUS_REF ("main"). It can be overridden via
+// the RADIUS_DELETE_REF env var (e.g. pin to a commit SHA or a PR branch) so the
+// delete templates can be re-pinned without releasing a new core package.
+export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || RADIUS_REF;
 
 // Committed delete-workflow file names. The application-delete dispatcher plus
 // its reusable provider workflows are committed to the target repo's
@@ -24,7 +21,7 @@ export type DeleteWorkflowFiles = Record<string, string>;
 
 /**
  * Build the application-delete GitHub Actions workflows, mirroring the
- * composite-action structure of radius-project/radius (PR #12367).
+ * composite-action structure of radius-project/radius.
  *
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` dispatcher plus the reusable
@@ -49,7 +46,7 @@ export function generateDeleteWorkflow(
     }
     return body;
   };
-  return {
+  const files: DeleteWorkflowFiles = {
     [DELETE_APP_DISPATCHER_FILE]: fillTemplate(
       pick(DELETE_APP_DISPATCHER_FILE),
       { ENV: env }
@@ -63,6 +60,10 @@ export function generateDeleteWorkflow(
       RADIUS_REF: DELETE_RADIUS_REF
     })
   };
+  for (const [file, body] of Object.entries(files)) {
+    assertNoUnresolvedPlaceholders(body, `delete workflow "${file}"`);
+  }
+  return files;
 }
 
 // Re-export so callers can pin template fetches to the same ref.

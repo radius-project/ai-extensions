@@ -1,20 +1,24 @@
 import { defineConfig } from "vitest/config";
+import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
-    projects: [
-      "packages/core/vitest.config.ts",
-      "packages/adapter-shared/vitest.config.ts",
-      "packages/adapter-canvas/vitest.config.ts"
-    ],
+    projects: ["packages/*/vitest.config.ts"],
     coverage: {
       provider: "v8",
+      reporter: ["text", "json-summary", "lcov"],
       include: ["packages/*/src/**/*.ts"],
-      exclude: [
-        "packages/*/src/**/*.test.ts",
-        "packages/*/src/**/*_test.ts",
-        "packages/*/src/**/*.live_test.ts"
-      ]
+      exclude: ["packages/*/src/**/*.test.ts"],
+      thresholds: {
+        ...coverageBaseline.aggregate,
+        "packages/adapter-canvas/src/**":
+          coverageBaseline.packages["adapter-canvas"],
+        "packages/adapter-shared/src/**":
+          coverageBaseline.packages["adapter-shared"],
+        "packages/core/src/**": coverageBaseline.packages.core,
+        "packages/adapter-canvas/src/runtime/**":
+          coverageBaseline.newlyExtracted.runtime
+      }
     }
   }
 });

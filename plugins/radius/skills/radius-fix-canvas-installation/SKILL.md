@@ -28,6 +28,7 @@ Files to copy:
 
 - `extension.mjs`
 - `package.json`
+- `extension.mjs.map` — **optional**; only present on newer installs. Copy it when it exists, but never fail the repair if it is missing.
 
 The `~/.copilot` directory is under the user's home directory on every platform:
 
@@ -40,16 +41,17 @@ Pick the code block matching the host OS. Run the shell commands directly; do no
 
 1. **Resolve the home directory.** Use `$HOME` in both PowerShell and bash. Build the source and destination folder paths from it.
 
-2. **Verify the source exists.** Confirm the source folder and both source files (`extension.mjs`, `package.json`) are present.
+2. **Verify the source exists.** Confirm the source folder and both required source files (`extension.mjs`, `package.json`) are present.
    - If the source folder does not exist, stop and tell the user the Radius plugin is not installed under `radius-plugins/radius`; there is nothing to copy. Do not attempt to download or synthesize the files.
 
 3. **Ensure the destination folder exists.** Create `~/.copilot/extensions/radius/` if it is missing.
 
-4. **Copy both files**, overwriting any existing copies in the destination:
+4. **Copy the required files**, overwriting any existing copies in the destination, then copy `extension.mjs.map` if it is present:
    - `.../installed-plugins/radius-plugins/radius/extension.mjs` -> `.../extensions/radius/extension.mjs`
    - `.../installed-plugins/radius-plugins/radius/package.json` -> `.../extensions/radius/package.json`
+   - `.../installed-plugins/radius-plugins/radius/extension.mjs.map` -> `.../extensions/radius/extension.mjs.map` (skip silently when absent)
 
-5. **Verify the copy.** Confirm both files now exist in the destination and are non-empty. Optionally compare byte length or hash against the source to confirm an exact copy.
+5. **Verify the copy.** Confirm both required files now exist in the destination and are non-empty. Optionally compare byte length or hash against the source to confirm an exact copy.
 
 6. **Tell the user to reload.** The canvas is discovered at extension-load time, so instruct the user to reload extensions or restart the GitHub Copilot App for the Radius Canvas to appear.
 
@@ -72,6 +74,12 @@ New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
 foreach ($f in $files) {
     Copy-Item -Path (Join-Path $src $f) -Destination (Join-Path $dst $f) -Force -ErrorAction Stop
+}
+
+# The source map is optional; older installs do not ship one.
+$map = Join-Path $src 'extension.mjs.map'
+if (Test-Path $map) {
+    Copy-Item -Path $map -Destination (Join-Path $dst 'extension.mjs.map') -Force -ErrorAction Stop
 }
 
 # Verify each destination file now exists, is non-empty, and matches its source.
@@ -111,6 +119,9 @@ for f in "${files[@]}"; do
   cp -f "$src/$f" "$dst/$f"
 done
 
+# The source map is optional; older installs do not ship one.
+[ -f "$src/extension.mjs.map" ] && cp -f "$src/extension.mjs.map" "$dst/extension.mjs.map"
+
 # Verify each destination file now exists and is non-empty.
 for f in "${files[@]}"; do
   [ -s "$dst/$f" ] || { echo "Copy failed or produced an empty file: $dst/$f" >&2; exit 1; }
@@ -121,9 +132,10 @@ ls -l "$dst"
 
 ## Completion checklist
 
-- Source folder and both source files existed (or the user was clearly told the plugin is not installed and the skill stopped).
+- Source folder and both required source files existed (or the user was clearly told the plugin is not installed and the skill stopped).
 - `~/.copilot/extensions/radius/` exists.
 - `extension.mjs` and `package.json` are present and non-empty in the destination.
+- `extension.mjs.map` was copied if the source had one (its absence is not a failure).
 - The user was told to reload extensions / restart the app.
 
 ## Constraints and pitfalls

@@ -24,8 +24,8 @@ export const DEFAULT_CANVAS_PAGE = "graph";
 import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
-} from "./deploy-diagnostics.js";
-import type { CanvasState } from "./shared.js";
+} from "../deploy-diagnostics.js";
+import type { CanvasState } from "../shared.js";
 
 interface GraphTriggerTarget {
   repo: string;
@@ -222,11 +222,22 @@ export async function evaluateAppBicepHook(
   };
 }
 
-// Prompt injected as a new user turn (via session.send) when a Radius graph
-// canvas is opened but no .radius/app.bicep exists on the branch. Because it is
-// surfaced as a visible turn, keep it free of internal tool mechanics and
-// agent-only meta-instructions; it points the agent at the skill and states the
-// graph's data source, nothing more.
+// The two halves of an automated handoff turn. `prompt` is what the agent
+// receives and acts on; `displayPrompt` is what the chat timeline shows in its
+// place (MessageOptions.displayPrompt). The turn still occupies the user lane —
+// session.send is the only channel that can actually drive agent work, and
+// session.log cannot — so the display half exists to keep a long, pre-written
+// internal instruction from masquerading as something the user typed (#209).
+export interface HandoffMessage {
+  prompt: string;
+  displayPrompt: string;
+}
+
+// Prompt sent to the agent when a Radius graph canvas is opened but no
+// .radius/app.bicep exists on the branch. This half is agent-facing: it names
+// the skill and the graph's data source so recovery needs no extra round trip.
+// It is not what the timeline shows — always send it through
+// appBicepHandoffMessage() so a display prompt travels with it.
 export function appBicepHandoffPrompt(
   repo: string,
   page = "graph",
@@ -246,16 +257,46 @@ export function appBicepHandoffPrompt(
   ].join("\n");
 }
 
+// Timeline stand-in for appBicepHandoffPrompt. Names the same repo, view, and
+// branch(es) the agent was pointed at — graph-diff spans two branches, and a
+// user who cannot see which ones cannot tell what is being modeled or where a
+// commit will land — but carries none of the internal tool/skill mechanics.
+export function appBicepHandoffDisplayPrompt(
+  repo: string,
+  page = "graph",
+  branches: ReadonlyArray<string | undefined> = []
+): string {
+  const where = repo ? ` for ${repo}` : "";
+  const phrase = branchPhrase(branches);
+  const onPhrase = phrase ? ` (${phrase})` : "";
+  return `Generating the application model${where}${onPhrase} so the Radius ${page} view can render.`;
+}
+
+// Pairs the agent-facing prompt with its timeline stand-in. Callers send this
+// object straight to session.send so the two halves cannot drift apart or be
+// swapped.
+export function appBicepHandoffMessage(
+  repo: string,
+  page = "graph",
+  branches: Array<string | undefined> = []
+): HandoffMessage {
+  return {
+    prompt: appBicepHandoffPrompt(repo, page, branches),
+    displayPrompt: appBicepHandoffDisplayPrompt(repo, page, branches)
+  };
+}
+
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
 export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
-export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "./deploy-diagnostics.js";
+export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-diagnostics.js";
 
-// Prompt injected as a new user turn (via session.send) when a deploy started
-// from the canvas Deploy button fails. That path dispatches the workflow
-// directly, so nothing carries the failure back to the agent; this is the
-// bridge. Deliberately self-contained — it names the tools that repair the model
-// and redeploy, so the loop does not depend on another skill being consulted.
+// Prompt sent to the agent when a deploy started from the canvas Deploy button
+// fails. That path dispatches the workflow directly, so nothing carries the
+// failure back to the agent; this is the bridge. Deliberately self-contained —
+// it names the tools that repair the model and redeploy, so the loop does not
+// depend on another skill being consulted. Agent-facing only: send it through
+// deployRepairHandoffMessage() so a display prompt travels with it.
 export function deployRepairHandoffPrompt(
   repo: string,
   branch: string,
@@ -292,4 +333,29 @@ export function deployRepairHandoffPrompt(
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")
     .join("\n");
+}
+
+// Timeline stand-in for deployRepairHandoffPrompt. States what is happening and
+// to which repo/branch, without the diagnostic dump, tool names, or the repair
+// decision tree the agent needs.
+export function deployRepairHandoffDisplayPrompt(
+  repo: string,
+  branch: string
+): string {
+  const where = repo ? ` of ${repo}` : "";
+  const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+  return `Diagnosing the failed Radius deploy${where}${onPhrase} and repairing it if the app model caused it.`;
+}
+
+// Pairs the agent-facing prompt with its timeline stand-in, so the two halves
+// cannot drift apart or be swapped at the call site.
+export function deployRepairHandoffMessage(
+  repo: string,
+  branch: string,
+  details: DeployRepairDetails = {}
+): HandoffMessage {
+  return {
+    prompt: deployRepairHandoffPrompt(repo, branch, details),
+    displayPrompt: deployRepairHandoffDisplayPrompt(repo, branch)
+  };
 }

@@ -1,11 +1,22 @@
 {
-  "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
-  "changelog": "@changesets/cli/changelog",
+  "$schema": "https://unpkg.com/@changesets/config@4.0.0-next.9/schema.json",
+  "changelog": "@changesets/changelog-github",
   "commit": false,
   "fixed": [],
   "linked": [],
   "access": "restricted",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": []
+  "privatePackages": {
+    "version": true,
+    "tag": true
+  },
+  "snapshot": {
+    "useCalculatedVersion": true
+  },
+  "ignore": [
+    "@radius-project/core",
+    "@radius-project/adapter-shared",
+    "@radius-project/adapter-canvas"
+  ]
 }
