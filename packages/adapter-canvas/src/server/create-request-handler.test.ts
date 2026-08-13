@@ -169,12 +169,19 @@ describe("createRequestHandler (SU-03)", () => {
 
     const rejected = responseRecorder();
     await handler(
-      request("/api/example", "POST", "", { "sec-fetch-site": "cross-site" }),
+      request("/api/example?page=planned", "POST", "", {
+        "sec-fetch-site": "cross-site"
+      }),
       rejected.response
     );
     expect(rejected.recorder.status).toBe(403);
     expect(migrated).not.toHaveBeenCalled();
     expect(legacyFallback).not.toHaveBeenCalled();
+    // A rejected cross-site mutation must not mutate instance page state. The
+    // legacy dispatcher rejected before reading ?page, so building the request
+    // context must stay free of that side effect.
+    expect(canvasEntry.page).toBe("graph");
+    expect(canvasEntry.state.activeGraphView).toBeUndefined();
 
     const rejectedLegacy = responseRecorder();
     await handler(
