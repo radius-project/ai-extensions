@@ -78,6 +78,7 @@ export interface CanvasGraphResource {
   codeReference?: string;
   outputResources?: CanvasGraphResource[];
   deployStatus?: "pending" | "in_progress" | "success" | "failed";
+  deployMessage?: string;
   portalUrl?: string;
 }
 

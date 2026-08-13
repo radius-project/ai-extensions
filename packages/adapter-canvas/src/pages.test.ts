@@ -946,20 +946,90 @@ describe("graphDiffPage — comparison errors", () => {
 });
 
 describe("deployedGraphPage", () => {
-  it("uses resolved concrete labels with planned topology and solid lines", () => {
+  it("mounts the graph in deploy mode with the status legend", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
     const renderGraph = html.match(
-      /function renderGraph\(resources, showDeployStatus\) \{([\s\S]*?)\n    \}/
+      /function renderGraph\(resources, branch\) \{([\s\S]*?)\n    \}/
     )?.[1];
-    expect(renderGraph).toContain("deployedMode: !showDeployStatus");
-    expect(renderGraph).toContain("deployMode: !!showDeployStatus");
+    expect(renderGraph).toContain("deployMode: true");
+    expect(renderGraph).toContain("showLegend: true");
   });
 
-  it("renders terminal failed resources with deployment status styling", () => {
+  it("updates through the controller so the viewport survives a refresh", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
-    expect(html).toContain("st === 'failed'");
-    expect(html).toContain("renderGraph(liveRes, true)");
-    expect(html).toContain("renderGraph(resources, false)");
+    expect(html).toContain("controller.update(resources)");
+  });
+
+  it("uses the branch the server returns rather than hardcoding main", () => {
+    // Source links on a session worktree branch resolve only when the page
+    // honors the branch the graph was built from.
+    const html = deployedGraphPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-branch"
+    });
+    expect(html).toContain('var GRAPH_BRANCH = "feature-branch"');
+    expect(html).toContain("branch: branch || GRAPH_BRANCH || 'main'");
+  });
+
+  it("requests the deployed graph scoped to the selected app and environment", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "'&application=' + encodeURIComponent(appSelect.value)"
+    );
+    expect(html).toContain(
+      "'&environment=' + encodeURIComponent(envSelect.value)"
+    );
+  });
+
+  it("only shows the empty state when there is nothing at all to draw", () => {
+    // A modeled application with no deployment still renders, greyed — the
+    // empty state is reserved for having no resources whatsoever.
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    const loadGraph = html.match(
+      /function loadGraph\(\) \{([\s\S]*?)\n    \}/
+    )?.[1];
+    expect(loadGraph).toContain("if (!resources.length) {");
+    expect(loadGraph).toContain("mode === 'live'");
+  });
+
+  it("states the refresh cadence rather than looking frozen", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("var POLL_MS = 15000");
+    expect(html).toContain("refreshes every ");
+  });
+
+  it("keeps polling through a transient failure instead of freezing", () => {
+    // Dropping the timer in the catch would freeze the graph mid-deploy for the
+    // life of the page while the note still promised a refresh.
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "if (LAST_MODE === 'live' && document.visibilityState !== 'hidden') { pollTimer = setTimeout(loadGraph, POLL_MS); }"
+    );
+  });
+
+  it("reports the age of the data, not the age of the last fetch", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "setModeNote(describeMode(mode, d && d.updatedAt, d && d.application))"
+    );
+    expect(html).toContain("var at = updatedAt ? Date.parse(updatedAt) : 0;");
+  });
+
+  it("names the resolved application when it differs from the selection", () => {
+    // The server falls back to an env-only match when the selected app has no
+    // artifact yet; the note must say which app is actually on screen.
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("' \u00b7 showing ' + shownApp");
+  });
+
+  it("pauses polling while the panel is hidden and only resumes for a live deploy", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("document.visibilityState === 'hidden'");
+    // Resume only when a deploy is live; a terminal/greyed view never polled.
+    expect(html).toContain("else if (LAST_MODE === 'live' && !pollTimer)");
+    // A slow in-flight fetch is aborted on hide so it cannot land after pause.
+    expect(html).toContain("graphFetchController.abort()");
+    expect(html).toContain("if (err && err.name === 'AbortError') { return; }");
   });
 
   it("renders the subtitle and wires the adaptive primary button", () => {

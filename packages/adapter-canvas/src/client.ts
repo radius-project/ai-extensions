@@ -959,9 +959,8 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
 
     var diffMode = options.diffMode || false;
     var deployMode = options.deployMode || false;
-    var deployedMode = options.deployedMode || false;
     var plannedMode = options.plannedMode || false;
-    var resolvedMode = plannedMode || deployMode || deployedMode;
+    var resolvedMode = plannedMode || deployMode;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     // In diff mode a "removed" resource's source file lived on the base
@@ -1102,13 +1101,6 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                 default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
             }
         }
-        // The terminal "Deployed Graph" keeps every non-failed card neutral gray;
-        // a failed resource remains red when terminal status data is available.
-        if (deployedMode) {
-            return r.deployStatus === 'failed'
-                ? RADIUS_DEPLOY_STATUS_COLORS.failed
-                : RADIUS_DEPLOY_STATUS_COLORS.pending;
-        }
         // The "Deploying" page passes deployMode. A managed-cluster node always
         // stays gray — its overall status is conveyed by the corner status badge,
         // not the fill. Other resources, including ordinary compute nodes, take the live
@@ -1248,6 +1240,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
                 deployStatus: r.deployStatus || '',
+                deployMessage: r.deployMessage || '',
                 deployBadgeKind: deployMode ? radiusDeployBadgeKind(r.deployStatus) : '',
                 deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : '',
                 portalUrl: r.portalUrl || '',
@@ -1577,6 +1570,20 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                     links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
                 }
             }
+            // The producer's status message for this resource, shown first so a
+            // failed node explains itself instead of just being red. Rendered as
+            // escaped text, never as markup.
+            if (d.deployMessage) {
+                var msgIsFailure = d.deployStatus === 'failed';
+                // unshift, not push: when a deploy fails, the reason is the
+                // thing the user opened the popup for, so it leads.
+                links.unshift(
+                    '<div style="padding:6px 4px; font-size:12px; line-height:1.5; color:' +
+                    (msgIsFailure ? 'var(--rad-danger,#cf222e)' : 'var(--rad-text-secondary)') +
+                    '; border-bottom:1px solid var(--rad-stroke,#d1d9e0); margin-bottom:4px; word-break:break-word;">' +
+                    escLocal(d.deployMessage) + '</div>'
+                );
+            }
             // Live portal link surfaced during deployment (Azure portal / AWS console).
             if (d.portalUrl) {
                 links.push(linkRow(ICON_LINK, 'View in portal', d.portalUrl, false));
@@ -1664,7 +1671,29 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
 
     // Diff mode intentionally shows no legend; status is encoded directly on
     // node borders and edges.
-    if (options.showLegend && !diffMode) {
+    if (options.showLegend && !diffMode && deployMode) {
+        // The Deployed view's legend explains deploy STATUS, not resource
+        // category: every node carries a status badge, and the badge is the
+        // primary signal there (fills stay neutral so labels stay readable).
+        //
+        // Ported from the design in PR #200 by @nithyatsu. That design showed an
+        // hourglass for pending/in-progress; the shipped badge is the circular
+        // progress indicator radiusDeployBadgeSvg already draws, so the legend
+        // uses the real glyph rather than introducing a second one.
+        var statusItems = [
+            { kind: 'progress', label: 'Pending / deploying' },
+            { kind: 'success', label: 'Deployed' },
+            { kind: 'failed', label: 'Failed' }
+        ];
+        var legend1 = document.createElement('div');
+        legend1.className = 'legend';
+        var statusHtml = '';
+        for (var si = 0; si < statusItems.length; si++) {
+            statusHtml += '<div class="legend-item"><img src="' + escLocal(radiusDeployBadgeSvg(statusItems[si].kind)) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(statusItems[si].label) + '</div>';
+        }
+        legend1.innerHTML = statusHtml;
+        container.parentNode.insertBefore(legend1, container);
+    } else if (options.showLegend && !diffMode) {
         // Build a resource-type legend from the categories actually present in
         // the graph. Nodes render as uniform white cards, so category is conveyed
         // by the icon (owned by the type/recipe pack); the legend shows that same
