@@ -493,7 +493,7 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
   it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
     expect(CLIENT_GRAPH_JS).toContain(
-      "var resolvedMode = plannedMode || deployMode || deployedMode"
+      "var resolvedMode = plannedMode || deployMode"
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "if (!resolvedMode && r.outputResources && r.outputResources.length > 0)"
@@ -585,12 +585,6 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 });
 
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
-  it("renders deployed graph cards gray except for failed resources", () => {
-    expect(CLIENT_GRAPH_JS).toContain("if (deployedMode) {");
-    expect(CLIENT_GRAPH_JS).toContain("? RADIUS_DEPLOY_STATUS_COLORS.failed");
-    expect(CLIENT_GRAPH_JS).toContain(": RADIUS_DEPLOY_STATUS_COLORS.pending");
-  });
-
   it("keeps managed-cluster nodes gray unless they fail and colors ordinary compute nodes by deploy status", () => {
     expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
     expect(CLIENT_GRAPH_JS).toContain(
@@ -686,6 +680,50 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "var shortType = resolvedMode && resolvedResource"
+    );
+  });
+
+  it("renders the status legend in deploy mode instead of the category legend", () => {
+    // Ported from PR #200 (@nithyatsu): the Deployed view's legend explains
+    // deploy status, since that is what its badges encode.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "if (options.showLegend && !diffMode && deployMode) {"
+    );
+    expect(CLIENT_GRAPH_JS).toContain("'Pending / deploying'");
+    expect(CLIENT_GRAPH_JS).toContain("'Deployed'");
+    expect(CLIENT_GRAPH_JS).toContain("'Failed'");
+    expect(CLIENT_GRAPH_JS).toContain(
+      "radiusDeployBadgeSvg(statusItems[si].kind)"
+    );
+    // Modeled/Planned keep the resource-category legend.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "} else if (options.showLegend && !diffMode) {"
+    );
+  });
+
+  it("surfaces the producer's status message in the node popup", () => {
+    // A failed node has to explain itself. Without this the graph reports that
+    // something failed but never what went wrong, at the moment the user most
+    // needs the detail.
+    expect(CLIENT_GRAPH_JS).toContain("deployMessage: r.deployMessage || ''");
+    expect(CLIENT_GRAPH_JS).toContain("if (d.deployMessage) {");
+    // Escaped as text, never interpolated as markup.
+    expect(CLIENT_GRAPH_JS).toContain("escLocal(d.deployMessage)");
+    // A failure reads red; anything else is muted secondary text.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var msgIsFailure = d.deployStatus === 'failed';"
+    );
+  });
+
+  it("never mounts output resources as child nodes in deploy mode", () => {
+    // The Deployed view is one node per Radius resource; expanding recipe
+    // outputs would make the topology shift once a deploy resolves them.
+    // resolvedMode covers plannedMode and deployMode.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var resolvedMode = plannedMode || deployMode"
+    );
+    expect(CLIENT_GRAPH_JS).toContain(
+      "if (!resolvedMode && r.outputResources && r.outputResources.length > 0) {"
     );
   });
 });
