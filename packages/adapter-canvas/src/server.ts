@@ -2923,7 +2923,10 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   return false;
 }
 
-function createLegacyRequestHandler(
+// Exported so the routes it still owns can be driven directly in tests: the
+// handler is a closure over the instances map, so a test can seed an entry,
+// bind the handler to an ephemeral port, and make real requests.
+export function createLegacyRequestHandler(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {

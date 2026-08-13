@@ -1,0 +1,209 @@
+// Route-level tests for /api/deploy. The unit tests around
+// resolveDeployRepairLoop cover the decision; these cover the wiring, and above
+// all the guarantee that matters to a user: a refused redeploy costs no
+// GitHub Actions run. That can only be shown by driving the route itself, so
+// these bind the real request handler to an ephemeral port and make real
+// requests.
+//
+// Every case here is a refusal, which the route answers before it touches gh or
+// the network, so nothing needs to be stubbed. The one accepted deploy uses an
+// empty repo, which the background monitor rejects immediately, so it never
+// reaches the network either.
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createServer, type Server } from "node:http";
+import {
+  createLegacyRequestHandler,
+  servers,
+  setDeployRepairHandoff,
+  DEPLOY_MONITOR_LOST_KIND
+} from "./server.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { MIGRATED_ROUTE_KEYS } from "./server/route-table.js";
+import type { CanvasState } from "./shared.js";
+
+const INSTANCE = "deploy-route-test";
+
+let http: Server;
+let baseUrl = "";
+
+beforeEach(async () => {
+  // A handoff would otherwise fire from the accepted deploy's monitor.
+  setDeployRepairHandoff(() => Promise.resolve());
+  const { handler } = createLegacyRequestHandler(INSTANCE, () => baseUrl);
+  http = createServer(handler);
+  await new Promise<void>((resolve) =>
+    http.listen(0, "127.0.0.1", () => resolve())
+  );
+  const address = http.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  baseUrl = `http://127.0.0.1:${port}`;
+});
+
+afterEach(async () => {
+  servers.delete(INSTANCE);
+  setDeployRepairHandoff(null);
+  await new Promise<void>((resolve) => http.close(() => resolve()));
+});
+
+function seed(state: Partial<CanvasState>): CanvasState {
+  const full = state as CanvasState;
+  servers.set(INSTANCE, {
+    server: http as never,
+    baseUrl,
+    url: `${baseUrl}/?page=deployed`,
+    page: "deployed",
+    state: full
+  });
+  return full;
+}
+
+// A repair-loop redeploy as the tool builds it: the attempt snapshot is
+// replayed, so a branch is always supplied and the route never has to resolve
+// one (which would shell out to gh).
+function repairPayload(attemptId: string) {
+  return {
+    attemptId,
+    targetRepo: "acme/widgets",
+    environment: "production",
+    branch: "feat",
+    provider: "azure",
+    appFile: ".radius/app.bicep",
+    agentInitiated: true
+  };
+}
+
+function failedAttempt(extra: Partial<CanvasState> = {}): Partial<CanvasState> {
+  return {
+    deployStatus: "failed",
+    deployAttempt: {
+      id: "attempt-A",
+      targetRepo: "acme/widgets",
+      environment: "production",
+      branch: "feat",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    },
+    ...extra
+  };
+}
+
+async function postDeploy(body: unknown): Promise<{
+  status: number;
+  json: Record<string, unknown>;
+}> {
+  const res = await fetch(`${baseUrl}/api/deploy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: res.status, json };
+}
+
+describe("/api/deploy repair-loop refusals", () => {
+  it("still runs through the handler these cases bind to", () => {
+    // These bind the legacy handler directly, which is where /api/deploy is
+    // served from today. If it is ever migrated onto the route table, that
+    // stops being the path production takes and these cases would pass while
+    // testing nothing, so the assumption fails loudly here instead.
+    expect(MIGRATED_ROUTE_KEYS).not.toContain("POST /api/deploy");
+  });
+
+
+  it("refuses a redeploy past the cap without touching state or dispatching", async () => {
+    const state = seed(
+      failedAttempt({ deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP })
+    );
+    const { status, json } = await postDeploy(repairPayload("attempt-A"));
+
+    expect(status).toBe(409);
+    expect(String(json.error)).toMatch(/already used its/);
+    // The refusal has to be inert: no counter movement, no new attempt, and no
+    // transition out of failed — a dispatched run would have set in_progress.
+    expect(state.deployRepairAttempts).toBe(DEPLOY_REPAIR_ATTEMPT_CAP);
+    expect(state.deployAttempt?.id).toBe("attempt-A");
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployLogs).toBeUndefined();
+  });
+
+  it("refuses a redeploy while the attempt is still running", async () => {
+    const state = seed(
+      failedAttempt({ deployStatus: "in_progress", deployRepairAttempts: 1 })
+    );
+    const { status, json } = await postDeploy(repairPayload("attempt-A"));
+
+    expect(status).toBe(409);
+    expect(String(json.error)).toMatch(/still running/);
+    expect(state.deployRepairAttempts).toBe(1);
+  });
+
+  it("refuses a redeploy on an attempt that already succeeded", async () => {
+    const state = seed(
+      failedAttempt({ deployStatus: "complete", deployRepairAttempts: 2 })
+    );
+    const { status, json } = await postDeploy(repairPayload("attempt-A"));
+
+    expect(status).toBe(409);
+    expect(String(json.error)).toMatch(/without an attemptId/);
+    expect(state.deployRepairAttempts).toBe(2);
+  });
+
+  it("refuses a redeploy when monitoring was lost and the run may be live", async () => {
+    const state = seed(
+      failedAttempt({
+        deployErrorKind: DEPLOY_MONITOR_LOST_KIND,
+        deployRunUrl: "https://github.com/acme/widgets/actions/runs/7",
+        deployRepairAttempts: 1
+      })
+    );
+    const { status, json } = await postDeploy(repairPayload("attempt-A"));
+
+    expect(status).toBe(409);
+    expect(String(json.error)).toMatch(/may still be running/);
+    expect(state.deployRepairAttempts).toBe(1);
+  });
+
+  it("refuses a stale attempt without clobbering the current one", async () => {
+    // The canvas moved on to attempt-B; a repair still addressing attempt-A
+    // must not redirect that newer deploy at its own target.
+    const state = seed({
+      deployStatus: "failed",
+      deployRepairAttempts: 0,
+      deployAttempt: {
+        id: "attempt-B",
+        targetRepo: "acme/other",
+        environment: "staging",
+        branch: "main",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      }
+    });
+    const { status, json } = await postDeploy(repairPayload("attempt-A"));
+
+    expect(status).toBe(409);
+    expect(String(json.error)).toMatch(/no longer the current attempt/);
+    expect(state.deployAttempt?.id).toBe("attempt-B");
+    expect(state.deployAttempt?.targetRepo).toBe("acme/other");
+    expect(state.deployRepairAttempts).toBe(0);
+  });
+
+  it("accepts an unbound deploy, opening a new attempt and resetting the count", async () => {
+    // What the browser Deploy button sends: no attemptId. It must start a fresh
+    // loop rather than continue the agent's, so a human clicking Deploy never
+    // spends repair budget. An empty repo keeps the monitor off the network.
+    const state = seed(failedAttempt({ deployRepairAttempts: 4 }));
+    const { status } = await postDeploy({
+      targetRepo: "",
+      environment: "production",
+      branch: "feat",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    });
+
+    expect(status).toBe(200);
+    expect(state.deployRepairAttempts).toBe(0);
+    expect(state.deployAttempt?.id).not.toBe("attempt-A");
+    expect(state.deployRepairing).toBe(false);
+  });
+});
