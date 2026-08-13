@@ -132,6 +132,8 @@ export interface CanvasState {
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
+  plannedEnvironment?: string;
+  plannedRequestGeneration?: number;
   plannedFromWorkspace?: boolean;
   deployProvider?: string;
   diffResources?: CanvasGraphResource[] | null;
@@ -158,6 +160,13 @@ export interface CanvasState {
   deployingResources?: CanvasGraphResource[] | null;
   deployParams?: CanvasDeployParams;
   deployAttempt?: CanvasDeployAttempt;
+  deploymentMutation?: {
+    repo: string;
+    environment: string;
+    kind: "deploy" | "delete";
+    expiresAt: number;
+    attemptId?: string;
+  };
   deployStartedAt?: number;
   deployFinishedAt?: number;
   deployLogs?: string[];
