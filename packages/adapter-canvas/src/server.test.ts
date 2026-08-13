@@ -10,6 +10,7 @@ import {
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
+  DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
@@ -47,6 +48,16 @@ import {
 } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 import type { DeployRepairHandoffInput } from "./server.js";
+
+describe("DEPLOY_RAD_COMMANDS_STEP", () => {
+  it("matches the step name in the upstream run-rad-commands action", () => {
+    // The deploy monitor gates all of its in-flight handling on finding a step
+    // with this name. It previously read "Deploy Application", which exists
+    // nowhere in radius-project/radius, so that entire code path never ran on
+    // a real deploy. Pin the value so the same silent break cannot recur.
+    expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+  });
+});
 
 describe("endChildInput", () => {
   it("keeps command execution authoritative when closing stdin fails", () => {
