@@ -43,13 +43,16 @@ beforeEach(async () => {
 afterEach(async () => {
   servers.delete(INSTANCE);
   setDeployRepairHandoff(null);
+  // fetch keeps its sockets alive, and close() waits for open connections, so
+  // teardown would otherwise stall until the keep-alive timeout expired.
+  http.closeAllConnections();
   await new Promise<void>((resolve) => http.close(() => resolve()));
 });
 
 function seed(state: Partial<CanvasState>): CanvasState {
   const full = state as CanvasState;
   servers.set(INSTANCE, {
-    server: http as never,
+    server: http,
     baseUrl,
     url: `${baseUrl}/?page=deployed`,
     page: "deployed",
