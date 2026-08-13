@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 10 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the 6 radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -6,7 +6,6 @@ import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
 import { errorMessage } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
-import type { CanvasGraphResource } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 
 interface ToolArgs {
@@ -30,44 +29,9 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
 
   return [
     {
-      ...declarationByName.get("radius_configure_oidc")!,
-      handler: async (_args: ToolArgs) => {
-        return "Open the radius canvas with page 'credentials' to configure OIDC. Use open_canvas with canvasId 'radius' and input { page: 'credentials' }.";
-      }
-    },
-    {
       ...declarationByName.get("radius_generate_app")!,
       handler: async (args: ToolArgs) => {
         return deps.radiusAppBicepSkill(args.repoPath as string | undefined);
-      }
-    },
-    {
-      ...declarationByName.get("radius_render_graph")!,
-      handler: async (args: ToolArgs) => {
-        const resources = deps.core.filterGraphVisualizationResources(
-          (args.resources as CanvasGraphResource[]) || []
-        );
-        return `Graph data received with ${resources.length} resources. Use invoke_canvas_action with actionName 'render_graph' and the resources data to display the graph.`;
-      }
-    },
-    {
-      ...declarationByName.get("radius_render_graph_diff")!,
-      handler: async (args: ToolArgs) => {
-        const baseResources = deps.core.filterGraphVisualizationResources(
-          args.baseResources as CanvasGraphResource[]
-        );
-        const headResources = deps.core.filterGraphVisualizationResources(
-          args.headResources as CanvasGraphResource[]
-        );
-        const diffResources = deps.core.computeGraphDiff(
-          baseResources,
-          headResources
-        );
-        return JSON.stringify({
-          message: `Diff computed: ${diffResources.filter((r) => r.diffStatus === "added").length} added, ${diffResources.filter((r) => r.diffStatus === "removed").length} removed, ${diffResources.filter((r) => r.diffStatus === "modified").length} modified`,
-          resources: diffResources,
-          instruction: `Use invoke_canvas_action with actionName 'render_graph_diff' and pass these resources with repo '${args.repo}', baseBranch '${args.baseBranch}', and headBranch '${args.headBranch}'.`
-        });
       }
     },
     {
@@ -148,12 +112,6 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
         } catch (err) {
           return `⚠️ Could not generate app graph diff: ${errorMessage(err)}`;
         }
-      }
-    },
-    {
-      ...declarationByName.get("radius_create_environment")!,
-      handler: async (_args: ToolArgs) => {
-        return "Open the radius canvas with page 'environment' to create a GitHub environment. Use open_canvas with canvasId 'radius' and input { page: 'environment' }.";
       }
     },
     {

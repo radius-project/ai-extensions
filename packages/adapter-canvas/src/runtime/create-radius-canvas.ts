@@ -1,4 +1,4 @@
-// createRadiusCanvas — builds the "radius" canvas definition (metadata, the 6
+// createRadiusCanvas — builds the "radius" canvas definition (metadata, the 2
 // actions, open/onClose) from RADIUS_ACTION_DECLARATIONS plus a
 // RadiusExtensionDependencies dependency object. No SDK import, no I/O at
 // module load, and no joinSession: constructing the canvas only wires
@@ -22,7 +22,7 @@ import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
-import type { CanvasGraphResource, CanvasState } from "../shared.js";
+import type { CanvasState } from "../shared.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -41,19 +41,6 @@ function isCurrentSourceRefToken(
   token: unknown
 ): boolean {
   return !!token && state?.sourceRefContexts?.[view]?.token === token;
-}
-
-function graphResources(value: unknown): CanvasGraphResource[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((resource) => {
-    const fields = record(resource);
-    return {
-      ...fields,
-      id: optionalString(fields.id),
-      name: optionalString(fields.name),
-      type: optionalString(fields.type)
-    };
-  });
 }
 
 // Everything below this line is created by createRadiusCanvas so it can close
@@ -124,161 +111,6 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
   );
 
   const actions = [
-    {
-      ...declarationByName.get("configure_oidc")!,
-      handler: async (ctx: CanvasContext) => {
-        const entry = await deps.getOrCreateServer(
-          ctx.instanceId,
-          "credentials"
-        );
-        const data = record(ctx.input);
-        const result =
-          data.provider === "azure" ?
-            deps.infra.generateAzureOIDC(data)
-          : deps.infra.generateAWSOIDC(data);
-        if (data.provider === "azure") {
-          entry.state.oidcAzure = {
-            ...result,
-            tenantId: optionalString(data.tenantId),
-            tenantName: optionalString(data.tenantName),
-            subscriptionId: optionalString(data.subscriptionId),
-            subscriptionName: optionalString(data.subscriptionName),
-            clientId: optionalString(data.clientId),
-            clientName: optionalString(data.clientName)
-          };
-        } else {
-          entry.state.oidcAws = {
-            ...result,
-            accountId: optionalString(data.accountId),
-            accountName: optionalString(data.accountName),
-            region: optionalString(data.region)
-          };
-        }
-        entry.url = `${entry.baseUrl}/?page=environment`;
-        return { message: result.message, url: entry.url };
-      }
-    },
-    {
-      ...declarationByName.get("render_graph")!,
-      handler: async (ctx: CanvasContext) => {
-        const entry = await deps.getOrCreateServer(ctx.instanceId, "graph");
-        const input = record(ctx.input);
-        Object.assign(entry.state, await workspaceState());
-        if (Array.isArray(input.resources)) {
-          const context = {
-            repo: entry.state.contextRepo || entry.state.workspaceRepo || "",
-            branch:
-              entry.state.contextBranch || entry.state.workspaceBranch || ""
-          };
-          const resources = deps.core.filterGraphVisualizationResources(
-            graphResources(input.resources)
-          );
-          deps.sourceRefs.setSourceRefResources(
-            entry,
-            "graph",
-            resources,
-            context
-          );
-          deps.sourceRefs.setSourceRefResources(
-            entry,
-            "planned",
-            resources,
-            context
-          );
-          entry.state.graphLoaded = true;
-          delete entry.state.graphFromWorkspace;
-          delete entry.state.plannedFromWorkspace;
-        }
-        entry.state.activeGraphView = "graph";
-        entry.url = `${entry.baseUrl}/?page=graph`;
-        return { message: "Graph rendered", url: entry.url };
-      }
-    },
-    {
-      ...declarationByName.get("render_graph_diff")!,
-      handler: async (ctx: CanvasContext) => {
-        const entry = await deps.getOrCreateServer(
-          ctx.instanceId,
-          "graph-diff"
-        );
-        const input = record(ctx.input);
-        if (
-          Array.isArray(input.baseResources) &&
-          Array.isArray(input.headResources)
-        ) {
-          const baseResources = deps.core.filterGraphVisualizationResources(
-            graphResources(input.baseResources)
-          );
-          const headResources = deps.core.filterGraphVisualizationResources(
-            graphResources(input.headResources)
-          );
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
-          deps.sourceRefs.setSourceRefResources(entry, "diff", diffResources, {
-            repo: optionalString(input.repo),
-            baseBranch: optionalString(input.baseBranch),
-            headBranch: optionalString(input.headBranch)
-          });
-          entry.state.diffTargetRepo = optionalString(input.repo);
-          entry.state.diffBase = optionalString(input.baseBranch);
-          entry.state.diffHead = optionalString(input.headBranch);
-        }
-        entry.state.activeGraphView = "diff";
-        entry.url = `${entry.baseUrl}/?page=graph-diff`;
-        return { message: "Diff graph rendered", url: entry.url };
-      }
-    },
-    {
-      ...declarationByName.get("create_environment")!,
-      handler: async (ctx: CanvasContext) => {
-        const entry = await deps.getOrCreateServer(
-          ctx.instanceId,
-          "environment"
-        );
-        const data = record(ctx.input);
-        try {
-          const provider = optionalString(data.provider);
-          const required =
-            provider === "azure" ?
-              [
-                "clientId",
-                "tenantId",
-                "subscriptionId",
-                "resourceGroup",
-                "cluster"
-              ]
-            : ["roleArn", "accountId", "region", "cluster"];
-          const missing = required.filter((name) => !data[name]);
-          if (missing.length > 0) {
-            throw new Error(
-              `Missing required ${provider} environment inputs: ${missing.join(", ")}.`
-            );
-          }
-          const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/create-environment`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                ...data,
-                environment: optionalString(data.name)
-              })
-            }
-          );
-          const result = record(await response.json());
-          if (!response.ok && !result.error) {
-            result.error = `Environment setup failed with HTTP ${response.status}.`;
-          }
-          entry.state.envResult = result;
-        } catch (e) {
-          entry.state.envResult = { error: errorMessage(e) };
-        }
-        entry.url = `${entry.baseUrl}/?page=environment`;
-        return entry.state.envResult;
-      }
-    },
     {
       ...declarationByName.get("get_graph_resources")!,
       handler: async (ctx: CanvasContext) => {

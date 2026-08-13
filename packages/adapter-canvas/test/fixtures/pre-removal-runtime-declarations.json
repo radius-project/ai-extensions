@@ -1,4 +1,5 @@
 {
+  "recordedBeforePhase0": true,
   "actions": [
     "configure_oidc",
     "create_environment",
