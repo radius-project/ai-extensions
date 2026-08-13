@@ -693,6 +693,40 @@ const envListCache = new Map<string, CachedPayload>();
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
+// A deploy request resolves branch and GitHub state asynchronously before
+// beginDeployAttempt marks the canvas state in progress. Reserve that window so
+// two near-simultaneous requests cannot both pass the conflict check and start.
+// Deploy reservations live through the background monitor; delete reservations
+// live through the short GitHub record-publication window. Failures release
+// immediately.
+export interface DeploymentDispatchReservation {
+  repo: string;
+  environment: string;
+  kind: "deploy" | "delete";
+}
+
+export function reserveDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservation
+): DeploymentDispatchReservation | null {
+  if (state.deploymentMutation) return null;
+  state.deploymentMutation = reservation;
+  return reservation;
+}
+
+export function releaseDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservation
+): void {
+  if (state.deploymentMutation === reservation) delete state.deploymentMutation;
+}
+
+export function deploymentStatusBlocksMutation(status: unknown): boolean {
+  return (
+    status === "pending" || status === "in_progress" || status === "deleting"
+  );
+}
+
 // Throttle for the background workflow drift-sync kicked off from the
 // environments listing: repo -> last-attempt epoch ms. Keeps the sync from
 // re-running on every page load / poll while still self-healing stale workflows.
@@ -6713,6 +6747,8 @@ function createRequestHandler(
       const finishedAt = entry?.state?.deployFinishedAt || null;
       const deployedGraph = entry?.state?.deployedGraph || null;
       const deployRunUrl = entry?.state?.deployRunUrl || null;
+      const attempt = entry?.state?.deployAttempt || null;
+      const active = status === "in_progress";
       // Every failure path converges on this poll, so it is where a failed
       // deploy is handed to the agent to repair (once per repair loop).
       const repairing =
@@ -6746,6 +6782,8 @@ function createRequestHandler(
             finishedAt,
             deployedGraph,
             deployRunUrl,
+            attempt,
+            active,
             repairing,
             handoff
           })
@@ -6765,6 +6803,8 @@ function createRequestHandler(
             finishedAt,
             deployedGraph,
             deployRunUrl,
+            attempt,
+            active,
             repairing,
             handoff
           })
@@ -7279,6 +7319,14 @@ function createRequestHandler(
         res.writeHead(code);
         res.end(JSON.stringify(payload));
       };
+      let deleteReservation: DeploymentDispatchReservation | null = null;
+      let deleteReservationOwner: CanvasState | null = null;
+      const releaseDeleteReservation = (): void => {
+        if (deleteReservation && deleteReservationOwner)
+          releaseDeploymentMutation(deleteReservationOwner, deleteReservation);
+        deleteReservation = null;
+        deleteReservationOwner = null;
+      };
       try {
         const data = JSON.parse(body || "{}");
         const repo = data.repo || "";
@@ -7287,6 +7335,67 @@ function createRequestHandler(
         if (!repo || !environment || !application) {
           respond(400, {
             error: "repo, environment, and application are required."
+          });
+          return;
+        }
+
+        const entry = servers.get(instanceId);
+        if (!entry) {
+          respond(503, { error: "Canvas server state is unavailable." });
+          return;
+        }
+        const attempt = entry.state.deployAttempt;
+        const activeRepo =
+          attempt?.targetRepo || entry.state.deployingRepo || "";
+        const activeEnvironment =
+          attempt?.environment || entry.state.envName || "";
+        const reserved = entry.state.deploymentMutation;
+        if (
+          (entry.state.deployStatus === "in_progress" &&
+            activeRepo === repo &&
+            activeEnvironment === environment) ||
+          (reserved?.repo === repo && reserved?.environment === environment)
+        ) {
+          respond(409, {
+            error:
+              "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
+          });
+          return;
+        }
+
+        deleteReservationOwner = entry.state;
+        deleteReservation = reserveDeploymentMutation(entry.state, {
+          repo,
+          environment,
+          kind: "delete"
+        });
+        if (!deleteReservation) {
+          respond(409, {
+            error: "Another deployment operation is already starting."
+          });
+          return;
+        }
+
+        // Backstop the UI with GitHub's persisted state too. This covers a
+        // deployment started from another canvas instance or browser session.
+        let current: DeploymentRow | null;
+        try {
+          current = await resolveEnvDeployment(repo, environment, application);
+        } catch {
+          releaseDeleteReservation();
+          respond(503, {
+            error:
+              "Could not verify the current deployment state. Check your GitHub connection and try again."
+          });
+          return;
+        }
+        if (current && deploymentStatusBlocksMutation(current.status)) {
+          releaseDeleteReservation();
+          respond(409, {
+            error:
+              current.status === "deleting" ?
+                "This deployment is already being deleted."
+              : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
           });
           return;
         }
@@ -7343,6 +7452,7 @@ function createRequestHandler(
           (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
         );
         if (commitFail) {
+          releaseDeleteReservation();
           respond(400, {
             error:
               "Couldn't commit the delete workflow (" +
@@ -7390,6 +7500,7 @@ function createRequestHandler(
           if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
         }
         if (dispatch.code !== 0) {
+          releaseDeleteReservation();
           const de = (dispatch.stderr || "").trim();
           const hint =
             /workflow.{0,20}scope/i.test(de) ?
@@ -7423,11 +7534,21 @@ function createRequestHandler(
         );
         if (runId)
           runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
+        // A workflow run can become discoverable before it creates its GitHub
+        // deployment record. Retain a short lease in either case to close that
+        // publication gap; after it expires, resolveEnvDeployment is the
+        // durable cross-instance guard.
+        const reservationTimer = setTimeout(
+          releaseDeleteReservation,
+          DEPLOY_LIST_TTL_MS * 2
+        );
+        reservationTimer.unref?.();
         // A delete is now in flight, so the cached listing is stale — drop
         // it so the next poll reflects the "Deleting…" state immediately.
         deployListCache.delete(repo);
         respond(200, { success: true, runUrl });
       } catch (e) {
+        releaseDeleteReservation();
         respond(400, { error: errorMessage(e) });
       }
       return;
@@ -8102,16 +8223,22 @@ function createRequestHandler(
     if (pathname === "/api/deploy" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
+      let reservation: DeploymentDispatchReservation | null = null;
+      let reservationOwner: CanvasState | null = null;
+      const releaseReservation = (): void => {
+        if (reservation && reservationOwner)
+          releaseDeploymentMutation(reservationOwner, reservation);
+        reservation = null;
+        reservationOwner = null;
+      };
       try {
         const data = JSON.parse(body);
         const entry = servers.get(instanceId);
+        if (!entry) throw new Error("Canvas server state is unavailable.");
         // Re-validate the repair-loop attempt before touching any state: the
         // tool checked it before sending, but a newer deploy may have started
         // since, and a stale repair must not clobber it.
-        const loop = resolveDeployRepairLoop(
-          entry?.state || ({} as CanvasState),
-          data.attemptId
-        );
+        const loop = resolveDeployRepairLoop(entry.state, data.attemptId);
         if (loop.error) {
           res.setHeader("Content-Type", "application/json");
           res.writeHead(409);
@@ -8125,6 +8252,77 @@ function createRequestHandler(
             entry.state.plannedRepo ||
             entry.state.contextRepo ||
             "";
+          const environment = data.environment || "";
+          if (!repo || !environment) {
+            throw new Error("targetRepo and environment are required.");
+          }
+          if (
+            entry.state.deployStatus === "in_progress" ||
+            entry.state.deploymentMutation
+          ) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error:
+                  "A deployment is already in progress. Wait for it to finish before starting another operation."
+              })
+            );
+            return;
+          }
+
+          reservationOwner = entry.state;
+          reservation = reserveDeploymentMutation(entry.state, {
+            repo,
+            environment,
+            kind: "deploy"
+          });
+          if (!reservation) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error: "Another deployment operation is already starting."
+              })
+            );
+            return;
+          }
+
+          // The canvas-local state closes the immediate double-click race; the
+          // persisted GitHub status closes the same race across sessions.
+          let current: DeploymentRow | null;
+          try {
+            current = await resolveEnvDeployment(
+              repo,
+              environment,
+              repo.split("/").pop() || repo
+            );
+          } catch {
+            releaseReservation();
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(503);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Could not verify whether this environment already has an operation in progress. Check your GitHub connection and try again."
+              })
+            );
+            return;
+          }
+          if (current && deploymentStatusBlocksMutation(current.status)) {
+            releaseReservation();
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error:
+                  current.status === "deleting" ?
+                    "This deployment is currently being deleted. Wait for it to finish before deploying again."
+                  : "A deployment to this environment is already in progress."
+              })
+            );
+            return;
+          }
           // Resolve the branch to deploy. When the client doesn't specify
           // one, fall back to the repo's real default branch (which may be
           // master/develop, not main) so the dispatch --ref and the
@@ -8178,7 +8376,7 @@ function createRequestHandler(
             repo,
             branch,
             provider,
-            environment: entry.state.envName || data.environment || "",
+            environment,
             appFile: data.appFile || ".radius/app.bicep",
             repairLoop: loop.repairLoop,
             attemptId: loop.attemptId
@@ -9199,12 +9397,20 @@ function createRequestHandler(
               // never attempted. The route keeps its own call as a fallback,
               // and triggerDeployRepairHandoff is idempotent per repair loop.
               triggerDeployRepairHandoff(entry, instanceId);
+              // Hold the repo/environment reservation for the whole deploy, not
+              // merely until the background monitor starts. This closes the
+              // deployment-record publication gap within this canvas instance.
+              releaseReservation();
             });
         }
+        // Keep this response adjacent to the monitor launch. Once the monitor
+        // owns the reservation, an awaited/throwing step here could enter the
+        // outer catch and release the lock while the deploy is still running.
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
       } catch (e) {
+        releaseReservation();
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));

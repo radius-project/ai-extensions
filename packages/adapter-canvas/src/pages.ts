@@ -1853,7 +1853,8 @@ function escapeHtmlClient(s) {
         // Both a delete in flight and an unreadable listing are transient, and
         // both leave the button disabled — so poll until they resolve, or the
         // button would stay stuck until a manual reload.
-        scheduleStatePoll(deploymentStatus(app, env) === 'deleting' || DEPLOYMENT_STATES_STALE);
+        var status = deploymentStatus(app, env);
+        scheduleStatePoll(status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE);
     }
 
     // Refresh the deployment listing while a delete runs, or while the listing
@@ -4854,10 +4855,10 @@ function loadDeployments(fresh, quiet) {
                     ? '<a class="rad-deploy-applink" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + arrowSvg + 'View Run</a>'
                     : '<span class="rad-cell-empty">—</span>';
                 // Failed deployments get a filled (solid) delete button; all
-                // others use the subtle outline variant. A row that's mid-delete
-                // disables its button to prevent a duplicate dispatch.
+                // others use the subtle outline variant. Any in-flight operation
+                // disables deletion so deploy/delete workflows cannot overlap.
                 var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
-                var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';
+                var delDisabled = (status === 'pending' || status === 'deleting' || dep.synthetic) ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
@@ -5151,7 +5152,19 @@ deployBtn.addEventListener('click', function() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: deployBranch, appFile: '.radius/app.bicep' })
-    }).then(function(r) { return r.json().catch(function() { return {}; }); })
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (result.ok) return;
+        clearInterval(wfPoll);
+        clearTimeout(autoHide);
+        delete OP_STATUS[opKey(app, env)];
+        document.getElementById('deploy-progress-modal').style.display = 'none';
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+        showInline('error', (result.d && result.d.error) || 'Could not start the deployment.');
+        loadDeployments(true);
+    })
       .catch(function() {
           clearInterval(wfPoll);
           clearTimeout(autoHide);
@@ -5179,10 +5192,63 @@ deployBtn.addEventListener('click', function() {
     });
 })();
 
+// Deploys started from the Planned or Deployed graph redirect here. Carrying
+// the selected app/environment in the URL lets this page restore the same
+// optimistic row and polling used for deployments started locally, closing the
+// gap before GitHub publishes the deployment record.
+function resumeRedirectedDeployment() {
+    var params;
+    try { params = new URLSearchParams(window.location.search); } catch (e) { return false; }
+    var app = params.get('application') || '';
+    var env = params.get('environment') || '';
+    if (!app || !env || !CTX_REPO) return false;
+
+    var key = opKey(app, env);
+    OP_STATUS[key] = 'pending';
+    DEPLOYED_ENVS[env] = 'pending';
+    refreshDeployBtn();
+    loadDeployments(true);
+
+    var ticks = 0;
+    var recordSeen = false;
+    var poll = setInterval(function() {
+        if (++ticks > 720) {
+            clearInterval(poll);
+            delete OP_STATUS[key];
+            loadDeployments(true);
+            return;
+        }
+        fetch('/api/deploy-status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var attempt = (d && d.attempt) || {};
+                var sameAttempt = (!attempt.targetRepo || attempt.targetRepo === CTX_REPO) &&
+                    (!attempt.environment || attempt.environment === env);
+                if (d && d.active && sameAttempt) {
+                    // Once GitHub has published the real deployment record, the
+                    // optimistic override keeps its status pending; repeatedly
+                    // bypassing the list cache after that would fan out several
+                    // GitHub API calls per environment every 2.5 seconds.
+                    if (!recordSeen && DEPLOY_RECORDS_PRESENT[key]) recordSeen = true;
+                    if (!recordSeen) loadDeployments(true, true);
+                    return;
+                }
+                clearInterval(poll);
+                delete OP_STATUS[key];
+                if (d && d.status === 'failed' && sameAttempt) {
+                    showDeployFailed(app, env, d.error || '', d.deployRunUrl || '', d.errorKind || '', d.errorBranch || '', d.repairing || false, d.handoff || {});
+                }
+                loadDeployments(true);
+            })
+            .catch(function() {});
+    }, 2500);
+    return true;
+}
+
 loadApplications();
 loadEnvironmentsDropdown();
 loadBranches();
-loadDeployments();
+if (!resumeRedirectedDeployment()) loadDeployments();
 <\/script>`,
     "deployments"
   );

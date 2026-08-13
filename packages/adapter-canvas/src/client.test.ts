@@ -342,6 +342,7 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     const branchSel: FakeSelect = { value: "main" };
     const envSel: FakeSelect = { value: "prod" };
     const elements: Record<string, unknown> = {
+      "planned-app": { value: "web-app" },
       "planned-branch": branchSel,
       "planned-env": envSel
     };
@@ -352,7 +353,7 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     const fetch = (url: string, init: { body: string }) => {
       requestedUrl = url;
       requestedBody = JSON.parse(init.body);
-      return Promise.resolve({ json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     };
     const deploy = new Function(
       "document",
@@ -373,7 +374,47 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
       appFile: ".radius/app.bicep"
     });
     expect(btn.disabled).toBe(true);
-    expect(location.href).toBe("/?page=deploying");
+    expect(location.href).toBe(
+      "/?page=deploying&application=web-app&environment=prod"
+    );
+  });
+
+  it("does not redirect when the server rejects a conflicting deployment", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      disabled: false,
+      setAttribute(name, value) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "planned-app": { value: "web-app" },
+      "planned-branch": { value: "main" },
+      "planned-env": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    const fetch = () =>
+      Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({ error: "Deployment already running." })
+      });
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", { prod: "azure" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(location.href).toBe("");
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.title).toBe("Deployment already running.");
   });
 
   it("refuses to dispatch without an explicit branch", () => {
@@ -575,6 +616,21 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     expect(hint.innerHTML).toContain("<strong>prod</strong>");
   });
 
+  it("disables deletion while a deployment is still pending", () => {
+    const { btn, hint, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "pending"
+    );
+    expect(mode).toBe("delete");
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deploying…");
+    expect(btn.title).toContain("still in progress");
+    expect(hint.innerHTML).toContain("currently being deployed");
+  });
+
   it.each(["success", "failed", "unknown", undefined])(
     "leaves the button enabled for terminal status %s",
     (status) => {
@@ -628,6 +684,7 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
       disabled: false
     };
     const elements: Record<string, unknown> = {
+      "deployed-app-select": { value: "web-app" },
       "deployed-env-select": { value: "prod" }
     };
     const document = { getElementById: (id: string) => elements[id] || null };
@@ -637,7 +694,7 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     const fetch = (url: string, init: { body: string }) => {
       requestedUrl = url;
       requestedBody = JSON.parse(init.body);
-      return Promise.resolve({ json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     };
     const deploy = new Function(
       "document",
@@ -657,7 +714,47 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
       branch: "feature-x",
       appFile: ".radius/app.bicep"
     });
-    expect(location.href).toBe("/?page=deploying");
+    expect(location.href).toBe(
+      "/?page=deploying&application=web-app&environment=prod"
+    );
+  });
+
+  it("does not redirect when the server rejects a conflicting deployment", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      className: "",
+      disabled: false,
+      setAttribute(name, value) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-app-select": { value: "web-app" },
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    const fetch = () =>
+      Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({ error: "Deployment already running." })
+      });
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", "feature-x", { prod: "aws" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(location.href).toBe("");
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.title).toBe("Deployment already running.");
   });
 
   it("does not dispatch a deployment without a selected environment", () => {

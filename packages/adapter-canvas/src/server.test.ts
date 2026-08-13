@@ -11,6 +11,7 @@ import {
   cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
   deleteNewlyCreatedGitHubEnvironment,
+  deploymentStatusBlocksMutation,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
   DEPLOY_HANDOFF_RETRY_DELAY_MS,
@@ -27,6 +28,8 @@ import {
   pickAksResourceGroup,
   preflightGhcrPackageWriteAccess,
   resolveGitHubEnvironmentCreateState,
+  releaseDeploymentMutation,
+  reserveDeploymentMutation,
   resolveDeployStatus,
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
@@ -1225,6 +1228,64 @@ describe("pickAksResourceGroup", () => {
 
   it("ignores non-string cluster RG values", () => {
     expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+  });
+});
+
+describe("deploymentStatusBlocksMutation", () => {
+  it.each(["pending", "in_progress", "deleting"])(
+    "blocks the non-terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(true);
+    }
+  );
+
+  it.each(["success", "failed", "unknown", "", undefined])(
+    "allows the terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(false);
+    }
+  );
+});
+
+describe("deployment mutation reservations", () => {
+  it("allows one mutation at a time and releases its owner", () => {
+    const state: CanvasState = {};
+    const deploy = reserveDeploymentMutation(state, {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy"
+    });
+
+    expect(deploy).not.toBeNull();
+    if (!deploy) throw new Error("expected deployment reservation");
+    expect(
+      reserveDeploymentMutation(state, {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "delete"
+      })
+    ).toBeNull();
+
+    releaseDeploymentMutation(state, deploy);
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+
+  it("does not let a stale completion release a newer mutation", () => {
+    const stale = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy" as const
+    };
+    const current = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "delete" as const
+    };
+    const state: CanvasState = { deploymentMutation: current };
+
+    releaseDeploymentMutation(state, stale);
+
+    expect(state.deploymentMutation).toBe(current);
   });
 });
 

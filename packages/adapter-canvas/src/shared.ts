@@ -158,6 +158,11 @@ export interface CanvasState {
   deployingResources?: CanvasGraphResource[] | null;
   deployParams?: CanvasDeployParams;
   deployAttempt?: CanvasDeployAttempt;
+  deploymentMutation?: {
+    repo: string;
+    environment: string;
+    kind: "deploy" | "delete";
+  };
   deployStartedAt?: number;
   deployFinishedAt?: number;
   deployLogs?: string[];

@@ -242,8 +242,10 @@ function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
     if (!btn || btn.disabled) return;
     var branchSel = document.getElementById('planned-branch');
     var envSel = document.getElementById('planned-env');
+    var appSel = document.getElementById('planned-app');
     var branch = (branchSel && branchSel.value.trim()) || '';
     var env = envSel ? envSel.value : '';
+    var app = appSel ? appSel.value : '';
     // Never dispatch without an explicit branch. The server would otherwise
     // resolve an empty one to the repo's default branch, deploying code the
     // user never previewed. The button is already disabled in this state; this
@@ -256,9 +258,21 @@ function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: branch, appFile: '.radius/app.bicep' })
-    }).then(function(r) { return r.json().catch(function() { return {}; }); })
-      .then(function() { window.location.href = '/?page=deploying'; })
-      .catch(function() { window.location.href = '/?page=deploying'; });
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (!result.ok) {
+            btn.textContent = 'Deploy Application';
+            btn.disabled = false;
+            btn.setAttribute('title', (result.d && result.d.error) || 'Could not start the deployment.');
+            return;
+        }
+        window.location.href = '/?page=deploying&application=' + encodeURIComponent(app) + '&environment=' + encodeURIComponent(env);
+    }).catch(function() {
+        btn.textContent = 'Deploy Application';
+        btn.disabled = false;
+        btn.setAttribute('title', 'Could not start the deployment.');
+    });
 }
 
 // ─── Deployed graph adaptive primary action ──────────────────────────────────
@@ -295,6 +309,7 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
     var envSel = document.getElementById('deployed-env-select');
     var app = (appSel && appSel.value) || '';
     var env = (envSel && envSel.value) || '';
+    var pending = deploymentStatus === 'pending';
     var deleting = deploymentStatus === 'deleting';
     var unavailable = !!statesUnavailable;
     var mode = !hasEnv ? 'create-env' : (hasDeployment ? 'delete' : 'deploy');
@@ -315,10 +330,12 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
                 btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
             }
         } else {
-            btn.textContent = deleting ? 'Deleting…' : 'Delete Deployment';
+            btn.textContent = pending ? 'Deploying…' : (deleting ? 'Deleting…' : 'Delete Deployment');
             btn.className = 'rad-btn rad-btn--danger-outline';
-            btn.disabled = !(app && env) || deleting || unavailable;
-            if (deleting) {
+            btn.disabled = !(app && env) || pending || deleting || unavailable;
+            if (pending) {
+                btn.setAttribute('title', 'This deployment is still in progress. Wait for it to finish before deleting it.');
+            } else if (deleting) {
                 btn.setAttribute('title', 'This deployment is already being deleted from environment "' + env + '". Wait for the delete to finish.');
             } else if (unavailable) {
                 btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
@@ -332,6 +349,8 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
             hint.textContent = ' To deploy this application, you must first create an environment.';
         } else if (mode === 'deploy') {
             hint.innerHTML = ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
+        } else if (pending) {
+            hint.innerHTML = ' The application (' + appLabel + ') is currently being deployed to the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
         } else if (deleting) {
             hint.innerHTML = ' The application (' + appLabel + ') is currently being deleted from the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
         } else {
@@ -348,7 +367,9 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
 function radiusDeployDeployedApp(btn, repo, branch, envProviders, fallbackProvider) {
     if (!btn || btn.disabled) return;
     var envSel = document.getElementById('deployed-env-select');
+    var appSel = document.getElementById('deployed-app-select');
     var env = envSel ? envSel.value : '';
+    var app = appSel ? appSel.value : '';
     // The branch is resolved server-side (contextBranch → plannedBranch →
     // graphBranch → "main") so it should never arrive empty, but refuse to
     // dispatch if it ever does: /api/deploy resolves an empty branch to the
@@ -362,9 +383,21 @@ function radiusDeployDeployedApp(btn, repo, branch, envProviders, fallbackProvid
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: deployBranch, appFile: '.radius/app.bicep' })
-    }).then(function(r) { return r.json().catch(function() { return {}; }); })
-      .then(function() { window.location.href = '/?page=deploying'; })
-      .catch(function() { window.location.href = '/?page=deploying'; });
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (!result.ok) {
+            btn.textContent = 'Deploy Application';
+            btn.disabled = false;
+            btn.setAttribute('title', (result.d && result.d.error) || 'Could not start the deployment.');
+            return;
+        }
+        window.location.href = '/?page=deploying&application=' + encodeURIComponent(app) + '&environment=' + encodeURIComponent(env);
+    }).catch(function() {
+        btn.textContent = 'Deploy Application';
+        btn.disabled = false;
+        btn.setAttribute('title', 'Could not start the deployment.');
+    });
 }
 
 // Toggle the Modeled-graph primary button between "Create Environment" (when

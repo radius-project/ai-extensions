@@ -835,7 +835,22 @@ describe("deployingPage — Deployments landing", () => {
     // successful delete mid-deploy).
     expect(html).toContain("synthetic: true");
     expect(html).toContain(
-      "var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+      "var delDisabled = (status === 'pending' || status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+    );
+    expect(html).toContain("function resumeRedirectedDeployment()");
+    expect(html).toContain("OP_STATUS[key] = 'pending'");
+    expect(html).toContain(
+      "if (!recordSeen && DEPLOY_RECORDS_PRESENT[key]) recordSeen = true"
+    );
+    expect(html).toContain("if (!recordSeen) loadDeployments(true, true)");
+    expect(html).toContain(
+      "if (!resumeRedirectedDeployment()) loadDeployments()"
+    );
+    // A server-side 409 must unwind the optimistic row rather than pretending
+    // the conflicting deployment started successfully.
+    expect(html).toContain("if (result.ok) return;");
+    expect(html).toContain(
+      "(result.d && result.d.error) || 'Could not start the deployment.'"
     );
     // The in-flight list refresh stops once the real record shows up, and the
     // poll is capped so a stuck run can't fan out fresh=1 fetches forever.
@@ -954,7 +969,9 @@ describe("deployedGraphPage", () => {
     expect(html).toContain("deploymentStatus(app, env)");
     expect(html).toContain("function deploymentStatus(");
     expect(html).toContain("scheduleStatePoll(");
-    expect(html).toContain("deploymentStatus(app, env) === 'deleting'");
+    expect(html).toContain(
+      "status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE"
+    );
   });
 
   // A transient GitHub failure comes back as HTTP 200 with
@@ -1058,7 +1075,7 @@ describe("deployedGraphPage", () => {
       "deploymentStatus(app, env), DEPLOYMENT_STATES_STALE"
     );
     expect(html).toContain(
-      "deploymentStatus(app, env) === 'deleting' || DEPLOYMENT_STATES_STALE"
+      "status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE"
     );
   });
 
