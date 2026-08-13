@@ -8,6 +8,17 @@ export const CLIENT_REPO_BRANCH_JS = `
 // ─── Shared Repo/Branch Library ───────────────────────────────────────────────
 // Provides consistent repo/branch dropdowns across all panes (matches diff pane style).
 
+// Minimal HTML-escaping helper for values (e.g. app/env names) interpolated
+// into innerHTML strings built from user- or repo-provided data.
+function radiusEscapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function radiusPopulateRepos(selectId, defaultRepo) {
     var sel = document.getElementById(selectId);
     if (!sel) return Promise.resolve();
@@ -85,9 +96,12 @@ function radiusSetupRepoBranch(repoSelectId, branchSelectIds, defaultRepo, defau
 // Populate the Application / Branch / Environment selectors on the Planned
 // Graph pane. The repository is assumed from the workspace, so it is not a
 // selectable field. Fills the passed envProviders map so the caller can derive
-// the cloud provider from the chosen environment. When defaultBranch is given
-// (loaded state) it is pre-selected; otherwise no branch is pre-selected.
-function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
+// the cloud provider from the chosen environment. When defaultBranch/defaultEnv
+// are given (loaded state) they are pre-selected; otherwise the first available
+// option is left to the browser's default selection. Returns a promise that
+// resolves once all three selectors have settled, so callers can auto-render
+// the planned graph as soon as sensible defaults are in place.
+function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defaultEnv) {
     var appSel = document.getElementById('planned-app');
     var branchSel = document.getElementById('planned-branch');
     var envSel = document.getElementById('planned-env');
@@ -95,9 +109,9 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
         if (appSel) appSel.innerHTML = '<option value="">No repository</option>';
         if (branchSel) branchSel.innerHTML = '<option value="">No repository</option>';
         if (envSel) envSel.innerHTML = '<option value="">No repository</option>';
-        return;
+        return Promise.resolve();
     }
-    if (appSel) {
+    var appPromise = appSel ?
         fetch('/api/list-applications?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -109,10 +123,15 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                     return;
                 }
                 apps.forEach(function(a) { var o = document.createElement('option'); o.value = a.name; o.textContent = a.name; appSel.appendChild(o); });
+                // Honor ?app= (e.g. from the Modeled graph's "Plan Deployment").
+                try {
+                    var preApp = new URLSearchParams(window.location.search).get('app');
+                    if (preApp && apps.some(function(a) { return a.name === preApp; })) appSel.value = preApp;
+                } catch (e) { /* URLSearchParams unavailable */ }
             })
-            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; });
-    }
-    if (branchSel) {
+            .catch(function() { appSel.innerHTML = '<option value="">Unable to load applications</option>'; })
+        : Promise.resolve();
+    var branchPromise = branchSel ?
         fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo}) })
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -126,46 +145,368 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch) {
                     branchSel.appendChild(o);
                 });
             })
-            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; });
-    }
-    if (envSel) {
+            .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; })
+        : Promise.resolve();
+    var hasEnvResult = false;
+    var envsUnavailable = false;
+    var envPromise = envSel ?
         fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
             .then(function(d) {
+                if (d && d.error) {
+                    envsUnavailable = true;
+                    envSel.innerHTML = '<option value="">Unable to load environments</option>';
+                    return;
+                }
                 var envs = (d && d.environments) || [];
                 if (!envs.length) {
                     envSel.innerHTML = '<option value="">No environments</option>';
-                    radiusApplyPlanEnvState(false);
                     return;
                 }
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
-                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name; envSel.appendChild(o);
+                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name;
+                    if (defaultEnv && e.name === defaultEnv) o.selected = true;
+                    envSel.appendChild(o);
                 });
-                radiusApplyPlanEnvState(true);
+                hasEnvResult = true;
             })
-            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; });
-    }
+            .catch(function() {
+                envsUnavailable = true;
+                envSel.innerHTML = '<option value="">Unable to load environments</option>';
+            })
+        : Promise.resolve();
+    // Apply the button/hint state only after BOTH the application and
+    // environment selectors have finished populating, so the hint can name
+    // the actually-selected application instead of falling back to generic
+    // text (appSel.value would still be empty while its own fetch is
+    // in-flight if this ran as soon as the environment fetch settled).
+    return Promise.all([appPromise, branchPromise, envPromise]).then(function() {
+        radiusApplyPlanEnvState(hasEnvResult, envsUnavailable);
+    });
 }
 
-// Toggle the planned-graph primary button between "Create Environment" (when the
-// repo has no Radius-managed environment) and its normal plan label. When there
-// is no environment the button navigates to the environment page instead of
-// planning, and an explanatory note is shown.
-function radiusApplyPlanEnvState(hasEnv) {
+// Tracks the last-known environment state for the Planned pane so selector
+// change handlers can refresh the subtitle hint (which names the selected
+// application/environment) without re-querying /api/list-environments.
+var RADIUS_PLAN_HAS_ENV = false;
+var RADIUS_PLAN_ENVS_STALE = false;
+var RADIUS_PLAN_REQUEST_FAILED = false;
+
+// Toggle the planned-graph primary button between "Create Environment" (when
+// the repo has no Radius-managed environment) and "Deploy Application" (which
+// deploys the selected application/branch to the selected environment). The
+// subtitle hint under the sub-tabs is updated to match, naming the currently
+// selected application and environment so the next step is always spelled out.
+//
+// In deploy mode the button stays disabled until both a branch and an
+// environment are chosen. Those are the two values dispatched to /api/deploy,
+// and an empty branch there is not inert: the server falls back to the repo's
+// default branch, which would deploy something other than the graph the user
+// just previewed.
+function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
+    RADIUS_PLAN_HAS_ENV = !!hasEnv;
+    RADIUS_PLAN_ENVS_STALE = !!statesUnavailable;
     var btn = document.getElementById('plan-btn');
-    var note = document.getElementById('plan-env-note');
+    var hint = document.getElementById('planned-subtitle-hint');
+    var appSel = document.getElementById('planned-app');
+    var branchSel = document.getElementById('planned-branch');
+    var envSel = document.getElementById('planned-env');
+    var branch = (branchSel && branchSel.value && branchSel.value.trim()) || '';
+    var env = (envSel && envSel.value) || '';
     if (btn) {
-        if (hasEnv) {
-            btn.dataset.mode = 'plan';
-            btn.textContent = btn.dataset.planLabel || 'Plan Deployment';
+        btn.removeAttribute('title');
+        if (statesUnavailable) {
+            btn.dataset.mode = 'unavailable';
+            btn.textContent = 'Deploy Application';
+            btn.disabled = true;
+            btn.setAttribute('title', 'Environments could not be loaded. Try again before deploying.');
+        } else if (hasEnv) {
+            btn.dataset.mode = 'deploy';
+            btn.textContent = 'Deploy Application';
+            btn.disabled = !(branch && env);
+            if (!branch && !env) {
+                btn.setAttribute('title', 'Select a branch and an environment to deploy.');
+            } else if (!branch) {
+                btn.setAttribute('title', 'Select the branch to deploy.');
+            } else if (!env) {
+                btn.setAttribute('title', 'Select the environment to deploy to.');
+            } else if (RADIUS_PLAN_REQUEST_FAILED) {
+                btn.disabled = true;
+                btn.setAttribute('title', 'The selected deployment plan could not be generated. Try another selection.');
+            }
         } else {
             btn.dataset.mode = 'create-env';
             btn.textContent = 'Create Environment';
+            btn.disabled = false;
         }
     }
-    if (note) note.style.display = hasEnv ? 'none' : '';
+    if (hint) {
+        if (statesUnavailable) {
+            hint.textContent = ' Environments could not be loaded, so deployment planning is temporarily unavailable.';
+        } else if (hasEnv) {
+            var appName = (appSel && appSel.value) || 'this application';
+            var envName = env || 'the selected environment';
+            hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
+        } else {
+            hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
+        }
+    }
+}
+
+// Coalesce rapid selector changes and serialize plan requests. A selection made
+// while a request is active invalidates that response and queues exactly one
+// request for the latest values, preventing older plans from overwriting newer
+// selections in either the browser or the server's canvas state.
+function radiusCreatePlanScheduler(run, onIdle, debounceMs) {
+    var version = 0;
+    var active = false;
+    var queued = false;
+    var timer = null;
+    var delayMs = typeof debounceMs === 'number' ? debounceMs : 150;
+
+    function drain() {
+        timer = null;
+        if (active || !queued) return;
+        queued = false;
+        active = true;
+        var requestVersion = version;
+        Promise.resolve()
+            .then(function() {
+                return run(function() { return requestVersion === version; });
+            })
+            .catch(function(error) {
+                console.error('Planned graph request failed.', error);
+            })
+            .then(function() {
+                active = false;
+                if (queued) {
+                    timer = setTimeout(drain, delayMs);
+                } else if (onIdle) {
+                    onIdle();
+                }
+            });
+    }
+
+    return function schedule(immediate) {
+        version++;
+        queued = true;
+        if (timer) clearTimeout(timer);
+        if (active) return;
+        timer = setTimeout(drain, immediate ? 0 : delayMs);
+    };
+}
+
+// Trigger a deployment of the currently-selected application/branch to the
+// currently-selected environment on the Planned pane, then redirect to the
+// Deployments tab so the user can monitor progress. Mirrors the Deployments
+// pane's own deploy dispatch (see deployLandingView), but does not need to
+// pass an application name since a repo hosts a single Radius application.
+function radiusDeployPlannedApp(btn, repo, envProviders, fallbackProvider) {
+    if (!btn || btn.disabled) return;
+    var branchSel = document.getElementById('planned-branch');
+    var envSel = document.getElementById('planned-env');
+    var appSel = document.getElementById('planned-app');
+    var branch = (branchSel && branchSel.value.trim()) || '';
+    var env = envSel ? envSel.value : '';
+    var app = appSel ? appSel.value : '';
+    // Never dispatch without an explicit branch. The server would otherwise
+    // resolve an empty one to the repo's default branch, deploying code the
+    // user never previewed. The button is already disabled in this state; this
+    // guard covers the dispatch path itself.
+    if (!repo || !env || !branch) return;
+    var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
+    btn.disabled = true;
+    btn.textContent = 'Starting deployment…';
+    fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: branch, appFile: '.radius/app.bicep' })
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (!result.ok) {
+            btn.textContent = 'Deploy Application';
+            btn.disabled = false;
+            btn.setAttribute('title', (result.d && result.d.error) || 'Could not start the deployment.');
+            return;
+        }
+        window.location.href = '/?page=deploying&application=' + encodeURIComponent(app) + '&environment=' + encodeURIComponent(env);
+    }).catch(function() {
+        btn.textContent = 'Deploy Application';
+        btn.disabled = false;
+        btn.setAttribute('title', 'Could not start the deployment.');
+    });
+}
+
+// ─── Deployed graph adaptive primary action ──────────────────────────────────
+// Tracks the last-known environment/deployment state for the Deployed pane so
+// selector change handlers can refresh the button + subtitle hint without
+// re-querying the environment and deployment listings.
+var RADIUS_DEPLOYED_HAS_ENV = false;
+var RADIUS_DEPLOYED_HAS_DEPLOYMENT = false;
+
+// Adapt the Deployed-graph primary button to the user's actual setup, in three
+// escalating states:
+//   • no environment at all      → "Create Environment" (links to the form)
+//   • environment but no deploy  → "Deploy Application" (dispatches a deploy)
+//   • an existing deployment     → "Delete Deployment"  (3-step confirm dialog)
+// The subtitle hint under the sub-tabs names the selected application and
+// environment so the next step is always spelled out.
+//
+// deploymentStatus is the selected environment's deployment status. A delete
+// already in flight disables the button, matching the Deployments table, whose
+// per-row delete button is likewise disabled while status is "deleting" —
+// dispatching a second delete would only fail or race the first.
+//
+// statesUnavailable means the deployment listing could not be read (a transient
+// GitHub failure). The button is disabled while that holds: the last-known
+// state is kept on screen, but it may be out of date, and dispatching against
+// state we cannot confirm risks starting an operation that conflicts with one
+// already running.
+function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, statesUnavailable) {
+    RADIUS_DEPLOYED_HAS_ENV = !!hasEnv;
+    RADIUS_DEPLOYED_HAS_DEPLOYMENT = !!hasDeployment;
+    var btn = document.getElementById('deployed-delete-btn');
+    var hint = document.getElementById('deployed-subtitle-hint');
+    var appSel = document.getElementById('deployed-app-select');
+    var envSel = document.getElementById('deployed-env-select');
+    var app = (appSel && appSel.value) || '';
+    var env = (envSel && envSel.value) || '';
+    var pending = deploymentStatus === 'pending';
+    var deleting = deploymentStatus === 'deleting';
+    var unavailable = !!statesUnavailable;
+    var mode = !hasEnv ? 'create-env' : (hasDeployment ? 'delete' : 'deploy');
+    if (btn) {
+        btn.dataset.mode = mode;
+        btn.removeAttribute('title');
+        if (mode === 'create-env') {
+            btn.textContent = 'Create Environment';
+            btn.className = 'rad-btn rad-btn--primary';
+            // Creating an environment doesn't act on deployment state, so an
+            // unreadable listing is no reason to block it.
+            btn.disabled = false;
+        } else if (mode === 'deploy') {
+            btn.textContent = 'Deploy Application';
+            btn.className = 'rad-btn rad-btn--primary';
+            btn.disabled = !(app && env) || unavailable;
+            if (unavailable) {
+                btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
+            }
+        } else {
+            btn.textContent = pending ? 'Deploying…' : (deleting ? 'Deleting…' : 'Delete Deployment');
+            btn.className = 'rad-btn rad-btn--danger-outline';
+            btn.disabled = !(app && env) || pending || deleting || unavailable;
+            if (pending) {
+                btn.setAttribute('title', 'This deployment is still in progress. Wait for it to finish before deleting it.');
+            } else if (deleting) {
+                btn.setAttribute('title', 'This deployment is already being deleted from environment "' + env + '". Wait for the delete to finish.');
+            } else if (unavailable) {
+                btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
+            }
+        }
+    }
+    if (hint) {
+        var appLabel = '<strong>' + radiusEscapeHtml(app || 'this application') + '</strong>';
+        var envLabel = '<strong>' + radiusEscapeHtml(env || 'the selected environment') + '</strong>';
+        if (mode === 'create-env') {
+            hint.textContent = ' To deploy this application, you must first create an environment.';
+        } else if (mode === 'deploy') {
+            hint.innerHTML = ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
+        } else if (pending) {
+            hint.innerHTML = ' The application (' + appLabel + ') is currently being deployed to the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
+        } else if (deleting) {
+            hint.innerHTML = ' The application (' + appLabel + ') is currently being deleted from the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
+        } else {
+            hint.innerHTML = ' Click the name of any application component to deep link into the cloud portal for its infrastructure. To delete the application (' + appLabel + ') currently deployed to the environment (' + envLabel + '), click "Delete Deployment".';
+        }
+    }
+    return mode;
+}
+
+// Dispatch a deployment of the currently-selected application/environment from
+// the Deployed pane, then redirect to the Deployments tab so the user can
+// monitor progress. Mirrors radiusDeployPlannedApp, but sources its selection
+// from the Deployed pane's own selectors.
+function radiusDeployDeployedApp(btn, repo, branch, envProviders, fallbackProvider) {
+    if (!btn || btn.disabled) return;
+    var envSel = document.getElementById('deployed-env-select');
+    var appSel = document.getElementById('deployed-app-select');
+    var env = envSel ? envSel.value : '';
+    var app = appSel ? appSel.value : '';
+    // The branch is resolved server-side (contextBranch → plannedBranch →
+    // graphBranch → "main") so it should never arrive empty, but refuse to
+    // dispatch if it ever does: /api/deploy resolves an empty branch to the
+    // repo's default, which would deploy code the user never selected.
+    var deployBranch = (branch && String(branch).trim()) || '';
+    if (!repo || !env || !deployBranch) return;
+    var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
+    btn.disabled = true;
+    btn.textContent = 'Starting deployment…';
+    fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: deployBranch, appFile: '.radius/app.bicep' })
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (!result.ok) {
+            btn.textContent = 'Deploy Application';
+            btn.disabled = false;
+            btn.setAttribute('title', (result.d && result.d.error) || 'Could not start the deployment.');
+            return;
+        }
+        window.location.href = '/?page=deploying&application=' + encodeURIComponent(app) + '&environment=' + encodeURIComponent(env);
+    }).catch(function() {
+        btn.textContent = 'Deploy Application';
+        btn.disabled = false;
+        btn.setAttribute('title', 'Could not start the deployment.');
+    });
+}
+
+// Toggle the Modeled-graph primary button between "Create Environment" (when
+// the repo has no Radius-managed environment) and "Plan Deployment". The
+// subtitle hint under the sub-tabs is updated to match so the next step is
+// always spelled out.
+function radiusApplyModeledEnvState(hasEnv) {
+    var btn = document.getElementById('deploy-app-btn');
+    var hint = document.getElementById('modeled-subtitle-hint');
+    if (btn) {
+        if (hasEnv) {
+            btn.dataset.mode = 'plan';
+            btn.textContent = 'Plan Deployment';
+        } else {
+            btn.dataset.mode = 'create-env';
+            btn.textContent = 'Create Environment';
+            btn.disabled = false;
+        }
+    }
+    if (hint) {
+        hint.textContent = hasEnv ?
+            ' To see how this application would be deployed to one of your existing environments, click "Plan Deployment".' :
+            ' To plan the deployment of this application, you must first create an environment.';
+    }
+}
+
+// Route the Modeled-graph primary button to the environment creation form or to
+// the Planned graph, depending on the adaptive mode set above.
+function radiusModeledPrimaryAction(btn) {
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+    var appSel = document.getElementById('graph-app');
+    var app = appSel ? (appSel.value || '') : '';
+    window.location.href = '/?page=planned' + (app ? '&app=' + encodeURIComponent(app) : '');
+}
+
+// Resolve whether the repo has any Radius-managed environment and adapt the
+// Modeled pane accordingly.
+function radiusLoadModeledEnvState(repo) {
+    if (!repo) return;
+    fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
+        .then(function(r) { return r.json(); })
+        .then(function(d) { radiusApplyModeledEnvState(!!(((d && d.environments) || []).length)); })
+        .catch(function() {});
 }
 
 // Populate the Base/Head selectors on the Graph Diff pane. Base defaults to
@@ -618,9 +959,8 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
 
     var diffMode = options.diffMode || false;
     var deployMode = options.deployMode || false;
-    var deployedMode = options.deployedMode || false;
     var plannedMode = options.plannedMode || false;
-    var resolvedMode = plannedMode || deployMode || deployedMode;
+    var resolvedMode = plannedMode || deployMode;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     // In diff mode a "removed" resource's source file lived on the base
@@ -761,13 +1101,6 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                 default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
             }
         }
-        // The terminal "Deployed Graph" keeps every non-failed card neutral gray;
-        // a failed resource remains red when terminal status data is available.
-        if (deployedMode) {
-            return r.deployStatus === 'failed'
-                ? RADIUS_DEPLOY_STATUS_COLORS.failed
-                : RADIUS_DEPLOY_STATUS_COLORS.pending;
-        }
         // The "Deploying" page passes deployMode. A managed-cluster node always
         // stays gray — its overall status is conveyed by the corner status badge,
         // not the fill. Other resources, including ordinary compute nodes, take the live
@@ -826,7 +1159,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                     else stroke = 'var(--rad-edge-muted)';
                 }
             }
-            var style = { stroke: stroke, strokeWidth: 1.5 };
+            var style = { stroke: stroke, strokeWidth: 2.5 };
             // Planned edges use a finer dotted pattern; other modes' dashed
             // output connectors keep their original wider gap.
             if (dashed) style.strokeDasharray = plannedMode ? '4 4' : '6 4';
@@ -891,7 +1224,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
             var srcBranch = (diffMode && r.diffStatus === 'removed') ? diffBaseBranch : branch;
             pushNode(r.id || r.name, {
                 borderColor: colors.border,
-                borderWidth: diffMode ? 2 : 1,
+                borderWidth: 2.5,
                 borderStyle: plannedMode ? 'dashed' : 'solid',
                 bgColor: colors.bg,
                 icon: radiusResolveIcon(r),
@@ -907,6 +1240,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                 resourceType: r.type || '',
                 diffStatus: r.diffStatus || '',
                 deployStatus: r.deployStatus || '',
+                deployMessage: r.deployMessage || '',
                 deployBadgeKind: deployMode ? radiusDeployBadgeKind(r.deployStatus) : '',
                 deployBadge: deployMode ? radiusDeployBadgeSvg(radiusDeployBadgeKind(r.deployStatus)) : '',
                 portalUrl: r.portalUrl || '',
@@ -943,7 +1277,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                     var outColors = { bg: 'var(--rad-bg-subtle)', border: 'var(--rad-edge-muted)' };
                     pushNode(outId, {
                         borderColor: outColors.border,
-                        borderWidth: 1,
+                        borderWidth: 2.5,
                         bgColor: outColors.bg,
                         icon: radiusResolveIcon(out),
                         nodeName: out.name || outLabel,
@@ -1073,7 +1407,7 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
             : null;
         var card = h('div', {
             className: 'rad-node', 'data-node-id': d.id,
-            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-node-bg)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 1) + 'px', borderColor: d.borderColor || 'var(--rad-node-border)' },
+            style: { boxSizing: 'border-box', background: d.bgColor || 'var(--rad-node-bg)', borderStyle: d.borderStyle || 'solid', borderWidth: (d.borderWidth || 2.5) + 'px', borderColor: d.borderColor || 'var(--rad-node-border)' },
             onClick: function(e) { popupCtl.open(d, e.currentTarget); }
         },
             dots,
@@ -1236,6 +1570,20 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                     links.push(linkRow(ICON_DEF, 'View app definition', defUrl, true));
                 }
             }
+            // The producer's status message for this resource, shown first so a
+            // failed node explains itself instead of just being red. Rendered as
+            // escaped text, never as markup.
+            if (d.deployMessage) {
+                var msgIsFailure = d.deployStatus === 'failed';
+                // unshift, not push: when a deploy fails, the reason is the
+                // thing the user opened the popup for, so it leads.
+                links.unshift(
+                    '<div style="padding:6px 4px; font-size:12px; line-height:1.5; color:' +
+                    (msgIsFailure ? 'var(--rad-danger,#cf222e)' : 'var(--rad-text-secondary)') +
+                    '; border-bottom:1px solid var(--rad-stroke,#d1d9e0); margin-bottom:4px; word-break:break-word;">' +
+                    escLocal(d.deployMessage) + '</div>'
+                );
+            }
             // Live portal link surfaced during deployment (Azure portal / AWS console).
             if (d.portalUrl) {
                 links.push(linkRow(ICON_LINK, 'View in portal', d.portalUrl, false));
@@ -1323,7 +1671,29 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
 
     // Diff mode intentionally shows no legend; status is encoded directly on
     // node borders and edges.
-    if (options.showLegend && !diffMode) {
+    if (options.showLegend && !diffMode && deployMode) {
+        // The Deployed view's legend explains deploy STATUS, not resource
+        // category: every node carries a status badge, and the badge is the
+        // primary signal there (fills stay neutral so labels stay readable).
+        //
+        // Ported from the design in PR #200 by @nithyatsu. That design showed an
+        // hourglass for pending/in-progress; the shipped badge is the circular
+        // progress indicator radiusDeployBadgeSvg already draws, so the legend
+        // uses the real glyph rather than introducing a second one.
+        var statusItems = [
+            { kind: 'progress', label: 'Pending / deploying' },
+            { kind: 'success', label: 'Deployed' },
+            { kind: 'failed', label: 'Failed' }
+        ];
+        var legend1 = document.createElement('div');
+        legend1.className = 'legend';
+        var statusHtml = '';
+        for (var si = 0; si < statusItems.length; si++) {
+            statusHtml += '<div class="legend-item"><img src="' + escLocal(radiusDeployBadgeSvg(statusItems[si].kind)) + '" width="14" height="14" style="vertical-align:middle;" alt="" />' + escLocal(statusItems[si].label) + '</div>';
+        }
+        legend1.innerHTML = statusHtml;
+        container.parentNode.insertBefore(legend1, container);
+    } else if (options.showLegend && !diffMode) {
         // Build a resource-type legend from the categories actually present in
         // the graph. Nodes render as uniform white cards, so category is conveyed
         // by the icon (owned by the type/recipe pack); the legend shows that same
@@ -1585,4 +1955,101 @@ export const CLIENT_OPCHIP_JS = `
     if (document.visibilityState === 'visible') poll();
   });
 })();
+`;
+
+// ─── Delete-deployment confirmation dialog (shared) ──────────────────────────
+// Deleting a deployment tears down live infrastructure and cannot be undone, so
+// it is gated behind the Figma three-step flow: state intent, acknowledge the
+// effects, then type "app/env" to confirm. Every surface that can delete a
+// deployment must use this — a second, weaker confirmation path elsewhere in the
+// product silently lowers the bar for the whole product.
+//
+// The dialog owns confirmation only. Callers pass an onConfirm callback and keep
+// their own dispatch and progress reporting, which differ per page (the
+// Deployments table updates a row in place; the Deployed graph navigates).
+export const CLIENT_DELETE_DIALOG_JS = `
+function radiusCreateDeleteDeploymentDialog(options) {
+  var opts = options || {};
+  // Self-contained escaping: this dialog is injected as its own <script> block,
+  // so it must not depend on another block having already defined a helper.
+  var esc = function(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+  var modal = document.getElementById(opts.modalId || 'deploy-delete-modal');
+  var body = document.getElementById(opts.bodyId || 'deploy-delete-body');
+  var appEl = document.getElementById(opts.appId || 'deploy-delete-app');
+  var envEl = document.getElementById(opts.envId || 'deploy-delete-env');
+  var closeEl = document.getElementById(opts.closeId || 'deploy-delete-close');
+  if (!modal || !body) return null;
+  var pending = null;
+  var step = 1;
+
+  function close() {
+    modal.style.display = 'none';
+    pending = null;
+    step = 1;
+    body.innerHTML = '';
+  }
+
+  function confirmNow() {
+    if (!pending) return;
+    var target = pending;
+    close();
+    if (typeof opts.onConfirm === 'function') opts.onConfirm(target.app, target.environment);
+  }
+
+  // Steps escalate the confirmation:
+  //   1) intent, 2) acknowledge the irreversible effects, 3) type "app/env".
+  function renderStep() {
+    if (!pending) return;
+    var app = pending.app, env = pending.environment;
+    if (step === 1) {
+      body.innerHTML =
+        '<p class="rad-ddlg__text">Deleting this deployment will tear down running containers and resources. To proceed, please confirm your intention.</p>' +
+        '<button type="button" class="rad-ddlg__btn" id="del-step1-btn">I want to delete this deployment</button>';
+      document.getElementById('del-step1-btn').addEventListener('click', function() { step = 2; renderStep(); });
+    } else if (step === 2) {
+      body.innerHTML =
+        '<div class="rad-ddlg__warn"><span aria-hidden="true">⚠</span><span>This action cannot be undone. Please read carefully!</span></div>' +
+        '<div class="rad-ddlg__bullet"><span>This will permanently delete the deployment of <strong>' + esc(app) + '</strong> from environment <strong>' + esc(env) + '</strong>, including all associated resources.</span></div>' +
+        '<button type="button" class="rad-ddlg__btn" id="del-step2-btn">I have read and understand these effects</button>';
+      document.getElementById('del-step2-btn').addEventListener('click', function() { step = 3; renderStep(); });
+    } else {
+      var token = app + '/' + env;
+      body.innerHTML =
+        '<p class="rad-ddlg__confirm-label">To confirm, type "' + esc(token) + '" in the box below</p>' +
+        '<input type="text" class="rad-ddlg__input" id="del-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="' + esc(token) + '">' +
+        '<button type="button" class="rad-ddlg__delete" id="del-confirm-btn" disabled>Delete this deployment</button>';
+      var input = document.getElementById('del-confirm-input');
+      var btn = document.getElementById('del-confirm-btn');
+      var matches = function() { return input.value.trim() === token; };
+      input.addEventListener('input', function() { btn.disabled = !matches(); });
+      input.addEventListener('keydown', function(e) { if (e.key === 'Enter' && matches()) confirmNow(); });
+      btn.addEventListener('click', function() { if (matches()) confirmNow(); });
+      input.focus();
+    }
+  }
+
+  function open(app, env) {
+    pending = { app: app, environment: env };
+    step = 1;
+    if (appEl) appEl.textContent = app;
+    if (envEl) envEl.textContent = env;
+    renderStep();
+    modal.style.display = 'flex';
+  }
+
+  if (closeEl) closeEl.addEventListener('click', close);
+  modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && modal.style.display === 'flex') close();
+  });
+
+  return { open: open, close: close };
+}
 `;
