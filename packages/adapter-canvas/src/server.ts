@@ -506,24 +506,37 @@ export function setEnvironmentOperationTestRunner(
   environmentOperationTestRunner = runner;
 }
 
-const activeEnvironmentTasks = new Set<string>();
-const environmentTasksSettledListeners = new Set<() => void>();
+const activeEnvironmentTasks = new Map<string, Set<string>>();
+const environmentTasksSettledListeners = new Map<
+  string,
+  Set<() => void>
+>();
 
-export function hasActiveEnvironmentTasks(): boolean {
-  return activeEnvironmentTasks.size > 0;
+export function hasActiveEnvironmentTasks(instanceId: string): boolean {
+  return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
 }
 
-export function onEnvironmentTasksSettled(listener: () => void): () => void {
-  environmentTasksSettledListeners.add(listener);
+export function onEnvironmentTasksSettled(
+  instanceId: string,
+  listener: () => void
+): () => void {
+  let listeners = environmentTasksSettledListeners.get(instanceId);
+  if (!listeners) {
+    listeners = new Set();
+    environmentTasksSettledListeners.set(instanceId, listeners);
+  }
+  listeners.add(listener);
   let listening = true;
   const stop = () => {
     if (!listening) return;
     listening = false;
-    environmentTasksSettledListeners.delete(listener);
+    listeners?.delete(listener);
+    if (listeners?.size === 0)
+      environmentTasksSettledListeners.delete(instanceId);
   };
-  if (activeEnvironmentTasks.size === 0) {
+  if (!hasActiveEnvironmentTasks(instanceId)) {
     queueMicrotask(() => {
-      if (!listening || activeEnvironmentTasks.size > 0) return;
+      if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
       try {
         listener();
       } catch {
@@ -2376,7 +2389,12 @@ function createRequestHandler(
     operationId: string,
     task: () => Promise<void>
   ): void {
-    activeEnvironmentTasks.add(operationId);
+    let instanceTasks = activeEnvironmentTasks.get(instanceId);
+    if (!instanceTasks) {
+      instanceTasks = new Set();
+      activeEnvironmentTasks.set(instanceId, instanceTasks);
+    }
+    instanceTasks.add(operationId);
     const op = operations.get(operationId);
     if (op) setExecutionActive(op, true);
     const prior = serverOwnedTasks.get(operationId);
@@ -2410,9 +2428,12 @@ function createRequestHandler(
         const current = operations.get(operationId);
         if (current && !current.endedAt) setExecutionActive(current, false);
         serverOwnedTasks.delete(operationId);
-        activeEnvironmentTasks.delete(operationId);
-        if (activeEnvironmentTasks.size === 0) {
-          for (const listener of environmentTasksSettledListeners) {
+        const activeForInstance = activeEnvironmentTasks.get(instanceId);
+        activeForInstance?.delete(operationId);
+        if (activeForInstance?.size === 0) {
+          activeEnvironmentTasks.delete(instanceId);
+          for (const listener of
+            environmentTasksSettledListeners.get(instanceId) || []) {
             try {
               listener();
             } catch {
@@ -2444,6 +2465,7 @@ function createRequestHandler(
 
   async function monitorVerification(operationId: string): Promise<void> {
     const deadline = Date.now() + 45 * 60 * 1000;
+    let delayMs = 5000;
     while (Date.now() < deadline) {
       const op = operations.get(operationId);
       if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
@@ -2464,7 +2486,11 @@ function createRequestHandler(
         );
       }
       if (result?.state === "success" || result?.state === "failed") return;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const jitterMs = Math.floor(Math.random() * 1000);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
+      );
+      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
     }
     throw new Error(
       "Credential verification did not complete within 45 minutes."
@@ -2758,6 +2784,21 @@ function createRequestHandler(
           JSON.stringify({
             error: "Unknown operation.",
             code: "unknown-operation"
+          })
+        );
+        return;
+      }
+      if (
+        op.state === "failed_partial" &&
+        op.failure?.code === "operation-input-expired"
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(410);
+        res.end(
+          JSON.stringify({
+            error: op.failure.message,
+            code: "operation-input-expired",
+            operation: toClientView(op)
           })
         );
         return;

@@ -58,7 +58,7 @@ async function postJson(path, body) {
 describe("POST /api/operations server-owned execution", () => {
   it("notifies a settlement listener registered after tasks have already settled", async () => {
     const listener = vi.fn();
-    const stop = onEnvironmentTasksSettled(listener);
+    const stop = onEnvironmentTasksSettled("operations-routes-test", listener);
     await Promise.resolve();
     expect(listener).toHaveBeenCalledTimes(1);
     stop();
@@ -69,8 +69,14 @@ describe("POST /api/operations server-owned execution", () => {
       throw new Error("listener failed");
     });
     const following = vi.fn();
-    const stopThrowing = onEnvironmentTasksSettled(throwing);
-    const stopFollowing = onEnvironmentTasksSettled(following);
+    const stopThrowing = onEnvironmentTasksSettled(
+      "operations-routes-test",
+      throwing
+    );
+    const stopFollowing = onEnvironmentTasksSettled(
+      "operations-routes-test",
+      following
+    );
     await Promise.resolve();
     expect(throwing).toHaveBeenCalledTimes(1);
     expect(following).toHaveBeenCalledTimes(1);

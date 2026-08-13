@@ -1107,6 +1107,7 @@ const MAX_RETAINED = 20;
 // on indefinitely. Longer than the slowest observed leg, short enough that a
 // stuck record clears itself.
 const STALE_AFTER_MS = 15 * 60 * 1000;
+export const INPUT_STALE_AFTER_MS = 60 * 60 * 1000;
 export const VERIFY_STALE_AFTER_MS = 45 * 60 * 1000;
 
 export function hasCompleteVerificationIdentity(op: any): boolean {
@@ -1131,7 +1132,7 @@ export function isStale(op: any, now = Date.now()): boolean {
     return (
       now -
         new Date(op.inputRequired?.requestedAt || op.lastActivityAt).getTime() >
-      STALE_AFTER_MS
+      INPUT_STALE_AFTER_MS
     );
   }
   if (hasCompleteVerificationIdentity(op)) {
@@ -1255,6 +1256,26 @@ export function createRegistry({
   /** @type {Map<string, object>} */
   const byId = new Map();
 
+  function expireInput(op: any, now = clock()): any {
+    if (
+      op?.state !== INPUT_REQUIRED_STATE ||
+      !isStale(op, now) ||
+      isTerminalState(op.state)
+    )
+      return op;
+    return finish(op, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          "Environment setup timed out while waiting for required information.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+  }
+
   function prune() {
     const now = clock();
     const terminal = [];
@@ -1339,7 +1360,12 @@ export function createRegistry({
     /** The operation still running for a repo, if any. */
     running(repo) {
       for (const op of byId.values()) {
-        if (op.repo === repo && !isTerminalState(op.state) && !isStale(op))
+        expireInput(op);
+        if (
+          op.repo === repo &&
+          !isTerminalState(op.state) &&
+          !isStale(op, clock())
+        )
           return op;
       }
       return null;
@@ -1352,12 +1378,13 @@ export function createRegistry({
       let best = null;
       for (const op of byId.values()) {
         if (op.repo !== repo) continue;
+        expireInput(op);
         if (!isTerminalState(op.state)) {
           // A stale record is one nobody is driving any more. Showing
           // it would be worse than showing nothing: a spinner that can
           // never resolve is exactly the thing this work set out to
           // remove.
-          if (isStale(op)) continue;
+          if (isStale(op, clock())) continue;
           return op;
         }
         if (
@@ -1381,8 +1408,9 @@ export function createRegistry({
     latestAny() {
       let best = null;
       for (const op of byId.values()) {
+        expireInput(op);
         if (!isTerminalState(op.state)) {
-          if (isStale(op)) continue;
+          if (isStale(op, clock())) continue;
           return op;
         }
         if (
@@ -1396,7 +1424,8 @@ export function createRegistry({
     },
     get(operationId) {
       const op = byId.get(operationId) || null;
-      return op && !isStale(op) ? op : null;
+      expireInput(op);
+      return op && !isStale(op, clock()) ? op : null;
     },
     /**
      * Register a new operation, refusing when one is already running for
@@ -1426,7 +1455,7 @@ export function createRegistry({
     },
     anyRunning() {
       for (const op of byId.values())
-        if (!isTerminalState(op.state) && !isStale(op)) return true;
+        if (!isTerminalState(op.state) && !isStale(op, clock())) return true;
       return false;
     },
     anyExecuting() {
@@ -1437,7 +1466,7 @@ export function createRegistry({
           (op.executionActive === true ||
             (op.currentStage === STAGE_VERIFY &&
               !!op.verification?.dispatchedAt)) &&
-          !isStale(op)
+          !isStale(op, clock())
         )
           return true;
       }

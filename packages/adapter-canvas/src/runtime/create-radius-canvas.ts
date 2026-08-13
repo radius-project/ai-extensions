@@ -24,6 +24,8 @@ import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
 import type { CanvasState } from "../shared.js";
 
+const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
+
 interface CanvasContext {
   extensionId: string;
   canvasId: string;
@@ -383,19 +385,29 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
-        if (deps.operations.hasActiveEnvironmentTasks()) {
+        if (deps.operations.hasActiveEnvironmentTasks(ctx.instanceId)) {
           const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
+          let closeTimer: ReturnType<typeof setTimeout> | undefined;
+          const closeEntry = () => {
+            stopListening();
+            if (closeTimer) clearTimeout(closeTimer);
+            if (closeGenerations.get(ctx.instanceId) !== closeGeneration) return;
+            if (deps.servers.get(ctx.instanceId) !== entry) return;
+            deps.servers.delete(ctx.instanceId);
+            closeGenerations.delete(ctx.instanceId);
+            entry.server.close();
+          };
           const stopListening = deps.operations.onEnvironmentTasksSettled(
+            ctx.instanceId,
             () => {
-              stopListening();
-              if (closeGenerations.get(ctx.instanceId) !== closeGeneration)
-                return;
-              if (deps.servers.get(ctx.instanceId) !== entry) return;
-              deps.servers.delete(ctx.instanceId);
-              closeGenerations.delete(ctx.instanceId);
-              entry.server.close();
+              closeEntry();
             }
           );
+          closeTimer = setTimeout(
+            closeEntry,
+            MAX_DEFERRED_ENVIRONMENT_CLOSE_MS
+          );
+          closeTimer.unref?.();
           return;
         }
         deps.servers.delete(ctx.instanceId);

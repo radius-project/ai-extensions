@@ -3005,7 +3005,8 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                                 if (response.ok) return response;
                                 return response.json().catch(function() { return {}; }).then(function(payload) {
                                     var error = new Error(payload.error || payload.message || 'Unable to resume environment setup.');
-                                    error.retryPrompt = true;
+                                    error.retryPrompt = payload.code !== 'operation-input-expired';
+                                    error.operation = payload.operation;
                                     throw error;
                                 });
                             });
@@ -3018,38 +3019,16 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                                     .catch(function() { envProgressTimer = setTimeout(tick, 1500); });
                                 return;
                             }
+                            if (error && error.operation && error.operation.failure && error.operation.failure.code === 'operation-input-expired') {
+                                stopEnvProgress();
+                                applyEnvTerminal(error.operation);
+                                return;
+                            }
                             if (error && error.retryPrompt) promptingRequestedAt = '';
                             envProgressTimer = setTimeout(tick, 1500);
                         });
                         return;
                     }
-                }
-                if (op.currentStage === 'verify' && environment) {
-                    // Reading verification status is what advances the server's
-                    // operation record from verify/running to a terminal state.
-                    // Keep doing it while the record exists; limiting this read
-                    // to restart recovery leaves a successful operation spinning
-                    // forever even though the environment list is already green.
-                    fetch('/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId))
-                        .then(function(r) { return r.json(); })
-                        .then(function(v) {
-                            if (v.state === 'expired' || v.terminal) {
-                                stopEnvProgress();
-                                var expiredActivity = document.getElementById('env-progress-activity');
-                                if (expiredActivity) expiredActivity.textContent = v.error || 'Credential verification is no longer being tracked.';
-                                return;
-                            }
-                            if (verifyDispatchedAtMs && Date.now() - verifyDispatchedAtMs > verifyDeadlineMs) {
-                                stopEnvProgress();
-                                var timedOutActivity = document.getElementById('env-progress-activity');
-                                if (timedOutActivity) timedOutActivity.textContent = 'Credential verification exceeded its tracking window. Check the GitHub Actions run before retrying.';
-                                return;
-                            }
-                            if (v.activity) envVerifyActivity = v.activity;
-                            envProgressTimer = setTimeout(tick, v.state === 'success' || v.state === 'failed' ? 0 : 1500);
-                        })
-                        .catch(function() { envProgressTimer = setTimeout(tick, 3000); });
-                    return;
                 }
                 envProgressTimer = setTimeout(tick, 1500);
             })
@@ -3090,6 +3069,14 @@ function applyEnvTerminal(op) {
         showEnvActionRequired(op.provider, op.environment, op.terminal && op.terminal.pullRequestUrl, op.terminal);
     } else if (op.terminalState === 'succeeded' || op.terminalState === 'succeeded_with_warnings') {
         showEnvSuccessBanner(op.provider, op.environment);
+        showEnvSetupWarnings(warnings);
+    } else if (op.terminalState === 'cancelled') {
+        var cancelledPanel = document.getElementById('env-progress-panel');
+        if (cancelledPanel) {
+            cancelledPanel.classList.remove('env-progress--done', 'env-progress--failed');
+        }
+        var cancelledActivity = document.getElementById('env-progress-activity');
+        if (cancelledActivity) cancelledActivity.textContent = 'Environment setup cancelled.';
         showEnvSetupWarnings(warnings);
     } else {
         var message = 'Environment setup failed: ' + ((op.failure && op.failure.message) || 'unknown error');

@@ -353,9 +353,14 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     );
   });
 
-  it("keeps resume HTTP failures retryable and abandons cancelled prompts", () => {
+  it("keeps ordinary resume failures retryable, terminates expired prompts, and abandons cancelled prompts", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("error.retryPrompt = true");
+    expect(html).toContain(
+      "error.retryPrompt = payload.code !== 'operation-input-expired';"
+    );
+    expect(html).toContain(
+      "error.operation.failure.code === 'operation-input-expired'"
+    );
     expect(html).toContain(
       "if (error && error.retryPrompt) promptingRequestedAt = '';"
     );
@@ -1114,19 +1119,25 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(render).toBeGreaterThan(observed);
   });
 
-  it("polls verification while the live operation is in the verify stage", () => {
+  it("leaves live verification polling to the server-owned operation", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
-    const liveVerify = html.indexOf(
+    expect(html).not.toContain(
       "if (op.currentStage === 'verify' && environment)"
     );
-    const verifyRequest = html.indexOf(
-      "fetch('/api/verify-status?repo='",
-      liveVerify
+    expect(
+      html.match(/fetch\('\/api\/verify-status\?repo='/g) || []
+    ).toHaveLength(1);
+    expect(html).toContain(
+      "If the extension restarts after"
     );
-    expect(liveVerify).toBeGreaterThan(-1);
-    expect(verifyRequest).toBeGreaterThan(liveVerify);
-    expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
-      "v.state === 'expired' || v.terminal"
+  });
+
+  it("renders deliberate cancellation without failed styling", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("op.terminalState === 'cancelled'");
+    expect(html).toContain("Environment setup cancelled.");
+    expect(html).toContain(
+      "cancelledPanel.classList.remove('env-progress--done', 'env-progress--failed')"
     );
   });
 

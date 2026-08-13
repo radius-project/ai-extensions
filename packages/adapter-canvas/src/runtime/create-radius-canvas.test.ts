@@ -646,7 +646,7 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     let settled: (() => void) | undefined;
     vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
     vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
-      (listener) => {
+      (_instanceId, listener) => {
         settled = listener;
         return vi.fn();
       }
@@ -656,6 +656,13 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
 
     await canvas.onClose(ctx("radius-panel"));
+    expect(deps.operations.hasActiveEnvironmentTasks).toHaveBeenCalledWith(
+      "radius-panel"
+    );
+    expect(deps.operations.onEnvironmentTasksSettled).toHaveBeenCalledWith(
+      "radius-panel",
+      expect.any(Function)
+    );
     expect(closeSpy).not.toHaveBeenCalled();
     expect(deps.servers.has("radius-panel")).toBe(true);
 
@@ -669,7 +676,7 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     let settled: (() => void) | undefined;
     vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
     vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
-      (listener) => {
+      (_instanceId, listener) => {
         settled = listener;
         return vi.fn();
       }
@@ -684,5 +691,46 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
 
     expect(closeSpy).not.toHaveBeenCalled();
     expect(deps.servers.get("radius-panel")).toBe(entry);
+  });
+
+  it("does not defer one instance for another instance's active work", async () => {
+    const { canvas, deps } = setup();
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockImplementation(
+      (instanceId) => instanceId === "panel-b"
+    );
+    await canvas.open(ctx("panel-a", { page: "environment" }));
+    await canvas.open(ctx("panel-b", { page: "environment" }));
+    const panelA = deps.servers.get("panel-a")!;
+    const closeSpy = panelA.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("panel-a"));
+
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(deps.operations.onEnvironmentTasksSettled).not.toHaveBeenCalled();
+    expect(deps.servers.has("panel-b")).toBe(true);
+  });
+
+  it("force-closes a deferred server after the supported operation lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const { canvas, deps } = setup();
+      const stopListening = vi.fn();
+      vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+      vi.mocked(deps.operations.onEnvironmentTasksSettled).mockReturnValue(
+        stopListening
+      );
+      await canvas.open(ctx("radius-panel", { page: "environment" }));
+      const entry = deps.servers.get("radius-panel")!;
+      const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+
+      await canvas.onClose(ctx("radius-panel"));
+      await vi.advanceTimersByTimeAsync(46 * 60 * 1000);
+
+      expect(stopListening).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(deps.servers.has("radius-panel")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

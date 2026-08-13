@@ -1126,14 +1126,15 @@ describe("keepalive predicate", () => {
       expect(canResumeInput(op)).toBe(false);
     });
 
-    it("releases an abandoned input wait after the operation stale window", () => {
+    it("keeps an input wait resumable for an hour", () => {
       const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
-      const registry = createRegistry({ clock: () => startedAt + 16 * 60_000 });
+      const registry = createRegistry({ clock: () => startedAt + 59 * 60_000 });
       const op = createOperation({
         provider: "azure",
         repo: "contoso/abandoned-input",
         environment: "dev",
-        startedAt: new Date(startedAt).toISOString()
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
       });
       requireInput(op, {
         code: "app-selection-required",
@@ -1141,9 +1142,35 @@ describe("keepalive predicate", () => {
         message: "Choose an App Registration."
       });
       op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
 
       registry.start(op);
-      expect(registry.running(op.repo)).toBeNull();
+      expect(registry.running(op.repo)).toBe(op);
+    });
+
+    it("turns an expired input wait into a durable typed terminal record", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 61 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/expired-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.get(op.operationId)).toBe(op);
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure.code).toBe("operation-input-expired");
+      expect(registry.latest(op.repo)).toBe(op);
     });
   });
 
