@@ -1,4 +1,4 @@
-import { Readable } from "node:stream";
+﻿import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -68,8 +68,8 @@ function request(method: string, url: string, body = ""): IncomingMessage {
 }
 
 // Every fake returns a distinct, identifiable value and throws on an argument
-// it was not scripted for, so calling the wrong port — or calling the right
-// ports in the wrong order — fails loudly instead of silently matching.
+// it was not scripted for, so calling the wrong port â€” or calling the right
+// ports in the wrong order â€” fails loudly instead of silently matching.
 interface Calls {
   log: string[];
 }
@@ -222,7 +222,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ]);
   });
 
-  // ── GET /api/credential-profiles (SU-07) ───────────────────────────────────
+  // â”€â”€ GET /api/credential-profiles (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("lists the profiles for the repo named in the query string", async () => {
     const seen: string[] = [];
@@ -274,7 +274,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
   });
 
   it("answers a missing repo with an empty list without touching the store", async () => {
-    // The port throws on any call, so reaching it at all fails this test —
+    // The port throws on any call, so reaching it at all fails this test â€”
     // which is exactly the short-circuit being pinned.
     const recording = await run(
       "GET",
@@ -316,7 +316,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ).rejects.toThrow("credentials file unreadable");
   });
 
-  // ── GET /api/github-identity (SU-06) ───────────────────────────────────────
+  // â”€â”€ GET /api/github-identity (SU-06) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("returns the resolved identity without touching the cache or preflight", async () => {
     const calls: Calls = { log: [] };
@@ -412,7 +412,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
       "",
       handleGitHubIdentity,
       // `validSlugs` is empty, so the slug check rejects and `preflightRepoAdmin`
-      // — which throws when reached — must never be called.
+      // â€” which throws when reached â€” must never be called.
       dependencies(identityPorts(calls, { validSlugs: [] }))
     );
     expect(recording.status).toBe(200);
@@ -471,7 +471,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"error":"gh unavailable","accounts":[]}');
   });
 
-  // ── POST /api/github-account (SU-06) ───────────────────────────────────────
+  // â”€â”€ POST /api/github-account (SU-06) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("persists the chosen login before re-reading the identity", async () => {
     const calls: Calls = { log: [] };
@@ -510,7 +510,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
         })
       )
     );
-    // 400, not a 200 error payload — and nothing is persisted.
+    // 400, not a 200 error payload â€” and nothing is persisted.
     expect(recording.status).toBe(400);
     expect(recording.body).toBe('{"error":"no such account"}');
     expect(calls.log).toEqual(["switchGhAccount(ghost)"]);
@@ -579,7 +579,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"error":"spawn"}');
   });
 
-  // ── POST /api/save-credential-profile (SU-07) ──────────────────────────────
+  // â”€â”€ POST /api/save-credential-profile (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("saves a profile and echoes what the store returned", async () => {
     const saves: { repo: string; profile: unknown }[] = [];
@@ -601,7 +601,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
       '{"success":true,"profile":{"name":"prod","provider":"azure","status":"verified"}}'
     );
     // The trimmed repo is passed, but the *whole* parsed body travels as the
-    // profile — including the untrimmed name and the provider field.
+    // profile â€” including the untrimmed name and the provider field.
     expect(saves).toEqual([
       {
         repo: "octo/app",
@@ -675,7 +675,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"success":true,"profile":null}');
   });
 
-  // ── POST /api/delete-credential-profile (SU-07) ────────────────────────────
+  // â”€â”€ POST /api/delete-credential-profile (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("deletes a profile and reports whether anything was removed", async () => {
     const deletes: [string, string][] = [];
@@ -760,11 +760,11 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
   });
 });
 
-// ── Differential oracle ──────────────────────────────────────────────────────
+// â”€â”€ Differential oracle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Verbatim transcriptions of the five branches deleted from the legacy if-chain
 // in `server.ts`, kept only so the migrated handlers can be proven identical
 // while the fallback still exists. Each side is driven separately against its
-// own fakes and the two recordings are compared afterwards — never through a
+// own fakes and the two recordings are compared afterwards â€” never through a
 // single shared runner, because several of these paths throw or return early
 // and a shared runner can pass while only exercising one side.
 
@@ -921,7 +921,23 @@ interface DifferentialCase {
 interface Side {
   recording: Recording;
   calls: string[];
-  error?: string;
+  thrown: string | null;
+  // Recorded rather than inferred. A side that never ran leaves this false, and
+  // `compare` asserts it on BOTH sides â€” that is what stops a case from
+  // silently degenerating into a one-sided test when one implementation throws
+  // or short-circuits before the other is reached.
+  ran: boolean;
+}
+
+// Compares two independently produced outcomes. Neither side is ever driven
+// through a shared runner, so a throw on one cannot prevent the other from
+// being exercised.
+function compare(legacy: Side, migrated: Side): void {
+  expect(legacy.ran, "legacy side was not driven").toBe(true);
+  expect(migrated.ran, "migrated side was not driven").toBe(true);
+  expect(migrated.thrown).toEqual(legacy.thrown);
+  expect(migrated.recording).toEqual(legacy.recording);
+  expect(migrated.calls).toEqual(legacy.calls);
 }
 
 // Builds one independent set of fakes. Each side of the comparison gets its own
@@ -974,6 +990,27 @@ function differentialPorts(input: DifferentialCase): {
   };
 }
 
+const LEGACY_TRANSCRIPTIONS: Record<
+  Route,
+  (
+    url: URL,
+    body: string,
+    res: ServerResponse<IncomingMessage>,
+    ports: LegacyPorts
+  ) => void | Promise<void>
+> = {
+  "credential-profiles": (url, _body, res, ports) =>
+    legacyCredentialProfiles(url, res, ports),
+  "github-identity": (url, _body, res, ports) =>
+    legacyGitHubIdentity(url, res, ports),
+  "github-account": (_url, body, res, ports) =>
+    legacyGitHubAccount(body, res, ports),
+  "save-credential-profile": (_url, body, res, ports) =>
+    legacySaveCredentialProfile(body, res, ports),
+  "delete-credential-profile": (_url, body, res, ports) =>
+    legacyDeleteCredentialProfile(body, res, ports)
+};
+
 async function recordLegacy(input: DifferentialCase): Promise<Side> {
   const { calls, ports } = differentialPorts(input);
   const { recording, response } = recorder();
@@ -982,22 +1019,25 @@ async function recordLegacy(input: DifferentialCase): Promise<Side> {
     "http://localhost"
   );
   const body = input.body ?? "";
-  try {
-    if (input.route === "credential-profiles") {
-      legacyCredentialProfiles(url, response, ports);
-    } else if (input.route === "github-identity") {
-      await legacyGitHubIdentity(url, response, ports);
-    } else if (input.route === "github-account") {
-      await legacyGitHubAccount(body, response, ports);
-    } else if (input.route === "save-credential-profile") {
-      await legacySaveCredentialProfile(body, response, ports);
-    } else {
-      await legacyDeleteCredentialProfile(body, response, ports);
-    }
-  } catch (e) {
-    return { recording, calls: calls.log, error: legacyErrorMessage(e) };
+  // Looked up rather than branched, so an unmapped route leaves `ran` false
+  // instead of falling through to some other transcription.
+  const transcription = LEGACY_TRANSCRIPTIONS[input.route];
+  if (!transcription) {
+    return { recording, calls: calls.log, thrown: null, ran: false };
   }
-  return { recording, calls: calls.log };
+  let ran = false;
+  try {
+    ran = true;
+    await transcription(url, body, response, ports);
+  } catch (e) {
+    return {
+      recording,
+      calls: calls.log,
+      thrown: legacyErrorMessage(e),
+      ran
+    };
+  }
+  return { recording, calls: calls.log, thrown: null, ran };
 }
 
 const HANDLERS: Record<Route, { method: string; handler: Handler }> = {
@@ -1016,11 +1056,17 @@ const HANDLERS: Record<Route, { method: string; handler: Handler }> = {
 
 async function recordMigrated(input: DifferentialCase): Promise<Side> {
   const { calls, deps } = differentialPorts(input);
-  const { method, handler } = HANDLERS[input.route];
+  const registered = HANDLERS[input.route];
   const { recording, response } = recorder();
+  // Resolved from the registry the production route module exports, so a route
+  // this harness forgot to wire leaves `ran` false rather than quietly
+  // comparing two empty recordings.
+  if (!registered) {
+    return { recording, calls: calls.log, thrown: null, ran: false };
+  }
   const context = createRequestContext(
     request(
-      method,
+      registered.method,
       `/api/${input.route}${input.query ?? ""}`,
       input.body ?? ""
     ),
@@ -1028,12 +1074,19 @@ async function recordMigrated(input: DifferentialCase): Promise<Side> {
     "panel-a",
     new Map<string, CanvasServerEntry>()
   );
+  let ran = false;
   try {
-    await handler(context, deps);
+    ran = true;
+    await registered.handler(context, deps);
   } catch (e) {
-    return { recording, calls: calls.log, error: legacyErrorMessage(e) };
+    return {
+      recording,
+      calls: calls.log,
+      thrown: legacyErrorMessage(e),
+      ran
+    };
   }
-  return { recording, calls: calls.log };
+  return { recording, calls: calls.log, thrown: null, ran };
 }
 
 describe("identity-profiles legacy/migrated differential contract", () => {
@@ -1063,7 +1116,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
   ])("matches /api/credential-profiles for a %s", async (_label, input) => {
     const legacy = await recordLegacy(input);
     const migrated = await recordMigrated(input);
-    expect(migrated).toEqual(legacy);
+    compare(legacy, migrated);
   });
 
   it.each<[string, DifferentialCase]>([
@@ -1120,7 +1173,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
   ])("matches /api/github-identity for a %s", async (_label, input) => {
     const legacy = await recordLegacy(input);
     const migrated = await recordMigrated(input);
-    expect(migrated).toEqual(legacy);
+    compare(legacy, migrated);
   });
 
   it.each<[string, DifferentialCase]>([
@@ -1185,7 +1238,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
   ])("matches /api/github-account for a %s", async (_label, input) => {
     const legacy = await recordLegacy(input);
     const migrated = await recordMigrated(input);
-    expect(migrated).toEqual(legacy);
+    compare(legacy, migrated);
   });
 
   it.each<[string, DifferentialCase]>([
@@ -1241,7 +1294,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
   ])("matches /api/save-credential-profile for a %s", async (_label, input) => {
     const legacy = await recordLegacy(input);
     const migrated = await recordMigrated(input);
-    expect(migrated).toEqual(legacy);
+    compare(legacy, migrated);
   });
 
   it.each<[string, DifferentialCase]>([
@@ -1294,7 +1347,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
     async (_label, input) => {
       const legacy = await recordLegacy(input);
       const migrated = await recordMigrated(input);
-      expect(migrated).toEqual(legacy);
+      compare(legacy, migrated);
     }
   );
 });
