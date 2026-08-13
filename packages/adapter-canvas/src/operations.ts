@@ -31,9 +31,18 @@ import {
   type OperationStore
 } from "./operation-store.js";
 
-export const OPERATION_SCHEMA_VERSION = 1;
+// Version 2 adds the cooperative control record (stop, attempts, commands,
+// idempotency keys, outcome history). Version 1 records written by the durable
+// store and the server-owned executor still load: `readOperationControl` fills
+// the new fields with safe defaults rather than discarding the operation.
+export const OPERATION_SCHEMA_VERSION = 2;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2]);
 
-export type SetupArtifactPresence = "not_started" | "created" | "reused";
+// `deleted` is written only after a cleanup attempt proved the resource is gone
+// (removed by Radius, or already absent). It keeps a rolled-back artifact out of
+// the surviving inventory and lets a later resume rebuild it.
+export type SetupArtifactPresence =
+  "not_started" | "created" | "reused" | "deleted";
 export type SetupCommitMode = "not_started" | "default_branch" | "pull_request";
 export type SetupCleanupStatus =
   | "not_started"
@@ -87,22 +96,35 @@ export type SetupArtifactCommitState = {
   workflowFiles: WorkflowCommitArtifact[];
 };
 
+export type SetupCleanupArtifactType =
+  | "github_environment"
+  | "role_assignment"
+  | "federated_credential"
+  | "service_principal"
+  | "azure_app";
+
+export type SetupCleanupOutcome =
+  "deleted" | "not_found" | "warning" | "skipped";
+
+// `identity` is the artifact's stable key (an appId, an object id, a
+// `repo:name` pair), never the display label. The label is built for a human and
+// changes with the resource's display name, so matching a cleanup result to the
+// artifact it removed by label silently fails and reports a deleted resource as
+// still present. Records written before this field existed fall back to `target`.
+export type SetupCleanupResult = {
+  attempt: number;
+  artifactType: SetupCleanupArtifactType;
+  target: string;
+  identity?: string | null;
+  outcome: SetupCleanupOutcome;
+  detail: string | null;
+};
+
 export type SetupArtifactCleanupState = {
   state: SetupCleanupStatus;
   ownerAssignment: "not_requested";
   attempts: number;
-  results: Array<{
-    attempt: number;
-    artifactType:
-      | "github_environment"
-      | "role_assignment"
-      | "federated_credential"
-      | "service_principal"
-      | "azure_app";
-    target: string;
-    outcome: "deleted" | "not_found" | "warning" | "skipped";
-    detail: string | null;
-  }>;
+  results: SetupCleanupResult[];
 };
 
 export type SetupArtifactLedger = {
@@ -114,6 +136,169 @@ export type SetupArtifactLedger = {
   commit: SetupArtifactCommitState;
   cleanup: SetupArtifactCleanupState;
 };
+
+// ─── Cooperative control record ──────────────────────────────────────────────
+// Issue #306 adds customer commands to the durable operation. The commands are
+// recorded before Radius acts on them, so a Canvas reload, a duplicate click, or
+// an extension restart resolves to the same saved decision instead of starting a
+// second mutation. Nothing here holds a secret, a token, or raw command output.
+
+export type OperationCommandKind =
+  | "stop"
+  | "resume_input"
+  | "retry_setup"
+  | "retry_verification"
+  | "retry_cleanup";
+
+export type OperationCommandState = "accepted" | "running" | "finished";
+
+export type OperationAttemptKind = "setup" | "verification" | "cleanup";
+
+export type OperationCommandRecord = {
+  kind: OperationCommandKind;
+  commandId: string;
+  attempt: number;
+  target: string;
+  idempotencyKey: string;
+  state: OperationCommandState;
+  acceptedAt: string;
+  completedAt: string | null;
+  outcome: string | null;
+};
+
+export type OperationStopRecord = {
+  requestedAt: string | null;
+  acknowledgedAt: string | null;
+  boundary: string | null;
+};
+
+export type OperationAttemptCounters = {
+  setup: number;
+  verification: number;
+  cleanup: number;
+};
+
+export type OperationOutcomeRecord = {
+  kind: OperationAttemptKind;
+  attempt: number;
+  state: string;
+  code: string | null;
+  recordedAt: string;
+};
+
+export type OperationControlRecord = {
+  stop: OperationStopRecord;
+  attempts: OperationAttemptCounters;
+  commands: OperationCommandRecord[];
+  idempotency: Record<string, string>;
+  outcomes: OperationOutcomeRecord[];
+};
+
+const MAX_RETAINED_COMMANDS = 20;
+const MAX_RETAINED_OUTCOMES = 20;
+
+export function createOperationControl(): OperationControlRecord {
+  return {
+    stop: { requestedAt: null, acknowledgedAt: null, boundary: null },
+    attempts: { setup: 1, verification: 0, cleanup: 0 },
+    commands: [],
+    idempotency: {},
+    outcomes: []
+  };
+}
+
+function isoOrNull(value: any): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+function positiveInt(value: any, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+const COMMAND_KINDS = Object.freeze([
+  "stop",
+  "resume_input",
+  "retry_setup",
+  "retry_verification",
+  "retry_cleanup"
+]);
+const COMMAND_STATES = Object.freeze(["accepted", "running", "finished"]);
+const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
+
+/**
+ * Normalize a persisted control record, filling schema-version-1 gaps.
+ *
+ * A command whose saved shape cannot be trusted is dropped rather than repaired:
+ * a half-read command identity is the one thing that could let a retry run
+ * twice, so this fails closed on the individual record instead of the operation.
+ */
+export function readOperationControl(value: any): OperationControlRecord {
+  const control = createOperationControl();
+  if (!value || typeof value !== "object") return control;
+  const stop = value.stop && typeof value.stop === "object" ? value.stop : {};
+  control.stop = {
+    requestedAt: isoOrNull(stop.requestedAt),
+    acknowledgedAt: isoOrNull(stop.acknowledgedAt),
+    boundary: isoOrNull(stop.boundary)
+  };
+  const attempts =
+    value.attempts && typeof value.attempts === "object" ? value.attempts : {};
+  control.attempts = {
+    setup: positiveInt(attempts.setup, 1),
+    verification: positiveInt(attempts.verification, 0),
+    cleanup: positiveInt(attempts.cleanup, 0)
+  };
+  if (Array.isArray(value.commands)) {
+    for (const entry of value.commands) {
+      if (!entry || typeof entry !== "object") continue;
+      if (!COMMAND_KINDS.includes(entry.kind)) continue;
+      if (typeof entry.commandId !== "string" || !entry.commandId) continue;
+      if (typeof entry.idempotencyKey !== "string" || !entry.idempotencyKey)
+        continue;
+      if (!COMMAND_STATES.includes(entry.state)) continue;
+      control.commands.push({
+        kind: entry.kind,
+        commandId: entry.commandId,
+        attempt: positiveInt(entry.attempt, 0),
+        target: String(entry.target || "operation"),
+        idempotencyKey: entry.idempotencyKey,
+        state: entry.state,
+        acceptedAt: isoOrNull(entry.acceptedAt) || nowIso(),
+        completedAt: isoOrNull(entry.completedAt),
+        outcome: isoOrNull(entry.outcome)
+      });
+    }
+  }
+  if (value.idempotency && typeof value.idempotency === "object") {
+    for (const [key, target] of Object.entries(value.idempotency)) {
+      if (typeof key !== "string" || !key) continue;
+      control.idempotency[key] = String(target == null ? "" : target);
+    }
+  }
+  if (Array.isArray(value.outcomes)) {
+    for (const entry of value.outcomes) {
+      if (!entry || typeof entry !== "object") continue;
+      if (!ATTEMPT_KINDS.includes(entry.kind)) continue;
+      if (typeof entry.state !== "string" || !entry.state) continue;
+      control.outcomes.push({
+        kind: entry.kind,
+        attempt: positiveInt(entry.attempt, 0),
+        state: entry.state,
+        code: isoOrNull(entry.code),
+        recordedAt: isoOrNull(entry.recordedAt) || nowIso()
+      });
+    }
+  }
+  return control;
+}
+
+/** The control record, created with safe defaults for a version 1 operation. */
+export function getOperationControl(op: any): OperationControlRecord | null {
+  if (!op) return null;
+  if (!op.control) op.control = createOperationControl();
+  return op.control;
+}
 
 // Terminal states are enumerated rather than derived. `succeeded_with_warnings`
 // exists because the AKS RBAC grant can fail while everything else works, and
@@ -303,7 +488,8 @@ export function createOperation({
     },
     terminal: null,
     failure: null,
-    stopRequested: false
+    stopRequested: false,
+    control: createOperationControl()
   };
 }
 
@@ -396,7 +582,10 @@ export function canResumeInput(
     isTerminalState(op.state) ||
     op.state !== INPUT_REQUIRED_STATE ||
     !op.inputRequired ||
-    op.executionActive
+    op.executionActive ||
+    // A stop saved before this answer wins the race. Continuing here would
+    // resume an operation the customer already asked Radius to end.
+    shouldStop(op)
   )
     return false;
   if (
@@ -637,6 +826,70 @@ export function recordCleanupState(op: any, patch: any): any {
   return op;
 }
 
+/**
+ * Take a proven-gone artifact out of the ledger.
+ *
+ * A ledger that still claims to own a resource Radius deleted is the source of
+ * two follow-on defects: the partial-state inventory reports it as surviving,
+ * and `nextIncompleteSetupStep` skips the step that has to recreate it. Called
+ * only for a `deleted` or `not_found` cleanup result, never for a warning — a
+ * failed deletion leaves ownership exactly where it was.
+ */
+export function recordCleanupDeletion(
+  op: any,
+  {
+    artifactType,
+    identity
+  }: { artifactType: SetupCleanupArtifactType | string; identity?: string }
+): boolean {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return false;
+  const key = normalizeIdentityPart(identity);
+  const matches = (artifact: any): boolean =>
+    !key || cleanupArtifactIdentity(artifactType, artifact) === key;
+  switch (artifactType) {
+    case "azure_app":
+      if (ledger.azureApp.state !== "created" || !matches(ledger.azureApp))
+        return false;
+      ledger.azureApp.state = "deleted";
+      return true;
+    case "service_principal":
+      if (
+        ledger.servicePrincipal.state !== "created" ||
+        !matches(ledger.servicePrincipal)
+      )
+        return false;
+      ledger.servicePrincipal.state = "deleted";
+      return true;
+    case "github_environment":
+      if (
+        ledger.githubEnvironment.state !== "created" ||
+        !matches(ledger.githubEnvironment)
+      )
+        return false;
+      ledger.githubEnvironment.state = "deleted";
+      return true;
+    case "federated_credential": {
+      const remaining = ledger.federatedCredentials.filter(
+        (entry: any) => !matches(entry)
+      );
+      if (remaining.length === ledger.federatedCredentials.length) return false;
+      ledger.federatedCredentials = remaining;
+      return true;
+    }
+    case "role_assignment": {
+      const remaining = ledger.roleAssignments.filter(
+        (entry: any) => !matches(entry)
+      );
+      if (remaining.length === ledger.roleAssignments.length) return false;
+      ledger.roleAssignments = remaining;
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   if (!ledger) return false;
   return (
@@ -699,6 +952,102 @@ function formatWorkflowFileLabel(file: any): string {
   return branch ? `${path} on ${branch}` : path;
 }
 
+// ─── Stable artifact identity ────────────────────────────────────────────────
+// A cleanup result and a ledger entry describe the same resource, so matching
+// them must not go through the display label: `formatAzureAppLabel` renders
+// "radius-store (00000000-…)" while the deletion recorded the bare appId, and a
+// deleted App Registration therefore kept appearing in "created". Identity is
+// derived from the fields that actually name the resource, and a result written
+// before this field existed is still matched through its recorded target.
+
+function normalizeIdentityPart(value: any): string {
+  return String(value == null ? "" : value)
+    .trim()
+    .toLowerCase();
+}
+
+/** The stable key for one cleanup-capable artifact, or "" when unidentifiable. */
+export function cleanupArtifactIdentity(
+  artifactType: any,
+  artifact: any
+): string {
+  if (!artifact) return "";
+  switch (artifactType) {
+    case "azure_app":
+      return normalizeIdentityPart(artifact.appId);
+    case "service_principal":
+      return (
+        normalizeIdentityPart(artifact.appId) ||
+        normalizeIdentityPart(artifact.objectId)
+      );
+    case "federated_credential":
+      return `${normalizeIdentityPart(artifact.name)}@${normalizeIdentityPart(
+        artifact.subject
+      )}`;
+    case "role_assignment":
+      return `${normalizeIdentityPart(artifact.role)}@${normalizeIdentityPart(
+        artifact.scope
+      )}`;
+    case "github_environment":
+      return `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
+        artifact.name
+      )}`;
+    default:
+      return "";
+  }
+}
+
+/**
+ * Every key a cleanup result may legitimately carry for one artifact.
+ *
+ * The identity is authoritative; the labels are the compatibility path for
+ * results persisted before results carried an identity at all.
+ */
+function artifactMatchKeys(
+  artifactType: string,
+  identity: string,
+  labels: string[]
+): Set<string> {
+  const keys = new Set<string>();
+  if (identity) keys.add(`${artifactType}#${identity}`);
+  for (const label of labels) {
+    const normalized = normalizeIdentityPart(label);
+    if (normalized) keys.add(`${artifactType}#${normalized}`);
+  }
+  return keys;
+}
+
+function cleanupResultMatchKey(result: any): string {
+  return cleanupTargetKey(result);
+}
+
+/**
+ * The stable key that ties a cleanup result, an unresolved target, and a ledger
+ * artifact together. Falls back to the recorded label for results written before
+ * results carried an identity.
+ */
+export function cleanupTargetKey(entry: any): string {
+  const artifactType = String((entry && entry.artifactType) || "");
+  const identity =
+    normalizeIdentityPart(entry && entry.identity) ||
+    normalizeIdentityPart(entry && entry.target);
+  return `${artifactType}#${identity}`;
+}
+
+/** Keys of the artifacts a cleanup attempt proved are gone. */
+function removedArtifactKeys(results: any[]): Set<string> {
+  const removed = new Set<string>();
+  for (const result of results) {
+    if (result?.outcome !== "deleted" && result?.outcome !== "not_found")
+      continue;
+    removed.add(cleanupResultMatchKey(result));
+    // Old records only carry the display label; index both so either matches.
+    const target = normalizeIdentityPart(result?.target);
+    if (target) removed.add(`${String(result?.artifactType || "")}#${target}`);
+  }
+  return removed;
+}
+
 function pushRetainedArtifact(list: any[], entry: any): void {
   if (!entry || !entry.target) return;
   if (
@@ -726,10 +1075,23 @@ export function projectCleanupSummary(op: any): any {
   if (!ledger) return null;
   const failureState = op.state === "failed" || op.state === "failed_partial";
   const cleanupState = ledger.cleanup && ledger.cleanup.state;
-  if (!failureState && cleanupState === "not_started") return null;
+  // A stopped or retried operation leaves resources behind exactly as a failure
+  // does, and the customer needs the same truthful inventory to decide what to
+  // do next. Only an operation with nothing recorded stays silent.
+  const reportableState =
+    failureState ||
+    op.state === "cancelled" ||
+    (op.control && op.control.attempts && op.control.attempts.setup > 1);
+  if (
+    !reportableState &&
+    cleanupState === "not_started" &&
+    !hasTrackedSetupArtifacts(ledger)
+  )
+    return null;
 
   const commitPointReached = hasReachedSetupCommitPoint(op);
-  const results = cleanupAttemptResults(ledger).map((entry: any) => ({
+  const attemptResults = cleanupAttemptResults(ledger);
+  const results = attemptResults.map((entry: any) => ({
     artifactType: entry.artifactType,
     outcome: entry.outcome,
     target: String(entry.target || ""),
@@ -871,7 +1233,613 @@ export function projectCleanupSummary(op: any): any {
     removed,
     retained,
     warnings,
-    retry
+    retry,
+    ...projectPartialState(op, {
+      ledger,
+      results,
+      attemptResults,
+      commitPointReached
+    })
+  };
+}
+
+/**
+ * Name what exists after a stop, a failure, or a retry.
+ *
+ * The groups are disjoint on purpose. A customer reading "created" and
+ * "retained" in the same list cannot tell whether Radius intends to reuse the
+ * resource or has simply left it behind, and that ambiguity is what turns a
+ * partial setup into a manual audit. Only safe labels travel: no secret value,
+ * no token, no raw command output, and never the private ledger itself.
+ */
+function projectPartialState(
+  op: any,
+  {
+    ledger,
+    results,
+    attemptResults,
+    commitPointReached
+  }: {
+    ledger: any;
+    results: any[];
+    attemptResults: any[];
+    commitPointReached: boolean;
+  }
+): any {
+  const cleaned = results
+    .filter(
+      (entry: any) =>
+        entry.outcome === "deleted" || entry.outcome === "not_found"
+    )
+    .map((entry: any) => ({
+      kind: entry.artifactType,
+      target: cleanupResultTarget(entry),
+      outcome: entry.outcome
+    }));
+  // Matched on identity, not on the rendered label. The two differ for every
+  // Azure artifact, which is why a removed App Registration used to survive
+  // this filter and be reported to the customer as still present.
+  const removedKeys = removedArtifactKeys(attemptResults);
+  const manualActionRequired = results
+    .filter(
+      (entry: any) => entry.outcome === "warning" || entry.outcome === "skipped"
+    )
+    .map((entry: any) => ({
+      kind: entry.artifactType,
+      target: String(entry.target || ""),
+      action:
+        entry.detail ||
+        "Review this resource in the Azure or GitHub portal and remove it if this setup should be rolled back."
+    }));
+  if (ledger.githubEnvironment.state === "created_candidate") {
+    const target = formatGitHubEnvironmentLabel(ledger.githubEnvironment);
+    if (!manualActionRequired.some((entry: any) => entry.target === target)) {
+      manualActionRequired.push({
+        kind: "github_environment",
+        target,
+        action:
+          "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
+      });
+    }
+  }
+
+  const reused: any[] = [];
+  if (ledger.azureApp.state === "reused")
+    reused.push({
+      kind: "azure_app",
+      target: formatAzureAppLabel(ledger.azureApp)
+    });
+  if (ledger.servicePrincipal.state === "reused")
+    reused.push({
+      kind: "service_principal",
+      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+    });
+  if (ledger.githubEnvironment.state === "reused")
+    reused.push({
+      kind: "github_environment",
+      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+    });
+
+  const surviving: any[] = [];
+  const pushSurviving = (
+    kind: string,
+    artifact: any,
+    target: string,
+    extra: any = {}
+  ) => {
+    surviving.push({
+      kind,
+      target,
+      keys: artifactMatchKeys(kind, cleanupArtifactIdentity(kind, artifact), [
+        target
+      ]),
+      ...extra
+    });
+  };
+  if (ledger.azureApp.state === "created")
+    pushSurviving(
+      "azure_app",
+      ledger.azureApp,
+      formatAzureAppLabel(ledger.azureApp)
+    );
+  if (ledger.servicePrincipal.state === "created")
+    pushSurviving(
+      "service_principal",
+      ledger.servicePrincipal,
+      formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+    );
+  ledger.federatedCredentials.forEach((entry: any) => {
+    pushSurviving(
+      "federated_credential",
+      entry,
+      `${String(entry.name || "")} @ ${String(entry.subject || "")}`
+    );
+  });
+  ledger.roleAssignments.forEach((entry: any) => {
+    pushSurviving(
+      "role_assignment",
+      entry,
+      `${String(entry.role || "")} @ ${String(entry.scope || "")}`
+    );
+  });
+  if (ledger.githubEnvironment.state === "created")
+    pushSurviving(
+      "github_environment",
+      ledger.githubEnvironment,
+      formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+    );
+  ledger.commit.workflowFiles.forEach((entry: any) => {
+    const target = formatWorkflowFileLabel(entry);
+    if (target)
+      surviving.push({
+        kind: "workflow_file",
+        target,
+        keys: new Set<string>(),
+        keepAlways: true
+      });
+  });
+
+  const reusableOnRetry = commitPointReached || canRetrySetup(op).ok;
+  const created: any[] = [];
+  const retainedGroup: any[] = [];
+  for (const entry of surviving) {
+    if ([...entry.keys].some((key: string) => removedKeys.has(key))) continue;
+    const item = { kind: entry.kind, target: entry.target };
+    if (entry.keepAlways || reusableOnRetry) retainedGroup.push(item);
+    else created.push(item);
+  }
+
+  return {
+    created,
+    retainedArtifacts: retainedGroup,
+    reused,
+    cleaned,
+    manualActionRequired
+  };
+}
+
+// ─── Retry eligibility ───────────────────────────────────────────────────────
+// Each check is a closed list built from the failure codes this code actually
+// produces. An unrecognised failure is never classified as retryable: guessing
+// costs a duplicated cloud resource, while refusing costs one support message.
+
+const VERIFICATION_RETRY_CLASSIFICATIONS: Record<string, string> = {
+  "verify-run-failed": "azure-rbac-propagation",
+  "verification-tracking-expired": "verification-tracking-expired",
+  // The dispatch call itself failed, so no run was ever created: nothing was
+  // verified, nothing was written, and asking GitHub again is the whole fix.
+  "verify-dispatch-failed": "verification-dispatch-failed"
+};
+
+const VERIFICATION_RETRY_TERMINAL_REASONS: Record<string, string> = {
+  "pr-merge-required": "workflow-installation-pending"
+};
+
+export function classifyVerificationRetry(op: any): string | null {
+  if (!op) return null;
+  if (op.state === "action_required") {
+    return (
+      VERIFICATION_RETRY_TERMINAL_REASONS[String(op.terminal?.reason || "")] ||
+      null
+    );
+  }
+  if (op.state === "failed_partial") {
+    return (
+      VERIFICATION_RETRY_CLASSIFICATIONS[String(op.failure?.code || "")] || null
+    );
+  }
+  return null;
+}
+
+function hasCloudIdentityProvenance(op: any, ledger: any): boolean {
+  if (op.provider === "azure") {
+    return Boolean(ledger.azureApp.appId || ledger.servicePrincipal.appId);
+  }
+  return Boolean(op.context && op.context.cloud);
+}
+
+export function hasVerificationProvenance(op: any): boolean {
+  const verification = op?.verification;
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return false;
+  return Boolean(
+    op.repo &&
+    op.environment &&
+    typeof verification?.workflow === "string" &&
+    verification.workflow &&
+    typeof verification?.ref === "string" &&
+    verification.ref &&
+    typeof verification?.environment === "string" &&
+    verification.environment &&
+    (ledger.commit.mode !== "not_started" ||
+      ledger.commit.workflowFiles.length > 0) &&
+    hasCloudIdentityProvenance(op, ledger)
+  );
+}
+
+export function setupPullRequestUrl(op: any): string | null {
+  const ledger = getSetupArtifactLedger(op);
+  const fromTerminal =
+    typeof op?.terminal?.pullRequestUrl === "string" ?
+      op.terminal.pullRequestUrl
+    : "";
+  const fromLedger =
+    typeof ledger?.commit?.pullRequestUrl === "string" ?
+      ledger.commit.pullRequestUrl
+    : "";
+  return fromTerminal || fromLedger || null;
+}
+
+export function canRetryVerification(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  const classification = classifyVerificationRetry(op);
+  if (!classification)
+    return { ok: false, code: "verification-retry-not-retryable" };
+  if (!hasVerificationProvenance(op))
+    return { ok: false, code: "verification-provenance-incomplete" };
+  return {
+    ok: true,
+    code: "verification-retry-allowed",
+    classification,
+    requiresMergedPullRequest:
+      classification === "workflow-installation-pending",
+    pullRequestUrl: setupPullRequestUrl(op)
+  };
+}
+
+/**
+ * The reason a setup retry must be refused, or null when ownership is provable.
+ *
+ * A mutation that may have succeeded before Radius could save its provenance is
+ * the one case that must never be retried automatically. Re-running it could
+ * create a second App Registration; deleting it could remove one the customer
+ * already relies on.
+ */
+export function ambiguousSetupOwnership(ledger: any): string | null {
+  if (!ledger) return "The setup artifact ledger is missing.";
+  if (ledger.githubEnvironment.state === "created_candidate")
+    return "A GitHub environment may exist without proven ownership.";
+  const results =
+    Array.isArray(ledger.cleanup?.results) ? ledger.cleanup.results : [];
+  const skipped = results.find((entry: any) => entry?.outcome === "skipped");
+  if (skipped)
+    return (
+      skipped.detail ||
+      "A recorded resource could not be identified precisely enough to act on."
+    );
+  return null;
+}
+
+export const SETUP_RESUME_STEPS = Object.freeze([
+  "azure_app",
+  "service_principal",
+  "federated_credentials",
+  "role_assignments",
+  "github_environment",
+  "workflow_commit",
+  "verification"
+]);
+
+/** The first step the ledger does not already prove finished. */
+export function nextIncompleteSetupStep(op: any): string {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return "azure_app";
+  // A rolled-back artifact is incomplete again: cleanup proved it is gone, so
+  // resuming past it would leave the setup permanently missing that resource.
+  const present = (state: any) => state === "created" || state === "reused";
+  if (op?.provider === "azure") {
+    if (!present(ledger.azureApp.state)) return "azure_app";
+    if (!present(ledger.servicePrincipal.state)) return "service_principal";
+    if (ledger.federatedCredentials.length === 0)
+      return "federated_credentials";
+    if (ledger.roleAssignments.length === 0) return "role_assignments";
+  }
+  if (
+    !present(ledger.githubEnvironment.state) &&
+    ledger.githubEnvironment.state !== "created_candidate"
+  )
+    return "github_environment";
+  if (ledger.commit.workflowFiles.length === 0) return "workflow_commit";
+  return "verification";
+}
+
+const SETUP_IDENTITY_RESUME_STEPS = Object.freeze([
+  "azure_app",
+  "service_principal",
+  "federated_credentials",
+  "role_assignments"
+]);
+
+export type SetupContinuationPlan = {
+  resumeFrom: string;
+  stage: string;
+  runIdentity: boolean;
+  runEnvironment: boolean;
+};
+
+/**
+ * Turn a resume point into the work a continuation must actually redo.
+ *
+ * Retry used to ignore the resume point entirely and re-run the whole route,
+ * which both repeated finished Azure mutations and left the record parked on the
+ * stage the failure ended in — and that stale stage is what the continuation
+ * guard rejected. The plan names one stage and the two route calls it still
+ * needs, so the guard sees a record positioned where the work resumes.
+ */
+export function planSetupContinuation(
+  op: any,
+  resumeFrom: any
+): SetupContinuationPlan {
+  const step =
+    SETUP_RESUME_STEPS.includes(String(resumeFrom || "")) ?
+      String(resumeFrom)
+    : SETUP_RESUME_STEPS[0];
+  const stages = Array.isArray(op?.stages) ? op.stages : [];
+  const hasIdentityStage = stages.some(
+    (stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY
+  );
+  // A repository that already had credentials never ran the identity stage, so
+  // there is no identity work to resume even when the ledger has no App
+  // Registration of its own.
+  const runIdentity =
+    hasIdentityStage && SETUP_IDENTITY_RESUME_STEPS.includes(step);
+  // Only verification can be resumed without re-entering the environment route,
+  // and only when the record still names the run to watch. Otherwise the
+  // environment route is what installs the workflow and dispatches the run.
+  const monitorOnly = step === "verification" && hasVerificationRunToWatch(op);
+  const stage =
+    runIdentity ? STAGE_AUTHORIZE_IDENTITY
+    : monitorOnly ? STAGE_VERIFY
+    : STAGE_CONFIGURE_ENVIRONMENT;
+  return {
+    resumeFrom: step,
+    stage,
+    runIdentity,
+    runEnvironment: !monitorOnly
+  };
+}
+
+function hasVerificationRunToWatch(op: any): boolean {
+  const verification = op?.verification;
+  return Boolean(
+    verification &&
+    Number(verification.dispatchedAt) > 0 &&
+    typeof verification.workflow === "string" &&
+    verification.workflow &&
+    typeof verification.ref === "string" &&
+    verification.ref
+  );
+}
+
+/**
+ * Position a reopened setup at the stage its resume point belongs to.
+ *
+ * Stages before the resume point are settled, the resume stage is entered fresh,
+ * and everything after it goes back to pending — otherwise the checklist would
+ * still show the failure verdict of a stage the retry is about to redo.
+ */
+export function applySetupResumePoint(
+  op: any,
+  resumeFrom: any
+): SetupContinuationPlan {
+  const plan = planSetupContinuation(op, resumeFrom);
+  if (!op) return plan;
+  const stages = Array.isArray(op.stages) ? op.stages : [];
+  const found = stages.findIndex((stage: any) => stage?.id === plan.stage);
+  const index = found >= 0 ? found : 0;
+  stages.forEach((stage: any, position: number) => {
+    if (position < index) stage.state = "succeeded";
+    else stage.state = "pending";
+  });
+  const target = stages[index]?.id ?? null;
+  if (target) enterStage(op, target);
+  op.resumeFrom = plan.resumeFrom;
+  return { ...plan, stage: target || plan.stage };
+}
+
+export function canRetrySetup(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  if (op.state !== "failed_partial" && op.state !== "cancelled")
+    return { ok: false, code: "setup-retry-not-retryable" };
+  const request = op.resumeRequest || op.request;
+  if (!request || !request.environment)
+    return { ok: false, code: "setup-retry-request-missing" };
+  const ledger = getSetupArtifactLedger(op);
+  const ambiguous = ambiguousSetupOwnership(ledger);
+  if (ambiguous)
+    return {
+      ok: false,
+      code: "setup-retry-ownership-ambiguous",
+      detail: ambiguous
+    };
+  return {
+    ok: true,
+    code: "setup-retry-allowed",
+    resumeFrom: nextIncompleteSetupStep(op)
+  };
+}
+
+function isProvenOwnedCleanupTarget(ledger: any, result: any): boolean {
+  switch (result.artifactType) {
+    case "azure_app":
+      return ledger.azureApp.state === "created";
+    case "service_principal":
+      return ledger.servicePrincipal.state === "created";
+    case "federated_credential":
+      return ledger.federatedCredentials.length > 0;
+    case "role_assignment":
+      return ledger.roleAssignments.length > 0;
+    case "github_environment":
+      return ledger.githubEnvironment.state === "created";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Resources from the latest cleanup attempt that Radius proved it created and
+ * still could not remove. A `skipped` result is deliberately excluded: Radius
+ * could not identify that target, so retrying it would be a guess.
+ *
+ * Each entry carries the stable key the retry needs to act on exactly this
+ * resource rather than re-deriving a deletion set from the ledger.
+ */
+export function unresolvedCleanupTargets(op: any): any[] {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return [];
+  return cleanupAttemptResults(ledger)
+    .filter((entry: any) => entry.outcome === "warning")
+    .filter((entry: any) => isProvenOwnedCleanupTarget(ledger, entry))
+    .map((entry: any) => ({
+      artifactType: entry.artifactType,
+      target: String(entry.target || ""),
+      identity:
+        entry.identity == null || entry.identity === "" ?
+          null
+        : String(entry.identity),
+      key: cleanupTargetKey(entry),
+      detail:
+        entry.detail == null || entry.detail === "" ?
+          null
+        : String(entry.detail)
+    }));
+}
+
+export function canRetryCleanup(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return { ok: false, code: "cleanup-retry-ledger-missing" };
+  if (hasReachedSetupCommitPoint(op))
+    return { ok: false, code: "cleanup-retry-after-commit" };
+  if (ledger.cleanup.state !== "succeeded_with_warnings")
+    return { ok: false, code: "cleanup-retry-not-retryable" };
+  const targets = unresolvedCleanupTargets(op);
+  if (targets.length === 0)
+    return { ok: false, code: "cleanup-retry-nothing-unresolved" };
+  return { ok: true, code: "cleanup-retry-allowed", targets };
+}
+
+// ─── Action projection ───────────────────────────────────────────────────────
+// The server decides what a customer may do; the page renders that list. Copying
+// eligibility rules into browser code is how the two surfaces drift apart, and a
+// Retry button that the server then refuses is worse than no button at all.
+
+// One sentence per classification, so a new retryable failure code cannot ship
+// with a description written for a different cause.
+const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
+  "workflow-installation-pending":
+    "Merge the setup pull request first. Radius then checks the installed workflows again.",
+  "azure-rbac-propagation":
+    "Azure role assignments can take a few minutes to propagate. Radius checks the same workflow run identity again.",
+  "verification-tracking-expired":
+    "Radius stopped following the previous verification run. It starts the same workflow again on the same branch.",
+  "verification-dispatch-failed":
+    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again."
+};
+
+export function projectOperationActions(op: any): any[] {
+  if (!op) return [];
+  const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
+  const control = op.control || createOperationControl();
+  if (!isTerminalState(op.state)) {
+    const waitingForInput = op.state === INPUT_REQUIRED_STATE;
+    return [
+      {
+        id: "stop",
+        kind: "stop",
+        label: "Stop setup",
+        description:
+          waitingForInput ?
+            "Radius is waiting for your answer, so it stops immediately."
+          : "Radius will finish the current Azure or GitHub step, record what changed, and stop before the next step.",
+        method: "POST",
+        path: `${base}/stop`,
+        pending: Boolean(control.stop.requestedAt)
+      }
+    ];
+  }
+  const actions: any[] = [];
+  const verification = canRetryVerification(op);
+  if (verification.ok) {
+    actions.push({
+      id: "retry-verification",
+      kind: "retry_verification",
+      label: "Retry verification",
+      description: VERIFICATION_RETRY_DESCRIPTIONS[verification.classification],
+      method: "POST",
+      path: `${base}/retry/verification`,
+      pending: false,
+      classification: verification.classification,
+      requiresMergedPullRequest: verification.requiresMergedPullRequest,
+      pullRequestUrl: verification.pullRequestUrl
+    });
+  }
+  const setup = canRetrySetup(op);
+  if (setup.ok) {
+    actions.push({
+      id: "retry-setup",
+      kind: "retry_setup",
+      label: "Retry setup",
+      description:
+        "Radius reuses the resources it already recorded and continues from the first unfinished step.",
+      method: "POST",
+      path: `${base}/retry/setup`,
+      pending: false,
+      resumeFrom: setup.resumeFrom
+    });
+  }
+  const cleanup = canRetryCleanup(op);
+  if (cleanup.ok) {
+    actions.push({
+      id: "retry-cleanup",
+      kind: "retry_cleanup",
+      label: "Retry cleanup",
+      description:
+        "Radius removes only the resources it proved it created and could not delete on the last attempt.",
+      method: "POST",
+      path: `${base}/retry/cleanup`,
+      pending: false
+    });
+  }
+  return actions;
+}
+
+/**
+ * The automatic transition a non-terminal view is waiting on.
+ *
+ * Every non-terminal state must either name what happens next or offer an
+ * action, so no view can leave a customer watching a spinner with nothing to do.
+ */
+export function projectNextTransition(op: any): any {
+  if (!op || isTerminalState(op.state)) return null;
+  if (isStopPending(op)) {
+    return {
+      code: "stopping",
+      message: "Stopping after the current step…"
+    };
+  }
+  if (op.state === INPUT_REQUIRED_STATE) {
+    return {
+      code: "awaiting-input",
+      message: "Radius is waiting for your answer before it continues."
+    };
+  }
+  if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {
+    return {
+      code: "monitoring-verification",
+      message:
+        "Radius is following the credential verification run and will report its result here."
+    };
+  }
+  return {
+    code: "running",
+    message: "Radius is running the next environment setup step."
   };
 }
 
@@ -906,11 +1874,26 @@ function announceTerminal(op) {
   }
 }
 
+/**
+ * Announce a terminal record whose announcement was deferred until it was safe.
+ *
+ * A route that must save the outcome before anyone hears about it finishes with
+ * `announce: false` and calls this once the write succeeded. Announcing twice is
+ * impossible: the record carries the timestamp of the announcement it already
+ * made.
+ */
+export function announceOperationTerminal(op: any): boolean {
+  if (!op || !isTerminalState(op.state)) return false;
+  if (op.journey?.notifiedAt) return false;
+  announceTerminal(op);
+  return true;
+}
+
 /** Finish the operation in an explicit terminal state. */
 export function finish(
   op: any,
   state: any,
-  { terminal = null, failure = null }: any = {}
+  { terminal = null, failure = null, announce = true }: any = {}
 ): any {
   if (!op) return op;
   if (!isTerminalState(state))
@@ -950,7 +1933,7 @@ export function finish(
         : "not_needed"
       : "not_needed";
   }
-  announceTerminal(op);
+  if (announce) announceTerminal(op);
   return op;
 }
 
@@ -973,16 +1956,335 @@ export function hasWarnings(op: any): boolean {
   return !!(op && op.steps.some((s) => s.state === "warning"));
 }
 
-/** Cooperative stop. The loop checks this between mutations; it never aborts one. */
+/**
+ * Cooperative stop. The loop checks this between mutations; it never aborts one.
+ *
+ * The request is written to the durable control record before any caller is told
+ * it was accepted, so a Canvas reload or an extension restart cannot lose the
+ * customer's command.
+ */
 export function requestStop(op: any): boolean {
   if (!op) return false;
   if (isTerminalState(op.state)) return false;
+  const control = getOperationControl(op);
+  if (!control.stop.requestedAt) {
+    control.stop.requestedAt = nowIso();
+    op.lastActivityAt = control.stop.requestedAt;
+  }
   op.stopRequested = true;
   return true;
 }
 
 export function shouldStop(op: any): boolean {
-  return !!(op && op.stopRequested && !isTerminalState(op.state));
+  if (!op || isTerminalState(op.state)) return false;
+  return !!(op.stopRequested || op.control?.stop?.requestedAt);
+}
+
+/** Whether a stop is recorded but not yet honored at a boundary. */
+export function isStopPending(op: any): boolean {
+  return shouldStop(op) && !op?.control?.stop?.acknowledgedAt;
+}
+
+/**
+ * Honor a recorded stop at a named safe boundary.
+ *
+ * Called only after the current remote mutation finished and its provenance was
+ * saved, which is what keeps Stop from ever leaving a half-written resource.
+ */
+export function stopAtBoundary(
+  op: any,
+  boundary: any,
+  { announce = true }: any = {}
+): any {
+  if (!op || isTerminalState(op.state)) return op;
+  const control = getOperationControl(op);
+  const at = nowIso();
+  if (!control.stop.requestedAt) control.stop.requestedAt = at;
+  control.stop.acknowledgedAt = at;
+  control.stop.boundary = String(boundary || "unknown");
+  recordAttemptOutcome(op, {
+    kind: "setup",
+    state: "cancelled",
+    code: "operation-stopped"
+  });
+  return finish(op, "cancelled", {
+    announce,
+    terminal: {
+      reason: "stopped-at-boundary",
+      boundary: control.stop.boundary,
+      userMessage:
+        "Radius finished the step that was already running, recorded what changed, and stopped before the next one."
+    }
+  });
+}
+
+export type StopRequestOutcome =
+  | "cancelled"
+  | "pending"
+  | "already_requested"
+  | "already_stopped"
+  | "terminal";
+
+/**
+ * Apply a customer stop request to the saved record.
+ *
+ * An operation parked on a prompt has no mutation in flight, so it cancels at
+ * once. Anything else records the request and lets the executor stop at its next
+ * safe boundary.
+ *
+ * `announce` is false when the caller must save the record before anyone hears
+ * about it. Announcing a cancellation that a failed write then rolls back tells
+ * the customer their setup ended when it did not, which is the one lie this
+ * whole model exists to prevent — so the caller announces with
+ * `announceOperationTerminal` only after the write succeeded.
+ */
+export function applyStopRequest(
+  op: any,
+  { announce = true }: { announce?: boolean } = {}
+): {
+  outcome: StopRequestOutcome;
+  duplicate: boolean;
+} {
+  if (!op) return { outcome: "terminal", duplicate: false };
+  const control = getOperationControl(op);
+  const duplicate = Boolean(control.stop.requestedAt);
+  if (isTerminalState(op.state)) {
+    return {
+      outcome:
+        op.state === "cancelled" && duplicate ? "already_stopped" : "terminal",
+      duplicate
+    };
+  }
+  if (op.state === INPUT_REQUIRED_STATE && !op.executionActive) {
+    requestStop(op);
+    stopAtBoundary(op, "input_prompt", { announce });
+    return { outcome: "cancelled", duplicate };
+  }
+  requestStop(op);
+  return { outcome: duplicate ? "already_requested" : "pending", duplicate };
+}
+
+// ─── Commands and idempotency ────────────────────────────────────────────────
+// Every key is built from facts that are already saved: the operation id, the
+// command kind, the attempt number, and the logical target. No timestamp and no
+// random value, so a restarted executor rebuilds exactly the same key and a
+// repeated mutation is recognisable as the same one.
+
+export function operationCommandKey({
+  operationId,
+  kind,
+  attempt,
+  target = "operation"
+}: {
+  operationId: string;
+  kind: string;
+  attempt: number;
+  target?: string;
+}): string {
+  return `${String(operationId || "")}:${String(kind || "")}:${positiveInt(
+    attempt,
+    0
+  )}:${String(target || "operation")}`;
+}
+
+export function buildCommandId(input: any): string {
+  return operationCommandKey(input);
+}
+
+export function buildIdempotencyKey(input: any): string {
+  return `idem:${operationCommandKey(input)}`;
+}
+
+export function findCommand(op: any, commandId: any): any {
+  const control = op?.control;
+  if (!control || !commandId) return null;
+  return (
+    control.commands.find((entry: any) => entry.commandId === commandId) || null
+  );
+}
+
+export function latestCommand(op: any): any {
+  const commands = op?.control?.commands;
+  if (!Array.isArray(commands) || commands.length === 0) return null;
+  return commands[commands.length - 1];
+}
+
+/**
+ * Record a customer command before Radius acts on it.
+ *
+ * A repeated submission resolves to the saved command rather than a second one:
+ * the identity is derived, so a double click, a lost response, or a reload all
+ * produce the same command id.
+ */
+export function acceptCommand(
+  op: any,
+  {
+    kind,
+    attempt,
+    target = "operation"
+  }: { kind: OperationCommandKind; attempt: number; target?: string }
+): { ok: boolean; duplicate: boolean; command: any } {
+  const control = getOperationControl(op);
+  if (!control) return { ok: false, duplicate: false, command: null };
+  const commandId = buildCommandId({
+    operationId: op.operationId,
+    kind,
+    attempt,
+    target
+  });
+  const existing = findCommand(op, commandId);
+  if (existing) return { ok: false, duplicate: true, command: existing };
+  const command = {
+    kind,
+    commandId,
+    attempt: positiveInt(attempt, 0),
+    target: String(target || "operation"),
+    idempotencyKey: buildIdempotencyKey({
+      operationId: op.operationId,
+      kind,
+      attempt,
+      target
+    }),
+    state: "accepted" as OperationCommandState,
+    acceptedAt: nowIso(),
+    completedAt: null,
+    outcome: null
+  };
+  control.commands.push(command);
+  if (control.commands.length > MAX_RETAINED_COMMANDS) {
+    control.commands.splice(0, control.commands.length - MAX_RETAINED_COMMANDS);
+  }
+  control.idempotency[command.idempotencyKey] = command.target;
+  op.lastActivityAt = command.acceptedAt;
+  return { ok: true, duplicate: false, command };
+}
+
+/** Undo an accepted command when the durable save that must follow it failed. */
+export function discardCommand(op: any, commandId: any): boolean {
+  const control = op?.control;
+  if (!control) return false;
+  const index = control.commands.findIndex(
+    (entry: any) => entry.commandId === commandId
+  );
+  if (index < 0) return false;
+  const [removed] = control.commands.splice(index, 1);
+  delete control.idempotency[removed.idempotencyKey];
+  return true;
+}
+
+export function setCommandState(
+  op: any,
+  commandId: any,
+  state: OperationCommandState,
+  outcome: any = null
+): any {
+  const command = findCommand(op, commandId);
+  if (!command || !COMMAND_STATES.includes(state)) return null;
+  command.state = state;
+  if (state === "finished") command.completedAt = nowIso();
+  if (outcome != null) command.outcome = String(outcome);
+  return command;
+}
+
+export function recordAttemptOutcome(
+  op: any,
+  {
+    kind,
+    state,
+    code = null
+  }: { kind: OperationAttemptKind; state: string; code?: string | null }
+): any {
+  const control = getOperationControl(op);
+  if (!control || !ATTEMPT_KINDS.includes(kind)) return null;
+  const entry = {
+    kind,
+    attempt: positiveInt(control.attempts[kind], 0),
+    state: String(state || ""),
+    code: code == null || code === "" ? null : String(code),
+    recordedAt: nowIso()
+  };
+  control.outcomes.push(entry);
+  if (control.outcomes.length > MAX_RETAINED_OUTCOMES) {
+    control.outcomes.splice(0, control.outcomes.length - MAX_RETAINED_OUTCOMES);
+  }
+  return entry;
+}
+
+/**
+ * Reopen a closed operation for an allowed continuation.
+ *
+ * The prior verdict is copied into the immutable outcome history before the
+ * record moves back to `running`, so an `action_required` result survives the
+ * verification retry that follows a merged pull request.
+ */
+export function beginRetryAttempt(op: any, kind: OperationAttemptKind): number {
+  const control = getOperationControl(op);
+  if (!control || !ATTEMPT_KINDS.includes(kind)) return 0;
+  recordAttemptOutcome(op, {
+    kind,
+    state: op.state,
+    code: op.failure?.code || op.terminal?.reason || null
+  });
+  control.attempts[kind] = positiveInt(control.attempts[kind], 0) + 1;
+  control.stop = { requestedAt: null, acknowledgedAt: null, boundary: null };
+  op.stopRequested = false;
+  op.state = RUNNING_STATE;
+  op.endedAt = null;
+  op.failure = null;
+  op.terminal = null;
+  op.recoveryState = null;
+  if (op.journey) op.journey.notifiedAt = null;
+  op.lastActivityAt = nowIso();
+  return control.attempts[kind];
+}
+
+/** Undo `beginRetryAttempt` when the durable save that must follow it failed. */
+export function rollbackRetryAttempt(op: any, snapshot: any): any {
+  if (!op || !snapshot) return op;
+  op.control = structuredClone(snapshot.control);
+  op.state = snapshot.state;
+  op.endedAt = snapshot.endedAt;
+  op.failure = snapshot.failure;
+  op.terminal = snapshot.terminal;
+  op.recoveryState = snapshot.recoveryState;
+  op.stopRequested = snapshot.stopRequested;
+  op.stages = structuredClone(snapshot.stages);
+  op.currentStage = snapshot.currentStage;
+  op.lastActivityAt = snapshot.lastActivityAt;
+  op.executionActive = snapshot.executionActive;
+  if (snapshot.resumeFrom === undefined) delete op.resumeFrom;
+  else op.resumeFrom = snapshot.resumeFrom;
+  if (snapshot.inputRequired === undefined) delete op.inputRequired;
+  else op.inputRequired = structuredClone(snapshot.inputRequired);
+  // `finish` opens cleanup on the way out, so a rolled-back terminal transition
+  // has to put the ledger's cleanup record back too or the next projection
+  // reports a rollback that never happened.
+  if (snapshot.cleanup !== undefined && op.setupArtifacts) {
+    op.setupArtifacts.cleanup = structuredClone(snapshot.cleanup);
+  }
+  if (op.journey) op.journey.notifiedAt = snapshot.notifiedAt;
+  return op;
+}
+
+export function snapshotRetryState(op: any): any {
+  const ledger = op?.setupArtifacts || null;
+  return {
+    control: structuredClone(getOperationControl(op)),
+    state: op.state,
+    endedAt: op.endedAt,
+    failure: op.failure ? structuredClone(op.failure) : null,
+    terminal: op.terminal ? structuredClone(op.terminal) : null,
+    recoveryState: op.recoveryState ?? null,
+    stopRequested: Boolean(op.stopRequested),
+    stages: structuredClone(op.stages || []),
+    currentStage: op.currentStage ?? null,
+    lastActivityAt: op.lastActivityAt ?? null,
+    executionActive: op.executionActive,
+    resumeFrom: op.resumeFrom,
+    inputRequired: op.inputRequired,
+    cleanup: ledger?.cleanup ? structuredClone(ledger.cleanup) : undefined,
+    notifiedAt: op.journey?.notifiedAt ?? null
+  };
 }
 
 /**
@@ -997,6 +2299,8 @@ export function summarize(op: any): string {
   const env = op.environment || "environment";
   switch (op.state) {
     case RUNNING_STATE: {
+      if (isStopPending(op))
+        return `Stopping ${env} setup after the current step…`;
       const stage = op.stages.find((s) => s.id === op.currentStage);
       return `Creating ${env} — ${
         stage ? stage.label.toLowerCase() : "working"
@@ -1143,6 +2447,53 @@ export function isStale(op: any, now = Date.now()): boolean {
   );
 }
 
+/**
+ * Give a non-terminal record the outcome its saved state already implies.
+ *
+ * Two dead ends are closed here. A stop recorded while the executor was still
+ * unwinding is honored as soon as the prompt is genuinely idle, because no
+ * mutation is ever in flight at a prompt. And filtering a quiet record out of
+ * every lookup used to leave the operation neither running nor finished: the
+ * customer saw nothing, the repository looked free, and the resources the
+ * attempt had already created were described nowhere.
+ */
+export function reconcileOperationLifecycle(op: any, now = Date.now()): any {
+  if (!op || isTerminalState(op.state)) return op;
+  if (
+    op.state === INPUT_REQUIRED_STATE &&
+    !op.executionActive &&
+    shouldStop(op)
+  ) {
+    return stopAtBoundary(op, "input_prompt");
+  }
+  if (!isStale(op, now)) return op;
+  if (shouldStop(op)) return stopAtBoundary(op, "stale_reconciliation");
+  if (op.state === INPUT_REQUIRED_STATE) {
+    return finish(op, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          "Environment setup timed out while waiting for required information.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+  }
+  return finish(op, "failed_partial", {
+    failure: {
+      code: "operation-stalled",
+      stage: op.currentStage,
+      stepSeq: null,
+      message:
+        "Radius stopped hearing from this environment setup before it finished. Resources it already created were retained so you can retry or clean them up.",
+      classification: "user-fixable",
+      evidence: null
+    }
+  });
+}
+
 const PERSISTED_OPERATION_KEYS = new Set([
   "operationId",
   "schemaVersion",
@@ -1163,7 +2514,9 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "failure",
   "inputRequired",
   "resumeRequest",
-  "verification"
+  "resumeFrom",
+  "verification",
+  "control"
 ]);
 
 function persistedFailure(failure: any): any {
@@ -1184,10 +2537,11 @@ export function toPersistedOperation(op: any): any {
   }
   const record: any = {};
   for (const key of PERSISTED_OPERATION_KEYS) {
-    if (key === "failure") continue;
+    if (key === "failure" || key === "control") continue;
     if (op[key] !== undefined) record[key] = structuredClone(op[key]);
   }
   record.failure = persistedFailure(op.failure);
+  record.control = readOperationControl(op.control);
   if (
     typeof record.operationId !== "string" ||
     !record.operationId.startsWith("op_") ||
@@ -1200,19 +2554,53 @@ export function toPersistedOperation(op: any): any {
   return record;
 }
 
+/**
+ * Read a saved operation, upgrading a schema-version-1 record in place.
+ *
+ * Issues #304 and #305 shipped version 1 records. Discarding them would strand
+ * a customer mid-setup with resources already created, so the missing control
+ * fields are filled with safe defaults instead.
+ */
 export function fromPersistedOperation(value: any): any {
-  const op = toPersistedOperation(value);
-  if (!Array.isArray(op.stages) || !Array.isArray(op.steps)) {
+  if (!value || typeof value !== "object") {
+    throw new Error("Operation record is required.");
+  }
+  const record: any = {};
+  for (const key of PERSISTED_OPERATION_KEYS) {
+    if (key === "failure" || key === "control") continue;
+    if (value[key] !== undefined) record[key] = structuredClone(value[key]);
+  }
+  record.failure = persistedFailure(value.failure);
+  if (
+    typeof record.operationId !== "string" ||
+    !record.operationId.startsWith("op_") ||
+    typeof record.repo !== "string" ||
+    typeof record.state !== "string" ||
+    !SUPPORTED_OPERATION_SCHEMA_VERSIONS.includes(record.schemaVersion)
+  ) {
+    throw new Error("Invalid operation record.");
+  }
+  if (!Array.isArray(record.stages) || !Array.isArray(record.steps)) {
     throw new Error("Invalid persisted operation stages or steps.");
   }
-  if (op.verification?.runId != null) {
-    op.verification.runId = String(op.verification.runId);
+  record.control = readOperationControl(value.control);
+  record.stopRequested = Boolean(record.control.stop.requestedAt);
+  record.schemaVersion = OPERATION_SCHEMA_VERSION;
+  if (record.verification?.runId != null) {
+    record.verification.runId = String(record.verification.runId);
   }
-  return op;
+  return record;
 }
 
 export function reconcileRestoredOperation(op: any): any {
   if (!op || isTerminalState(op.state)) return op;
+  // A stop the customer already paid for outlives the process that was going to
+  // honor it. Nothing is mid-flight after a restart, so the boundary is here.
+  if (shouldStop(op)) {
+    stopAtBoundary(op, "restart_recovery");
+    op.recoveryState = "stopped";
+    return op;
+  }
   if (op.inputRequired) {
     if (op.resumeRequest) {
       op.state = INPUT_REQUIRED_STATE;
@@ -1255,26 +2643,6 @@ export function createRegistry({
 } = {}): any {
   /** @type {Map<string, object>} */
   const byId = new Map();
-
-  function expireInput(op: any, now = clock()): any {
-    if (
-      op?.state !== INPUT_REQUIRED_STATE ||
-      !isStale(op, now) ||
-      isTerminalState(op.state)
-    )
-      return op;
-    return finish(op, "failed_partial", {
-      failure: {
-        code: "operation-input-expired",
-        stage: op.currentStage,
-        stepSeq: null,
-        message:
-          "Environment setup timed out while waiting for required information.",
-        classification: "user-fixable",
-        evidence: null
-      }
-    });
-  }
 
   function prune() {
     const now = clock();
@@ -1357,16 +2725,18 @@ export function createRegistry({
       store.report?.(diagnostic);
     },
     snapshot,
-    /** The operation still running for a repo, if any. */
+    /**
+     * The operation holding this repository's lock, if any.
+     *
+     * "One setup at a time per repository" is the invariant that keeps two
+     * attempts from racing on the same App Registration and environment
+     * secrets. A record that has gone quiet is settled here rather than
+     * skipped, so the lock is released by a real terminal result.
+     */
     running(repo) {
       for (const op of byId.values()) {
-        expireInput(op);
-        if (
-          op.repo === repo &&
-          !isTerminalState(op.state) &&
-          !isStale(op, clock())
-        )
-          return op;
+        reconcileOperationLifecycle(op, clock());
+        if (op.repo === repo && !isTerminalState(op.state)) return op;
       }
       return null;
     },
@@ -1378,15 +2748,8 @@ export function createRegistry({
       let best = null;
       for (const op of byId.values()) {
         if (op.repo !== repo) continue;
-        expireInput(op);
-        if (!isTerminalState(op.state)) {
-          // A stale record is one nobody is driving any more. Showing
-          // it would be worse than showing nothing: a spinner that can
-          // never resolve is exactly the thing this work set out to
-          // remove.
-          if (isStale(op, clock())) continue;
-          return op;
-        }
+        reconcileOperationLifecycle(op, clock());
+        if (!isTerminalState(op.state)) return op;
         if (
           !best ||
           new Date(op.endedAt || op.startedAt) >
@@ -1408,11 +2771,8 @@ export function createRegistry({
     latestAny() {
       let best = null;
       for (const op of byId.values()) {
-        expireInput(op);
-        if (!isTerminalState(op.state)) {
-          if (isStale(op, clock())) continue;
-          return op;
-        }
+        reconcileOperationLifecycle(op, clock());
+        if (!isTerminalState(op.state)) return op;
         if (
           !best ||
           new Date(op.endedAt || op.startedAt) >
@@ -1424,8 +2784,8 @@ export function createRegistry({
     },
     get(operationId) {
       const op = byId.get(operationId) || null;
-      expireInput(op);
-      return op && !isStale(op, clock()) ? op : null;
+      reconcileOperationLifecycle(op, clock());
+      return op;
     },
     /**
      * Register a new operation, refusing when one is already running for
@@ -1436,6 +2796,17 @@ export function createRegistry({
       const existing = this.running(op.repo);
       if (existing) return { ok: false, conflict: existing };
       prune();
+      byId.set(op.operationId, op);
+      return { ok: true, operation: op };
+    },
+    /**
+     * Take the repository lock back for an accepted retry of an operation
+     * that already owns the record. Another live attempt wins the conflict.
+     */
+    acquireForRetry(op) {
+      const existing = this.running(op.repo);
+      if (existing && existing.operationId !== op.operationId)
+        return { ok: false, conflict: existing };
       byId.set(op.operationId, op);
       return { ok: true, operation: op };
     },
@@ -1454,19 +2825,21 @@ export function createRegistry({
       return byId.size;
     },
     anyRunning() {
-      for (const op of byId.values())
-        if (!isTerminalState(op.state) && !isStale(op, clock())) return true;
+      for (const op of byId.values()) {
+        reconcileOperationLifecycle(op, clock());
+        if (!isTerminalState(op.state)) return true;
+      }
       return false;
     },
     anyExecuting() {
       for (const op of byId.values()) {
+        reconcileOperationLifecycle(op, clock());
         if (
           !isTerminalState(op.state) &&
           op.state === RUNNING_STATE &&
           (op.executionActive === true ||
             (op.currentStage === STAGE_VERIFY &&
-              !!op.verification?.dispatchedAt)) &&
-          !isStale(op, clock())
+              !!op.verification?.dispatchedAt))
         )
           return true;
       }
@@ -1519,6 +2892,8 @@ export function setupInFlight(): boolean {
 export function toClientView(op: any): any {
   if (!op) return null;
   const cleanup = projectCleanupSummary(op);
+  const control = op.control || createOperationControl();
+  const command = latestCommand(op);
   return {
     operationId: op.operationId,
     schemaVersion: op.schemaVersion,
@@ -1544,6 +2919,36 @@ export function toClientView(op: any): any {
     terminalState: isTerminalState(op.state) ? op.state : null,
     hasWarnings: hasWarnings(op),
     cleanup,
+    stop: {
+      requested: Boolean(control.stop.requestedAt),
+      requestedAt: control.stop.requestedAt,
+      acknowledgedAt: control.stop.acknowledgedAt,
+      boundary: control.stop.boundary
+    },
+    attempts: { ...control.attempts },
+    // The idempotency key is derived from saved facts and is never needed in the
+    // browser, so only the command's identity and state travel.
+    command:
+      command ?
+        {
+          kind: command.kind,
+          commandId: command.commandId,
+          attempt: command.attempt,
+          state: command.state,
+          acceptedAt: command.acceptedAt,
+          completedAt: command.completedAt,
+          outcome: command.outcome
+        }
+      : null,
+    outcomes: control.outcomes.map((entry: any) => ({
+      kind: entry.kind,
+      attempt: entry.attempt,
+      state: entry.state,
+      code: entry.code,
+      recordedAt: entry.recordedAt
+    })),
+    actions: projectOperationActions(op),
+    nextTransition: projectNextTransition(op),
     failure:
       op.failure ?
         {

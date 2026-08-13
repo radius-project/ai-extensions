@@ -11,9 +11,17 @@ import {
   finish,
   finishSucceeded,
   isStale,
+  acceptCommand,
+  beginRetryAttempt,
+  canRetrySetup,
   recordAzureApp,
+  recordCommitState,
+  recordCommittedWorkflowFile,
   recordGitHubEnvironment,
+  recordServicePrincipal,
+  requestStop,
   requireInput,
+  shouldStop,
   sanitizeResumeTarget,
   STAGE_VERIFY,
   toClientView
@@ -486,5 +494,237 @@ describe("operation restart functional coverage", () => {
         message: expect.stringContaining("disk full")
       })
     ]);
+  });
+});
+
+describe("cooperative control functional coverage", () => {
+  const operation = () =>
+    createOperation({
+      provider: "azure",
+      repo: "contoso/store",
+      environment: "dev",
+      journey: { origin: "environments" }
+    });
+
+  it("honors a stop recorded before the extension restarted", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-contoso-store"
+    });
+    requestStop(op);
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    // Nothing was in flight across the restart, so the boundary is here.
+    expect(recovered.state).toBe("cancelled");
+    expect(recovered.recoveryState).toBe("stopped");
+    expect(recovered.control.stop.requestedAt).toBeTruthy();
+    expect(recovered.control.stop.boundary).toBe("restart_recovery");
+    expect(shouldStop(recovered)).toBe(false);
+    // The resource it created is still named for the customer.
+    expect(toClientView(recovered).cleanup.created).toEqual([
+      { kind: "azure_app", target: "radius-contoso-store (app-1)" }
+    ]);
+  });
+
+  it("rebuilds the same command identity for a retry after a restart", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: { resourceGroup: "rg-dev" },
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finish(op, "failed_partial", {
+      failure: { code: "operation-stalled", message: "lost contact" }
+    });
+    const attempt = beginRetryAttempt(op, "setup");
+    const accepted = acceptCommand(op, {
+      kind: "retry_setup",
+      attempt,
+      target: "setup"
+    });
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(recovered.control.attempts.setup).toBe(2);
+    expect(recovered.control.commands).toEqual([
+      expect.objectContaining({
+        commandId: accepted.command.commandId,
+        idempotencyKey: accepted.command.idempotencyKey
+      })
+    ]);
+    // The same command cannot be accepted twice after a restart.
+    expect(
+      acceptCommand(recovered, {
+        kind: "retry_setup",
+        attempt: recovered.control.attempts.setup,
+        target: "setup"
+      })
+    ).toMatchObject({ ok: false, duplicate: true });
+    expect(recovered.control.outcomes).toEqual([
+      expect.objectContaining({ kind: "setup", state: "failed_partial" })
+    ]);
+  });
+
+  it("continues a restored setup from the retained ledger rather than browser state", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: { resourceGroup: "rg-dev", cluster: "aks-dev" },
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(canRetrySetup(recovered)).toMatchObject({
+      ok: true,
+      resumeFrom: "federated_credentials"
+    });
+    expect(recovered.setupArtifacts.azureApp.appId).toBe("app-1");
+    expect(recovered.request).toBeUndefined();
+  });
+
+  it("keeps the action_required verdict in history across a verification retry", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      mode: "pull_request",
+      branch: "radius-setup"
+    });
+    recordCommitState(op, {
+      mode: "pull_request",
+      branch: "radius-setup",
+      baseBranch: "main",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+    finish(op, "action_required", {
+      terminal: {
+        reason: "pr-merge-required",
+        pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      }
+    });
+    beginRetryAttempt(op, "verification");
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(recovered.state).toBe("running");
+    expect(recovered.control.attempts.verification).toBe(1);
+    expect(recovered.control.outcomes).toEqual([
+      expect.objectContaining({
+        kind: "verification",
+        state: "action_required",
+        code: "pr-merge-required"
+      })
+    ]);
+    // The retained ledger still names the workflow, branch, and pull request.
+    expect(recovered.setupArtifacts.commit.pullRequestUrl).toBe(
+      "https://github.com/contoso/store/pull/7"
+    );
+    expect(recovered.verification.workflow).toBe(
+      "radius-verify-credentials.yml"
+    );
+  });
+
+  it("loads a version 1 record written before the control fields existed", async () => {
+    const { first, filePath, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    requireInput(op, {
+      code: "app-selection-required",
+      message: "Choose an App Registration."
+    });
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {},
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    await first.persist();
+
+    // Rewrite the file exactly as issues #304 and #305 would have left it.
+    const envelope = JSON.parse(await fs.readFile(filePath, "utf8"));
+    for (const record of envelope.operations) {
+      record.schemaVersion = 1;
+      delete record.control;
+    }
+    await fs.writeFile(filePath, JSON.stringify(envelope, null, 2));
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(recovered.schemaVersion).toBe(2);
+    expect(recovered.state).toBe("input_required");
+    expect(recovered.control.attempts).toEqual({
+      setup: 1,
+      verification: 0,
+      cleanup: 0
+    });
+    expect(recovered.control.commands).toEqual([]);
+  });
+
+  it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {
+    const op = operation();
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: { clientSecret: "SECRET_VALUE" },
+      environment: { repo: "contoso/store", environment: "dev" }
+    };
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    requestStop(op);
+    finish(op, "failed_partial", {
+      failure: {
+        code: "operation-stalled",
+        message: "lost contact",
+        evidence: "RAW_STDERR_TOKEN"
+      }
+    });
+    const view = JSON.stringify(toClientView(op));
+    expect(view).not.toContain("SECRET_VALUE");
+    expect(view).not.toContain("RAW_STDERR_TOKEN");
+    expect(view).not.toContain("resumeRequest");
+    expect(view).not.toContain("setupArtifacts");
+    expect(view).not.toContain("idempotencyKey");
   });
 });
