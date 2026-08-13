@@ -26,23 +26,25 @@ The companion [test architecture](./2026-08-radius-canvas-test-architecture.md) 
 | 7     | Not started                               | Add visual and extended regression gates                             | Reviewed screenshots and non-duplicative resilience/platform checks are stable                                                   | —                                                                                                                                             |
 | 8     | Not started                               | Qualify a real Copilot host                                          | Harness self-test and HOST-01–HOST-07 pass; unavailable or emulated results do not qualify a release                             | —                                                                                                                                             |
 
-### Test layers
+### Test priorities and enforcement
 
-| Test layer            | When required                                                                                                                  | Main regression caught                                                                        |
-|-----------------------|--------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
-| Unit                  | Every affected pull request                                                                                                    | Logic, validation, state, escaping, serialization, and error propagation                      |
-| Runtime integration   | Runtime, declaration, lifecycle, hook, action, tool, or branch-context changes; complete gate from Phase 5                     | Registration, open/reopen/close, callbacks, keepalive, and session routing                    |
-| HTTP integration      | Server, route, cache, stream, or destructive-operation changes; complete gate from Phase 5                                     | Real methods, paths, status, headers, bodies, streaming, cleanup, and fail-closed results     |
-| Built-extension smoke | Runtime, export, build, dependency, page, browser, skill, or packaging changes; complete gate and publish blocker from Phase 5 | Missing bundled code, bundled SDK, duplicate registration, broken startup, or broken shutdown |
-| Browser component     | Affected browser unit from Phase 6                                                                                             | Real DOM events, focus, storage, and rendering behavior                                       |
-| Browser functional    | Affected page or cross-module browser behavior from Phase 6                                                                    | Forms, DOM state, polling, and browser HTTP interactions                                      |
-| Critical journey      | Affected supported journey from Phase 6                                                                                        | Regressions crossing renderers, browser code, local HTTP, navigation, and server state        |
-| Accessibility         | Every affected material page state from Phase 6                                                                                | WCAG 2.2 A/AA semantic violations                                                             |
-| Keyboard              | Every affected interactive page state from Phase 6                                                                             | Keyboard traps, bad tab order, focus loss, and missing announcements                          |
-| Visual                | Selected or affected stable states from Phase 7                                                                                | Layout, clipping, theme, graph, and status-presentation drift                                 |
-| Real-host             | Weekly/manual after qualification and mandatory before release                                                                 | Installation, discovery, panel, iframe, focus, close, reopen, and reconnect                   |
+Test priority is independent of implementation phase: **P0** means Required PR gates, **P1** means Required browser gates, **P2** means Extended regression gates, and **P3** means Release qualification. Priority controls delivery order and where a test blocks; it does not make a lower-priority test optional when that test is the only faithful check of a boundary. A test is non-negotiable when a pull request changes the behavior it owns. Higher-level tests complement unit tests and never excuse missing focused unit coverage.
 
-The enforcement groups are **Required PR gates** for Node tests, **Required browser gates** for Chromium behavior and journeys, **Extended regression gates** for visual, resilience, and platform variance, and **Release qualification** for the real host. These groups replace the old priority labels. Higher-level tests complement unit tests and never excuse missing focused unit coverage.
+| Test layer            | Priority | Enforcement                                                                                                                    | Main regression caught                                                                        |
+|-----------------------|----------|--------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| Unit                  | P0       | Every affected pull request; no retries                                                                                        | Logic, validation, state, escaping, serialization, and error propagation                      |
+| Runtime integration   | P0       | Runtime, declaration, lifecycle, hook, action, tool, or branch-context changes; complete gate from Phase 5                     | Registration, open/reopen/close, callbacks, keepalive, and session routing                    |
+| HTTP integration      | P0       | Server, route, cache, stream, or destructive-operation changes; complete gate from Phase 5                                     | Real methods, paths, status, headers, bodies, streaming, cleanup, and fail-closed results     |
+| Built-extension smoke | P0       | Runtime, export, build, dependency, page, browser, skill, or packaging changes; complete gate and publish blocker from Phase 5 | Missing bundled code, bundled SDK, duplicate registration, broken startup, or broken shutdown |
+| Browser component     | P1       | Affected browser unit from Phase 6; one diagnostic retry with the original failure retained                                    | Real DOM events, focus, storage, and rendering behavior                                       |
+| Browser functional    | P1       | Affected page or cross-module browser behavior from Phase 6; one diagnostic retry with flake tracking                          | Forms, DOM state, polling, and browser HTTP interactions                                      |
+| Critical journey      | P1       | Affected supported journey from Phase 6; one traced diagnostic retry with flake tracking                                       | Regressions crossing renderers, browser code, local HTTP, navigation, and server state        |
+| Accessibility         | P1       | Every affected material page state from Phase 6; one diagnostic retry                                                          | WCAG 2.2 A/AA semantic violations                                                             |
+| Keyboard              | P1       | Every affected interactive page state from Phase 6; one diagnostic retry                                                       | Keyboard traps, bad tab order, focus loss, and missing announcements                          |
+| Visual                | P2       | Selected and affected stable states from Phase 7; one diagnostic retry and human-reviewed baseline changes                     | Layout, clipping, theme, graph, and status-presentation drift                                 |
+| Real-host             | P3       | Weekly/manual after qualification and non-negotiable before release; at most one diagnostic retry                              | Installation, discovery, panel, iframe, focus, close, reopen, and reconnect                   |
+
+Platform-matrix and resilience runs are execution policies over these test layers rather than additional test types. Platform-specific unit, runtime-integration, and HTTP-integration tests are P0 when a pull request changes path, process, managed-binary, or source-link behavior and P2 scheduled protection otherwise. P2 resilience runs choose the cheapest faithful layer for partial responses, expiry, repeated polling, cleanup, and timeouts; their scheduled priority does not permit a known failure to remain unowned.
 
 ## Scope and target map
 
@@ -513,9 +515,9 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | QR-13 | Unknown consumer of removed declaration                  | Phase 0 audit/history                    |
 | QR-14 | Setup becomes stale/non-resumable or leaks raw errors    | LC-17, RF-08, J-11                       |
 
-### Appendix F: legacy plan IDs
+### Appendix F: priority suite identifiers
 
-These labels exist only to map earlier design discussions to the renamed gates. Do not use them as priorities or implementation phase numbers.
+These labels retain traceability to earlier design discussions. P0–P3 are test priorities, not implementation phases; the letter suffix identifies a suite group within that priority.
 
 | Legacy plan ID | Current name                                             |
 |----------------|----------------------------------------------------------|
