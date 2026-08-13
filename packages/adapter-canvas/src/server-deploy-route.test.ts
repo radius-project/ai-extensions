@@ -16,18 +16,23 @@ import {
   createLegacyRequestHandler,
   servers,
   setDeployRepairHandoff,
-  DEPLOY_MONITOR_LOST_KIND
+  DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { MIGRATED_ROUTE_KEYS } from "./server/route-table.js";
 import type { CanvasState } from "./shared.js";
 
-// Every GitHub CLI invocation the route can make funnels through these two
-// exports, and the deploy dispatch itself is a `gh workflow run` through
-// cliExec. Replacing them records what the route actually ran, so "a refusal
+// The deploy dispatch is a `gh workflow run` issued through cliExec, and the
+// route's own branch lookup goes through runCommand, both taken from this
+// module. Replacing them records what the route actually ran, so "a refusal
 // costs no Actions run" is checked at that boundary rather than inferred from
-// which state the route did or did not touch. Both are replaced because
-// runCommand calls cliExec internally, not through this module's exports.
+// which state the route did or did not touch.
+//
+// This covers the dispatch, not every possible route to GitHub: helpers kept
+// through importOriginal (getDefaultBranch, fetchFileFromRepo, and the rest)
+// call cliExec internally rather than through the module's exports, so their
+// calls are not recorded here. That is enough for what these cases assert,
+// because a refusal returns before the route reaches any of them.
 const ghCli = vi.hoisted(() => ({
   cliExec: vi.fn(),
   runCommand: vi.fn()
@@ -139,7 +144,7 @@ async function postDeploy(body: unknown): Promise<{
 }
 
 // The guarantee this file exists for: a refused redeploy never reaches the
-// GitHub CLI, so it cannot have dispatched a workflow run. Asserted at the
+// dispatch, so it cannot have started a workflow run. Asserted at that
 // boundary itself, so reordering the route's state writes cannot make a
 // refusal quietly start costing an Actions run.
 function expectNoGitHubCliUse(): void {
@@ -155,7 +160,6 @@ describe("/api/deploy repair-loop refusals", () => {
     // testing nothing, so the assumption fails loudly here instead.
     expect(MIGRATED_ROUTE_KEYS).not.toContain("POST /api/deploy");
   });
-
 
   it("refuses a redeploy past the cap without touching state or dispatching", async () => {
     const state = seed(
@@ -198,10 +202,10 @@ describe("/api/deploy repair-loop refusals", () => {
     expect(state.deployRepairAttempts).toBe(2);
   });
 
-  it("refuses a redeploy when monitoring was lost and the run may be live", async () => {
+  it("refuses a redeploy when the run's outcome was never confirmed", async () => {
     const state = seed(
       failedAttempt({
-        deployErrorKind: DEPLOY_MONITOR_LOST_KIND,
+        deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
         deployRunUrl: "https://github.com/acme/widgets/actions/runs/7",
         deployRepairAttempts: 1
       })
@@ -209,7 +213,7 @@ describe("/api/deploy repair-loop refusals", () => {
     const { status, json } = await postDeploy(repairPayload("attempt-A"));
 
     expect(status).toBe(409);
-    expect(String(json.error)).toMatch(/may still be running/);
+    expect(String(json.error)).toMatch(/may still be in flight/);
     expectNoGitHubCliUse();
     expect(state.deployRepairAttempts).toBe(1);
   });
