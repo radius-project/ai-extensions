@@ -8853,5 +8853,8 @@ export async function getOrCreateServer(
     }
     return entry;
   }
+  // Start warming the page assets only when a canvas is actually opened. The
+  // first HTML request awaits this same in-flight promise before rendering.
+  void ensureVendorScripts();
   return await startServer(instanceId, page);
 }

@@ -295,6 +295,13 @@ export function createRadiusExtension(
   let attachedSession: SessionPort | undefined;
 
   function attachSession(session: SessionPort): void {
+    // Shutdown has already run and will not run again, so a session stored now
+    // would never be torn down. Reject it before mutating either session holder.
+    if (shutdownPromise) {
+      throw new Error(
+        "Radius runtime: cannot attach a session after shutdown; the runtime can no longer tear it down."
+      );
+    }
     if (attachedSession) {
       if (attachedSession !== session) {
         throw new Error(
@@ -305,8 +312,6 @@ export function createRadiusExtension(
     }
     attachedSession = session;
     deps.session.set(session);
-    // A session attached after shutdown must not resurrect the keepalive.
-    if (shutdownPromise) return;
     startKeepalive();
   }
 
