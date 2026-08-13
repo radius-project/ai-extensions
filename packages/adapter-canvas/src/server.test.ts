@@ -1,15 +1,24 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  activeDeploymentMutation,
   addGraphProgress,
+  beginPlannedGraphRequest,
+  beginDeployAttempt,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
   buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
+  azureCliAssistDisplayPrompt,
+  azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
+  DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
+  deploymentStatusBlocksMutation,
+  DEPLOYMENT_MUTATION_LEASE_MS,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS,
   endChildInput,
   ensureServicePrincipal,
   finalizeSetupFailure,
@@ -18,12 +27,19 @@ import {
   isCrossSiteMutation,
   isCliCommandMissing,
   isCurrentSourceRefToken,
+  isCurrentPlannedGraphRequest,
   isReplicationLagError,
   invokeSessionPrompt,
+  localDeploymentBlocksMutation,
   pickAksResourceGroup,
   preflightGhcrPackageWriteAccess,
+  resetDeploymentViewState,
   resolveGitHubEnvironmentCreateState,
+  releaseDeploymentMutation,
+  reserveDeploymentMutation,
+  resolveDeploymentEnvironment,
   resolveDeployStatus,
+  resolveDeployRepairLoop,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
 } from "./server.js";
@@ -42,6 +58,16 @@ import {
 } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 import type { DeployRepairHandoffInput } from "./server.js";
+
+describe("DEPLOY_RAD_COMMANDS_STEP", () => {
+  it("matches the step name in the upstream run-rad-commands action", () => {
+    // The deploy monitor gates all of its in-flight handling on finding a step
+    // with this name. It previously read "Deploy Application", which exists
+    // nowhere in radius-project/radius, so that entire code path never ran on
+    // a real deploy. Pin the value so the same silent break cannot recur.
+    expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+  });
+});
 
 describe("endChildInput", () => {
   it("keeps command execution authoritative when closing stdin fails", () => {
@@ -1223,6 +1249,196 @@ describe("pickAksResourceGroup", () => {
   });
 });
 
+describe("deploymentStatusBlocksMutation", () => {
+  it.each(["pending", "in_progress", "deleting"])(
+    "blocks the non-terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(true);
+    }
+  );
+
+  it.each(["success", "failed", "unknown", "", undefined])(
+    "allows the terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(false);
+    }
+  );
+});
+
+describe("deployment mutation reservations", () => {
+  it("allows one mutation at a time and releases its owner", () => {
+    const state: CanvasState = {};
+    const deploy = reserveDeploymentMutation(state, {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy"
+    });
+
+    expect(deploy).not.toBeNull();
+    if (!deploy) throw new Error("expected deployment reservation");
+    expect(
+      reserveDeploymentMutation(state, {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "delete"
+      })
+    ).toBeNull();
+
+    releaseDeploymentMutation(state, deploy);
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+
+  it("does not let a stale completion release a newer mutation", () => {
+    const stale = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy" as const,
+      expiresAt: 100
+    };
+    const current = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "delete" as const,
+      expiresAt: 200
+    };
+    const state: CanvasState = { deploymentMutation: current };
+
+    releaseDeploymentMutation(state, stale);
+
+    expect(state.deploymentMutation).toBe(current);
+  });
+
+  it("expires abandoned reservations and lets a later operation recover", () => {
+    const state: CanvasState = {};
+    const abandoned = reserveDeploymentMutation(
+      state,
+      {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy"
+      },
+      100
+    );
+    expect(abandoned?.expiresAt).toBe(100 + DEPLOYMENT_MUTATION_LEASE_MS);
+    expect(
+      activeDeploymentMutation(state, 100 + DEPLOYMENT_MUTATION_LEASE_MS - 1)
+    ).toBe(abandoned);
+
+    const recovered = reserveDeploymentMutation(
+      state,
+      {
+        repo: "octo/app",
+        environment: "staging",
+        kind: "deploy"
+      },
+      100 + DEPLOYMENT_MUTATION_LEASE_MS
+    );
+
+    expect(recovered).not.toBeNull();
+    expect(state.deploymentMutation).toBe(recovered);
+  });
+});
+
+describe("deployment mutation recovery", () => {
+  it("bounds stale local in-progress state but preserves fresh and legacy state", () => {
+    expect(
+      localDeploymentBlocksMutation(
+        { deployStatus: "in_progress", deployStartedAt: 100 },
+        100 + DEPLOYMENT_MUTATION_LEASE_MS - 1
+      )
+    ).toBe(true);
+    expect(
+      localDeploymentBlocksMutation(
+        { deployStatus: "in_progress", deployStartedAt: 100 },
+        100 + DEPLOYMENT_MUTATION_LEASE_MS
+      )
+    ).toBe(false);
+    expect(
+      localDeploymentBlocksMutation({ deployStatus: "in_progress" }, 100)
+    ).toBe(true);
+    expect(
+      localDeploymentBlocksMutation({ deployStatus: "success" }, 100)
+    ).toBe(false);
+  });
+
+  it("restores the state-backed environment fallback for existing callers", () => {
+    expect(resolveDeploymentEnvironment({ envName: "prod" }, undefined)).toBe(
+      "prod"
+    );
+    expect(resolveDeploymentEnvironment({ envName: "prod" }, "staging")).toBe(
+      "staging"
+    );
+    expect(resolveDeploymentEnvironment({}, undefined)).toBe("");
+  });
+
+  it("clears both the result and any abandoned reservation on reset", () => {
+    const state: CanvasState = {
+      deployResult: { message: "done" },
+      deployAttempt: { id: "attempt-1" },
+      deploymentMutation: {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy",
+        expiresAt: 1000,
+        attemptId: "attempt-1"
+      }
+    };
+
+    resetDeploymentViewState(state, "attempt-1", 100);
+
+    expect(state.deployResult).toBeUndefined();
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+
+  it("does not let an old result page reset a newer reservation", () => {
+    const current = {
+      repo: "octo/app",
+      environment: "staging",
+      kind: "deploy" as const,
+      expiresAt: 1000,
+      attemptId: "attempt-2"
+    };
+    const state: CanvasState = {
+      deployResult: { message: "new result" },
+      deployAttempt: { id: "attempt-2" },
+      deploymentMutation: current
+    };
+
+    resetDeploymentViewState(state, "attempt-1", 100);
+
+    expect(state.deployResult).toEqual({ message: "new result" });
+    expect(state.deploymentMutation).toBe(current);
+  });
+
+  it("clears an expired reservation even without an attempt match", () => {
+    const state: CanvasState = {
+      deploymentMutation: {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy",
+        expiresAt: 100
+      }
+    };
+
+    resetDeploymentViewState(state, undefined, 100);
+
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+});
+
+describe("planned graph request generations", () => {
+  it("clears stale resources and lets only the latest request commit", () => {
+    const state: CanvasState = { plannedResources: [{ name: "old" }] };
+
+    const first = beginPlannedGraphRequest(state);
+    const second = beginPlannedGraphRequest(state);
+
+    expect(state.plannedResources).toBeNull();
+    expect(isCurrentPlannedGraphRequest(state, first)).toBe(false);
+    expect(isCurrentPlannedGraphRequest(state, second)).toBe(true);
+  });
+});
+
 describe("triggerDeployRepairHandoff", () => {
   afterEach(() => {
     setDeployRepairHandoff(null);
@@ -1292,8 +1508,11 @@ describe("triggerDeployRepairHandoff", () => {
     entry.state.deployRepairing = false;
     entry.state.deployHandoffState = "idle";
     entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
     expect(triggerDeployRepairHandoff(entry)).toBe(true);
     expect(calls).toHaveLength(2);
+    // The handoff belongs to the new attempt, not a reopened attempt-A.
+    expect(calls[1]).toMatchObject({ attemptId: "attempt-B" });
   });
 
   it("suppresses a re-handoff while delivery is still in flight", () => {
@@ -1398,6 +1617,300 @@ describe("triggerDeployRepairHandoff", () => {
       state: "pending",
       pending: true
     });
+  });
+
+  // A canvas panel is reused across deploys, so these settle against whatever
+  // deploy is current, not the one that opened the handoff.
+  it("ignores a delivery that lands after a new deploy replaced the attempt", async () => {
+    let resolveSend: (value: string) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const entry = failedEntry();
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    // The user starts a new deploy before the send settles. Mirror exactly what
+    // /api/deploy assigns when agentInitiated !== true.
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployRepairing = false;
+    entry.state.deployHandoffState = "idle";
+    entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    resolveSend("message-id");
+    await Promise.resolve();
+
+    // Marking the new attempt delivered/owned would permanently suppress its
+    // own handoff via the deployRepairing guard.
+    expect(entry.state.deployRepairing).toBe(false);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "idle",
+      attempts: 0
+    });
+
+    // The new attempt still gets its own handoff when it fails.
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+      return Promise.resolve("message-id");
+    });
+    entry.state.deployStatus = "failed";
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    expect(calls).toEqual([
+      expect.objectContaining({ attemptId: "attempt-B" })
+    ]);
+  });
+
+  it("ignores a rejection that lands after a new deploy replaced the attempt", async () => {
+    let rejectSend: (reason: Error) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSend = reject;
+        })
+    );
+    const entry = failedEntry();
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployRepairing = false;
+    entry.state.deployHandoffState = "idle";
+    entry.state.deployHandoffAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    rejectSend(new Error("send failed"));
+    await Promise.resolve();
+
+    // "retryable" here would also keep the webview polling for a handoff that
+    // belongs to a deploy that is already over.
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "idle",
+      attempts: 0,
+      pending: false
+    });
+  });
+
+  // Every deploy mints an attempt id today, but a state without one must not
+  // get stranded as pending - that would block every later handoff.
+  it("still settles a handoff opened without an attempt id", async () => {
+    setDeployRepairHandoff(() => Promise.resolve("message-id"));
+    const entry = failedEntry({ deployAttempt: undefined });
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployRepairing).toBe(true);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "delivered",
+      pending: false
+    });
+  });
+
+  // The route resolves the deploy branch before calling beginDeployAttempt,
+  // because an await between the reset and the new attempt id would leave the
+  // previous attempt current for that window.
+  it("revokes an in-flight handoff as soon as a new attempt begins", async () => {
+    let resolveSend: (value: string) => void = () => {};
+    setDeployRepairHandoff(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const entry = failedEntry();
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+    expect(entry.state.deployAttempt?.id).not.toBe("attempt-A");
+
+    resolveSend("message-id");
+    await Promise.resolve();
+
+    expect(entry.state.deployRepairing).toBe(false);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "idle",
+      attempts: 0
+    });
+  });
+
+  it("keeps an agent redeploy owned by the repair loop it came from", () => {
+    const entry = failedEntry();
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployRepairing).toBe(true);
+    expect(deployHandoffStatus(entry.state)).toMatchObject({
+      state: "delivered"
+    });
+    // The loop keeps one identity across its retries, so the agent's next
+    // status call is not told its own attempt is inactive.
+    expect(entry.state.deployAttempt?.id).toBe("attempt-A");
+  });
+
+  it("hands off a failed first agent deploy, which opens no repair loop", async () => {
+    // Regression: radius_deploy sets agentInitiated on every call, so keying
+    // ownership off that flag pre-marked a first agent deploy as repairing and
+    // triggerDeployRepairHandoff bailed out — the agent never learned it failed.
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    const entry = failedEntry();
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+    entry.state.deployStatus = "failed";
+    expect(entry.state.deployRepairing).toBe(false);
+    expect(triggerDeployRepairHandoff(entry)).toBe(true);
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("carries the delivery budget across a repair loop but resets it otherwise", () => {
+    // The budget belongs to the loop: resetting it on every redeploy let an
+    // undeliverable handoff retry past DEPLOY_HANDOFF_MAX_ATTEMPTS forever.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployHandoffAttempts = 2;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployHandoffAttempts).toBe(2);
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployHandoffAttempts).toBe(0);
+  });
+
+  describe("resolveDeployRepairLoop", () => {
+    it("treats a deploy with no attempt as an ordinary deploy", () => {
+      expect(
+        resolveDeployRepairLoop(
+          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          ""
+        )
+      ).toEqual({ repairLoop: false, attemptId: "" });
+      expect(resolveDeployRepairLoop({} as CanvasState, undefined)).toEqual({
+        repairLoop: false,
+        attemptId: ""
+      });
+    });
+
+    it("keeps a redeploy on the attempt it was handed so the loop stays addressable", () => {
+      expect(
+        resolveDeployRepairLoop(
+          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          "attempt-A"
+        )
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A" });
+    });
+
+    it("rejects a stale repair rather than letting it clobber a newer deploy", () => {
+      // The tool validated the attempt before POSTing, but a newer deploy can
+      // start in between. Re-checking server-side keeps that race from marking
+      // the newer deploy as already owned and swallowing its handoff.
+      const stale = resolveDeployRepairLoop(
+        { deployAttempt: { id: "attempt-B" } } as CanvasState,
+        "attempt-A"
+      );
+      expect(stale.repairLoop).toBe(false);
+      expect(stale.attemptId).toBe("");
+      expect(stale.error).toMatch(/no longer the current attempt/);
+    });
+
+    it("rejects an attempt-bound deploy when the panel holds no attempt", () => {
+      const orphan = resolveDeployRepairLoop({} as CanvasState, "attempt-A");
+      expect(orphan.repairLoop).toBe(false);
+      expect(orphan.error).toMatch(/no longer the current attempt/);
+    });
+  });
+
+  it("drops a scheduled retry when a new deploy starts during the backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = failedEntry();
+      expect(triggerDeployRepairHandoff(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "retryable",
+        attempts: 1
+      });
+
+      // The backoff is its own window for the user to start a new deploy, and
+      // that deploy can fail fast enough to land back in the handoff window.
+      entry.state.deployRepairing = false;
+      entry.state.deployHandoffState = "idle";
+      entry.state.deployHandoffAttempts = 0;
+      entry.state.deployAttempt = { id: "attempt-B" };
+
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS * 2);
+
+      // The retry belonged to attempt-A, so it must not re-send that attempt's
+      // payload against attempt-B or consume attempt-B's budget.
+      expect(calls).toHaveLength(1);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "idle",
+        attempts: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries from the server when nothing polls the status route", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = failedEntry();
+      expect(triggerDeployRepairHandoff(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+
+      // No status poll happens here; the retry has to come from the timer.
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      expect(calls).toHaveLength(2);
+      expect(deployHandoffStatus(entry.state)).toMatchObject({
+        state: "retryable",
+        attempts: 2
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1509,6 +2022,19 @@ describe("invokeSessionPrompt", () => {
       error: "The Copilot session could not start Azure CLI help."
     });
   });
+
+  it("forwards a paired prompt/displayPrompt message to the handler untouched", async () => {
+    const seen: unknown[] = [];
+    const message = {
+      prompt: "run az login …",
+      displayPrompt: "Signing in to Azure CLI."
+    };
+    const result = await invokeSessionPrompt(async (value) => {
+      seen.push(value);
+    }, message);
+    expect(seen).toEqual([message]);
+    expect(result).toEqual({ status: 200 });
+  });
 });
 
 describe("buildAzureCliAssistPrompt", () => {
@@ -1540,5 +2066,45 @@ describe("buildAzureCliAssistPrompt", () => {
     const prompt = buildAzureCliAssistPrompt({ action: "install" });
     expect(prompt).toContain("Azure CLI is not installed");
     expect(prompt).toContain("install Azure CLI");
+  });
+});
+
+describe("azureCliAssistDisplayPrompt", () => {
+  it("summarizes the login case without the command or environment mechanics", () => {
+    const display = azureCliAssistDisplayPrompt({
+      action: "login",
+      tenantId: "11111111-2222-3333-4444-555555555555"
+    });
+    expect(display).toBe(
+      "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials."
+    );
+    expect(display).not.toContain("az login");
+    expect(display).not.toContain("COPILOT_AGENT_SESSION_ID");
+    // A tenant guid is internal detail; it must not leak into the timeline.
+    expect(display).not.toContain("11111111");
+  });
+
+  it("summarizes the install case", () => {
+    expect(azureCliAssistDisplayPrompt({ action: "install" })).toContain(
+      "Installing Azure CLI"
+    );
+  });
+});
+
+describe("azureCliAssistMessage", () => {
+  // Issue #209: the canvas injects this turn on the user's behalf, so the
+  // timeline must not show the multi-paragraph instructions as if the user
+  // typed them, while the agent still receives them in full.
+  it("pairs the full agent prompt with its short display stand-in", () => {
+    const input = {
+      action: "login",
+      tenantId: "11111111-2222-3333-4444-555555555555"
+    };
+    const message = azureCliAssistMessage(input);
+    expect(message.prompt).toBe(buildAzureCliAssistPrompt(input));
+    expect(message.displayPrompt).toBe(azureCliAssistDisplayPrompt(input));
+    expect(message.prompt).toContain("COPILOT_AGENT_SESSION_ID");
+    expect(message.displayPrompt).not.toContain("COPILOT_AGENT_SESSION_ID");
+    expect(message.displayPrompt.length).toBeLessThan(message.prompt.length);
   });
 });

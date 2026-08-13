@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SDK = "@github/copilot-sdk";
@@ -52,5 +54,26 @@ describe("@github/copilot-sdk version pin", () => {
     expect(buildScript).toMatch(
       /external:\s*\[[^\]]*"@github\/copilot-sdk"[^\]]*\]/
     );
+  });
+
+  // The handoff turns rely on MessageOptions.displayPrompt to keep an internal
+  // repair prompt from rendering as a message the user appears to have typed
+  // (#209). A pin that predates the field would silently restore that bug, so
+  // assert it against the installed types rather than trusting the version.
+  it("resolves to an SDK whose MessageOptions supports displayPrompt", () => {
+    // Resolve the installed package root from its entry point rather than a
+    // hardcoded node_modules path, so pnpm's virtual store layout doesn't
+    // matter. The entry sits under dist/ (ESM) or dist/cjs/ (CJS).
+    const entry = createRequire(import.meta.url).resolve("@github/copilot-sdk");
+    const packageRoot = entry.slice(
+      0,
+      entry.lastIndexOf(`${sep}dist${sep}`) + 1
+    );
+    const messageOptions = readFileSync(
+      join(packageRoot, "dist", "types.d.ts"),
+      "utf8"
+    ).match(/export interface MessageOptions \{[\s\S]*?\n\}/)?.[0];
+    expect(messageOptions).toBeDefined();
+    expect(messageOptions).toMatch(/displayPrompt\?:\s*string/);
   });
 });

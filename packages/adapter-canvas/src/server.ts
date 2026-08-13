@@ -14,19 +14,21 @@ import type {
   Server as HttpServer,
   ServerResponse
 } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
+  deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  projectDeployedGraph,
   resolveRecipeOutputs,
-  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
   buildEnvironmentSuffix
 } from "@radius-project/core";
+import type { DeployStatus } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
 import {
@@ -119,6 +121,7 @@ import {
 } from "./verification-plan.js";
 import {
   operations,
+  isTerminalState,
   isStale,
   hasCompleteVerificationIdentity,
   toClientView,
@@ -142,8 +145,11 @@ import {
   projectCleanupSummary,
   finish,
   finishSucceeded,
+  canResumeInput,
   requireInput,
   resumeAfterInput,
+  setExecutionActive,
+  INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
@@ -175,24 +181,20 @@ import {
   findWorkflowRun,
   getRunDetail,
   fetchRunLog,
-  fetchLiveDeployLog,
-  fetchLiveActivityLog,
-  fetchLiveControlPlaneLog,
-  fetchDeployState,
-  createDeployStatusReader,
-  appNameForGraphTag,
-  normalizeDeployedGraph,
-  rewireDeployedGraphChain,
-  reduceActivityLog,
-  applyActivityToResources,
   extractErrorLines,
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
-  explainRepoAccessForEnvSetup,
-  parseResourceProgress,
-  parseRadDeployLog
+  explainRepoAccessForEnvSetup
 } from "./deploy.js";
+import {
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  buildDeployMessageMap,
+  buildDeployStatusMap,
+  createDeployStatusReader,
+  settleDeployStatuses
+} from "./deploy-artifacts.js";
 import {
   graphPage,
   plannedGraphPage,
@@ -384,7 +386,9 @@ interface OpenSourceInput {
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
-type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+type SessionPromptHandler = (
+  prompt: string | SessionPromptMessage
+) => Promise<unknown>;
 
 interface IdValidationInput {
   tenantId?: string;
@@ -399,6 +403,14 @@ interface AzureLoginInput {
 interface AzureCliAssistInput {
   action?: string;
   tenantId?: string;
+}
+
+// A prompt paired with the shorter text the chat timeline shows in its place.
+// Mirrors the runtime's HandoffMessage: server-originated prompts are also
+// machine-authored, so they must not render as if the user typed them (#209).
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
 }
 
 interface DeployHandoffSummary {
@@ -493,6 +505,59 @@ interface FederatedCredential {
 // Per-instance canvas servers: instanceId -> { server, url, page, state }.
 // Shared with the SDK entry (extension.ts) for open/close + shutdown.
 export const servers = new Map<string, CanvasServerEntry>();
+let environmentOperationTestRunner:
+  ((operationId: string) => Promise<void>) | null = null;
+
+export function setEnvironmentOperationTestRunner(
+  runner: ((operationId: string) => Promise<void>) | null
+): void {
+  environmentOperationTestRunner = runner;
+}
+
+const activeEnvironmentTasks = new Map<string, Set<string>>();
+const environmentTasksSettledListeners = new Map<string, Set<() => void>>();
+const shuttingDownInstances = new Set<string>();
+const activeVerificationMonitors = new Set<string>();
+
+export function hasActiveEnvironmentTasks(instanceId: string): boolean {
+  return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
+}
+
+export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
+  shuttingDownInstances.add(instanceId);
+}
+
+export function onEnvironmentTasksSettled(
+  instanceId: string,
+  listener: () => void
+): () => void {
+  let listeners = environmentTasksSettledListeners.get(instanceId);
+  if (!listeners) {
+    listeners = new Set();
+    environmentTasksSettledListeners.set(instanceId, listeners);
+  }
+
+  listeners.add(listener);
+  let listening = true;
+  const stop = () => {
+    if (!listening) return;
+    listening = false;
+    listeners?.delete(listener);
+    if (listeners?.size === 0)
+      environmentTasksSettledListeners.delete(instanceId);
+  };
+  if (!hasActiveEnvironmentTasks(instanceId)) {
+    queueMicrotask(() => {
+      if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
+      try {
+        listener();
+      } catch {
+        // Listener failures must not affect task settlement.
+      }
+    });
+  }
+  return stop;
+}
 
 export function graphDefinitionHash(
   content: string,
@@ -541,77 +606,81 @@ export function addGraphProgress(
   return true;
 }
 
-// deployStatusReaderFromState - build a GHCR-first deployed-graph/status reader
-// from a canvas instance's state. The graph registry/tag are derived the same
-// way the deploy workflow producer derives them (from the environment's GHCR
-// state registry + the environment/app names), so the reader pulls the exact
-// artifact the deploy published. Falls back to the radius-deploy-status branch
-// when the environment/app/registry can't be resolved or the artifact is
-// absent.
+// deployStatusReaderFromState - build a deployed-graph/status reader for a
+// canvas instance's state.
 //
-// The app name is required to build the producer's "<environment>-<app>-latest"
-// tag. It's populated during the deploy flow, but on a fresh session (or when
-// the Deployed tab is opened without first deploying) it's derived here from the
-// repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
-// — and cached back into state so GHCR retrieval works across reloads.
+// Deploy status and the deployed application graph are published by the deploy
+// workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
+// the run being monitored when there is one, so an in-flight deploy reports its
+// own status rather than the previous run's; otherwise read the newest matching
+// artifact repo-wide, which is what a fresh canvas session with no run in flight
+// needs.
+//
+// The application name only breaks ties between artifacts in the same
+// environment; it is never a lookup key and never a hard filter. That is why the
+// ordinary `resolveRepoAppName` is good enough here even though it falls back to
+// the repository's short name: a wrong guess cannot hide a real artifact.
 async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,
-  branch: string
+  branch: string,
+  runId?: number | string | null
 ) {
   const environment = state?.deployEnvName || state?.envName || "";
-  let app = state?.deployAppName || "";
-  if (!app && repo && environment) {
-    app = await resolveGraphAppName(
+  let application = state?.deployAppName || "";
+  if (!application && repo) {
+    application = await resolveRepoAppName(
       repo,
       branch || state?.deployingBranch || state?.graphBranch || ""
     );
-    if (app && state) state.deployAppName = app;
+    if (application && state) state.deployAppName = application;
   }
-  let stateRegistry = "";
-  if (repo && environment) {
-    try {
-      stateRegistry = stateRegistryForEnvironment(repo, environment);
-    } catch {
-      stateRegistry = "";
-    }
-  }
-  return createDeployStatusReader({ repo, environment, app, stateRegistry });
+  return cachedDeployStatusReader({
+    repo,
+    environment,
+    application,
+    runId: runId ?? state?.deployRunId ?? null
+  });
 }
 
-// resolveGraphAppName - extract the Radius app name for the GHCR graph tag using
-// the producer's exact rule (the first `name: '...'` literal in app.bicep). This
-// differs from resolveRepoAppName, which prefers the applications resource name
-// and falls back to the repo basename; the tag must match the producer's grep
-// byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
-async function resolveGraphAppName(
-  repo: string,
-  branch: string
-): Promise<string> {
-  const ref = branch || "main";
-  for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw: string;
-    try {
-      raw = await ghOrThrow([
-        "api",
-        `/repos/${repo}/contents/${p}?ref=${ref}`,
-        "--jq",
-        ".content"
-      ]);
-    } catch {
-      raw = "";
-    }
-    if (!raw) continue;
-    let decoded: string;
-    try {
-      decoded = Buffer.from(raw, "base64").toString("utf8");
-    } catch {
-      decoded = "";
-    }
-    const name = appNameForGraphTag(decoded);
-    if (name) return name;
+// createDeployStatusReader keeps its TTL cache, single-flight de-dup and
+// monotonic `sequence` guard in the reader instance, so building a fresh reader
+// per request makes all three inert and lets the deploy monitor and an
+// /api/deployed-graph poll download the same artifact concurrently. Cache
+// readers by their identity so callers reading the same deployment share one.
+const deployStatusReaders = new Map<
+  string,
+  ReturnType<typeof createDeployStatusReader>
+>();
+const MAX_DEPLOY_STATUS_READERS = 32;
+
+function cachedDeployStatusReader(
+  options: Parameters<typeof createDeployStatusReader>[0]
+): ReturnType<typeof createDeployStatusReader> {
+  const key = [
+    options.repo,
+    options.environment || "",
+    options.application || "",
+    options.runId ?? ""
+  ].join("\n");
+  const existing = deployStatusReaders.get(key);
+  if (existing) {
+    // Refresh LRU position so the cap evicts genuinely idle readers, not the
+    // one a live deploy is actively polling.
+    deployStatusReaders.delete(key);
+    deployStatusReaders.set(key, existing);
+    return existing;
   }
-  return "";
+  const reader = createDeployStatusReader(options);
+  deployStatusReaders.set(key, reader);
+  // Bounded: each run mints a new key (runId is part of it), so a long session
+  // cycling through deploys/environments must not grow the map without limit.
+  while (deployStatusReaders.size > MAX_DEPLOY_STATUS_READERS) {
+    const oldest = deployStatusReaders.keys().next().value;
+    if (oldest === undefined) break;
+    deployStatusReaders.delete(oldest);
+  }
+  return reader;
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -625,6 +694,129 @@ const envListCache = new Map<string, CachedPayload>();
 // dispatched (see /api/deploy and /api/delete-deployment).
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
+
+// A deploy request resolves branch and GitHub state asynchronously before
+// beginDeployAttempt marks the canvas state in progress. Reserve that window so
+// two near-simultaneous requests cannot both pass the conflict check and start.
+// Deploy reservations live through the background monitor; delete reservations
+// live through the short GitHub record-publication window. Failures release
+// immediately.
+export interface DeploymentDispatchReservation {
+  repo: string;
+  environment: string;
+  kind: "deploy" | "delete";
+  expiresAt: number;
+  attemptId?: string;
+}
+
+export const DEPLOYMENT_MUTATION_LEASE_MS = 30 * 60 * 1000;
+
+type DeploymentDispatchReservationInput = Omit<
+  DeploymentDispatchReservation,
+  "expiresAt"
+>;
+
+export function activeDeploymentMutation(
+  state: CanvasState,
+  now = Date.now()
+): DeploymentDispatchReservation | undefined {
+  const current = state.deploymentMutation;
+  if (current && current.expiresAt <= now) {
+    delete state.deploymentMutation;
+    return undefined;
+  }
+  return current;
+}
+
+export function reserveDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservationInput,
+  now = Date.now()
+): DeploymentDispatchReservation | null {
+  if (activeDeploymentMutation(state, now)) return null;
+  const owner = {
+    ...reservation,
+    expiresAt: now + DEPLOYMENT_MUTATION_LEASE_MS
+  };
+  state.deploymentMutation = owner;
+  return owner;
+}
+
+export function releaseDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservation
+): void {
+  if (state.deploymentMutation === reservation) delete state.deploymentMutation;
+}
+
+export function deploymentStatusBlocksMutation(status: unknown): boolean {
+  return (
+    status === "pending" || status === "in_progress" || status === "deleting"
+  );
+}
+
+export function localDeploymentBlocksMutation(
+  state: CanvasState,
+  now = Date.now()
+): boolean {
+  if (state.deployStatus !== "in_progress") return false;
+  return (
+    typeof state.deployStartedAt !== "number" ||
+    state.deployStartedAt + DEPLOYMENT_MUTATION_LEASE_MS > now
+  );
+}
+
+export function resolveDeploymentEnvironment(
+  state: CanvasState,
+  requestedEnvironment: unknown
+): string {
+  return (
+    (typeof requestedEnvironment === "string" && requestedEnvironment) ||
+    (typeof state.envName === "string" && state.envName) ||
+    ""
+  );
+}
+
+export function beginPlannedGraphRequest(state: CanvasState): number {
+  const generation =
+    typeof state.plannedRequestGeneration === "number" ?
+      state.plannedRequestGeneration + 1
+    : 1;
+  state.plannedRequestGeneration = generation;
+  state.plannedResources = null;
+  return generation;
+}
+
+export function isCurrentPlannedGraphRequest(
+  state: CanvasState,
+  generation: number
+): boolean {
+  return state.plannedRequestGeneration === generation;
+}
+
+export function resetDeploymentViewState(
+  state: CanvasState,
+  attemptId: unknown,
+  now = Date.now()
+): void {
+  const requestedAttemptId =
+    typeof attemptId === "string" ? attemptId : undefined;
+  if (
+    state.deployAttempt?.id &&
+    requestedAttemptId !== state.deployAttempt.id
+  ) {
+    return;
+  }
+  delete state.deployResult;
+  const mutation = activeDeploymentMutation(state, now);
+  if (
+    mutation?.attemptId &&
+    mutation.attemptId === requestedAttemptId &&
+    state.deployAttempt?.id === requestedAttemptId
+  ) {
+    releaseDeploymentMutation(state, mutation);
+  }
+}
 
 // Throttle for the background workflow drift-sync kicked off from the
 // environments listing: repo -> last-attempt epoch ms. Keeps the sync from
@@ -803,7 +995,7 @@ export function azureLoginRequiredResponse({
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string
+  prompt: string | SessionPromptMessage
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
@@ -852,6 +1044,29 @@ export function buildAzureCliAssistPrompt({
   ].join("\n\n");
 }
 
+// Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
+// Credentials on the user's behalf, so the turn it injects should read as a
+// status line, not as multi-paragraph instructions the user appears to have
+// typed. The agent still receives the full prompt.
+export function azureCliAssistDisplayPrompt({
+  action = "login"
+}: AzureCliAssistInput = {}): string {
+  return action === "install" ?
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+}
+
+// Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
+// cannot drift apart or be swapped at the call site.
+export function azureCliAssistMessage(
+  input: AzureCliAssistInput = {}
+): SessionPromptMessage {
+  return {
+    prompt: buildAzureCliAssistPrompt(input),
+    displayPrompt: azureCliAssistDisplayPrompt(input)
+  };
+}
+
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
@@ -890,8 +1105,91 @@ function triggerAppBicepHandoff(
 // browser stops polling once a deploy is terminal: a rejected send has no later
 // poll to piggyback on, so the status route keeps the poll alive while delivery
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
-export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
+export interface DeployAttemptInput {
+  repo: string;
+  branch: string;
+  provider: string;
+  environment: string;
+  appFile: string;
+  // True only for a redeploy the agent makes from inside a repair loop it
+  // already owns. Resolved from the attempt id by resolveDeployRepairLoop, not
+  // taken from the client: an agent-initiated deploy is not by itself a repair.
+  repairLoop: boolean;
+  // The attempt this redeploy continues, so a loop keeps one identity across
+  // its retries. Empty for any deploy that opens a new attempt.
+  attemptId?: string;
+}
 
+// Decide, server-side, whether an incoming deploy continues an existing repair
+// loop. The tool validates the attempt before it POSTs, but another deploy can
+// start in between, so re-check here against the attempt this panel currently
+// holds: a stale repair must not overwrite the newer deploy or mark it as
+// already owned (which would suppress its own failure handoff). An unbound
+// request is an ordinary deploy and always proceeds.
+export function resolveDeployRepairLoop(
+  state: CanvasState,
+  requestedAttemptId: unknown
+): { repairLoop: boolean; attemptId: string; error?: string } {
+  const requested =
+    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
+  if (!requested) return { repairLoop: false, attemptId: "" };
+  const current = state?.deployAttempt?.id || "";
+  if (current !== requested) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested };
+}
+
+// Open a new deploy attempt on a reused canvas state. Deliberately
+// synchronous: the reset and the new attempt id must land together, because
+// a previous attempt's handoff settling between them would still see itself
+// as the current attempt and could mark the incoming deploy as repairing,
+// suppressing its own repair handoff for good. Anything that needs awaiting
+// (branch resolution) has to happen before this is called.
+export function beginDeployAttempt(
+  state: CanvasState,
+  input: DeployAttemptInput
+): void {
+  state.deployStatus = "in_progress";
+  state.deployError = null;
+  state.deployErrorKind = null;
+  state.deployErrorBranch = null;
+  state.deployRunUrl = null;
+  state.deployRunId = null;
+  // Only a redeploy inside an existing repair loop is already owned by the
+  // agent. Every other deploy — including the agent's first one, which opens no
+  // loop — must stay eligible to hand its failure off; marking that one as
+  // repairing made triggerDeployRepairHandoff bail out and silently dropped the
+  // repair.
+  state.deployRepairing = input.repairLoop;
+  state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
+  // The delivery budget belongs to the loop, not to a single deploy: resetting
+  // it on every redeploy would let an undeliverable handoff retry forever.
+  state.deployHandoffAttempts =
+    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  state.deployingBranch = input.branch;
+  // Immutable identity for this attempt. A canvas panel is reused across
+  // deploys, so the repair loop binds to this snapshot instead of the panel:
+  // a stale repair cannot redeploy whatever the user started next. A redeploy
+  // inside a loop keeps the id it was handed, so the agent can keep addressing
+  // the same loop across retries instead of being told its attempt is inactive.
+  state.deployAttempt = {
+    id:
+      (input.repairLoop && input.attemptId) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    targetRepo: input.repo,
+    environment: input.environment,
+    branch: input.branch,
+    provider: input.provider,
+    appFile: input.appFile
+  };
+}
+
+export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
 // Backoff before re-sending a handoff whose delivery was rejected.
 export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
 
@@ -918,13 +1216,24 @@ export function triggerDeployRepairHandoff(
     const attemptId = state.deployAttempt?.id || "";
     state.deployHandoffState = "pending";
     state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
+    // A canvas panel is reused across deploys and these callbacks settle
+    // asynchronously, so a user deploy started in the meantime would otherwise
+    // be mutated by the previous attempt's handoff. Binding to the attempt that
+    // opened this handoff keeps a stale settle from marking the new attempt as
+    // delivered/owned, which would suppress its own handoff for good. Compare
+    // both sides normalized so an attempt-less handoff still settles against an
+    // attempt-less state - refusing to settle there would strand it as pending
+    // and block every later trigger - while a new deploy's id still revokes it.
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
     const delivered = () => {
+      if (!ownsAttempt()) return;
       state.deployHandoffState = "delivered";
       state.deployRepairing = true;
     };
     // A handoff that never reached the agent must not leave the loop marked as
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
+      if (!ownsAttempt()) return;
       state.deployRepairing = false;
       const exhausted =
         (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
@@ -935,6 +1244,9 @@ export function triggerDeployRepairHandoff(
       // exactly the unmounted-panel case this trigger exists to cover.
       if (exhausted) return;
       const timer = setTimeout(() => {
+        // The backoff is another window for a new deploy to start, and that
+        // deploy drives its own handoff.
+        if (!ownsAttempt()) return;
         triggerDeployRepairHandoff(entry, instanceId);
       }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
       // Never hold the process open for a retry.
@@ -984,6 +1296,16 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 // are not real application deployments and are filtered out.
 const DEPLOY_WORKFLOW_FILE = "run-rad-commands.yml";
 const DELETE_WORKFLOW_FILE = "delete-application.yml";
+
+// Name of the step inside the run-rad-commands composite action that executes
+// the `rad` commands (and therefore `rad deploy`). The deploy monitor keys its
+// in-flight handling — start time, per-resource status polling, the "still
+// running" heartbeat — on finding a step with this exact name, so a mismatch
+// silently disables all of it. It is exported so a test can pin it.
+//
+// Do not guess at this value: it must match
+// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
@@ -2268,14 +2590,213 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(instanceId: string) {
-  return async (
+function createRequestHandler(
+  instanceId: string,
+  resolveBaseUrl: () => string
+) {
+  const serverOwnedTasks = new Map<string, Promise<void>>();
+  const serverOwnedToken = randomUUID();
+
+  function scheduleServerOwnedTask(
+    operationId: string,
+    task: () => Promise<void>
+  ): void {
+    let instanceTasks = activeEnvironmentTasks.get(instanceId);
+    if (!instanceTasks) {
+      instanceTasks = new Set();
+      activeEnvironmentTasks.set(instanceId, instanceTasks);
+    }
+    instanceTasks.add(operationId);
+    const op = operations.get(operationId);
+    if (op) setExecutionActive(op, true);
+    const prior = serverOwnedTasks.get(operationId);
+    const running = (prior || Promise.resolve())
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            setImmediate(() => resolve());
+          })
+      )
+      .then(task)
+      .catch(async (error) => {
+        const current = operations.get(operationId);
+        if (shuttingDownInstances.has(instanceId)) return;
+        if (current && !current.endedAt) {
+          finish(current, "failed", {
+            failure: {
+              code: "server-owned-task-failed",
+              stage: current.currentStage,
+              stepSeq: null,
+              message: errorMessage(error),
+              classification: "unknown",
+              evidence: error instanceof Error ? error.stack || null : null
+            }
+          });
+          await operations.persist().catch(() => {});
+        }
+      })
+      .finally(() => {
+        if (serverOwnedTasks.get(operationId) !== running) return;
+        const current = operations.get(operationId);
+        if (current && !current.endedAt) setExecutionActive(current, false);
+        serverOwnedTasks.delete(operationId);
+        const activeForInstance = activeEnvironmentTasks.get(instanceId);
+        activeForInstance?.delete(operationId);
+        if (activeForInstance?.size === 0) {
+          activeEnvironmentTasks.delete(instanceId);
+          for (const listener of environmentTasksSettledListeners.get(
+            instanceId
+          ) || []) {
+            try {
+              listener();
+            } catch {
+              // One shutdown consumer must not block the others.
+            }
+          }
+        }
+      });
+    serverOwnedTasks.set(operationId, running);
+  }
+
+  async function postInternal(pathname: string, data: unknown): Promise<any> {
+    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": serverOwnedToken
+      },
+      body: JSON.stringify(data)
+    });
+    const result: any = await response.json();
+    if (!response.ok && !result?.inputRequired) {
+      throw new Error(
+        result?.error || `Request failed with HTTP ${response.status}.`
+      );
+    }
+    return result;
+  }
+
+  async function monitorVerification(operationId: string): Promise<void> {
+    const deadline = Date.now() + 45 * 60 * 1000;
+    let delayMs = 5000;
+    while (Date.now() < deadline) {
+      const op = operations.get(operationId);
+      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
+      const params = new URLSearchParams({
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      const response = await fetch(
+        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
+        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
+      );
+      const result: any = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          result?.error ||
+            `Verification status failed with HTTP ${response.status}.`
+        );
+      }
+      if (result?.state === "success" || result?.state === "failed") return;
+      if (result?.terminal || result?.state === "expired") {
+        const current = operations
+          .all()
+          .find((candidate: any) => candidate.operationId === operationId);
+        if (current && !current.endedAt) {
+          finish(current, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: current.currentStage,
+              stepSeq: null,
+              message:
+                result?.error ||
+                "Credential verification is no longer being tracked.",
+              classification: "user-fixable",
+              evidence: null
+            }
+          });
+          await persistBestEffort({
+            operation: current,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        }
+        return;
+      }
+      const jitterMs = Math.floor(Math.random() * 1000);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
+      );
+      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
+    }
+    throw new Error(
+      "Credential verification did not complete within 45 minutes."
+    );
+  }
+
+  async function runEnvironmentOperation(operationId: string): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId);
+      return;
+    }
+    const op = operations.get(operationId);
+    if (!op) return;
+    const request = op.request || op.resumeRequest || {};
+    let setupResult: any = null;
+    if (op.provider === "azure" && request.needsAzureCredentials) {
+      setupResult = await postInternal("/api/azure-auto-setup", {
+        ...request.azure,
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      if (setupResult?.inputRequired || op.state === "input_required") return;
+    }
+    const current = operations.get(operationId);
+    if (!current || current.state === "input_required" || current.endedAt)
+      return;
+    await postInternal("/api/create-environment", {
+      ...request.environment,
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider,
+      operationId,
+      clientId: setupResult?.clientId || request.environment?.clientId || ""
+    });
+    await monitorVerification(operationId);
+  }
+
+  function startRecoveredVerificationTasks(): void {
+    for (const op of operations.all()) {
+      if (
+        op.recoveryState !== "verification_pending" ||
+        op.currentStage !== STAGE_VERIFY ||
+        op.endedAt ||
+        activeVerificationMonitors.has(op.operationId)
+      )
+        continue;
+      activeVerificationMonitors.add(op.operationId);
+      scheduleServerOwnedTask(op.operationId, async () => {
+        try {
+          await monitorVerification(op.operationId);
+        } finally {
+          activeVerificationMonitors.delete(op.operationId);
+        }
+      });
+    }
+  }
+
+  const handler = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
-    lastWebviewActivityAt = Date.now();
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    const isServerOwnedRequest =
+      req.headers["x-radius-server-owned"] === serverOwnedToken;
+    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
     // CSRF defense-in-depth: reject cross-site state-changing requests before
     // any routing or body parse. See isCrossSiteMutation for the rules.
     if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
@@ -2333,6 +2854,353 @@ function createRequestHandler(instanceId: string) {
       res.end(
         JSON.stringify({ operation: record ? toClientView(record) : null })
       );
+      return;
+    }
+    if (pathname === "/api/operations" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
+        );
+        return;
+      }
+      const repo = String(data.repo || "");
+      const environment = String(data.environment || data.name || "dev").trim();
+      const provider = data.provider === "aws" ? "aws" : "azure";
+      if (!isValidRepoSlug(repo)) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: `Invalid repository "${repo}". Expected "owner/repo".`,
+            code: "invalid-repo"
+          })
+        );
+        return;
+      }
+      if (!environment.trim()) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Environment name is required.",
+            code: "environment-required"
+          })
+        );
+        return;
+      }
+      if (provider === "azure") {
+        if (
+          !isResourceGroupName(String(data.resourceGroup || "")) ||
+          !isAksClusterName(String(data.cluster || "")) ||
+          !isUuid(String(data.tenantId || "")) ||
+          !isUuid(String(data.subscriptionId || ""))
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error:
+                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+              code: "invalid-azure-operation-input"
+            })
+          );
+          return;
+        }
+      } else if (
+        !String(data.roleArn || "").trim() ||
+        !String(data.accountId || "").trim() ||
+        !String(data.region || "").trim() ||
+        !String(data.cluster || "").trim()
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error:
+              "AWS setup requires roleArn, accountId, region, and cluster.",
+            code: "invalid-aws-operation-input"
+          })
+        );
+        return;
+      }
+      const needsAzureCredentials =
+        provider === "azure" && !String(data.clientId || "").trim();
+      const op = createOperation({
+        provider,
+        repo,
+        environment,
+        stages: buildStages({ includeIdentity: needsAzureCredentials }),
+        journey: {
+          origin: data.origin || null,
+          resumeTarget: data.resumeTarget || null,
+          resumeBranch: data.resumeBranch || data.branch || null,
+          resumeReason: data.resumeReason || null
+        }
+      });
+      op.request = {
+        needsAzureCredentials,
+        azure: {
+          resourceGroup: data.resourceGroup || "",
+          cluster: data.cluster || "",
+          clusterResourceGroup: data.clusterResourceGroup || "",
+          subscriptionId: data.subscriptionId || "",
+          tenantId: data.tenantId || "",
+          appName: data.appName,
+          appId: data.appId || "",
+          createNew: data.createNew === true,
+          serviceManagementReference: data.serviceManagementReference || ""
+        },
+        environment: { ...data, environment, provider }
+      };
+      if (provider === "azure") {
+        op.resumeRequest = {
+          needsAzureCredentials,
+          azure: structuredClone(op.request.azure),
+          environment: {
+            repo,
+            environment,
+            provider,
+            cluster: data.cluster || "",
+            namespace: data.namespace || "",
+            profileName: data.profileName || "",
+            branch: data.branch || "",
+            tenantId: data.tenantId || "",
+            subscriptionId: data.subscriptionId || "",
+            resourceGroup: data.resourceGroup || "",
+            origin: data.origin || null,
+            resumeTarget: data.resumeTarget || null,
+            resumeBranch: data.resumeBranch || null,
+            resumeReason: data.resumeReason || null
+          }
+        };
+      }
+      const started = operations.start(op);
+      if (!started.ok) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: `Setup is already running for ${repo}.`,
+            code: "operation-in-progress",
+            operationId: started.conflict.operationId
+          })
+        );
+        return;
+      }
+      try {
+        await operations.persist();
+      } catch (error) {
+        finish(op, "failed", {
+          failure: {
+            code: "operation-registration-persist-failed",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not durably register the environment operation.",
+            classification: "unknown",
+            evidence: errorMessage(error)
+          }
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not durably register the environment operation. No setup work was started.",
+            code: "operation-registration-persist-failed"
+          })
+        );
+        return;
+      }
+      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Location", statusUrl);
+      res.writeHead(202);
+      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
+    }
+    const resumeMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
+    );
+    if (resumeMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(resumeMatch[1]);
+      const code = decodeURIComponent(resumeMatch[2]);
+      const op = operations.get(operationId);
+      if (!op) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(404);
+        res.end(
+          JSON.stringify({
+            error: "Unknown operation.",
+            code: "unknown-operation"
+          })
+        );
+        return;
+      }
+      if (
+        op.state === "failed_partial" &&
+        op.failure?.code === "operation-input-expired"
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(410);
+        res.end(
+          JSON.stringify({
+            error: op.failure.message,
+            code: "operation-input-expired",
+            operation: toClientView(op)
+          })
+        );
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = {};
+      }
+      if (
+        !canResumeInput(op, {
+          code,
+          checkpoint: data.checkpoint,
+          repo: data.repo,
+          environment: data.environment,
+          provider: data.provider
+        })
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: "The operation is not waiting for this input.",
+            code: "operation-resume-mismatch",
+            operationId
+          })
+        );
+        return;
+      }
+      if (!op.request && op.resumeRequest) {
+        op.request = structuredClone(op.resumeRequest);
+      }
+      const resumeSnapshot = {
+        inputRequired: structuredClone(op.inputRequired),
+        request: structuredClone(op.request),
+        resumeRequest:
+          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
+      };
+      if (code === "service-management-reference-required") {
+        op.request.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.serviceManagementReference =
+            data.serviceManagementReference || "";
+        }
+      } else if (code === "app-selection-required") {
+        op.request.azure.appId = data.appId || "";
+        op.request.azure.createNew = data.createNew === true;
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.appId = data.appId || "";
+          op.resumeRequest.azure.createNew = data.createNew === true;
+        }
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Unsupported resume prompt.",
+            code: "unsupported-resume"
+          })
+        );
+        return;
+      }
+      resumeAfterInput(op);
+      try {
+        await operations.persist();
+      } catch (error) {
+        op.request = resumeSnapshot.request;
+        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
+        else op.resumeRequest = resumeSnapshot.resumeRequest;
+        requireInput(op, resumeSnapshot.inputRequired);
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+            code: "operation-resume-persist-failed",
+            operationId,
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(202);
+      res.end(
+        JSON.stringify({
+          operationId,
+          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
+        })
+      );
+      scheduleServerOwnedTask(operationId, () =>
+        runEnvironmentOperation(operationId)
+      );
+      return;
+    }
+    const abandonMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/abandon$/
+    );
+    if (abandonMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(abandonMatch[1]);
+      const op = operations.get(operationId);
+      if (
+        !op ||
+        op.state !== INPUT_REQUIRED_STATE ||
+        op.executionActive ||
+        isTerminalState(op.state)
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(op ? 409 : 404);
+        res.end(
+          JSON.stringify({
+            error:
+              op ?
+                "The operation is not waiting for input."
+              : "Unknown operation.",
+            code: op ? "operation-abandon-mismatch" : "unknown-operation"
+          })
+        );
+        return;
+      }
+      finish(op, "cancelled");
+      try {
+        await operations.persist();
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Radius could not persist the abandoned operation.",
+            code: "operation-abandon-persist-failed",
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
     if (pathname.startsWith("/api/operations/") && req.method === "GET") {
@@ -2604,7 +3472,7 @@ function createRequestHandler(instanceId: string) {
         const requestedTenantId =
           typeof data.tenantId === "string" ? data.tenantId.trim() : "";
         const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+        const prompt = azureCliAssistMessage({ action, tenantId });
         const promptResult = await invokeSessionPrompt(
           sessionPromptHandler,
           prompt
@@ -2931,6 +3799,17 @@ function createRequestHandler(instanceId: string) {
 
     // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
     if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Cleaned up in finally; declared here so it's reachable from finally.
@@ -2986,12 +3865,29 @@ function createRequestHandler(instanceId: string) {
             code === "app-selection-required" ||
             code === "service-management-reference-required";
           if (op && retryablePrompt) {
-            requireInput(op, { code, message: error });
+            requireInput(op, {
+              code,
+              message: error,
+              checkpoint:
+                code === "app-selection-required" ?
+                  "azure-app-selection"
+                : "azure-service-management-reference",
+              metadata:
+                code === "app-selection-required" ?
+                  {
+                    candidates:
+                      Array.isArray(extra.candidates) ? extra.candidates : [],
+                    defaultAppId: extra.defaultAppId || null
+                  }
+                : null
+            });
+            await operations.persist();
             res.setHeader("Content-Type", "application/json");
             res.writeHead(status);
             res.end(
               JSON.stringify({
                 error,
+                inputRequired: true,
                 ...(code ? { code } : {}),
                 ...(op ? { operationId: op.operationId } : {}),
                 ...sanitizeFailureExtra(extra || {})
@@ -3127,7 +4023,7 @@ function createRequestHandler(instanceId: string) {
             existing.environment !== envName ||
             existing.provider !== "azure" ||
             existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
-            !existing.inputRequired
+            (!isServerOwnedRequest && !existing.inputRequired)
           ) {
             await fail(
               409,
@@ -3137,7 +4033,7 @@ function createRequestHandler(instanceId: string) {
             return;
           }
           op = existing;
-          resumeAfterInput(op);
+          if (existing.inputRequired) resumeAfterInput(op);
         } else {
           op = createOperation({
             provider: "azure",
@@ -4752,6 +5648,17 @@ function createRequestHandler(instanceId: string) {
     }
 
     if (pathname === "/api/create-environment" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Declared out here so the generic catch below can close it rather
@@ -4800,7 +5707,8 @@ function createRequestHandler(instanceId: string) {
             existing.repo !== targetRepo ||
             existing.environment !== envName ||
             existing.provider !== provider ||
-            existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
+            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
+              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
             existing.inputRequired
           ) {
             res.setHeader("Content-Type", "application/json");
@@ -5873,51 +6781,147 @@ function createRequestHandler(instanceId: string) {
       res.setHeader("Content-Type", "application/json");
       if (!repo) {
         res.writeHead(200);
-        res.end(JSON.stringify({ resources: [], repo: "" }));
+        res.end(JSON.stringify({ resources: [], repo: "", mode: "greyed" }));
         return;
       }
-      // Prefer the deployed graph published to GHCR by the deploy workflow
-      // (radius-project/radius PR #12591), falling back to the legacy
-      // radius-deploy-status branch and then any graph captured in state.
-      const reader = await deployStatusReaderFromState(
-        entry?.state || {},
-        repo,
-        ""
-      );
-      let graph = (await reader.graph()).graph;
-      if (!graph && entry?.state?.deployedGraph)
-        graph = entry.state.deployedGraph;
+      const state = entry?.state || {};
+      const branch =
+        state.workspaceBranch && repoMatchesWorkspace(state, repo) ?
+          state.workspaceBranch
+        : "main";
+
+      // The page's selectors are authoritative: the user can pick an
+      // environment other than the one this session last deployed to, and the
+      // graph must follow the selection rather than silently rendering another
+      // environment's deploy under the selected environment's label.
+      const sessionEnv = state.deployEnvName || state.envName || "";
+      const requestedEnv =
+        (reqUrl.searchParams.get("environment") || "").trim() || sessionEnv;
+      const requestedApp =
+        (reqUrl.searchParams.get("application") || "").trim() ||
+        state.deployAppName ||
+        "";
+
+      // The Deployed view is a projection: a fixed topology (the modeled
+      // application) painted with a per-resource status that is resolved
+      // separately. Keeping them independent means the graph renders before any
+      // status is known and never changes shape when a deploy starts or ends.
+      //
+      //   live     - a deploy is in flight for this selection.
+      //   terminal - a deployment's status is known.
+      //   greyed   - nothing is known; every node renders pending.
+      //
+      // This session's own deploy status only describes the environment it
+      // deployed to, so it is used only when the selection matches.
+      const sessionMatchesSelection =
+        !requestedEnv ||
+        !sessionEnv ||
+        requestedEnv.toLowerCase() === sessionEnv.toLowerCase();
+      const deploying =
+        state.deployStatus === "in_progress" && sessionMatchesSelection;
+
+      const statusByKey = new Map<string, DeployStatus>();
+      // The resources the deploy monitor tracks are the freshest status this
+      // process has, both during a run and after it settles. Seed from them
+      // first so a terminal deploy keeps its colors even when the artifact read
+      // comes back empty — repainting a just-deployed app as pending would
+      // reproduce the very bug this transport replaced.
+      if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
+        for (const resource of state.deployingResources) {
+          const status = resource?.deployStatus as DeployStatus | undefined;
+          if (!status || status === "pending") continue;
+          for (const key of deployStatusKeys(resource)) {
+            if (!statusByKey.has(key)) statusByKey.set(key, status);
+          }
+        }
+      }
+
+      let graph: unknown = null;
+      let readOk = false;
+      let updatedAt: string | null = null;
+      // The app selector is a hint, not a hard filter: the reader falls back to
+      // an env-only match when the selected app has no artifact yet (the app
+      // name can itself be a guess from the repo short name). Surface the app it
+      // actually resolved so the page can say which one is on screen rather than
+      // mislabeling another app's status under the selected name.
+      let resolvedApp: string | null = requestedApp || null;
+      const messageByKey = new Map<string, string>();
+      try {
+        const reader = cachedDeployStatusReader({
+          repo,
+          environment: requestedEnv,
+          application: requestedApp,
+          // While a deploy is in flight, scope to its run so a previous
+          // deployment's newest-repo-wide artifact can't overwrite the live
+          // topology/status. The in-flight run hasn't uploaded yet, so this
+          // read is empty and the seeded live statuses stand.
+          runId: deploying ? (state.deployRunId ?? null) : null
+        });
+        const result = await reader.graph();
+        graph = result.graph;
+        readOk = result.status === "ok" || result.status === "stale";
+        const progress = await reader.progress();
+        updatedAt = progress?.updatedAt || null;
+        if (progress?.application) resolvedApp = progress.application;
+        for (const [key, status] of buildDeployStatusMap(progress)) {
+          if (!statusByKey.has(key)) statusByKey.set(key, status);
+        }
+        for (const [key, message] of buildDeployMessageMap(progress)) {
+          if (!messageByKey.has(key)) messageByKey.set(key, message);
+        }
+      } catch (e) {
+        // A status read failure must not blank the tab: fall through to the
+        // seeded statuses and the modeled topology.
+        if (entry?.state) {
+          if (!entry.state.progressMessages) entry.state.progressMessages = [];
+          entry.state.progressMessages.push(
+            `Deployed graph status read failed: ${errorMessage(e)}`
+          );
+        }
+      }
+      if (!graph && sessionMatchesSelection && state.deployedGraph)
+        graph = state.deployedGraph;
+
+      // A deployment is "terminal" when its status is known, which is not the
+      // same as having a published graph: the producer only attaches
+      // deploy-graph.json to its final upload, so a run can report real
+      // per-resource status with no graph at all.
+      const mode: "live" | "terminal" | "greyed" =
+        deploying ? "live"
+        : statusByKey.size > 0 || readOk || graph ? "terminal"
+        : "greyed";
+
+      // Topology: prefer the graph the deploy actually published (it reflects
+      // what is running), falling back to the modeled resources so the skeleton
+      // renders before anything has ever been deployed.
       const graphRecord = record(graph);
-      let resources = canvasGraphResources(
+      let topology: unknown[] =
         Array.isArray(graph) ? graph
         : Array.isArray(graphRecord.resources) ? graphRecord.resources
-        : []
+        : [];
+      if (topology.length === 0) {
+        topology =
+          (sessionMatchesSelection ? state.deployingResources : null) ||
+          state.plannedResources ||
+          state.graphResources ||
+          [];
+      }
+
+      const resources = canvasGraphResources(
+        projectDeployedGraph(topology as any[], statusByKey)
       );
-      // DEMO: present the deployed topology as container → cache → database.
-      resources = canvasGraphResources(
-        rewireDeployedGraphChain(resources) || []
-      );
-      // Re-derive connections (e.g. database→secret) that rad app graph
-      // omits, so the deployed graph renders connected like the planned one.
-      resources = canvasGraphResources(normalizeDeployedGraph(resources) || []);
-      // Hide implementation-detail resources (containerImages + their
-      // ghcr-registry-creds secret) from the deployed view too, matching
-      // every other graph state. Applied last so any edges the rewire/
-      // normalize steps synthesized toward those nodes are also stripped.
-      // The raw deploy-graph.json on the status branch is left untouched.
-      resources = filterGraphVisualizationResources(resources);
+      // Attach the producer's per-resource message so a red node can explain
+      // itself in the popup instead of just being red.
+      applyDeployMessages(resources, messageByKey);
       res.writeHead(200);
       res.end(
         JSON.stringify({
           resources,
           repo,
-          branch:
-            (
-              entry?.state?.workspaceBranch &&
-              repoMatchesWorkspace(entry.state, repo)
-            ) ?
-              entry.state.workspaceBranch
-            : "main"
+          branch,
+          mode,
+          updatedAt,
+          application: resolvedApp
         })
       );
       return;
@@ -5940,6 +6944,8 @@ function createRequestHandler(instanceId: string) {
       const finishedAt = entry?.state?.deployFinishedAt || null;
       const deployedGraph = entry?.state?.deployedGraph || null;
       const deployRunUrl = entry?.state?.deployRunUrl || null;
+      const attempt = entry?.state?.deployAttempt || null;
+      const active = status === "in_progress";
       // Every failure path converges on this poll, so it is where a failed
       // deploy is handed to the agent to repair (once per repair loop).
       const repairing =
@@ -5973,6 +6979,8 @@ function createRequestHandler(instanceId: string) {
             finishedAt,
             deployedGraph,
             deployRunUrl,
+            attempt,
+            active,
             repairing,
             handoff
           })
@@ -5992,6 +7000,8 @@ function createRequestHandler(instanceId: string) {
             finishedAt,
             deployedGraph,
             deployRunUrl,
+            attempt,
+            active,
             repairing,
             handoff
           })
@@ -6506,6 +7516,14 @@ function createRequestHandler(instanceId: string) {
         res.writeHead(code);
         res.end(JSON.stringify(payload));
       };
+      let deleteReservation: DeploymentDispatchReservation | null = null;
+      let deleteReservationOwner: CanvasState | null = null;
+      const releaseDeleteReservation = (): void => {
+        if (deleteReservation && deleteReservationOwner)
+          releaseDeploymentMutation(deleteReservationOwner, deleteReservation);
+        deleteReservation = null;
+        deleteReservationOwner = null;
+      };
       try {
         const data = JSON.parse(body || "{}");
         const repo = data.repo || "";
@@ -6514,6 +7532,69 @@ function createRequestHandler(instanceId: string) {
         if (!repo || !environment || !application) {
           respond(400, {
             error: "repo, environment, and application are required."
+          });
+          return;
+        }
+
+        const entry = servers.get(instanceId);
+        if (!entry) {
+          respond(503, { error: "Canvas server state is unavailable." });
+          return;
+        }
+        const attempt = entry.state.deployAttempt;
+        const activeRepo =
+          attempt?.targetRepo || entry.state.deployingRepo || "";
+        const activeEnvironment =
+          attempt?.environment || entry.state.envName || "";
+        const reserved = activeDeploymentMutation(entry.state);
+        if (localDeploymentBlocksMutation(entry.state) || reserved) {
+          const operation = reserved?.kind || "deploy";
+          const conflictRepo = reserved?.repo || activeRepo || repo;
+          const conflictEnvironment =
+            reserved?.environment || activeEnvironment || environment;
+          respond(409, {
+            error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
+          });
+          return;
+        }
+
+        deleteReservationOwner = entry.state;
+        deleteReservation = reserveDeploymentMutation(entry.state, {
+          repo,
+          environment,
+          kind: "delete"
+        });
+        if (!deleteReservation) {
+          const conflict = activeDeploymentMutation(entry.state);
+          respond(409, {
+            error:
+              conflict ?
+                `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
+              : "Another deployment operation is already starting."
+          });
+          return;
+        }
+
+        // Backstop the UI with GitHub's persisted state too. This covers a
+        // deployment started from another canvas instance or browser session.
+        let current: DeploymentRow | null;
+        try {
+          current = await resolveEnvDeployment(repo, environment, application);
+        } catch {
+          releaseDeleteReservation();
+          respond(503, {
+            error:
+              "Could not verify the current deployment state. Check your GitHub connection and try again."
+          });
+          return;
+        }
+        if (current && deploymentStatusBlocksMutation(current.status)) {
+          releaseDeleteReservation();
+          respond(409, {
+            error:
+              current.status === "deleting" ?
+                "This deployment is already being deleted."
+              : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
           });
           return;
         }
@@ -6570,6 +7651,7 @@ function createRequestHandler(instanceId: string) {
           (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
         );
         if (commitFail) {
+          releaseDeleteReservation();
           respond(400, {
             error:
               "Couldn't commit the delete workflow (" +
@@ -6617,6 +7699,7 @@ function createRequestHandler(instanceId: string) {
           if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
         }
         if (dispatch.code !== 0) {
+          releaseDeleteReservation();
           const de = (dispatch.stderr || "").trim();
           const hint =
             /workflow.{0,20}scope/i.test(de) ?
@@ -6650,11 +7733,21 @@ function createRequestHandler(instanceId: string) {
         );
         if (runId)
           runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
+        // A workflow run can become discoverable before it creates its GitHub
+        // deployment record. Retain a short lease in either case to close that
+        // publication gap; after it expires, resolveEnvDeployment is the
+        // durable cross-instance guard.
+        const reservationTimer = setTimeout(
+          releaseDeleteReservation,
+          DEPLOY_LIST_TTL_MS * 2
+        );
+        reservationTimer.unref?.();
         // A delete is now in flight, so the cached listing is stale — drop
         // it so the next poll reflects the "Deleting…" state immediately.
         deployListCache.delete(repo);
         respond(200, { success: true, runUrl });
       } catch (e) {
+        releaseDeleteReservation();
         respond(400, { error: errorMessage(e) });
       }
       return;
@@ -6967,6 +8060,11 @@ function createRequestHandler(instanceId: string) {
         }
         const branch = data.branch || defaultBranchForState(entry.state);
         const provider = data.provider || "azure";
+        const planGeneration = beginPlannedGraphRequest(entry.state);
+        // Persist the selected environment so re-opening (or reloading) the
+        // Planned tab re-selects it by default, matching the graph just shown.
+        entry.state.plannedEnvironment =
+          typeof data.environment === "string" ? data.environment : "";
         const sourceRefContext =
           entry ?
             prepareSourceRefResources(entry, "planned", { repo, branch })
@@ -7066,6 +8164,12 @@ function createRequestHandler(instanceId: string) {
         );
 
         if (entry && sourceRefContext) {
+          if (!isCurrentPlannedGraphRequest(entry.state, planGeneration)) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(JSON.stringify({ stale: true }));
+            return;
+          }
           if (
             !setSourceRefResources(
               entry,
@@ -7325,15 +8429,144 @@ function createRequestHandler(instanceId: string) {
     if (pathname === "/api/deploy" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
+      let reservation: DeploymentDispatchReservation | null = null;
+      let reservationOwner: CanvasState | null = null;
+      const releaseReservation = (): void => {
+        if (reservation && reservationOwner)
+          releaseDeploymentMutation(reservationOwner, reservation);
+        reservation = null;
+        reservationOwner = null;
+      };
       try {
         const data = JSON.parse(body);
         const entry = servers.get(instanceId);
+        if (!entry) throw new Error("Canvas server state is unavailable.");
+        // Re-validate the repair-loop attempt before touching any state: the
+        // tool checked it before sending, but a newer deploy may have started
+        // since, and a stale repair must not clobber it.
+        const loop = resolveDeployRepairLoop(entry.state, data.attemptId);
+        if (loop.error) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: loop.error }));
+          return;
+        }
         // Store deploy params
         if (entry) {
-          entry.state.deployParams = data;
-          entry.state.envName = data.environment;
+          const repo =
+            data.targetRepo ||
+            entry.state.plannedRepo ||
+            entry.state.contextRepo ||
+            "";
+          const environment = resolveDeploymentEnvironment(
+            entry.state,
+            data.environment
+          );
+          if (!repo || !environment) {
+            throw new Error("targetRepo and environment are required.");
+          }
+          const activeMutation = activeDeploymentMutation(entry.state);
+          if (localDeploymentBlocksMutation(entry.state) || activeMutation) {
+            const activeRepo =
+              activeMutation?.repo ||
+              entry.state.deployAttempt?.targetRepo ||
+              entry.state.deployingRepo ||
+              repo;
+            const activeEnvironment =
+              activeMutation?.environment ||
+              entry.state.deployAttempt?.environment ||
+              entry.state.envName ||
+              environment;
+            const operation = activeMutation?.kind || "deploy";
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error: `A ${operation} operation for ${activeRepo} in environment ${activeEnvironment} is already in progress. Wait for it to finish before starting another operation.`
+              })
+            );
+            return;
+          }
+
+          reservationOwner = entry.state;
+          reservation = reserveDeploymentMutation(entry.state, {
+            repo,
+            environment,
+            kind: "deploy"
+          });
+          if (!reservation) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error: "Another deployment operation is already starting."
+              })
+            );
+            return;
+          }
+
+          // The canvas-local state closes the immediate double-click race; the
+          // persisted GitHub status closes the same race across sessions.
+          let current: DeploymentRow | null;
+          try {
+            current = await resolveEnvDeployment(
+              repo,
+              environment,
+              repo.split("/").pop() || repo
+            );
+          } catch {
+            releaseReservation();
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(503);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Could not verify whether this environment already has an operation in progress. Check your GitHub connection and try again."
+              })
+            );
+            return;
+          }
+          if (current && deploymentStatusBlocksMutation(current.status)) {
+            releaseReservation();
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(
+              JSON.stringify({
+                error:
+                  current.status === "deleting" ?
+                    "This deployment is currently being deleted. Wait for it to finish before deploying again."
+                  : "A deployment to this environment is already in progress."
+              })
+            );
+            return;
+          }
+          // Resolve the branch to deploy. When the client doesn't specify
+          // one, fall back to the repo's real default branch (which may be
+          // master/develop, not main) so the dispatch --ref and the
+          // "branch not pushed" guard below target a branch that exists.
+          // Resolved up front, before any state is touched: beginDeployAttempt
+          // has to run without an await in front of it, or the previous attempt
+          // stays current across that window and its handoff can settle onto the
+          // deploy starting here.
+          let branch = data.branch || "";
+          if (!branch) {
+            const detectedDefault = (
+              (await runCommand("gh", [
+                "repo",
+                "view",
+                repo,
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name"
+              ]).catch(() => "")) || ""
+            ).trim();
+            branch = detectedDefault || "main";
+          }
+          entry.state.deployParams = { ...data, environment };
+          entry.state.envName = environment;
           entry.state.deployProvider = data.provider;
-          entry.state.deployingRepo = data.targetRepo;
+          entry.state.deployingRepo = repo;
           entry.state.appFile = data.appFile;
 
           // Snapshot the planned graph (nodes start as pending). If the
@@ -7355,57 +8588,18 @@ function createRequestHandler(instanceId: string) {
           entry.state.deployingResources = resources;
           entry.state.deployLogs = [];
           entry.state.deployLogBase = 0;
-          entry.state.deployStatus = "in_progress";
-          entry.state.deployError = null;
-          entry.state.deployErrorKind = null;
-          entry.state.deployErrorBranch = null;
-          entry.state.deployRunUrl = null;
-          entry.state.deployRunId = null;
-          // An agent redeploy is already inside a repair loop; a user
-          // deploy starts fresh and may hand off again on failure.
-          entry.state.deployRepairing = data.agentInitiated === true;
-          entry.state.deployHandoffState =
-            data.agentInitiated === true ? "delivered" : "idle";
-          entry.state.deployHandoffAttempts = 0;
-
-          const repo =
-            data.targetRepo ||
-            entry.state.plannedRepo ||
-            entry.state.contextRepo ||
-            "";
-          // Resolve the branch to deploy. When the client doesn't specify
-          // one, fall back to the repo's real default branch (which may be
-          // master/develop, not main) so the dispatch --ref and the
-          // "branch not pushed" guard below target a branch that exists.
-          let branch = data.branch || "";
-          if (!branch) {
-            const detectedDefault = (
-              (await runCommand("gh", [
-                "repo",
-                "view",
-                repo,
-                "--json",
-                "defaultBranchRef",
-                "--jq",
-                ".defaultBranchRef.name"
-              ]).catch(() => "")) || ""
-            ).trim();
-            branch = detectedDefault || "main";
-          }
-          entry.state.deployingBranch = branch;
           const provider = data.provider || "azure";
-          // Immutable identity for this attempt. A canvas panel is reused
-          // across deploys, so the repair loop binds to this snapshot
-          // instead of the panel: a stale repair cannot redeploy whatever
-          // the user started next.
-          entry.state.deployAttempt = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-            targetRepo: repo,
-            environment: entry.state.envName || data.environment || "",
+          beginDeployAttempt(entry.state, {
+            repo,
             branch,
             provider,
-            appFile: data.appFile || ".radius/app.bicep"
-          };
+            environment,
+            appFile: data.appFile || ".radius/app.bicep",
+            repairLoop: loop.repairLoop,
+            attemptId: loop.attemptId
+          });
+          if (reservation)
+            reservation.attemptId = entry.state.deployAttempt?.id;
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in
           // memory (and re-serializing the whole array to every 1.5s
@@ -7691,10 +8885,14 @@ function createRequestHandler(instanceId: string) {
                 const resolved = resolveDeployParams(parsed);
                 const { public: publicParams, secret: secretParams } =
                   partitionParams(parsed, resolved);
-                // Capture the app name (as the producer extracts it) so
-                // the deployed-graph reader can derive the GHCR artifact
-                // tag "<environment>-<app>-latest".
-                entry.state.deployAppName = appNameForGraphTag(bicepSource);
+                // Capture the app name so the deploy-status reader can prefer
+                // an artifact belonging to this application. It is a tiebreaker
+                // between artifacts in the same environment, never a lookup key
+                // and never a hard filter, so an unresolved name costs nothing.
+                entry.state.deployAppName =
+                  extractAppName(bicepSource) ||
+                  entry.state.deployAppName ||
+                  "";
                 // Ensure the environment carries the secret params the
                 // deployed app.bicep needs (e.g. an @secure() password).
                 // The workflow can ONLY read these from the
@@ -7974,87 +9172,80 @@ function createRequestHandler(instanceId: string) {
             let beatStep = "";
             let beatStepStartedAt = 0;
             let lastBeatAt = 0;
-            // Live `rad deploy` progress (published by the workflow to the
-            // radius-deploy-status branch). We track how many raw lines we've
-            // already surfaced so we only append new ones.
-            let liveLogShown = 0;
             let deployStarted = false;
-            // Track which activity-log status changes we've already
-            // streamed so we only announce new transitions.
-            const activitySeen = new Set<string>();
-            // Track how many control-plane / recipe log lines we've surfaced.
-            let cpLogShown = 0;
-            let cpLogTail = "";
-            const DEPLOY_STEP = "Deploy Application";
 
-            // Poll the Azure activity log the workflow publishes and
-            // drive FINE-GRAINED per-resource (output) status, coloring
-            // each planned graph node individually as Azure creates it.
-            const pollActivity = async () => {
-              if (provider !== "azure" || resources.length === 0) return;
-              const actText = await fetchLiveActivityLog(repo);
-              if (!actText) return;
-              const entries = reduceActivityLog(actText);
-              if (entries.length === 0) return;
-              const changes = applyActivityToResources(
-                entries,
+            // Deploy status and the deployed graph are published as a workflow
+            // artifact. This reader is scoped to the run we are tracking, so it
+            // reports this deploy's status rather than the previous one's.
+            const statusReader = await deployStatusReaderFromState(
+              entry.state,
+              repo,
+              branch,
+              dRunId
+            );
+            // Artifact uploads take seconds, so polling faster than this just
+            // re-reads the same bytes. The step-lifecycle stream and the
+            // heartbeat below keep the feed moving between refreshes.
+            const STATUS_POLL_MS = 15000;
+            let lastStatusPollAt = 0;
+
+            // Announce only new transitions, not the same status every tick.
+            const statusAnnounced = new Set<string>();
+
+            // pollDeployStatus - fold the newest published status map into the
+            // graph. Merging is conservative (see applyDeployStatusToResources):
+            // a resource missing from the payload keeps its current status, and
+            // a failure is never downgraded within the run.
+            const pollDeployStatus = async (force = false): Promise<void> => {
+              if (resources.length === 0) return;
+              if (!force && Date.now() - lastStatusPollAt < STATUS_POLL_MS)
+                return;
+              lastStatusPollAt = Date.now();
+              let statusMap;
+              let messageMap;
+              try {
+                const progress = await statusReader.progress();
+                statusMap = buildDeployStatusMap(progress);
+                messageMap = buildDeployMessageMap(progress);
+              } catch (e) {
+                addLog(
+                  "    ⚠ Could not read deploy status: " + errorMessage(e)
+                );
+                return;
+              }
+              applyDeployMessages(resources, messageMap);
+              const changes = applyDeployStatusToResources(
                 resources,
-                provider,
-                entry.state
+                statusMap
               );
-              for (const c of changes) {
-                if (!activitySeen.has(c)) {
-                  activitySeen.add(c);
-                  addLog("    ☁ " + c);
+              for (const change of changes) {
+                const line =
+                  (change.to === "failed" ? "✗"
+                  : change.to === "success" ? "✓"
+                  : "◐") +
+                  " " +
+                  (change.name || "resource") +
+                  " — " +
+                  change.to;
+                if (statusAnnounced.has(line)) continue;
+                statusAnnounced.add(line);
+                addLog("  " + line);
+              }
+              // Push each new status down onto the resource's outputs (and
+              // generate their portal links on success) the same way the rest
+              // of the deploy flow does.
+              if (changes.length > 0) {
+                for (const resource of resources) {
+                  if (resource.deployStatus)
+                    setStatus(resource, resource.deployStatus);
                 }
               }
             };
 
-            // Stream the Radius control-plane / recipe log (terraform/bicep
-            // execution from the radius-system pods). Real-time and carries
-            // the precise recipe failure cause. We append only new lines.
-            const pollControlPlane = async () => {
-              const cpText = await fetchLiveControlPlaneLog(repo);
-              if (!cpText) return;
-              cpLogTail = cpText;
-              const lines = cpText.split(/\r?\n/);
-              for (let i = cpLogShown; i < lines.length; i++) {
-                const t = lines[i].replace(/\s+$/, "");
-                if (t) addLog("    ⚙ " + t);
-              }
-              cpLogShown = lines.length;
-            };
-
-            // Advance per-resource status from any live log text so the
-            // graph shows gray→yellow→green/red per node. rad deploy in CI
-            // (non-TTY) prints no intermediate per-resource lines, so the
-            // control-plane/recipe log + activity log are the real signals.
-            const applyProgress = (text: string): void => {
-              if (!text) return;
-              const prog = parseResourceProgress(text, resources);
-              for (const r of resources) {
-                if (!r.name) continue;
-                const s = prog[r.name];
-                if (!s) continue;
-                const cur = r.deployStatus;
-                // Mid-deployment a node is NEVER painted red: a transient
-                // "error"/"failed"/"postponed" line in the live log does not
-                // mean the deployment failed. Such resources stay yellow
-                // (in_progress). Only the TERMINAL run conclusion (below)
-                // decides red vs green, so nodes go red solely on an actual
-                // failed deployment.
-                if (s === "success" && cur !== "success" && cur !== "failed") {
-                  setStatus(r, "success");
-                  addLog("  ✓ " + r.name + " deployed");
-                } else if (
-                  (s === "in_progress" || s === "failed") &&
-                  (cur === "pending" || !cur)
-                ) {
-                  setStatus(r, "in_progress");
-                  addLog("  ◐ " + r.name + " provisioning…");
-                }
-              }
-            };
+            // The step that runs `rad deploy`. This must match the step name in
+            // the upstream run-rad-commands composite action exactly — when it
+            // does not, none of the in-flight handling below ever executes.
+            const DEPLOY_STEP = DEPLOY_RAD_COMMANDS_STEP;
 
             for (let p = 0; p < 240; p++) {
               const detail = await getRunDetail(repo, dRunId);
@@ -8110,8 +9301,8 @@ function createRequestHandler(instanceId: string) {
                 }
               }
 
-              // While `rad deploy` runs, consume the live progress log
-              // the workflow publishes and drive REAL per-resource state.
+              // While the rad-commands step runs, fold in whatever per-resource
+              // status the deploy has published.
               const deployStep = detail.steps.find(
                 (s) => s.name === DEPLOY_STEP
               );
@@ -8132,27 +9323,16 @@ function createRequestHandler(instanceId: string) {
                   // Leave nodes gray; each flips to yellow when its own
                   // recipe/operation actually starts (see applyProgress).
                 }
-                const live = await fetchLiveDeployLog(repo);
-                if (live) {
-                  // Append any new raw rad-deploy output lines to the feed.
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
-                  }
-                  liveLogShown = lines.length;
-                  // Flip resources to their real status as the log reports them.
-                  applyProgress(live);
-                }
-                // Fine-grained Azure activity-log status per resource.
-                await pollActivity();
-                // Real-time control-plane / recipe (terraform) output.
-                await pollControlPlane();
-                // Drive per-node coloring from the control-plane/recipe log.
-                applyProgress(cpLogTail);
+                // Fold in whatever per-resource status the deploy has
+                // published so far. Nothing arrives mid-run yet: the producer
+                // publishes after `rad deploy` returns, because a composite
+                // step cannot invoke actions/upload-artifact while it runs.
+                // The poll is here regardless so that when the producer starts
+                // uploading during the deploy, this lights up unchanged.
+                await pollDeployStatus();
                 // Fallback: if nothing has advanced past pending ~25s into
-                // the deploy (no parseable per-resource signal), mark all
-                // pending nodes in_progress so the graph isn't stuck gray.
+                // the deploy, mark all pending nodes in_progress so the graph
+                // isn't stuck gray for the whole run.
                 if (
                   Date.now() - deployStepStartedAt > 25000 &&
                   !resources.some(
@@ -8168,48 +9348,29 @@ function createRequestHandler(instanceId: string) {
 
               if (detail.status === "completed") {
                 const conclusion = detail.conclusion;
-                // Final fine-grained activity sweep before settling.
-                await pollActivity();
-                await pollControlPlane();
 
-                // ── Finalize logs without cutting off ───────────
-                // The workflow writes the terminal deploy-state marker
-                // (succeeded/failed) LAST — only after the complete log
-                // and the deployed graph have been pushed to the status
-                // branch. Keep fetching the live log until the state is
-                // terminal AND its length stops growing, so we never drop
-                // the final rad-deploy output (e.g. the summary table).
-                let parsed;
-                let live = null;
-                let prevLen = -1;
-                let stableHits = 0;
-                for (let f = 0; f < 12; f++) {
-                  const ds = await fetchDeployState(repo);
-                  const cur = await fetchLiveDeployLog(repo);
-                  if (cur) live = cur;
-                  const len = cur ? cur.length : 0;
-                  const terminal = ds === "succeeded" || ds === "failed";
-                  if (len === prevLen) stableHits++;
-                  else stableHits = 0;
-                  prevLen = len;
-                  // Stream any control-plane lines that arrive late too.
-                  await pollControlPlane();
-                  if (terminal && (stableHits >= 1 || len === 0)) break;
-                  if (!terminal || stableHits < 1) await delay(2500);
-                }
-                if (live) {
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
+                // The producer publishes its artifact from a step that runs
+                // after `rad deploy` and before teardown, so by the time the
+                // run reports completed the upload has normally landed. Retry
+                // a few times anyway to absorb upload-finalization lag, since
+                // this read is the whole terminal graph.
+                addLog("🗺  Retrieving deploy status and application graph…");
+                let deployed: unknown = null;
+                let graphStatus: string | null = null;
+                for (let g = 0; g < 3; g++) {
+                  const gr = await statusReader.graph();
+                  graphStatus = gr.status;
+                  // Permission failures will not resolve by retrying.
+                  if (gr.status === "auth") break;
+                  if (gr.graph) {
+                    deployed = gr.graph;
+                    break;
                   }
-                  parsed = parseRadDeployLog(live, resources, {
-                    stripPrefix: false
-                  });
-                } else {
-                  const logText = await fetchRunLog(repo, dRunId);
-                  parsed = parseRadDeployLog(logText, resources);
+                  if (g < 2) await delay(5000);
                 }
+                // Final status sweep, forced past the poll interval so the
+                // last published state is always folded in.
+                await pollDeployStatus(true);
 
                 // Record stop time + duration.
                 const finishedAt = Date.now();
@@ -8227,63 +9388,42 @@ function createRequestHandler(instanceId: string) {
                   );
                 }
 
-                if (conclusion === "success") {
-                  // Overall success ⇒ every resource provisioned. Force all
-                  // nodes green; a transient "failed" token in the live log
-                  // must never leave a node red on a successful deployment.
-                  resources.forEach((r) => setStatus(r, "success"));
-                  // Fetch + store the REAL deployed application graph the
-                  // deploy published to GHCR (radius-project/radius PR
-                  // #12591), falling back to the legacy
-                  // radius-deploy-status branch when the artifact is
-                  // absent (older producers / git state backend).
-                  addLog("🗺  Retrieving deployed application graph…");
-                  const graphReader = await deployStatusReaderFromState(
-                    entry.state,
-                    repo,
-                    branch
+                // The run's own conclusion is authoritative for the overall
+                // outcome: it decides anything the published status left
+                // unfinished, without overwriting a resource the producer
+                // already reported as terminal.
+                settleDeployStatuses(resources, conclusion);
+                // Propagate onto output resources and generate portal links.
+                for (const resource of resources) {
+                  if (resource.deployStatus)
+                    setStatus(resource, resource.deployStatus);
+                }
+
+                if (deployed) {
+                  entry.state.deployedGraph =
+                    deployed as CanvasState["deployedGraph"];
+                  entry.state.deployedGraphRepo = repo;
+                  addLog("  ✓ Deployed graph saved (from workflow artifact).");
+                } else if (graphStatus === "auth") {
+                  addLog(
+                    "  ⚠ The deploy status artifact could not be read: access denied."
                   );
-                  let deployed = null;
-                  let graphSource = "none";
-                  let graphStatus = null;
-                  for (let g = 0; g < 6 && !deployed; g++) {
-                    const gr = await graphReader.graph();
-                    graphStatus = gr.status;
-                    if (gr.graph) {
-                      deployed = gr.graph;
-                      graphSource = gr.source;
-                      break;
-                    }
-                    // Permission failures won't resolve by retrying.
-                    if (gr.status === "auth") break;
-                    await delay(2500);
-                  }
-                  if (deployed) {
-                    entry.state.deployedGraph = deployed;
-                    entry.state.deployedGraphRepo = repo;
-                    addLog(
-                      graphSource === "ghcr" ?
-                        "  ✓ Deployed graph saved (from GHCR artifact " +
-                          graphReader.tag +
-                          ")."
-                      : "  ✓ Deployed graph saved (from radius-deploy-status branch)."
-                    );
-                  } else if (graphStatus === "auth") {
-                    addLog(
-                      "  ⚠ Deployed graph is published to a private GHCR package but access was denied."
-                    );
-                    addLog(
-                      "    Grant read access: gh auth refresh -s read:packages"
-                    );
-                  } else if (graphStatus === "malformed") {
-                    addLog(
-                      "  ⚠ Deployed graph artifact was found but could not be parsed (malformed). Continuing."
-                    );
-                  } else {
-                    addLog(
-                      "  ⚠ Deployed graph not available yet (continuing)."
-                    );
-                  }
+                  addLog(
+                    "    Check that the active gh account can read Actions artifacts for " +
+                      repo +
+                      "."
+                  );
+                } else if (graphStatus === "malformed") {
+                  addLog(
+                    "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
+                  );
+                } else {
+                  addLog(
+                    "  ⚠ Deployed graph not available (the deploy may not have published one)."
+                  );
+                }
+
+                if (conclusion === "success") {
                   entry.state.deployStatus = "complete";
                   addLog("");
                   addLog(
@@ -8297,17 +9437,6 @@ function createRequestHandler(instanceId: string) {
                       "."
                   );
                 } else {
-                  resources.forEach((r) => {
-                    const resourceName = r.name || "";
-                    if (parsed[resourceName] === "success")
-                      setStatus(r, "success");
-                    else if (
-                      parsed[resourceName] === "failed" ||
-                      r.deployStatus === "pending" ||
-                      r.deployStatus === "in_progress"
-                    )
-                      setStatus(r, "failed");
-                  });
                   entry.state.deployStatus = "failed";
                   addLog("");
                   addLog("❌ Deployment failed. Conclusion: " + conclusion);
@@ -8327,19 +9456,16 @@ function createRequestHandler(instanceId: string) {
                       " Failed step: " +
                       failedSteps.map((s) => s.name).join(", ") +
                       ".";
-                  // Surface the FULL detailed rad deploy failure block (root cause:
-                  // recipe/terraform/ARM operation errors). Prefer the live raw rad
-                  // output; fall back to the full run log.
-                  let failLog = live;
-                  if (!failLog) failLog = await fetchRunLog(repo, dRunId);
-                  // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the Azure Login
-                  // step, BEFORE rad runs — so it appears in the run log, not the live rad-deploy log.
-                  // A stale live-deploy log from a prior attempt (persisted on the status branch) could
-                  // otherwise mask it, so always consult the current run log for THIS run for the claim.
-                  const runLogForClaim =
-                    live ? await fetchRunLog(repo, dRunId) : failLog;
+                  // Surface the FULL detailed rad deploy failure block (root
+                  // cause: recipe/terraform/ARM operation errors). The run is
+                  // complete by now, so its log is readable in full — this is
+                  // the one signal the artifact transport does not carry.
+                  const failLog = await fetchRunLog(repo, dRunId);
+                  // The OIDC "enterprise claim" rejection (AADSTS7002381)
+                  // happens at the Azure Login step, before rad runs, so scope
+                  // the check to that step's log rather than the whole run.
                   const azureLoginLog = extractGitHubActionsStepLog(
-                    runLogForClaim,
+                    failLog,
                     "Azure Login (OIDC)"
                   );
                   const claimHelp = explainOidcEnterpriseClaim(azureLoginLog);
@@ -8353,26 +9479,29 @@ function createRequestHandler(instanceId: string) {
                     detailBlock.split("\n").forEach((l) => addLog("  " + l));
                     addLog("─────────────────────────────────");
                   }
-                  // The exact recipe (terraform/bicep) error is emitted by the
-                  // Radius control plane. Surface its tail if we captured it.
-                  if (cpLogTail) {
-                    const cpLines = cpLogTail
-                      .split(/\r?\n/)
-                      .filter((l) => l.trim());
-                    const cpErr = cpLines
-                      .filter((l) =>
-                        /error|failed|terraform|tofu|recipe/i.test(l)
-                      )
-                      .slice(-25);
-                    const cpShow = cpErr.length ? cpErr : cpLines.slice(-25);
-                    if (cpShow.length) {
-                      dErr +=
-                        "\n\n──── control-plane / recipe log ────\n" +
-                        cpShow.join("\n");
+                  // The producer ships a dedicated control-plane/recipe log in
+                  // the status artifact. It carries the precise recipe/terraform
+                  // failure cause, which the summarized run-log block above can
+                  // miss, so surface its tail when present.
+                  let cpLog: string | null = null;
+                  try {
+                    cpLog = await statusReader.controlPlaneLog();
+                  } catch {
+                    // Best-effort: a missing/unreadable control-plane log must
+                    // not mask the run-log failure details above.
+                  }
+                  if (cpLog) {
+                    const cpTail = cpLog
+                      .replace(/\s+$/, "")
+                      .split("\n")
+                      .slice(-40)
+                      .join("\n");
+                    if (cpTail.trim()) {
+                      dErr += "\n\n— control-plane log —\n" + cpTail;
                       addLog("");
-                      addLog("──────── control-plane / recipe log ────────");
-                      cpShow.forEach((l) => addLog("  " + l));
-                      addLog("─────────────────────────────────────────");
+                      addLog("──────── control-plane log ────────");
+                      cpTail.split("\n").forEach((l) => addLog("  " + l));
+                      addLog("───────────────────────────────────");
                     }
                   }
                   dErr +=
@@ -8422,12 +9551,20 @@ function createRequestHandler(instanceId: string) {
               // never attempted. The route keeps its own call as a fallback,
               // and triggerDeployRepairHandoff is idempotent per repair loop.
               triggerDeployRepairHandoff(entry, instanceId);
+              // Hold the repo/environment reservation for the whole deploy, not
+              // merely until the background monitor starts. This closes the
+              // deployment-record publication gap within this canvas instance.
+              releaseReservation();
             });
         }
+        // Keep this response adjacent to the monitor launch. Once the monitor
+        // owns the reservation, an awaited/throwing step here could enter the
+        // outer catch and release the lock while the deploy is still running.
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
       } catch (e) {
+        releaseReservation();
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
@@ -8437,8 +9574,19 @@ function createRequestHandler(instanceId: string) {
 
     if (pathname === "/api/deploy-reset" && req.method === "POST") {
       const entry = servers.get(instanceId);
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: Record<string, unknown>;
+      try {
+        data = body ? record(JSON.parse(body)) : {};
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: errorMessage(error) }));
+        return;
+      }
       if (entry) {
-        delete entry.state.deployResult;
+        resetDeploymentViewState(entry.state, data.attemptId);
       }
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
@@ -8702,6 +9850,7 @@ function createRequestHandler(instanceId: string) {
       res.end(environmentPage(state));
     }
   };
+  return { handler, startRecoveredVerificationTasks };
 }
 
 const PAGE_RENDERERS = {
@@ -8760,7 +9909,8 @@ async function startServer(
   instanceId: string,
   page = DEFAULT_CANVAS_PAGE
 ): Promise<CanvasServerEntry> {
-  const handler = createRequestHandler(instanceId);
+  let baseUrl = "";
+  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
   // Restore the user's explicitly chosen GitHub account (if any) before priming
   // so the very first strategy resolution honors it. This is what makes the
   // account choice stable across restarts.
@@ -8771,7 +9921,7 @@ async function startServer(
   // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
   // self-healing, so a failure here just means the next caller re-primes.
   primeGhIdentity().catch(() => {});
-  const server = createServer(handler);
+  const server = createServer(requestHandler.handler);
   let port: number;
   // Try the stable, instanceId-derived port first; fall back to an ephemeral
   // port (listen(0)) only if it's already taken/unavailable.
@@ -8786,7 +9936,7 @@ async function startServer(
     const address = server.address();
     port = typeof address === "object" && address ? address.port : 0;
   }
-  const baseUrl = `http://127.0.0.1:${port}`;
+  baseUrl = `http://127.0.0.1:${port}`;
   const entry: CanvasServerEntry = {
     server,
     baseUrl,
@@ -8795,6 +9945,8 @@ async function startServer(
     state: {}
   };
   servers.set(instanceId, entry);
+  shuttingDownInstances.delete(instanceId);
+  requestHandler.startRecoveredVerificationTasks();
   return entry;
 }
 
@@ -8810,5 +9962,8 @@ export async function getOrCreateServer(
     }
     return entry;
   }
+  // Start warming the page assets only when a canvas is actually opened. The
+  // first HTML request awaits this same in-flight promise before rendering.
+  void ensureVendorScripts();
   return await startServer(instanceId, page);
 }

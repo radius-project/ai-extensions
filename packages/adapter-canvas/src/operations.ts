@@ -129,6 +129,7 @@ export const TERMINAL_STATES = Object.freeze([
 ]);
 
 export const RUNNING_STATE = "running";
+export const INPUT_REQUIRED_STATE = "input_required";
 
 export function isTerminalState(state: any): boolean {
   return TERMINAL_STATES.includes(state);
@@ -336,11 +337,22 @@ export function setStageState(op: any, stageId: any, state: any): any {
 }
 
 /** Keep a live operation open while the user supplies information needed to continue. */
-export function requireInput(op: any, { code, message }: any = {}): any {
+export function requireInput(
+  op: any,
+  { code, message, checkpoint = null, metadata = null }: any = {}
+): any {
   if (!op || isTerminalState(op.state)) return op;
+  const promptCode = code || "input-required";
+  op.state = INPUT_REQUIRED_STATE;
   op.inputRequired = {
-    code: code || "input-required",
+    code: promptCode,
     message: message || "",
+    checkpoint:
+      typeof checkpoint === "string" && checkpoint ? checkpoint : promptCode,
+    metadata:
+      metadata && typeof metadata === "object" ?
+        structuredClone(metadata)
+      : null,
     requestedAt: nowIso()
   };
   op.lastActivityAt = op.inputRequired.requestedAt;
@@ -349,8 +361,63 @@ export function requireInput(op: any, { code, message }: any = {}): any {
 
 /** Clear the prompt marker when a retry presents the requested input. */
 export function resumeAfterInput(op: any): any {
-  if (!op || isTerminalState(op.state)) return op;
+  if (
+    !op ||
+    isTerminalState(op.state) ||
+    op.state !== INPUT_REQUIRED_STATE ||
+    !op.inputRequired
+  )
+    return op;
+  op.state = RUNNING_STATE;
   op.inputRequired = null;
+  op.recoveryState = null;
+  op.lastActivityAt = nowIso();
+  return op;
+}
+
+export function canResumeInput(
+  op: any,
+  {
+    code,
+    checkpoint,
+    repo,
+    environment,
+    provider
+  }: {
+    code?: string;
+    checkpoint?: string;
+    repo?: string;
+    environment?: string;
+    provider?: string;
+  } = {}
+): boolean {
+  if (
+    !op ||
+    isTerminalState(op.state) ||
+    op.state !== INPUT_REQUIRED_STATE ||
+    !op.inputRequired ||
+    op.executionActive
+  )
+    return false;
+  if (
+    !code ||
+    !checkpoint ||
+    !repo ||
+    !environment ||
+    !provider ||
+    op.inputRequired.code !== code ||
+    op.inputRequired.checkpoint !== checkpoint ||
+    op.repo !== repo ||
+    op.environment !== environment ||
+    op.provider !== provider
+  )
+    return false;
+  return true;
+}
+
+export function setExecutionActive(op: any, active: boolean): any {
+  if (!op || isTerminalState(op.state)) return op;
+  op.executionActive = !!active;
   op.lastActivityAt = nowIso();
   return op;
 }
@@ -935,6 +1002,11 @@ export function summarize(op: any): string {
         stage ? stage.label.toLowerCase() : "working"
       }…`;
     }
+    case INPUT_REQUIRED_STATE:
+      return (
+        (op.inputRequired && op.inputRequired.message) ||
+        `Creating ${env} needs information from you.`
+      );
     case "succeeded":
       return `Environment "${env}" is ready.`;
     case "succeeded_with_warnings": {
@@ -1035,6 +1107,7 @@ const MAX_RETAINED = 20;
 // on indefinitely. Longer than the slowest observed leg, short enough that a
 // stuck record clears itself.
 const STALE_AFTER_MS = 15 * 60 * 1000;
+export const INPUT_STALE_AFTER_MS = 60 * 60 * 1000;
 export const VERIFY_STALE_AFTER_MS = 45 * 60 * 1000;
 
 export function hasCompleteVerificationIdentity(op: any): boolean {
@@ -1055,7 +1128,13 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
 /** Whether a non-terminal record has gone quiet long enough to be abandoned. */
 export function isStale(op: any, now = Date.now()): boolean {
   if (!op || isTerminalState(op.state)) return false;
-  if (op.recoveryState === "waiting_input") return false;
+  if (op.state === INPUT_REQUIRED_STATE) {
+    return (
+      now -
+        new Date(op.inputRequired?.requestedAt || op.lastActivityAt).getTime() >
+      INPUT_STALE_AFTER_MS
+    );
+  }
   if (hasCompleteVerificationIdentity(op)) {
     return now - Number(op.verification.dispatchedAt) > VERIFY_STALE_AFTER_MS;
   }
@@ -1083,6 +1162,7 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "terminal",
   "failure",
   "inputRequired",
+  "resumeRequest",
   "verification"
 ]);
 
@@ -1134,8 +1214,11 @@ export function fromPersistedOperation(value: any): any {
 export function reconcileRestoredOperation(op: any): any {
   if (!op || isTerminalState(op.state)) return op;
   if (op.inputRequired) {
-    op.recoveryState = "waiting_input";
-    return op;
+    if (op.resumeRequest) {
+      op.state = INPUT_REQUIRED_STATE;
+      op.recoveryState = "waiting_input";
+      return op;
+    }
   }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
@@ -1172,6 +1255,26 @@ export function createRegistry({
 } = {}): any {
   /** @type {Map<string, object>} */
   const byId = new Map();
+
+  function expireInput(op: any, now = clock()): any {
+    if (
+      op?.state !== INPUT_REQUIRED_STATE ||
+      !isStale(op, now) ||
+      isTerminalState(op.state)
+    )
+      return op;
+    return finish(op, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          "Environment setup timed out while waiting for required information.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+  }
 
   function prune() {
     const now = clock();
@@ -1257,7 +1360,12 @@ export function createRegistry({
     /** The operation still running for a repo, if any. */
     running(repo) {
       for (const op of byId.values()) {
-        if (op.repo === repo && !isTerminalState(op.state) && !isStale(op))
+        expireInput(op);
+        if (
+          op.repo === repo &&
+          !isTerminalState(op.state) &&
+          !isStale(op, clock())
+        )
           return op;
       }
       return null;
@@ -1270,12 +1378,13 @@ export function createRegistry({
       let best = null;
       for (const op of byId.values()) {
         if (op.repo !== repo) continue;
+        expireInput(op);
         if (!isTerminalState(op.state)) {
           // A stale record is one nobody is driving any more. Showing
           // it would be worse than showing nothing: a spinner that can
           // never resolve is exactly the thing this work set out to
           // remove.
-          if (isStale(op)) continue;
+          if (isStale(op, clock())) continue;
           return op;
         }
         if (
@@ -1299,8 +1408,9 @@ export function createRegistry({
     latestAny() {
       let best = null;
       for (const op of byId.values()) {
+        expireInput(op);
         if (!isTerminalState(op.state)) {
-          if (isStale(op)) continue;
+          if (isStale(op, clock())) continue;
           return op;
         }
         if (
@@ -1314,7 +1424,8 @@ export function createRegistry({
     },
     get(operationId) {
       const op = byId.get(operationId) || null;
-      return op && !isStale(op) ? op : null;
+      expireInput(op);
+      return op && !isStale(op, clock()) ? op : null;
     },
     /**
      * Register a new operation, refusing when one is already running for
@@ -1344,7 +1455,21 @@ export function createRegistry({
     },
     anyRunning() {
       for (const op of byId.values())
-        if (!isTerminalState(op.state) && !isStale(op)) return true;
+        if (!isTerminalState(op.state) && !isStale(op, clock())) return true;
+      return false;
+    },
+    anyExecuting() {
+      for (const op of byId.values()) {
+        if (
+          !isTerminalState(op.state) &&
+          op.state === RUNNING_STATE &&
+          (op.executionActive === true ||
+            (op.currentStage === STAGE_VERIFY &&
+              !!op.verification?.dispatchedAt)) &&
+          !isStale(op, clock())
+        )
+          return true;
+      }
       return false;
     },
     clear() {
@@ -1381,7 +1506,7 @@ export async function persistOperations(): Promise<void> {
  * which is why this predicate has to exist before the panel ships.
  */
 export function setupInFlight(): boolean {
-  return operations.anyRunning();
+  return operations.anyExecuting();
 }
 
 /**

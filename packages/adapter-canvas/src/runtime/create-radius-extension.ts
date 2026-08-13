@@ -18,8 +18,8 @@ import { createGraphContextHelpers } from "./graph-context.js";
 import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
 import {
   evaluateAppBicepHook,
-  appBicepHandoffPrompt,
-  deployRepairHandoffPrompt
+  appBicepHandoffMessage,
+  deployRepairHandoffMessage
 } from "./hooks.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
@@ -74,21 +74,28 @@ export function createRadiusExtension(
   // always after attachSession() has run.
   deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page }) =>
     Promise.resolve(
-      deps.session.get().send(appBicepHandoffPrompt(repo, page, branches))
+      deps.session.get().send(appBicepHandoffMessage(repo, page, branches))
     )
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>
       deps.session.get().send(
-        deployRepairHandoffPrompt(repo, branch, {
+        deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
           attemptId
         })
       )
   );
+  // Routes hand us either a bare prompt or an already-paired
+  // {prompt, displayPrompt}; forward both shapes untouched so the server owns
+  // the wording and this seam only bridges to the session.
   deps.hostCallbacks.setSessionPromptHandler((prompt) =>
-    Promise.resolve(deps.session.get().send(String(prompt || "")))
+    Promise.resolve(
+      deps.session
+        .get()
+        .send(typeof prompt === "string" ? String(prompt || "") : prompt)
+    )
   );
   // Wires the "View source code" click for local-workspace graphs to the
   // Copilot editor canvas (side pane). See the original extension.ts history
@@ -173,6 +180,7 @@ export function createRadiusExtension(
         const closes: Array<Promise<void>> = [];
         for (const [id, entry] of deps.servers) {
           try {
+            deps.operations.markEnvironmentInstanceShuttingDown(id);
             entry.server.closeAllConnections?.();
             closes.push(
               new Promise<void>((resolve) => {
@@ -295,6 +303,13 @@ export function createRadiusExtension(
   let attachedSession: SessionPort | undefined;
 
   function attachSession(session: SessionPort): void {
+    // Shutdown has already run and will not run again, so a session stored now
+    // would never be torn down. Reject it before mutating either session holder.
+    if (shutdownPromise) {
+      throw new Error(
+        "Radius runtime: cannot attach a session after shutdown; the runtime can no longer tear it down."
+      );
+    }
     if (attachedSession) {
       if (attachedSession !== session) {
         throw new Error(
@@ -305,8 +320,6 @@ export function createRadiusExtension(
     }
     attachedSession = session;
     deps.session.set(session);
-    // A session attached after shutdown must not resurrect the keepalive.
-    if (shutdownPromise) return;
     startKeepalive();
   }
 

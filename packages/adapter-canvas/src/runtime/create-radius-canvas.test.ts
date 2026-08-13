@@ -4,6 +4,7 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
+import type { CanvasGraphResource } from "../shared.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -42,6 +43,30 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   return { ...fake, canvas };
 }
 
+async function seedGraph(
+  deps: ReturnType<typeof setup>["deps"],
+  resources: CanvasGraphResource[],
+  view: "graph" | "diff" = "graph"
+) {
+  const entry = await deps.getOrCreateServer(
+    "radius-panel",
+    view === "diff" ? "graph-diff" : "graph"
+  );
+  deps.sourceRefs.setSourceRefResources(
+    entry,
+    view,
+    resources,
+    view === "diff" ?
+      {
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      }
+    : { repo: "acme/widgets", branch: "main" }
+  );
+  entry.state.activeGraphView = view;
+}
+
 // RU-05: get_graph_resources full behavior.
 describe("RU-05: get_graph_resources", () => {
   it("reports ready:false before the graph has been built", async () => {
@@ -57,26 +82,42 @@ describe("RU-05: get_graph_resources", () => {
     });
   });
 
-  it("defaults to missingOnly=true, excluding resources with a codeReference or an applications-family type", async () => {
-    const { canvas } = setup();
-    await findAction(canvas, "render_graph").handler(
-      ctx("radius-panel", {
-        resources: [
-          { id: "1", name: "db", type: "Radius.Data/redis" },
-          {
-            id: "2",
-            name: "already-ref",
-            type: "Radius.Data/redis",
-            codeReference: "src/db.js#L1"
-          },
-          {
-            id: "3",
-            name: "app",
-            type: "Applications.Core/containers"
-          }
-        ]
-      })
+  it("reports unavailable context instead of returning unpinned resources", async () => {
+    const { canvas, deps } = setup();
+    deps.sourceRefs.getSourceRefResources = vi.fn(() => ({
+      ready: true,
+      view: "graph",
+      resources: [],
+      context: undefined
+    })) as typeof deps.sourceRefs.getSourceRefResources;
+
+    const result = await findAction(canvas, "get_graph_resources").handler(
+      ctx("radius-panel")
     );
+
+    expect(result).toEqual({
+      ready: false,
+      resources: [],
+      message: "Graph context is unavailable."
+    });
+  });
+
+  it("defaults to missingOnly=true, excluding resources with a codeReference or an applications-family type", async () => {
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [
+      { id: "1", name: "db", type: "Radius.Data/redis" },
+      {
+        id: "2",
+        name: "already-ref",
+        type: "Radius.Data/redis",
+        codeReference: "src/db.js#L1"
+      },
+      {
+        id: "3",
+        name: "app",
+        type: "Applications.Core/containers"
+      }
+    ]);
     const result = await findAction(canvas, "get_graph_resources").handler(
       ctx("radius-panel")
     );
@@ -85,20 +126,16 @@ describe("RU-05: get_graph_resources", () => {
   });
 
   it("returns all resources when missingOnly is false", async () => {
-    const { canvas } = setup();
-    await findAction(canvas, "render_graph").handler(
-      ctx("radius-panel", {
-        resources: [
-          { id: "1", name: "db", type: "Radius.Data/redis" },
-          {
-            id: "2",
-            name: "ref'd",
-            type: "Radius.Data/redis",
-            codeReference: "src/db.js#L1"
-          }
-        ]
-      })
-    );
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [
+      { id: "1", name: "db", type: "Radius.Data/redis" },
+      {
+        id: "2",
+        name: "ref'd",
+        type: "Radius.Data/redis",
+        codeReference: "src/db.js#L1"
+      }
+    ]);
     const result = await findAction(canvas, "get_graph_resources").handler(
       ctx("radius-panel", { missingOnly: false })
     );
@@ -106,10 +143,8 @@ describe("RU-05: get_graph_resources", () => {
   });
 
   it("includes the context token/repo/branch so update_source_refs can be pinned to this exact context", async () => {
-    const { canvas } = setup();
-    await findAction(canvas, "render_graph").handler(
-      ctx("radius-panel", { resources: [{ id: "1", name: "db", type: "x" }] })
-    );
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [{ id: "1", name: "db", type: "x" }]);
     const result = await findAction(canvas, "get_graph_resources").handler(
       ctx("radius-panel")
     );
@@ -143,10 +178,8 @@ describe("RU-06: update_source_refs", () => {
   });
 
   it("errors on a stale/unknown contextToken", async () => {
-    const { canvas } = setup();
-    await findAction(canvas, "render_graph").handler(
-      ctx("radius-panel", { resources: [{ id: "1", name: "db", type: "x" }] })
-    );
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [{ id: "1", name: "db", type: "x" }]);
     const result = await findAction(canvas, "update_source_refs").handler(
       ctx("radius-panel", {
         contextToken: "not-a-real-token",
@@ -158,19 +191,15 @@ describe("RU-06: update_source_refs", () => {
 
   it("updates a resource that exists in the current graph, skips one that already has a codeReference, and queues one that isn't in the graph yet", async () => {
     const { canvas, deps } = setup();
-    await findAction(canvas, "render_graph").handler(
-      ctx("radius-panel", {
-        resources: [
-          { id: "1", name: "db", type: "x" },
-          {
-            id: "2",
-            name: "already",
-            type: "x",
-            codeReference: "old.js#L1"
-          }
-        ]
-      })
-    );
+    await seedGraph(deps, [
+      { id: "1", name: "db", type: "x" },
+      {
+        id: "2",
+        name: "already",
+        type: "x",
+        codeReference: "old.js#L1"
+      }
+    ]);
     const { contextToken } = await findAction(
       canvas,
       "get_graph_resources"
@@ -201,14 +230,10 @@ describe("RU-06: update_source_refs", () => {
 
   it("maps the diff view to the graph-diff page and reloads the same canvas instance", async () => {
     const { canvas, deps } = setup();
-    await findAction(canvas, "render_graph_diff").handler(
-      ctx("radius-panel", {
-        baseResources: [{ id: "1", name: "db", type: "x" }],
-        headResources: [{ id: "1", name: "db", type: "x" }],
-        repo: "acme/widgets",
-        baseBranch: "main",
-        headBranch: "feat"
-      })
+    await seedGraph(
+      deps,
+      [{ id: "1", name: "db", type: "x", diffStatus: "unchanged" }],
+      "diff"
     );
     const { contextToken } = await findAction(
       canvas,
@@ -390,6 +415,16 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "1", name: "db", type: "Radius.Data/redis" }
     ]);
+    const session = deps.session.get();
+    session.log = vi.fn(() => {
+      throw new Error("log unavailable");
+    });
+    (
+      deps.rad.radArtifactsDirForSelection as ReturnType<typeof vi.fn>
+    ).mockImplementation(async ({ log }) => {
+      log("building graph");
+      return { dir: "/workspace/.radius", remote: false };
+    });
     await canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -401,6 +436,32 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.diffNoChanges).toBe(true);
     expect(state.diffError).toBeUndefined();
+    expect(session.log).toHaveBeenCalledWith("building graph");
+  });
+
+  it("records a graph-diff failure for the current comparison", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("graph compilation failed")
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
+      "graph compilation failed"
+    );
   });
 
   it("only records a diff error for the CURRENT diff request (stale responses are ignored)", async () => {
@@ -486,6 +547,26 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).not.toHaveBeenCalled();
   });
 
+  it("hands off when checking app.bicep fails", async () => {
+    const { canvas, deps } = setup();
+    const session = deps.session.get();
+    (
+      deps.core.fetchBicepFromRepo as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("contents unavailable"));
+
+    await expect(
+      canvas.open(
+        ctx("radius-panel", {
+          page: "graph",
+          repo: "other/repo",
+          branch: "main"
+        })
+      )
+    ).resolves.toMatchObject({ title: "Radius" });
+
+    expect(session.send).toHaveBeenCalledOnce();
+  });
+
   it("never blocks or fails canvas open when session.send throws", async () => {
     const { canvas, deps } = setup();
     const session = deps.session.get();
@@ -558,5 +639,102 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     await canvas.onClose(ctx("panel-a"));
     expect(deps.servers.has("panel-a")).toBe(false);
     expect(deps.servers.has("panel-b")).toBe(true);
+  });
+
+  it("defers close until the last server-owned environment task settles", async () => {
+    const { canvas, deps } = setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (_instanceId, listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    const entry = deps.servers.get("radius-panel")!;
+    const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("radius-panel"));
+    expect(deps.operations.hasActiveEnvironmentTasks).toHaveBeenCalledWith(
+      "radius-panel"
+    );
+    expect(deps.operations.onEnvironmentTasksSettled).toHaveBeenCalledWith(
+      "radius-panel",
+      expect.any(Function)
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(deps.servers.has("radius-panel")).toBe(true);
+
+    settled?.();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(deps.servers.has("radius-panel")).toBe(false);
+  });
+
+  it("cancels a deferred close when the same instance reopens", async () => {
+    const { canvas, deps } = setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (_instanceId, listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    const entry = deps.servers.get("radius-panel")!;
+    const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("radius-panel"));
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    settled?.();
+
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(deps.servers.get("radius-panel")).toBe(entry);
+  });
+
+  it("does not defer one instance for another instance's active work", async () => {
+    const { canvas, deps } = setup();
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockImplementation(
+      (instanceId) => instanceId === "panel-b"
+    );
+    await canvas.open(ctx("panel-a", { page: "environment" }));
+    await canvas.open(ctx("panel-b", { page: "environment" }));
+    const panelA = deps.servers.get("panel-a")!;
+    const closeSpy = panelA.server.close as unknown as ReturnType<typeof vi.fn>;
+
+    await canvas.onClose(ctx("panel-a"));
+
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(deps.operations.onEnvironmentTasksSettled).not.toHaveBeenCalled();
+    expect(deps.servers.has("panel-b")).toBe(true);
+  });
+
+  it("force-closes a deferred server after the supported operation lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const { canvas, deps } = setup();
+      const stopListening = vi.fn();
+      vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(
+        true
+      );
+      vi.mocked(deps.operations.onEnvironmentTasksSettled).mockReturnValue(
+        stopListening
+      );
+      await canvas.open(ctx("radius-panel", { page: "environment" }));
+      const entry = deps.servers.get("radius-panel")!;
+      const closeSpy = entry.server.close as unknown as ReturnType<
+        typeof vi.fn
+      >;
+
+      await canvas.onClose(ctx("radius-panel"));
+      await vi.advanceTimersByTimeAsync(46 * 60 * 1000);
+
+      expect(stopListening).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(deps.servers.has("radius-panel")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

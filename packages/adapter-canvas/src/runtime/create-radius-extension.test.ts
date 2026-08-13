@@ -9,6 +9,11 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
+import {
+  appBicepHandoffPrompt,
+  appBicepHandoffDisplayPrompt,
+  deployRepairHandoffDisplayPrompt
+} from "./hooks.js";
 
 // RU-20: the composition factory never calls joinSession — only the
 // production thin entry (src/extension.ts) does, exactly once. The real
@@ -91,19 +96,26 @@ describe("attachSession is single-use", () => {
     expect(() => ext.attachSession(session)).not.toThrow();
   });
 
-  it("does not restart the keepalive when a session is attached after shutdown", async () => {
+  it("rejects a session attached after shutdown without mutating the holder or starting keepalive", async () => {
     vi.useFakeTimers();
     try {
-      const { deps, setLastWebviewActivityAt } = createFakeDependencies();
+      const { deps } = createFakeDependencies();
       const ext = createRadiusExtension(deps);
       await ext.shutdown("SIGTERM");
 
       const session = createFakeSession();
-      ext.attachSession(session);
-      setLastWebviewActivityAt(Date.now());
-
-      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
-      expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+      let attachError: unknown;
+      try {
+        ext.attachSession(session);
+      } catch (error) {
+        attachError = error;
+      }
+      // Assert state first: the old store-then-return behavior must fail here,
+      // even before checking the public error contract.
+      expect(deps.session.tryGet()).toBeUndefined();
+      expect(() => {
+        throw attachError;
+      }).toThrow(/cannot attach a session after shutdown/);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -195,7 +207,7 @@ describe("RU-19: onSessionStart hook", () => {
 });
 
 describe("RU-19: host-channel callback wiring (context/permission/session)", () => {
-  it("registers an app.bicep handoff that sends the handoff prompt through the attached session", async () => {
+  it("registers an app.bicep handoff that sends the full prompt to the agent and a short display prompt to the timeline", async () => {
     const { ext, deps, capturedHostCallbacks } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
@@ -206,13 +218,21 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       page: "graph"
     });
     expect(session.send).toHaveBeenCalledOnce();
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    ).toContain("acme/widgets");
+    const sent = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string; displayPrompt: string };
+    // The agent half must carry the full instructions...
+    expect(sent.prompt).toBe(
+      appBicepHandoffPrompt("acme/widgets", "graph", ["main"])
+    );
+    // ...and the timeline half must be the short stand-in, not the reverse.
+    expect(sent.displayPrompt).toBe(
+      appBicepHandoffDisplayPrompt("acme/widgets", "graph", ["main"])
+    );
+    expect(sent.displayPrompt).not.toContain("radius_generate_app");
     void deps;
   });
 
-  it("registers a deploy-repair handoff that sends the repair prompt", async () => {
+  it("registers a deploy-repair handoff that sends the full prompt to the agent and a short display prompt to the timeline", async () => {
     const { ext, capturedHostCallbacks } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
@@ -225,17 +245,33 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       instanceId: "radius-panel"
     });
     expect(session.send).toHaveBeenCalledOnce();
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    ).toContain("BCP037");
+    const sent = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string; displayPrompt: string };
+    expect(sent.prompt).toContain("BCP037");
+    expect(sent.prompt).toContain("attempt-A");
+    expect(sent.displayPrompt).toBe(
+      deployRepairHandoffDisplayPrompt("acme/widgets", "main")
+    );
+    // The raw deploy diagnostic must never reach the timeline half.
+    expect(sent.displayPrompt).not.toContain("BCP037");
+    expect(sent.displayPrompt).not.toContain("radius_deploy_status");
   });
 
-  it("registers a session-prompt handler that forwards the prompt string", async () => {
+  it("registers a session-prompt handler that forwards a bare prompt string", async () => {
     const { ext, capturedHostCallbacks } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
     await capturedHostCallbacks.sessionPromptHandler!("please log in");
     expect(session.send).toHaveBeenCalledWith("please log in");
+  });
+
+  it("forwards an already-paired session prompt message untouched", async () => {
+    const { ext, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    const message = { prompt: "run az login …", displayPrompt: "Signing in." };
+    await capturedHostCallbacks.sessionPromptHandler!(message);
+    expect(session.send).toHaveBeenCalledWith(message);
   });
 
   it("registers an open-source handler that opens the editor canvas only for a file on the worktree", async () => {
@@ -452,6 +488,12 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     });
 
     await ext.shutdown("SIGTERM");
+    expect(
+      deps.operations.markEnvironmentInstanceShuttingDown
+    ).toHaveBeenCalledWith("panel-a");
+    expect(
+      deps.operations.markEnvironmentInstanceShuttingDown
+    ).toHaveBeenCalledWith("panel-b");
     expect(closeA).toHaveBeenCalledTimes(1);
     expect(closeB).toHaveBeenCalledTimes(1);
     expect(deps.servers.size).toBe(0);
