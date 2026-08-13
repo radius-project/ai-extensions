@@ -10,7 +10,7 @@
 // empty repo, which the background monitor rejects immediately, so it never
 // reaches the network either.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import {
   createLegacyRequestHandler,
@@ -22,6 +22,26 @@ import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { MIGRATED_ROUTE_KEYS } from "./server/route-table.js";
 import type { CanvasState } from "./shared.js";
 
+// Every GitHub CLI invocation the route can make funnels through these two
+// exports, and the deploy dispatch itself is a `gh workflow run` through
+// cliExec. Replacing them records what the route actually ran, so "a refusal
+// costs no Actions run" is checked at that boundary rather than inferred from
+// which state the route did or did not touch. Both are replaced because
+// runCommand calls cliExec internally, not through this module's exports.
+const ghCli = vi.hoisted(() => ({
+  cliExec: vi.fn(),
+  runCommand: vi.fn()
+}));
+
+vi.mock("./gh.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./gh.js")>();
+  return {
+    ...actual,
+    cliExec: ghCli.cliExec,
+    runCommand: ghCli.runCommand
+  };
+});
+
 const INSTANCE = "deploy-route-test";
 
 let http: Server;
@@ -30,6 +50,20 @@ let baseUrl = "";
 beforeEach(async () => {
   // A handoff would otherwise fire from the accepted deploy's monitor.
   setDeployRepairHandoff(() => Promise.resolve());
+  ghCli.cliExec.mockReset();
+  ghCli.runCommand.mockReset();
+  ghCli.runCommand.mockResolvedValue("");
+  ghCli.cliExec.mockImplementation(
+    (
+      _cmd: string,
+      _args: string[],
+      _opts: unknown,
+      cb?: (err: null, stdout: string, stderr: string) => void
+    ) => {
+      cb?.(null, "", "");
+      return { stdin: { end: () => {} } };
+    }
+  );
   const { handler } = createLegacyRequestHandler(INSTANCE, () => baseUrl);
   http = createServer(handler);
   await new Promise<void>((resolve) =>
@@ -104,6 +138,15 @@ async function postDeploy(body: unknown): Promise<{
   return { status: res.status, json };
 }
 
+// The guarantee this file exists for: a refused redeploy never reaches the
+// GitHub CLI, so it cannot have dispatched a workflow run. Asserted at the
+// boundary itself, so reordering the route's state writes cannot make a
+// refusal quietly start costing an Actions run.
+function expectNoGitHubCliUse(): void {
+  expect(ghCli.cliExec).not.toHaveBeenCalled();
+  expect(ghCli.runCommand).not.toHaveBeenCalled();
+}
+
 describe("/api/deploy repair-loop refusals", () => {
   it("still runs through the handler these cases bind to", () => {
     // These bind the legacy handler directly, which is where /api/deploy is
@@ -124,6 +167,7 @@ describe("/api/deploy repair-loop refusals", () => {
     expect(String(json.error)).toMatch(/already used its/);
     // The refusal has to be inert: no counter movement, no new attempt, and no
     // transition out of failed — a dispatched run would have set in_progress.
+    expectNoGitHubCliUse();
     expect(state.deployRepairAttempts).toBe(DEPLOY_REPAIR_ATTEMPT_CAP);
     expect(state.deployAttempt?.id).toBe("attempt-A");
     expect(state.deployStatus).toBe("failed");
@@ -138,6 +182,7 @@ describe("/api/deploy repair-loop refusals", () => {
 
     expect(status).toBe(409);
     expect(String(json.error)).toMatch(/still running/);
+    expectNoGitHubCliUse();
     expect(state.deployRepairAttempts).toBe(1);
   });
 
@@ -149,6 +194,7 @@ describe("/api/deploy repair-loop refusals", () => {
 
     expect(status).toBe(409);
     expect(String(json.error)).toMatch(/without an attemptId/);
+    expectNoGitHubCliUse();
     expect(state.deployRepairAttempts).toBe(2);
   });
 
@@ -164,6 +210,7 @@ describe("/api/deploy repair-loop refusals", () => {
 
     expect(status).toBe(409);
     expect(String(json.error)).toMatch(/may still be running/);
+    expectNoGitHubCliUse();
     expect(state.deployRepairAttempts).toBe(1);
   });
 
@@ -186,9 +233,30 @@ describe("/api/deploy repair-loop refusals", () => {
 
     expect(status).toBe(409);
     expect(String(json.error)).toMatch(/no longer the current attempt/);
+    expectNoGitHubCliUse();
     expect(state.deployAttempt?.id).toBe("attempt-B");
     expect(state.deployAttempt?.targetRepo).toBe("acme/other");
     expect(state.deployRepairAttempts).toBe(0);
+  });
+
+  it("routes its GitHub CLI calls through the replaced module", async () => {
+    // Without this, the assertions above could pass because nothing observes
+    // the route rather than because the route stayed away from the CLI. An
+    // accepted deploy that omits a branch has to resolve the repo's default
+    // one, which is a gh call and must therefore be recorded here.
+    seed(failedAttempt({ deployRepairAttempts: 0 }));
+    const { status } = await postDeploy({
+      targetRepo: "",
+      environment: "production",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    });
+
+    expect(status).toBe(200);
+    expect(ghCli.runCommand).toHaveBeenCalledWith(
+      "gh",
+      expect.arrayContaining(["repo", "view"])
+    );
   });
 
   it("accepts an unbound deploy, opening a new attempt and resetting the count", async () => {
