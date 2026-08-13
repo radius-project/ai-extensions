@@ -41,6 +41,35 @@ import {
   summarize,
   toClientView,
   toPersistedOperation,
+  fromPersistedOperation,
+  acceptCommand,
+  applyStopRequest,
+  ambiguousSetupOwnership,
+  beginRetryAttempt,
+  buildCommandId,
+  buildIdempotencyKey,
+  canRetryCleanup,
+  canRetrySetup,
+  canRetryVerification,
+  classifyVerificationRetry,
+  createOperationControl,
+  discardCommand,
+  findCommand,
+  getOperationControl,
+  isStopPending,
+  latestCommand,
+  nextIncompleteSetupStep,
+  projectCleanupSummary,
+  projectNextTransition,
+  projectOperationActions,
+  readOperationControl,
+  recordAttemptOutcome,
+  reconcileOperationLifecycle,
+  rollbackRetryAttempt,
+  setCommandState,
+  snapshotRetryState,
+  stopAtBoundary,
+  unresolvedCleanupTargets,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -645,11 +674,11 @@ describe("client projection", () => {
     recordAzureApp(op, {
       state: "created",
       appId: "canary-app",
-      displayName: "IGNORE-SETUP-LEDGER"
+      displayName: "radius-contoso-store"
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "IGNORE-SETUP-LEDGER-SUBJECT"
+      subject: "repo:contoso/store:environment:dev"
     });
     finish(op, "failed", {
       failure: {
@@ -667,7 +696,38 @@ describe("client projection", () => {
     expect("evidence" in view.failure).toBe(false);
     expect("setupArtifacts" in view).toBe(false);
     expect(JSON.stringify(view)).not.toContain("ignore previous instructions");
-    expect(JSON.stringify(view)).not.toContain("IGNORE-SETUP-LEDGER");
+  });
+
+  it("names created resources with safe labels rather than the private ledger", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-contoso-store"
+    });
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    finish(op, "failed", {
+      failure: {
+        code: "az-failed",
+        message: "Azure CLI failed",
+        classification: "user-fixable",
+        evidence: "RAW STDERR"
+      }
+    });
+    const view = toClientView(op);
+    expect(view.cleanup.created).toEqual([
+      { kind: "azure_app", target: "radius-contoso-store (app-1)" }
+    ]);
+    expect(view.cleanup.reused).toEqual([
+      { kind: "github_environment", target: "contoso/store:dev" }
+    ]);
+    expect(view.cleanup.cleaned).toEqual([]);
+    expect(view.cleanup.manualActionRequired).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain("RAW STDERR");
   });
 
   it("never persists raw failure evidence", () => {
@@ -1319,7 +1379,7 @@ describe("keepalive predicate", () => {
     operations.clear();
   });
 
-  it("lets go of a record that has gone quiet, rather than pinning the process forever", () => {
+  it("settles a record that has gone quiet instead of pinning the process forever", () => {
     // A setup spans two POSTs, so the record deliberately outlives the first
     // one. A user who abandons the flow between them would otherwise leave
     // it running for the life of the process.
@@ -1330,7 +1390,11 @@ describe("keepalive predicate", () => {
     expect(isStale(op)).toBe(true);
     expect(setupInFlight()).toBe(false);
     expect(operations.running("contoso/store")).toBeNull();
-    expect(operations.get(op.operationId)).toBeNull();
+    // The record is settled rather than hidden: the customer gets a real
+    // outcome to act on instead of a repository that silently unblocks.
+    const settled = operations.get(op.operationId);
+    expect(settled.state).toBe("failed_partial");
+    expect(settled.failure.code).toBe("operation-stalled");
     // And a retry is no longer blocked by the abandoned record.
     expect(operations.start(newOp()).ok).toBe(true);
     operations.clear();
@@ -1430,7 +1494,7 @@ describe("latestAny — the chip's repo-less lookup", () => {
     operations.clear();
   });
 
-  it("does not hand the panel a stale record to spin on", () => {
+  it("hands the panel a settled record rather than one that spins forever", () => {
     operations.clear();
     const abandoned = createOperation({
       repo: "contoso/store",
@@ -1442,11 +1506,13 @@ describe("latestAny — the chip's repo-less lookup", () => {
     abandoned.lastActivityAt = new Date(
       Date.now() - 20 * 60 * 1000
     ).toISOString();
-    expect(operations.latest("contoso/store")).toBeNull();
+    const shown = operations.latest("contoso/store");
+    expect(shown.terminalState ?? shown.state).toBe("failed_partial");
+    expect(toClientView(shown).nextTransition).toBeNull();
     operations.clear();
   });
 
-  it("ignores a record that has gone stale, exactly as the repo-keyed lookup does", () => {
+  it("settles a stale record before ranking it against a finished one", () => {
     operations.clear();
     const abandoned = createOperation({
       repo: "contoso/store",
@@ -1466,8 +1532,10 @@ describe("latestAny — the chip's repo-less lookup", () => {
     });
     operations.put(done);
     finishSucceeded(done);
-    // The stale record is not running, so it must not out-rank a real result.
-    expect(operations.latestAny().operationId).toBe(done.operationId);
+    // The stale record is no longer running, so it competes on its own
+    // terminal result instead of being silently dropped.
+    expect(operations.latestAny().state).toBe("failed_partial");
+    expect(abandoned.state).toBe("failed_partial");
     operations.clear();
   });
 });
@@ -1872,5 +1940,959 @@ describe("the options the announcement passes to session.log", () => {
   it("survives an operation with no terminal block at all", () => {
     expect(() => announcementOptions(opWith("succeeded", null))).not.toThrow();
     expect(() => announcementOptions(null)).not.toThrow();
+  });
+});
+
+// ─── Cooperative controls (issue #306) ───────────────────────────────────────
+
+function verifiableOp() {
+  const op = newOp();
+  recordAzureApp(op, {
+    state: "created",
+    appId: "app-1",
+    displayName: "radius-contoso-store"
+  });
+  recordServicePrincipal(op, { state: "created", appId: "app-1" });
+  recordCommittedWorkflowFile(op, {
+    path: ".github/workflows/radius-verify-credentials.yml",
+    mode: "pull_request",
+    branch: "radius-setup"
+  });
+  recordCommitState(op, {
+    mode: "pull_request",
+    branch: "radius-setup",
+    baseBranch: "main",
+    pullRequestUrl: "https://github.com/contoso/store/pull/7"
+  });
+  enterStage(op, STAGE_VERIFY);
+  op.verification = {
+    dispatchedAt: Date.now(),
+    workflow: "radius-verify-credentials.yml",
+    ref: "main",
+    environment: "dev",
+    runId: null,
+    runUrl: null
+  };
+  return op;
+}
+
+describe("durable stop", () => {
+  it("records the request before anything acts on it", () => {
+    const op = newOp();
+    expect(shouldStop(op)).toBe(false);
+    expect(requestStop(op)).toBe(true);
+    expect(op.control.stop.requestedAt).toBeTruthy();
+    expect(shouldStop(op)).toBe(true);
+    expect(isStopPending(op)).toBe(true);
+    expect(summarize(op)).toBe("Stopping dev setup after the current step…");
+  });
+
+  it("keeps the first request time when the customer clicks twice", () => {
+    const op = newOp();
+    requestStop(op);
+    const first = op.control.stop.requestedAt;
+    requestStop(op);
+    expect(op.control.stop.requestedAt).toBe(first);
+  });
+
+  it("cancels immediately while parked on a prompt", () => {
+    const op = newOp();
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    const result = applyStopRequest(op);
+    expect(result).toEqual({ outcome: "cancelled", duplicate: false });
+    expect(op.state).toBe("cancelled");
+    expect(op.control.stop.boundary).toBe("input_prompt");
+    expect(op.control.outcomes).toEqual([
+      expect.objectContaining({ kind: "setup", state: "cancelled" })
+    ]);
+  });
+
+  it("only records the request while an executor owns the operation", () => {
+    const op = newOp();
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    setExecutionActive(op, true);
+    expect(applyStopRequest(op).outcome).toBe("pending");
+    expect(op.state).toBe("input_required");
+  });
+
+  it("returns the saved result for a repeated request", () => {
+    const op = newOp();
+    expect(applyStopRequest(op).outcome).toBe("pending");
+    expect(applyStopRequest(op)).toEqual({
+      outcome: "already_requested",
+      duplicate: true
+    });
+    stopAtBoundary(op, "after-service-principal");
+    expect(applyStopRequest(op).outcome).toBe("already_stopped");
+  });
+
+  it("refuses to stop an operation that already reached a terminal result", () => {
+    const op = newOp();
+    finishSucceeded(op);
+    expect(applyStopRequest(op).outcome).toBe("terminal");
+    expect(requestStop(op)).toBe(false);
+    expect(shouldStop(op)).toBe(false);
+  });
+
+  it("names the boundary it stopped at and latches the cancellation", () => {
+    const op = newOp();
+    requestStop(op);
+    stopAtBoundary(op, "after-role-assignment");
+    expect(op.state).toBe("cancelled");
+    expect(op.control.stop.acknowledgedAt).toBeTruthy();
+    expect(op.control.stop.boundary).toBe("after-role-assignment");
+    expect(op.terminal.reason).toBe("stopped-at-boundary");
+    // A later failure cannot overwrite the customer's cancellation.
+    finish(op, "failed", { failure: { code: "late", message: "too late" } });
+    expect(op.state).toBe("cancelled");
+  });
+
+  it("loses the race to a continuation that was saved first", () => {
+    const op = newOp();
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    requestStop(op);
+    expect(
+      canResumeInput(op, {
+        code: "app-selection-required",
+        checkpoint: "app-selection-required",
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      })
+    ).toBe(false);
+  });
+
+  it("honors a saved stop as soon as the extension restarts", () => {
+    const op = newOp();
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    addSafeResumeRequest(op);
+    requestStop(op);
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+    expect(restored.state).toBe("cancelled");
+    expect(restored.recoveryState).toBe("stopped");
+    expect(restored.control.stop.boundary).toBe("restart_recovery");
+  });
+});
+
+describe("command identity and idempotency", () => {
+  it("builds keys from saved facts alone", () => {
+    const input = {
+      operationId: "op_1",
+      kind: "retry_verification",
+      attempt: 2,
+      target: "verification"
+    };
+    expect(buildCommandId(input)).toBe(
+      "op_1:retry_verification:2:verification"
+    );
+    expect(buildIdempotencyKey(input)).toBe(
+      "idem:op_1:retry_verification:2:verification"
+    );
+    // Rebuilt after a restart from the same saved facts, byte for byte.
+    expect(buildIdempotencyKey({ ...input })).toBe(buildIdempotencyKey(input));
+  });
+
+  it("refuses a duplicate command and hands back the saved one", () => {
+    const op = newOp();
+    const first = acceptCommand(op, {
+      kind: "retry_setup",
+      attempt: 2,
+      target: "setup"
+    });
+    const second = acceptCommand(op, {
+      kind: "retry_setup",
+      attempt: 2,
+      target: "setup"
+    });
+    expect(first.ok).toBe(true);
+    expect(second).toMatchObject({ ok: false, duplicate: true });
+    expect(second.command.commandId).toBe(first.command.commandId);
+    expect(op.control.commands).toHaveLength(1);
+    expect(op.control.idempotency[first.command.idempotencyKey]).toBe("setup");
+  });
+
+  it("distinguishes a new attempt from a repeated one", () => {
+    const op = newOp();
+    acceptCommand(op, { kind: "retry_setup", attempt: 2, target: "setup" });
+    const next = acceptCommand(op, {
+      kind: "retry_setup",
+      attempt: 3,
+      target: "setup"
+    });
+    expect(next.ok).toBe(true);
+    expect(op.control.commands).toHaveLength(2);
+  });
+
+  it("discards a command whose durable save failed", () => {
+    const op = newOp();
+    const accepted = acceptCommand(op, {
+      kind: "stop",
+      attempt: 1,
+      target: "operation"
+    });
+    expect(discardCommand(op, accepted.command.commandId)).toBe(true);
+    expect(op.control.commands).toEqual([]);
+    expect(op.control.idempotency).toEqual({});
+    expect(discardCommand(op, "missing")).toBe(false);
+  });
+
+  it("tracks command progress without inventing an unknown state", () => {
+    const op = newOp();
+    const accepted = acceptCommand(op, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: "cleanup"
+    });
+    expect(
+      setCommandState(op, accepted.command.commandId, "running")
+    ).toMatchObject({ state: "running" });
+    expect(
+      setCommandState(op, accepted.command.commandId, "finished", "cleaned")
+    ).toMatchObject({ state: "finished", outcome: "cleaned" });
+    expect(
+      setCommandState(op, accepted.command.commandId, "nonsense")
+    ).toBeNull();
+    expect(setCommandState(op, "missing", "running")).toBeNull();
+    expect(latestCommand(op).completedAt).toBeTruthy();
+    expect(latestCommand(newOp())).toBeNull();
+  });
+});
+
+describe("schema version 2 migration", () => {
+  it("loads a version 1 record with safe control defaults", () => {
+    const op = newOp();
+    const persisted = toPersistedOperation(op);
+    delete persisted.control;
+    persisted.schemaVersion = 1;
+    const restored = fromPersistedOperation(persisted);
+    expect(restored.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
+    expect(restored.control).toEqual(createOperationControl());
+    expect(restored.stopRequested).toBe(false);
+  });
+
+  it("rejects a record whose schema version is not supported", () => {
+    const op = newOp();
+    const persisted = toPersistedOperation(op);
+    persisted.schemaVersion = 99;
+    expect(() => fromPersistedOperation(persisted)).toThrow(
+      "Invalid operation record."
+    );
+  });
+
+  it("drops a command record whose saved shape cannot be trusted", () => {
+    const control = readOperationControl({
+      stop: { requestedAt: "2026-01-01T00:00:00.000Z" },
+      attempts: { setup: "nonsense", verification: 3 },
+      commands: [
+        {
+          kind: "not-a-command",
+          commandId: "a",
+          idempotencyKey: "k",
+          state: "accepted"
+        },
+        { kind: "stop", commandId: "", idempotencyKey: "k", state: "accepted" },
+        { kind: "stop", commandId: "b", idempotencyKey: "", state: "accepted" },
+        {
+          kind: "stop",
+          commandId: "c",
+          idempotencyKey: "k",
+          state: "invented"
+        },
+        null,
+        {
+          kind: "stop",
+          commandId: "ok",
+          idempotencyKey: "idem:ok",
+          state: "accepted",
+          attempt: 1,
+          target: "operation"
+        }
+      ],
+      idempotency: { "idem:ok": "operation" },
+      outcomes: [
+        { kind: "not-a-kind", state: "failed" },
+        { kind: "setup", state: "" },
+        { kind: "setup", attempt: 1, state: "failed_partial", code: "x" }
+      ]
+    });
+    expect(control.commands.map((entry) => entry.commandId)).toEqual(["ok"]);
+    expect(control.attempts).toEqual({ setup: 1, verification: 3, cleanup: 0 });
+    expect(control.outcomes).toHaveLength(1);
+    expect(control.stop.acknowledgedAt).toBeNull();
+    expect(readOperationControl(null)).toEqual(createOperationControl());
+  });
+
+  it("creates the control record on demand for a legacy in-memory operation", () => {
+    const op = newOp();
+    delete op.control;
+    expect(getOperationControl(op)).toEqual(createOperationControl());
+    expect(getOperationControl(null)).toBeNull();
+  });
+});
+
+describe("retry eligibility", () => {
+  it("classifies only the failures this code produces as retryable", () => {
+    const merge = verifiableOp();
+    finish(merge, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    expect(classifyVerificationRetry(merge)).toBe(
+      "workflow-installation-pending"
+    );
+
+    const rbac = verifiableOp();
+    finish(rbac, "failed_partial", { failure: { code: "verify-run-failed" } });
+    expect(classifyVerificationRetry(rbac)).toBe("azure-rbac-propagation");
+
+    const expired = verifiableOp();
+    finish(expired, "failed_partial", {
+      failure: { code: "verification-tracking-expired" }
+    });
+    expect(classifyVerificationRetry(expired)).toBe(
+      "verification-tracking-expired"
+    );
+
+    const unknown = verifiableOp();
+    finish(unknown, "failed_partial", { failure: { code: "who-knows" } });
+    expect(classifyVerificationRetry(unknown)).toBeNull();
+    expect(classifyVerificationRetry(null)).toBeNull();
+    expect(canRetryVerification(unknown)).toMatchObject({
+      ok: false,
+      code: "verification-retry-not-retryable"
+    });
+  });
+
+  it("allows verification retry only with complete saved provenance", () => {
+    const op = verifiableOp();
+    finish(op, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    expect(canRetryVerification(op)).toMatchObject({
+      ok: true,
+      classification: "workflow-installation-pending",
+      requiresMergedPullRequest: true,
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+
+    const noIdentity = verifiableOp();
+    noIdentity.verification.workflow = "";
+    finish(noIdentity, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    expect(canRetryVerification(noIdentity)).toMatchObject({
+      ok: false,
+      code: "verification-provenance-incomplete"
+    });
+
+    const noCloudIdentity = verifiableOp();
+    noCloudIdentity.setupArtifacts.azureApp.appId = null;
+    noCloudIdentity.setupArtifacts.servicePrincipal.appId = null;
+    finish(noCloudIdentity, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    expect(canRetryVerification(noCloudIdentity).ok).toBe(false);
+
+    expect(canRetryVerification(null)).toMatchObject({
+      ok: false,
+      code: "unknown-operation"
+    });
+    expect(canRetryVerification(newOp())).toMatchObject({
+      ok: false,
+      code: "operation-active"
+    });
+  });
+
+  it("continues a setup only when the ledger proves what it owns", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    expect(canRetrySetup(op)).toMatchObject({
+      ok: true,
+      resumeFrom: "service_principal"
+    });
+
+    const ambiguous = newOp();
+    addSafeResumeRequest(ambiguous);
+    recordGitHubEnvironment(ambiguous, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    finish(ambiguous, "failed_partial", { failure: { code: "x" } });
+    expect(canRetrySetup(ambiguous)).toMatchObject({
+      ok: false,
+      code: "setup-retry-ownership-ambiguous"
+    });
+
+    const noRequest = newOp();
+    finish(noRequest, "failed_partial", { failure: { code: "x" } });
+    expect(canRetrySetup(noRequest)).toMatchObject({
+      ok: false,
+      code: "setup-retry-request-missing"
+    });
+
+    const succeeded = newOp();
+    addSafeResumeRequest(succeeded);
+    finishSucceeded(succeeded);
+    expect(canRetrySetup(succeeded)).toMatchObject({
+      ok: false,
+      code: "setup-retry-not-retryable"
+    });
+    expect(canRetrySetup(null)).toMatchObject({ code: "unknown-operation" });
+    expect(canRetrySetup(newOp())).toMatchObject({ code: "operation-active" });
+  });
+
+  it("refuses to continue past a cleanup target it could not identify", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "role_assignment",
+          target: "Contributor @ /subscriptions/sub",
+          outcome: "skipped",
+          detail: "Missing the Service Principal object id."
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    expect(ambiguousSetupOwnership(op.setupArtifacts)).toContain(
+      "Service Principal object id"
+    );
+    expect(canRetrySetup(op).ok).toBe(false);
+    expect(ambiguousSetupOwnership(null)).toContain("ledger is missing");
+  });
+
+  it("names the first step the ledger does not prove finished", () => {
+    const op = newOp();
+    expect(nextIncompleteSetupStep(op)).toBe("azure_app");
+    recordAzureApp(op, { state: "reused", appId: "a" });
+    recordServicePrincipal(op, { state: "reused", appId: "a" });
+    expect(nextIncompleteSetupStep(op)).toBe("federated_credentials");
+    recordCreatedFederatedCredential(op, { name: "n", subject: "s" });
+    expect(nextIncompleteSetupStep(op)).toBe("role_assignments");
+    recordCreatedRoleAssignment(op, { role: "Contributor", scope: "/subs" });
+    expect(nextIncompleteSetupStep(op)).toBe("github_environment");
+    recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+    expect(nextIncompleteSetupStep(op)).toBe("workflow_commit");
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/verify.yml",
+      mode: "default_branch",
+      branch: "main"
+    });
+    expect(nextIncompleteSetupStep(op)).toBe("verification");
+    expect(nextIncompleteSetupStep(null)).toBe("azure_app");
+
+    const aws = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev"
+    });
+    expect(nextIncompleteSetupStep(aws)).toBe("github_environment");
+  });
+
+  it("retries only unresolved resources Radius proved it created", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        },
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "contoso/store:dev",
+          outcome: "warning",
+          detail: "Reused environment."
+        },
+        {
+          attempt: 1,
+          artifactType: "role_assignment",
+          target: "Contributor @ /subs",
+          outcome: "skipped",
+          detail: "Missing object id."
+        },
+        {
+          attempt: 1,
+          artifactType: "service_principal",
+          target: "sp",
+          outcome: "deleted",
+          detail: null
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    expect(unresolvedCleanupTargets(op)).toEqual([
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        identity: null,
+        key: "azure_app#radius (app-1)",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+    expect(unresolvedCleanupTargets(null)).toEqual([]);
+  });
+
+  it("never offers cleanup retry once the workflows were committed", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/verify.yml",
+      mode: "default_branch",
+      branch: "main"
+    });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "warning",
+          detail: "failed"
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: false,
+      code: "cleanup-retry-after-commit"
+    });
+  });
+
+  it("refuses cleanup retry when nothing is unresolved", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCleanupState(op, {
+      state: "succeeded",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "deleted",
+          detail: null
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: false,
+      code: "cleanup-retry-not-retryable"
+    });
+    expect(canRetryCleanup(null)).toMatchObject({ code: "unknown-operation" });
+    expect(canRetryCleanup(newOp())).toMatchObject({
+      code: "operation-active"
+    });
+  });
+});
+
+describe("retry transitions", () => {
+  it("keeps the prior verdict in history while reopening the record", () => {
+    const op = verifiableOp();
+    finish(op, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    const attempt = beginRetryAttempt(op, "verification");
+    expect(attempt).toBe(1);
+    expect(op.state).toBe("running");
+    expect(op.endedAt).toBeNull();
+    expect(op.terminal).toBeNull();
+    expect(op.control.outcomes).toEqual([
+      expect.objectContaining({
+        kind: "verification",
+        state: "action_required",
+        code: "pr-merge-required"
+      })
+    ]);
+    // Reopened, so the next terminal result latches normally again.
+    finishSucceeded(op);
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("restores the closed record when the retry could not be saved", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    const snapshot = snapshotRetryState(op);
+    beginRetryAttempt(op, "setup");
+    rollbackRetryAttempt(op, snapshot);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure.code).toBe("operation-stalled");
+    expect(op.control.attempts.setup).toBe(1);
+    expect(op.control.outcomes).toEqual([]);
+    expect(rollbackRetryAttempt(op, null)).toBe(op);
+    expect(beginRetryAttempt(op, "not-a-kind")).toBe(0);
+  });
+
+  it("clears a stale stop request so the retry is not cancelled at once", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    requestStop(op);
+    stopAtBoundary(op, "after-app-registration");
+    beginRetryAttempt(op, "setup");
+    expect(shouldStop(op)).toBe(false);
+    expect(op.control.stop.requestedAt).toBeNull();
+  });
+});
+
+describe("action projection", () => {
+  it("offers stop while the operation is live and names the boundary rule", () => {
+    const op = newOp();
+    const [stop] = projectOperationActions(op);
+    expect(stop).toMatchObject({
+      id: "stop",
+      kind: "stop",
+      method: "POST",
+      pending: false
+    });
+    expect(stop.path).toBe(
+      `/api/operations/${encodeURIComponent(op.operationId)}/stop`
+    );
+    expect(stop.description).toContain("before the next step");
+    requestStop(op);
+    expect(projectOperationActions(op)[0].pending).toBe(true);
+  });
+
+  it("explains the immediate stop while a prompt is open", () => {
+    const op = newOp();
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    expect(projectOperationActions(op)[0].description).toContain("immediately");
+  });
+
+  it("offers verification retry after a pull-request handoff", () => {
+    const op = verifiableOp();
+    finish(op, "action_required", {
+      terminal: { reason: "pr-merge-required" }
+    });
+    const actions = projectOperationActions(op);
+    expect(actions.map((action) => action.id)).toEqual(["retry-verification"]);
+    expect(actions[0]).toMatchObject({
+      path: `/api/operations/${encodeURIComponent(op.operationId)}/retry/verification`,
+      requiresMergedPullRequest: true
+    });
+    // Deployment stays a separate customer action.
+    expect(JSON.stringify(actions)).not.toContain("deploy");
+  });
+
+  it("offers setup and cleanup retries for a partial failure", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    expect(projectOperationActions(op).map((action) => action.id)).toEqual([
+      "retry-setup",
+      "retry-cleanup"
+    ]);
+    expect(projectOperationActions(null)).toEqual([]);
+  });
+
+  it("names an automatic transition for every non-terminal view", () => {
+    const running = newOp();
+    expect(projectNextTransition(running).code).toBe("running");
+    requestStop(running);
+    expect(projectNextTransition(running).code).toBe("stopping");
+
+    const waiting = newOp();
+    requireInput(waiting, { code: "app-selection-required", message: "?" });
+    expect(projectNextTransition(waiting).code).toBe("awaiting-input");
+
+    const verifying = verifiableOp();
+    expect(projectNextTransition(verifying).code).toBe(
+      "monitoring-verification"
+    );
+
+    finishSucceeded(verifying);
+    expect(projectNextTransition(verifying)).toBeNull();
+    expect(projectNextTransition(null)).toBeNull();
+  });
+
+  it("gives a terminal record either an action or a described outcome", () => {
+    const op = newOp();
+    finishSucceeded(op);
+    const view = toClientView(op);
+    expect(view.actions).toEqual([]);
+    expect(view.nextTransition).toBeNull();
+    expect(view.terminalState).toBe("succeeded");
+    expect(view.summary).toBeTruthy();
+  });
+});
+
+describe("partial-state summary", () => {
+  it("separates retained, reused, cleaned, and manual work after a stop", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-contoso-store"
+    });
+    recordServicePrincipal(op, { state: "reused", appId: "app-1" });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub",
+      principalObjectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "role_assignment",
+          target: "Contributor @ /subscriptions/sub",
+          outcome: "deleted",
+          detail: null
+        }
+      ]
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after-role-assignment");
+    const summary = projectCleanupSummary(op);
+    expect(summary.cleaned).toEqual([
+      {
+        kind: "role_assignment",
+        target: "Contributor @ /subscriptions/sub",
+        outcome: "deleted"
+      }
+    ]);
+    expect(summary.reused).toEqual([
+      {
+        kind: "service_principal",
+        target: "Service Principal for radius-contoso-store (app-1)"
+      }
+    ]);
+    expect(summary.manualActionRequired).toEqual([
+      expect.objectContaining({
+        kind: "github_environment",
+        target: "contoso/store:dev"
+      })
+    ]);
+    expect(
+      summary.retainedArtifacts.concat(summary.created).map((e) => e.target)
+    ).toContain("radius-contoso-store (app-1)");
+  });
+
+  it("keeps committed workflow files out of the removable groups", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/verify.yml",
+      mode: "pull_request",
+      branch: "radius-setup"
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    const summary = projectCleanupSummary(op);
+    expect(summary.retainedArtifacts).toEqual([
+      {
+        kind: "workflow_file",
+        target: ".github/workflows/verify.yml on radius-setup"
+      }
+    ]);
+    expect(summary.created).toEqual([]);
+    expect(summary.cleaned).toEqual([]);
+  });
+
+  it("stays silent for an operation with nothing to report", () => {
+    expect(projectCleanupSummary(newOp())).toBeNull();
+    expect(projectCleanupSummary(null)).toBeNull();
+  });
+});
+
+describe("repository lock", () => {
+  it("keeps the lock for the retrying operation and refuses another attempt", () => {
+    operations.clear();
+    const op = newOp();
+    addSafeResumeRequest(op);
+    operations.start(op);
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    // A terminal record that nobody is continuing does not hold the lock.
+    expect(operations.running("contoso/store")).toBeNull();
+
+    beginRetryAttempt(op, "setup");
+    expect(operations.acquireForRetry(op)).toMatchObject({ ok: true });
+    expect(operations.running("contoso/store").operationId).toBe(
+      op.operationId
+    );
+    expect(operations.start(newOp()).ok).toBe(false);
+
+    const other = newOp();
+    expect(operations.acquireForRetry(other)).toMatchObject({
+      ok: false,
+      conflict: expect.objectContaining({ operationId: op.operationId })
+    });
+
+    stopAtBoundary(op, "after-role-assignment");
+    expect(operations.running("contoso/store")).toBeNull();
+    operations.clear();
+  });
+
+  it("releases the lock by settling a record nobody is driving", () => {
+    operations.clear();
+    const op = newOp();
+    operations.start(op);
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    reconcileOperationLifecycle(op);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure.code).toBe("operation-stalled");
+    expect(operations.running("contoso/store")).toBeNull();
+    operations.clear();
+  });
+
+  it("settles a stale record that already carried a stop as a cancellation", () => {
+    const op = newOp();
+    requestStop(op);
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    reconcileOperationLifecycle(op);
+    expect(op.state).toBe("cancelled");
+    expect(op.control.stop.boundary).toBe("stale_reconciliation");
+  });
+
+  it("settles an expired prompt as a partial failure the customer can act on", () => {
+    const op = newOp();
+    addSafeResumeRequest(op);
+    requireInput(op, { code: "app-selection-required", message: "?" });
+    op.inputRequired.requestedAt = new Date(
+      Date.now() - 2 * 60 * 60 * 1000
+    ).toISOString();
+    reconcileOperationLifecycle(op);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure.code).toBe("operation-input-expired");
+  });
+
+  it("cancels a prompt as soon as a stop recorded mid-flight can be honored", () => {
+    operations.clear();
+    const op = newOp();
+    operations.start(op);
+    requireInput(op, { code: "app-selection-required", message: "Pick one." });
+    // The executor was still unwinding, so the stop could only be recorded.
+    setExecutionActive(op, true);
+    expect(applyStopRequest(op).outcome).toBe("pending");
+    expect(op.state).toBe("input_required");
+    // Once the prompt is genuinely idle, the next read honors it — the customer
+    // never has to wait for a stale-record timer.
+    op.executionActive = false;
+    expect(operations.latest("contoso/store").state).toBe("cancelled");
+    expect(op.control.stop.boundary).toBe("input_prompt");
+    operations.clear();
+  });
+
+  it("leaves a live record alone", () => {
+    const op = newOp();
+    expect(reconcileOperationLifecycle(op)).toBe(op);
+    expect(op.state).toBe("running");
+    expect(reconcileOperationLifecycle(null)).toBeNull();
+  });
+});
+
+describe("control record guard rails", () => {
+  it("refuses to act on a missing operation", () => {
+    expect(applyStopRequest(null)).toEqual({
+      outcome: "terminal",
+      duplicate: false
+    });
+    expect(stopAtBoundary(null, "x")).toBeNull();
+    expect(acceptCommand(null, { kind: "stop", attempt: 1 })).toEqual({
+      ok: false,
+      duplicate: false,
+      command: null
+    });
+    expect(findCommand(null, "id")).toBeNull();
+    expect(discardCommand(null, "id")).toBe(false);
+    expect(setCommandState(null, "id", "running")).toBeNull();
+    expect(isStopPending(null)).toBe(false);
+  });
+
+  it("refuses an outcome for an attempt kind it does not model", () => {
+    const op = newOp();
+    expect(getOperationControl(op) && beginRetryAttempt(op, "deployment")).toBe(
+      0
+    );
+    expect(op.control.outcomes).toEqual([]);
+  });
+
+  it("keeps the command and outcome histories bounded", () => {
+    const op = newOp();
+    for (let attempt = 1; attempt <= 25; attempt += 1) {
+      acceptCommand(op, { kind: "retry_setup", attempt, target: "setup" });
+      op.control.attempts.setup = attempt;
+      recordAttemptOutcome(op, { kind: "setup", state: "failed_partial" });
+    }
+    expect(op.control.commands).toHaveLength(20);
+    expect(op.control.outcomes).toHaveLength(20);
+    expect(op.control.commands[19].attempt).toBe(25);
+    expect(op.control.outcomes[19].attempt).toBe(25);
+  });
+
+  it("normalizes an idempotency map with unusable entries", () => {
+    const control = readOperationControl({
+      idempotency: { "": "dropped", good: null }
+    });
+    expect(control.idempotency).toEqual({ good: "" });
+  });
+
+  it("rejects a record that is not an operation at all", () => {
+    expect(() => toPersistedOperation(null)).toThrow(
+      "Operation record is required."
+    );
+    expect(() => fromPersistedOperation(null)).toThrow(
+      "Operation record is required."
+    );
+    const op = newOp();
+    const persisted = toPersistedOperation(op);
+    delete persisted.stages;
+    expect(() => fromPersistedOperation(persisted)).toThrow(
+      "Invalid persisted operation stages or steps."
+    );
+  });
+
+  it("summarizes a stopped operation for the chip", () => {
+    const op = newOp();
+    requestStop(op);
+    stopAtBoundary(op, "after-app-registration");
+    expect(summarize(op)).toBe('Creating environment "dev" was stopped.');
+    expect(toClientView(op).stop).toMatchObject({
+      requested: true,
+      boundary: "after-app-registration"
+    });
   });
 });

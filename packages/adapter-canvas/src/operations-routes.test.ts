@@ -698,15 +698,327 @@ describe("GET /api/operations without a repo — the status chip's lookup", () =
     operations.clear();
   });
 
-  it("goes quiet for an abandoned operation instead of offering an unresolvable spinner", async () => {
-    // A setup spans two POSTs, so a user who walks away between them leaves
-    // a record that nobody is driving. Showing it would reproduce exactly
-    // the spinner this work exists to remove.
+  it("settles an abandoned operation into a result the customer can act on", async () => {
+    // A setup spans two POSTs, so a user who walks away between them leaves a
+    // record that nobody is driving. Hiding it left the repository blocked with
+    // nothing to show; it is now closed with an outcome and a retry action.
     operations.clear();
     const op = seed("contoso/abandoned");
     op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     const { body } = await getJson("/api/operations");
-    expect(body.operation).toBeNull();
+    expect(body.operation.terminalState).toBe("failed_partial");
+    expect(body.operation.failure.code).toBe("operation-stalled");
+    expect(body.operation.nextTransition).toBeNull();
     operations.clear();
+  });
+});
+
+// ─── Cooperative control routes (issue #306) ─────────────────────────────────
+
+function seedRetryableSetup(repo) {
+  const op = seed(repo);
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: { repo, environment: "dev", provider: "azure" }
+  };
+  recordAzureApp(op, {
+    state: "created",
+    appId: "app-1",
+    displayName: "radius-app"
+  });
+  finish(op, "failed_partial", {
+    failure: {
+      code: "operation-stalled",
+      message: "Radius lost contact with this setup.",
+      classification: "user-fixable"
+    }
+  });
+  return op;
+}
+
+function seedMergeHandoff(repo) {
+  const op = seed(repo);
+  recordAzureApp(op, { state: "created", appId: "app-1" });
+  recordServicePrincipal(op, { state: "created", appId: "app-1" });
+  recordCommittedWorkflowFile(op, {
+    path: ".github/workflows/radius-verify-credentials.yml",
+    mode: "pull_request",
+    branch: "radius-setup"
+  });
+  recordCommitState(op, {
+    mode: "pull_request",
+    branch: "radius-setup",
+    baseBranch: "main",
+    pullRequestUrl: "https://github.com/contoso/store/pull/7"
+  });
+  enterStage(op, STAGE_VERIFY);
+  op.verification = {
+    dispatchedAt: Date.now(),
+    workflow: "radius-verify-credentials.yml",
+    ref: "main",
+    environment: "dev",
+    runId: null,
+    runUrl: null
+  };
+  finish(op, "action_required", {
+    terminal: {
+      reason: "pr-merge-required",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    }
+  });
+  return op;
+}
+
+describe("POST /api/operations/{id}/stop", () => {
+  it("accepts a stop for a running operation and reports it as pending", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/stop-running");
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/stop`,
+      {}
+    );
+    expect(status).toBe(202);
+    expect(body.code).toBe("operation-stop-pending");
+    expect(body.operation.stop.requested).toBe(true);
+    expect(body.operation.state).toBe("running");
+    expect(body.operation.nextTransition.code).toBe("stopping");
+    expect(op.control.stop.requestedAt).toBeTruthy();
+    operations.clear();
+  });
+
+  it("cancels immediately while the operation waits for input", async () => {
+    operations.clear();
+    const op = seed("contoso/stop-prompt");
+    requireInput(op, {
+      code: "app-selection-required",
+      message: "Choose an identity."
+    });
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/stop`,
+      {}
+    );
+    expect(status).toBe(200);
+    expect(body.code).toBe("operation-stopped");
+    expect(body.operation.terminalState).toBe("cancelled");
+    expect(body.operation.stop.boundary).toBe("input_prompt");
+    // The repository lock is released by the terminal result.
+    expect(operations.running("contoso/stop-prompt")).toBeNull();
+    operations.clear();
+  });
+
+  it("returns the saved result when the same stop arrives twice", async () => {
+    operations.clear();
+    const op = seed("contoso/stop-twice");
+    requireInput(op, { code: "app-selection-required", message: "Choose." });
+    const first = await postJson(`/api/operations/${op.operationId}/stop`, {});
+    const second = await postJson(`/api/operations/${op.operationId}/stop`, {});
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.code).toBe("operation-stopped");
+    expect(second.body.operation.terminalState).toBe("cancelled");
+    operations.clear();
+  });
+
+  it("refuses to stop a finished operation", async () => {
+    operations.clear();
+    const op = seed("contoso/stop-done");
+    finish(op, "succeeded");
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/stop`,
+      {}
+    );
+    expect(status).toBe(409);
+    expect(body.code).toBe("operation-already-terminal");
+    operations.clear();
+  });
+
+  it("reports 404 for an operation it does not know", async () => {
+    const { status, body } = await postJson(
+      "/api/operations/op_missing/stop",
+      {}
+    );
+    expect(status).toBe(404);
+    expect(body.code).toBe("unknown-operation");
+  });
+});
+
+describe("POST /api/operations/{id}/retry/*", () => {
+  it("continues an interrupted setup and keeps the repository lock", async () => {
+    operations.clear();
+    const scheduled = [];
+    setEnvironmentOperationTestRunner(async (operationId) => {
+      scheduled.push(operationId);
+    });
+    const op = seedRetryableSetup("contoso/retry-setup");
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/setup`,
+      {}
+    );
+    expect(status).toBe(202);
+    expect(body.attempt).toBe(2);
+    expect(body.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
+    expect(body.operation.state).toBe("running");
+    expect(body.operation.outcomes).toEqual([
+      expect.objectContaining({ kind: "setup", state: "failed_partial" })
+    ]);
+    // The retrying attempt owns the repository until it reaches a result.
+    expect(operations.running("contoso/retry-setup").operationId).toBe(
+      op.operationId
+    );
+    await vi.waitFor(() => expect(scheduled).toContain(op.operationId));
+    operations.clear();
+  });
+
+  it("refuses a setup retry whose ownership the ledger cannot prove", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seedRetryableSetup("contoso/retry-ambiguous");
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/retry-ambiguous",
+      name: "dev"
+    });
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/setup`,
+      {}
+    );
+    expect(status).toBe(409);
+    expect(body.code).toBe("setup-retry-ownership-ambiguous");
+    expect(body.error).toContain("duplicate a resource");
+    expect(op.state).toBe("failed_partial");
+    operations.clear();
+  });
+
+  it("refuses verification retry while the setup pull request is still open", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seedMergeHandoff("contoso/store");
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/verification`,
+      {}
+    );
+    expect(status).toBe(409);
+    expect(body.code).toBe("verification-retry-pull-request-open");
+    expect(body.pullRequestUrl).toBe("https://github.com/contoso/store/pull/7");
+    // Refusing must not reopen the record or start a deployment.
+    expect(op.state).toBe("action_required");
+    operations.clear();
+  });
+
+  it("refuses a verification retry for a failure it cannot classify", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/retry-unknown");
+    finish(op, "failed_partial", {
+      failure: { code: "who-knows", message: "unclassified" }
+    });
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/verification`,
+      {}
+    );
+    expect(status).toBe(409);
+    expect(body.code).toBe("verification-retry-not-retryable");
+    operations.clear();
+  });
+
+  it("repeats verification for an Azure RBAC propagation failure", async () => {
+    operations.clear();
+    const scheduled = [];
+    setEnvironmentOperationTestRunner(async (operationId, commandId) => {
+      scheduled.push({ operationId, commandId });
+    });
+    const op = seedMergeHandoff("contoso/rbac");
+    // Reopen it as the RBAC case, which needs no merged pull request.
+    op.state = "failed_partial";
+    op.terminal = null;
+    op.failure = { code: "verify-run-failed", message: "role not ready" };
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/verification`,
+      {}
+    );
+    expect(status).toBe(202);
+    expect(body.commandId).toBe(
+      `${op.operationId}:retry_verification:1:verification`
+    );
+    expect(body.operation.currentStage).toBe(STAGE_VERIFY);
+    await vi.waitFor(() =>
+      expect(scheduled).toContainEqual({
+        operationId: op.operationId,
+        commandId: body.commandId
+      })
+    );
+    operations.clear();
+  });
+
+  it("retries cleanup only for a proven-owned unresolved resource", async () => {
+    operations.clear();
+    const scheduled = [];
+    setEnvironmentOperationTestRunner(async (operationId, commandId) => {
+      scheduled.push({ operationId, commandId });
+    });
+    const op = seed("contoso/retry-cleanup");
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+    const { status, body } = await postJson(
+      `/api/operations/${op.operationId}/retry/cleanup`,
+      {}
+    );
+    expect(status).toBe(202);
+    expect(body.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
+    await vi.waitFor(() =>
+      expect(scheduled).toContainEqual({
+        operationId: op.operationId,
+        commandId: body.commandId
+      })
+    );
+    operations.clear();
+  });
+
+  it("refuses a retry while another operation owns the repository", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const closed = seedRetryableSetup("contoso/locked");
+    const live = createOperation({
+      provider: "azure",
+      repo: "contoso/locked",
+      environment: "prod",
+      stages: buildStages()
+    });
+    operations.put(live);
+    const { status, body } = await postJson(
+      `/api/operations/${closed.operationId}/retry/setup`,
+      {}
+    );
+    expect(status).toBe(409);
+    expect(body).toMatchObject({
+      code: "operation-in-progress",
+      operationId: live.operationId
+    });
+    expect(closed.state).toBe("failed_partial");
+    operations.clear();
+  });
+
+  it("reports 404 for a retry against an unknown operation", async () => {
+    const { status, body } = await postJson(
+      "/api/operations/op_missing/retry/setup",
+      {}
+    );
+    expect(status).toBe(404);
+    expect(body.code).toBe("unknown-operation");
   });
 });
