@@ -9,7 +9,7 @@
 // extension.ts.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
   computeGraphDiff,
@@ -111,6 +111,7 @@ import {
 } from "./verification-plan.js";
 import {
   operations,
+  isTerminalState,
   isStale,
   hasCompleteVerificationIdentity,
   toClientView,
@@ -134,8 +135,11 @@ import {
   projectCleanupSummary,
   finish,
   finishSucceeded,
+  canResumeInput,
   requireInput,
   resumeAfterInput,
+  setExecutionActive,
+  INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
@@ -372,7 +376,9 @@ interface OpenSourceInput {
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
-type SessionPromptHandler = (prompt: string) => Promise<unknown>;
+type SessionPromptHandler = (
+  prompt: string | SessionPromptMessage
+) => Promise<unknown>;
 
 interface IdValidationInput {
   tenantId?: string;
@@ -387,6 +393,14 @@ interface AzureLoginInput {
 interface AzureCliAssistInput {
   action?: string;
   tenantId?: string;
+}
+
+// A prompt paired with the shorter text the chat timeline shows in its place.
+// Mirrors the runtime's HandoffMessage: server-originated prompts are also
+// machine-authored, so they must not render as if the user typed them (#209).
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
 }
 
 interface DeployHandoffSummary {
@@ -539,17 +553,39 @@ const serverRoutes = createServerRouteTable({
   ...identityProfilesRoutes
 });
 
+// Legacy handler objects, kept per instance so the start hook can resume
+// recovered verification monitors and the activity gate can recognise the
+// server-owned token. Removed when the instance stops.
+const legacyHandlers = new Map<
+  string,
+  ReturnType<typeof createLegacyRequestHandler>
+>();
+
 const canvasServer = createCanvasServer(
   createProductionCanvasServerDependencies({
-    createRequestHandler: ({ instanceId, instances, markActivity }) =>
-      createScaffoldRequestHandler({
+    createRequestHandler: ({ instanceId, instances, markActivity }) => {
+      const legacy = createLegacyRequestHandler(
+        instanceId,
+        () => instances.get(instanceId)?.baseUrl || ""
+      );
+      legacyHandlers.set(instanceId, legacy);
+      return createScaffoldRequestHandler({
         instanceId,
         instances,
         routes: serverRoutes,
-        legacyFallback: createLegacyRequestHandler(instanceId),
-        markActivity,
+        legacyFallback: legacy.handler,
+        // Server-owned internal calls must not refresh the webview activity
+        // clock, or the idle-respawn timer never fires.
+        markActivity: (request) => {
+          if (!legacy.isServerOwned(request)) markActivity();
+        },
         preRoute: preRouteCanvasRequest
-      }),
+      });
+    },
+    onStarted: (instanceId) => {
+      shuttingDownInstances.delete(instanceId);
+      legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+    },
     defaultPage: DEFAULT_CANVAS_PAGE,
     preferredPort: preferredPortForInstance
   })
@@ -557,6 +593,60 @@ const canvasServer = createCanvasServer(
 
 // Compatibility facade shared with the SDK runtime during the route migration.
 export const servers = canvasServer.instances;
+
+let environmentOperationTestRunner:
+  ((operationId: string) => Promise<void>) | null = null;
+
+export function setEnvironmentOperationTestRunner(
+  runner: ((operationId: string) => Promise<void>) | null
+): void {
+  environmentOperationTestRunner = runner;
+}
+
+const activeEnvironmentTasks = new Map<string, Set<string>>();
+const environmentTasksSettledListeners = new Map<string, Set<() => void>>();
+const shuttingDownInstances = new Set<string>();
+const activeVerificationMonitors = new Set<string>();
+
+export function hasActiveEnvironmentTasks(instanceId: string): boolean {
+  return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
+}
+
+export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
+  shuttingDownInstances.add(instanceId);
+}
+
+export function onEnvironmentTasksSettled(
+  instanceId: string,
+  listener: () => void
+): () => void {
+  let listeners = environmentTasksSettledListeners.get(instanceId);
+  if (!listeners) {
+    listeners = new Set();
+    environmentTasksSettledListeners.set(instanceId, listeners);
+  }
+
+  listeners.add(listener);
+  let listening = true;
+  const stop = () => {
+    if (!listening) return;
+    listening = false;
+    listeners?.delete(listener);
+    if (listeners?.size === 0)
+      environmentTasksSettledListeners.delete(instanceId);
+  };
+  if (!hasActiveEnvironmentTasks(instanceId)) {
+    queueMicrotask(() => {
+      if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
+      try {
+        listener();
+      } catch {
+        // Listener failures must not affect task settlement.
+      }
+    });
+  }
+  return stop;
+}
 
 export function graphDefinitionHash(
   content: string,
@@ -867,7 +957,7 @@ export function azureLoginRequiredResponse({
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string
+  prompt: string | SessionPromptMessage
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
@@ -916,6 +1006,29 @@ export function buildAzureCliAssistPrompt({
   ].join("\n\n");
 }
 
+// Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
+// Credentials on the user's behalf, so the turn it injects should read as a
+// status line, not as multi-paragraph instructions the user appears to have
+// typed. The agent still receives the full prompt.
+export function azureCliAssistDisplayPrompt({
+  action = "login"
+}: AzureCliAssistInput = {}): string {
+  return action === "install" ?
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+}
+
+// Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
+// cannot drift apart or be swapped at the call site.
+export function azureCliAssistMessage(
+  input: AzureCliAssistInput = {}
+): SessionPromptMessage {
+  return {
+    prompt: buildAzureCliAssistPrompt(input),
+    displayPrompt: azureCliAssistDisplayPrompt(input)
+  };
+}
+
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
@@ -960,7 +1073,37 @@ export interface DeployAttemptInput {
   provider: string;
   environment: string;
   appFile: string;
-  agentInitiated: boolean;
+  // True only for a redeploy the agent makes from inside a repair loop it
+  // already owns. Resolved from the attempt id by resolveDeployRepairLoop, not
+  // taken from the client: an agent-initiated deploy is not by itself a repair.
+  repairLoop: boolean;
+  // The attempt this redeploy continues, so a loop keeps one identity across
+  // its retries. Empty for any deploy that opens a new attempt.
+  attemptId?: string;
+}
+
+// Decide, server-side, whether an incoming deploy continues an existing repair
+// loop. The tool validates the attempt before it POSTs, but another deploy can
+// start in between, so re-check here against the attempt this panel currently
+// holds: a stale repair must not overwrite the newer deploy or mark it as
+// already owned (which would suppress its own failure handoff). An unbound
+// request is an ordinary deploy and always proceeds.
+export function resolveDeployRepairLoop(
+  state: CanvasState,
+  requestedAttemptId: unknown
+): { repairLoop: boolean; attemptId: string; error?: string } {
+  const requested =
+    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
+  if (!requested) return { repairLoop: false, attemptId: "" };
+  const current = state?.deployAttempt?.id || "";
+  if (current !== requested) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -979,17 +1122,27 @@ export function beginDeployAttempt(
   state.deployErrorBranch = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
-  // An agent redeploy is already inside a repair loop; a user deploy starts
-  // fresh and may hand off again on failure.
-  state.deployRepairing = input.agentInitiated;
-  state.deployHandoffState = input.agentInitiated ? "delivered" : "idle";
-  state.deployHandoffAttempts = 0;
+  // Only a redeploy inside an existing repair loop is already owned by the
+  // agent. Every other deploy — including the agent's first one, which opens no
+  // loop — must stay eligible to hand its failure off; marking that one as
+  // repairing made triggerDeployRepairHandoff bail out and silently dropped the
+  // repair.
+  state.deployRepairing = input.repairLoop;
+  state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
+  // The delivery budget belongs to the loop, not to a single deploy: resetting
+  // it on every redeploy would let an undeliverable handoff retry forever.
+  state.deployHandoffAttempts =
+    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
-  // a stale repair cannot redeploy whatever the user started next.
+  // a stale repair cannot redeploy whatever the user started next. A redeploy
+  // inside a loop keeps the id it was handed, so the agent can keep addressing
+  // the same loop across retries instead of being told its attempt is inactive.
   state.deployAttempt = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    id:
+      (input.repairLoop && input.attemptId) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     targetRepo: input.repo,
     environment: input.environment,
     branch: input.branch,
@@ -2406,8 +2559,205 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   return false;
 }
 
-function createLegacyRequestHandler(instanceId: string) {
-  return async (
+function createLegacyRequestHandler(
+  instanceId: string,
+  resolveBaseUrl: () => string
+) {
+  const serverOwnedTasks = new Map<string, Promise<void>>();
+  const serverOwnedToken = randomUUID();
+
+  function scheduleServerOwnedTask(
+    operationId: string,
+    task: () => Promise<void>
+  ): void {
+    let instanceTasks = activeEnvironmentTasks.get(instanceId);
+    if (!instanceTasks) {
+      instanceTasks = new Set();
+      activeEnvironmentTasks.set(instanceId, instanceTasks);
+    }
+    instanceTasks.add(operationId);
+    const op = operations.get(operationId);
+    if (op) setExecutionActive(op, true);
+    const prior = serverOwnedTasks.get(operationId);
+    const running = (prior || Promise.resolve())
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            setImmediate(() => resolve());
+          })
+      )
+      .then(task)
+      .catch(async (error) => {
+        const current = operations.get(operationId);
+        if (shuttingDownInstances.has(instanceId)) return;
+        if (current && !current.endedAt) {
+          finish(current, "failed", {
+            failure: {
+              code: "server-owned-task-failed",
+              stage: current.currentStage,
+              stepSeq: null,
+              message: errorMessage(error),
+              classification: "unknown",
+              evidence: error instanceof Error ? error.stack || null : null
+            }
+          });
+          await operations.persist().catch(() => {});
+        }
+      })
+      .finally(() => {
+        if (serverOwnedTasks.get(operationId) !== running) return;
+        const current = operations.get(operationId);
+        if (current && !current.endedAt) setExecutionActive(current, false);
+        serverOwnedTasks.delete(operationId);
+        const activeForInstance = activeEnvironmentTasks.get(instanceId);
+        activeForInstance?.delete(operationId);
+        if (activeForInstance?.size === 0) {
+          activeEnvironmentTasks.delete(instanceId);
+          for (const listener of environmentTasksSettledListeners.get(
+            instanceId
+          ) || []) {
+            try {
+              listener();
+            } catch {
+              // One shutdown consumer must not block the others.
+            }
+          }
+        }
+      });
+    serverOwnedTasks.set(operationId, running);
+  }
+
+  async function postInternal(pathname: string, data: unknown): Promise<any> {
+    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": serverOwnedToken
+      },
+      body: JSON.stringify(data)
+    });
+    const result: any = await response.json();
+    if (!response.ok && !result?.inputRequired) {
+      throw new Error(
+        result?.error || `Request failed with HTTP ${response.status}.`
+      );
+    }
+    return result;
+  }
+
+  async function monitorVerification(operationId: string): Promise<void> {
+    const deadline = Date.now() + 45 * 60 * 1000;
+    let delayMs = 5000;
+    while (Date.now() < deadline) {
+      const op = operations.get(operationId);
+      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
+      const params = new URLSearchParams({
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      const response = await fetch(
+        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
+        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
+      );
+      const result: any = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          result?.error ||
+            `Verification status failed with HTTP ${response.status}.`
+        );
+      }
+      if (result?.state === "success" || result?.state === "failed") return;
+      if (result?.terminal || result?.state === "expired") {
+        const current = operations
+          .all()
+          .find((candidate: any) => candidate.operationId === operationId);
+        if (current && !current.endedAt) {
+          finish(current, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: current.currentStage,
+              stepSeq: null,
+              message:
+                result?.error ||
+                "Credential verification is no longer being tracked.",
+              classification: "user-fixable",
+              evidence: null
+            }
+          });
+          await persistBestEffort({
+            operation: current,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        }
+        return;
+      }
+      const jitterMs = Math.floor(Math.random() * 1000);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
+      );
+      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
+    }
+    throw new Error(
+      "Credential verification did not complete within 45 minutes."
+    );
+  }
+
+  async function runEnvironmentOperation(operationId: string): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId);
+      return;
+    }
+    const op = operations.get(operationId);
+    if (!op) return;
+    const request = op.request || op.resumeRequest || {};
+    let setupResult: any = null;
+    if (op.provider === "azure" && request.needsAzureCredentials) {
+      setupResult = await postInternal("/api/azure-auto-setup", {
+        ...request.azure,
+        repo: op.repo,
+        environment: op.environment,
+        operationId
+      });
+      if (setupResult?.inputRequired || op.state === "input_required") return;
+    }
+    const current = operations.get(operationId);
+    if (!current || current.state === "input_required" || current.endedAt)
+      return;
+    await postInternal("/api/create-environment", {
+      ...request.environment,
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider,
+      operationId,
+      clientId: setupResult?.clientId || request.environment?.clientId || ""
+    });
+    await monitorVerification(operationId);
+  }
+
+  function startRecoveredVerificationTasks(): void {
+    for (const op of operations.all()) {
+      if (
+        op.recoveryState !== "verification_pending" ||
+        op.currentStage !== STAGE_VERIFY ||
+        op.endedAt ||
+        activeVerificationMonitors.has(op.operationId)
+      )
+        continue;
+      activeVerificationMonitors.add(op.operationId);
+      scheduleServerOwnedTask(op.operationId, async () => {
+        try {
+          await monitorVerification(op.operationId);
+        } finally {
+          activeVerificationMonitors.delete(op.operationId);
+        }
+      });
+    }
+  }
+
+  const handler = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
@@ -2415,9 +2765,360 @@ function createLegacyRequestHandler(instanceId: string) {
     const pathname = url.pathname;
     // Cross-site rejection and requested-page synchronisation now run in the
     // shared pre-routing step so migrated routes cannot bypass them; the page
-    // fallback below still needs the raw value.
+    // fallback below still needs the raw value. Webview-activity marking also
+    // moved to that seam, where it is gated on isServerOwned so server-owned
+    // internal calls still do not count as user activity.
+    const isServerOwnedRequest =
+      req.headers["x-radius-server-owned"] === serverOwnedToken;
     const requestedPage = url.searchParams.get("page");
 
+    if (pathname === "/api/operations" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
+        );
+        return;
+      }
+      const repo = String(data.repo || "");
+      const environment = String(data.environment || data.name || "dev").trim();
+      const provider = data.provider === "aws" ? "aws" : "azure";
+      if (!isValidRepoSlug(repo)) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: `Invalid repository "${repo}". Expected "owner/repo".`,
+            code: "invalid-repo"
+          })
+        );
+        return;
+      }
+      if (!environment.trim()) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Environment name is required.",
+            code: "environment-required"
+          })
+        );
+        return;
+      }
+      if (provider === "azure") {
+        if (
+          !isResourceGroupName(String(data.resourceGroup || "")) ||
+          !isAksClusterName(String(data.cluster || "")) ||
+          !isUuid(String(data.tenantId || "")) ||
+          !isUuid(String(data.subscriptionId || ""))
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error:
+                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+              code: "invalid-azure-operation-input"
+            })
+          );
+          return;
+        }
+      } else if (
+        !String(data.roleArn || "").trim() ||
+        !String(data.accountId || "").trim() ||
+        !String(data.region || "").trim() ||
+        !String(data.cluster || "").trim()
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error:
+              "AWS setup requires roleArn, accountId, region, and cluster.",
+            code: "invalid-aws-operation-input"
+          })
+        );
+        return;
+      }
+      const needsAzureCredentials =
+        provider === "azure" && !String(data.clientId || "").trim();
+      const op = createOperation({
+        provider,
+        repo,
+        environment,
+        stages: buildStages({ includeIdentity: needsAzureCredentials }),
+        journey: {
+          origin: data.origin || null,
+          resumeTarget: data.resumeTarget || null,
+          resumeBranch: data.resumeBranch || data.branch || null,
+          resumeReason: data.resumeReason || null
+        }
+      });
+      op.request = {
+        needsAzureCredentials,
+        azure: {
+          resourceGroup: data.resourceGroup || "",
+          cluster: data.cluster || "",
+          clusterResourceGroup: data.clusterResourceGroup || "",
+          subscriptionId: data.subscriptionId || "",
+          tenantId: data.tenantId || "",
+          appName: data.appName,
+          appId: data.appId || "",
+          createNew: data.createNew === true,
+          serviceManagementReference: data.serviceManagementReference || ""
+        },
+        environment: { ...data, environment, provider }
+      };
+      if (provider === "azure") {
+        op.resumeRequest = {
+          needsAzureCredentials,
+          azure: structuredClone(op.request.azure),
+          environment: {
+            repo,
+            environment,
+            provider,
+            cluster: data.cluster || "",
+            namespace: data.namespace || "",
+            profileName: data.profileName || "",
+            branch: data.branch || "",
+            tenantId: data.tenantId || "",
+            subscriptionId: data.subscriptionId || "",
+            resourceGroup: data.resourceGroup || "",
+            origin: data.origin || null,
+            resumeTarget: data.resumeTarget || null,
+            resumeBranch: data.resumeBranch || null,
+            resumeReason: data.resumeReason || null
+          }
+        };
+      }
+      const started = operations.start(op);
+      if (!started.ok) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: `Setup is already running for ${repo}.`,
+            code: "operation-in-progress",
+            operationId: started.conflict.operationId
+          })
+        );
+        return;
+      }
+      try {
+        await operations.persist();
+      } catch (error) {
+        finish(op, "failed", {
+          failure: {
+            code: "operation-registration-persist-failed",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not durably register the environment operation.",
+            classification: "unknown",
+            evidence: errorMessage(error)
+          }
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not durably register the environment operation. No setup work was started.",
+            code: "operation-registration-persist-failed"
+          })
+        );
+        return;
+      }
+      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Location", statusUrl);
+      res.writeHead(202);
+      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
+    }
+    const resumeMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
+    );
+    if (resumeMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(resumeMatch[1]);
+      const code = decodeURIComponent(resumeMatch[2]);
+      const op = operations.get(operationId);
+      if (!op) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(404);
+        res.end(
+          JSON.stringify({
+            error: "Unknown operation.",
+            code: "unknown-operation"
+          })
+        );
+        return;
+      }
+      if (
+        op.state === "failed_partial" &&
+        op.failure?.code === "operation-input-expired"
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(410);
+        res.end(
+          JSON.stringify({
+            error: op.failure.message,
+            code: "operation-input-expired",
+            operation: toClientView(op)
+          })
+        );
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: any;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = {};
+      }
+      if (
+        !canResumeInput(op, {
+          code,
+          checkpoint: data.checkpoint,
+          repo: data.repo,
+          environment: data.environment,
+          provider: data.provider
+        })
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(409);
+        res.end(
+          JSON.stringify({
+            error: "The operation is not waiting for this input.",
+            code: "operation-resume-mismatch",
+            operationId
+          })
+        );
+        return;
+      }
+      if (!op.request && op.resumeRequest) {
+        op.request = structuredClone(op.resumeRequest);
+      }
+      const resumeSnapshot = {
+        inputRequired: structuredClone(op.inputRequired),
+        request: structuredClone(op.request),
+        resumeRequest:
+          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
+      };
+      if (code === "service-management-reference-required") {
+        op.request.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.serviceManagementReference =
+            data.serviceManagementReference || "";
+        }
+      } else if (code === "app-selection-required") {
+        op.request.azure.appId = data.appId || "";
+        op.request.azure.createNew = data.createNew === true;
+        if (op.resumeRequest?.azure) {
+          op.resumeRequest.azure.appId = data.appId || "";
+          op.resumeRequest.azure.createNew = data.createNew === true;
+        }
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(
+          JSON.stringify({
+            error: "Unsupported resume prompt.",
+            code: "unsupported-resume"
+          })
+        );
+        return;
+      }
+      resumeAfterInput(op);
+      try {
+        await operations.persist();
+      } catch (error) {
+        op.request = resumeSnapshot.request;
+        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
+        else op.resumeRequest = resumeSnapshot.resumeRequest;
+        requireInput(op, resumeSnapshot.inputRequired);
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error:
+              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+            code: "operation-resume-persist-failed",
+            operationId,
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(202);
+      res.end(
+        JSON.stringify({
+          operationId,
+          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
+        })
+      );
+      scheduleServerOwnedTask(operationId, () =>
+        runEnvironmentOperation(operationId)
+      );
+      return;
+    }
+    const abandonMatch = pathname.match(
+      /^\/api\/operations\/([^/]+)\/abandon$/
+    );
+    if (abandonMatch && req.method === "POST") {
+      const operationId = decodeURIComponent(abandonMatch[1]);
+      const op = operations.get(operationId);
+      if (
+        !op ||
+        op.state !== INPUT_REQUIRED_STATE ||
+        op.executionActive ||
+        isTerminalState(op.state)
+      ) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(op ? 409 : 404);
+        res.end(
+          JSON.stringify({
+            error:
+              op ?
+                "The operation is not waiting for input."
+              : "Unknown operation.",
+            code: op ? "operation-abandon-mismatch" : "unknown-operation"
+          })
+        );
+        return;
+      }
+      finish(op, "cancelled");
+      try {
+        await operations.persist();
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Radius could not persist the abandoned operation.",
+            code: "operation-abandon-persist-failed",
+            detail: errorMessage(error)
+          })
+        );
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(JSON.stringify({ operation: toClientView(op) }));
+      return;
+    }
     // JSON API: OIDC validation
     if (pathname === "/api/oidc" && req.method === "POST") {
       let body = "";
@@ -2615,7 +3316,7 @@ function createLegacyRequestHandler(instanceId: string) {
         const requestedTenantId =
           typeof data.tenantId === "string" ? data.tenantId.trim() : "";
         const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = buildAzureCliAssistPrompt({ action, tenantId });
+        const prompt = azureCliAssistMessage({ action, tenantId });
         const promptResult = await invokeSessionPrompt(
           sessionPromptHandler,
           prompt
@@ -2807,6 +3508,17 @@ function createLegacyRequestHandler(instanceId: string) {
 
     // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
     if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Cleaned up in finally; declared here so it's reachable from finally.
@@ -2862,12 +3574,29 @@ function createLegacyRequestHandler(instanceId: string) {
             code === "app-selection-required" ||
             code === "service-management-reference-required";
           if (op && retryablePrompt) {
-            requireInput(op, { code, message: error });
+            requireInput(op, {
+              code,
+              message: error,
+              checkpoint:
+                code === "app-selection-required" ?
+                  "azure-app-selection"
+                : "azure-service-management-reference",
+              metadata:
+                code === "app-selection-required" ?
+                  {
+                    candidates:
+                      Array.isArray(extra.candidates) ? extra.candidates : [],
+                    defaultAppId: extra.defaultAppId || null
+                  }
+                : null
+            });
+            await operations.persist();
             res.setHeader("Content-Type", "application/json");
             res.writeHead(status);
             res.end(
               JSON.stringify({
                 error,
+                inputRequired: true,
                 ...(code ? { code } : {}),
                 ...(op ? { operationId: op.operationId } : {}),
                 ...sanitizeFailureExtra(extra || {})
@@ -3003,7 +3732,7 @@ function createLegacyRequestHandler(instanceId: string) {
             existing.environment !== envName ||
             existing.provider !== "azure" ||
             existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
-            !existing.inputRequired
+            (!isServerOwnedRequest && !existing.inputRequired)
           ) {
             await fail(
               409,
@@ -3013,7 +3742,7 @@ function createLegacyRequestHandler(instanceId: string) {
             return;
           }
           op = existing;
-          resumeAfterInput(op);
+          if (existing.inputRequired) resumeAfterInput(op);
         } else {
           op = createOperation({
             provider: "azure",
@@ -4628,6 +5357,17 @@ function createLegacyRequestHandler(instanceId: string) {
     }
 
     if (pathname === "/api/create-environment" && req.method === "POST") {
+      if (!isServerOwnedRequest) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: "This endpoint is reserved for server-owned operations.",
+            code: "server-owned-operation-required"
+          })
+        );
+        return;
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       // Declared out here so the generic catch below can close it rather
@@ -4676,7 +5416,8 @@ function createLegacyRequestHandler(instanceId: string) {
             existing.repo !== targetRepo ||
             existing.environment !== envName ||
             existing.provider !== provider ||
-            existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
+            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
+              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
             existing.inputRequired
           ) {
             res.setHeader("Content-Type", "application/json");
@@ -7002,6 +7743,19 @@ function createLegacyRequestHandler(instanceId: string) {
       try {
         const data = JSON.parse(body);
         const entry = servers.get(instanceId);
+        // Re-validate the repair-loop attempt before touching any state: the
+        // tool checked it before sending, but a newer deploy may have started
+        // since, and a stale repair must not clobber it.
+        const loop = resolveDeployRepairLoop(
+          entry?.state || ({} as CanvasState),
+          data.attemptId
+        );
+        if (loop.error) {
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: loop.error }));
+          return;
+        }
         // Store deploy params
         if (entry) {
           const repo =
@@ -7064,7 +7818,8 @@ function createLegacyRequestHandler(instanceId: string) {
             provider,
             environment: entry.state.envName || data.environment || "",
             appFile: data.appFile || ".radius/app.bicep",
-            agentInitiated: data.agentInitiated === true
+            repairLoop: loop.repairLoop,
+            attemptId: loop.attemptId
           });
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in
@@ -8362,6 +9117,12 @@ function createLegacyRequestHandler(instanceId: string) {
       res.end(environmentPage(state));
     }
   };
+  // Exposed so the composition root can gate webview-activity marking: the
+  // scaffold marks activity for every request, but server-owned internal calls
+  // must not count as user activity or the idle-respawn timer never fires.
+  const isServerOwned = (req: IncomingMessage): boolean =>
+    req.headers["x-radius-server-owned"] === serverOwnedToken;
+  return { handler, startRecoveredVerificationTasks, isServerOwned };
 }
 
 const PAGE_RENDERERS = {
