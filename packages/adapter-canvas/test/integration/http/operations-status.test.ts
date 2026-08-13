@@ -135,7 +135,9 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
 
-    // Only GET is declared, so other methods still fall through.
+    // Only the GET routes are migrated. `POST /api/operations` is a declared
+    // route owned by this family but still served by the legacy fallback, so a
+    // POST must not reach the migrated handler.
     const posted = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST"
     });
