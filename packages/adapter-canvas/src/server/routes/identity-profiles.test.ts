@@ -1,4 +1,4 @@
-﻿import { Readable } from "node:stream";
+import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -68,8 +68,8 @@ function request(method: string, url: string, body = ""): IncomingMessage {
 }
 
 // Every fake returns a distinct, identifiable value and throws on an argument
-// it was not scripted for, so calling the wrong port â€” or calling the right
-// ports in the wrong order â€” fails loudly instead of silently matching.
+// it was not scripted for, so calling the wrong port — or calling the right
+// ports in the wrong order — fails loudly instead of silently matching.
 interface Calls {
   log: string[];
 }
@@ -222,7 +222,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ]);
   });
 
-  // â”€â”€ GET /api/credential-profiles (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── GET /api/credential-profiles (SU-07) ───────────────────────────────────
 
   it("lists the profiles for the repo named in the query string", async () => {
     const seen: string[] = [];
@@ -274,7 +274,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
   });
 
   it("answers a missing repo with an empty list without touching the store", async () => {
-    // The port throws on any call, so reaching it at all fails this test â€”
+    // The port throws on any call, so reaching it at all fails this test —
     // which is exactly the short-circuit being pinned.
     const recording = await run(
       "GET",
@@ -316,7 +316,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ).rejects.toThrow("credentials file unreadable");
   });
 
-  // â”€â”€ GET /api/github-identity (SU-06) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── GET /api/github-identity (SU-06) ───────────────────────────────────────
 
   it("returns the resolved identity without touching the cache or preflight", async () => {
     const calls: Calls = { log: [] };
@@ -412,7 +412,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
       "",
       handleGitHubIdentity,
       // `validSlugs` is empty, so the slug check rejects and `preflightRepoAdmin`
-      // â€” which throws when reached â€” must never be called.
+      // — which throws when reached — must never be called.
       dependencies(identityPorts(calls, { validSlugs: [] }))
     );
     expect(recording.status).toBe(200);
@@ -471,7 +471,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"error":"gh unavailable","accounts":[]}');
   });
 
-  // â”€â”€ POST /api/github-account (SU-06) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── POST /api/github-account (SU-06) ───────────────────────────────────────
 
   it("persists the chosen login before re-reading the identity", async () => {
     const calls: Calls = { log: [] };
@@ -510,7 +510,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
         })
       )
     );
-    // 400, not a 200 error payload â€” and nothing is persisted.
+    // 400, not a 200 error payload — and nothing is persisted.
     expect(recording.status).toBe(400);
     expect(recording.body).toBe('{"error":"no such account"}');
     expect(calls.log).toEqual(["switchGhAccount(ghost)"]);
@@ -579,7 +579,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"error":"spawn"}');
   });
 
-  // â”€â”€ POST /api/save-credential-profile (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── POST /api/save-credential-profile (SU-07) ──────────────────────────────
 
   it("saves a profile and echoes what the store returned", async () => {
     const saves: { repo: string; profile: unknown }[] = [];
@@ -601,7 +601,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
       '{"success":true,"profile":{"name":"prod","provider":"azure","status":"verified"}}'
     );
     // The trimmed repo is passed, but the *whole* parsed body travels as the
-    // profile â€” including the untrimmed name and the provider field.
+    // profile — including the untrimmed name and the provider field.
     expect(saves).toEqual([
       {
         repo: "octo/app",
@@ -675,7 +675,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.body).toBe('{"success":true,"profile":null}');
   });
 
-  // â”€â”€ POST /api/delete-credential-profile (SU-07) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── POST /api/delete-credential-profile (SU-07) ────────────────────────────
 
   it("deletes a profile and reports whether anything was removed", async () => {
     const deletes: [string, string][] = [];
@@ -760,11 +760,11 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
   });
 });
 
-// â”€â”€ Differential oracle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Differential oracle ──────────────────────────────────────────────────────
 // Verbatim transcriptions of the five branches deleted from the legacy if-chain
 // in `server.ts`, kept only so the migrated handlers can be proven identical
 // while the fallback still exists. Each side is driven separately against its
-// own fakes and the two recordings are compared afterwards â€” never through a
+// own fakes and the two recordings are compared afterwards — never through a
 // single shared runner, because several of these paths throw or return early
 // and a shared runner can pass while only exercising one side.
 
@@ -923,7 +923,7 @@ interface Side {
   calls: string[];
   thrown: string | null;
   // Recorded rather than inferred. A side that never ran leaves this false, and
-  // `compare` asserts it on BOTH sides â€” that is what stops a case from
+  // `compare` asserts it on BOTH sides — that is what stops a case from
   // silently degenerating into a one-sided test when one implementation throws
   // or short-circuits before the other is reached.
   ran: boolean;
