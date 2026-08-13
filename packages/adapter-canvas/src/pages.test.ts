@@ -431,14 +431,38 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     // The client reacts to the machine-readable code and forwards the value.
     expect(html).toContain("service-management-reference-required");
     expect(html).toContain("serviceManagementReference");
-    expect(html).toContain("runAzureAutoSetupInteractive");
+    expect(html).toContain(
+      "'/api/operations/' + encodeURIComponent(operationId) + '/resume/'"
+    );
   });
 
-  it("keeps interactive prompt errors separate from cleanup narration", () => {
+  it("keeps ordinary resume failures retryable, terminates expired prompts, and abandons cancelled prompts", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("err.steps = data.steps");
-    expect(html).toContain("err.cleanup = data.cleanup");
-    expect(html).not.toContain("data.steps.join('; ')");
+    expect(html).toContain(
+      "error.retryPrompt = payload.code !== 'operation-input-expired';"
+    );
+    expect(html).toContain(
+      "error.operation.failure.code === 'operation-input-expired'"
+    );
+    expect(html).toContain(
+      "if (error && error.retryPrompt) promptingRequestedAt = '';"
+    );
+    expect(html).toContain("error.abandonOperation = true");
+    expect(html).toContain(
+      "'/api/operations/' + encodeURIComponent(operationId) + '/abandon'"
+    );
+    expect(html).toContain("if (!response.ok) {");
+    expect(html).toContain("promptingRequestedAt = '';");
+  });
+
+  it("validates Azure tenant and subscription before switching to progress", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "provider === 'azure' && (!(selectedProfile.subscriptionId || '').trim() || !(selectedProfile.tenantId || '').trim())"
+    );
+    expect(html).toContain(
+      "The selected profile needs both a tenant ID and subscription ID."
+    );
   });
 
   it("renders the app-registration picker + editable name + use-existing action", () => {
@@ -604,15 +628,12 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain(
       "clusterResourceGroup = findAzureClusterResourceGroup(cluster)"
     );
-    expect(html).toContain("clusterResourceGroup: clusterResourceGroup");
     expect(html).toContain(
-      "payload.clusterResourceGroup = params.clusterResourceGroup"
+      "envData.clusterResourceGroup = clusterResourceGroup;"
     );
-    // The auto-setup step log (incl. the best-effort AKS warning) is surfaced
-    // on the SUCCESS path, not just swallowed into the error message.
-    expect(html).toContain("function showEnvSetupWarnings(");
-    expect(html).toContain("preflight.then(function(setupResult)");
-    expect(html).toContain("showEnvSetupWarnings(setupSteps)");
+    expect(html).toContain(
+      "var warnings = op.steps.filter(function(s) { return s.state === 'warning'; })"
+    );
     expect(html).toContain('id="env-warning-banner"');
   });
 
@@ -644,7 +665,9 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
 
   it("always sends appName on create so explicit-empty is server-detectable", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("params.appName !== undefined");
+    expect(html).toContain(
+      "envData.appName = appNameEl ? appNameEl.value.trim() : '';"
+    );
   });
 
   it("requires in-canvas consent before asking Copilot to start Azure login", () => {
@@ -1212,13 +1235,10 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(html).toContain("panel.scrollIntoView({ behavior: reduceMotion");
     const start = html.indexOf("summary: 'Creating ' + env + '…'");
     const focus = html.indexOf("focusEnvProgressPanel();", start);
-    const tracking = html.indexOf(
-      "trackEnvProgress(targetRepo, env, provider);",
-      start
-    );
+    const accepted = html.indexOf("fetch('/api/operations'", start);
     expect(start).toBeGreaterThan(-1);
     expect(focus).toBeGreaterThan(start);
-    expect(tracking).toBeGreaterThan(focus);
+    expect(accepted).toBeGreaterThan(focus);
   });
 
   it("offers dismissal only after setup reaches a terminal state", () => {
@@ -1328,7 +1348,7 @@ describe("environmentPage — non-blocking setup progress", () => {
       "if (v.state === 'success') {\n                                hideEnvProgress();"
     );
     expect(html).toContain(
-      "else hideEnvProgress();\n                                    })"
+      "showEnvSuccessBanner(provider || 'azure', environment)"
     );
   });
 
@@ -1363,19 +1383,23 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(render).toBeGreaterThan(observed);
   });
 
-  it("polls verification while the live operation is in the verify stage", () => {
+  it("leaves live verification polling to the server-owned operation", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
-    const liveVerify = html.indexOf(
+    expect(html).not.toContain(
       "if (op.currentStage === 'verify' && environment)"
     );
-    const verifyRequest = html.indexOf(
-      "fetch('/api/verify-status?repo='",
-      liveVerify
-    );
-    expect(liveVerify).toBeGreaterThan(-1);
-    expect(verifyRequest).toBeGreaterThan(liveVerify);
-    expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
-      "v.state === 'expired' || v.terminal"
+    expect(
+      html.match(/fetch\('\/api\/verify-status\?repo='/g) || []
+    ).toHaveLength(1);
+    expect(html).toContain("If the extension restarts after");
+  });
+
+  it("renders deliberate cancellation without failed styling", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("op.terminalState === 'cancelled'");
+    expect(html).toContain("Environment setup cancelled.");
+    expect(html).toContain(
+      "cancelledPanel.classList.remove('env-progress--done', 'env-progress--failed')"
     );
   });
 
@@ -1412,16 +1436,8 @@ describe("environmentPage — pull-request terminal state", () => {
     // genuinely verifying — and inferring "do not poll" from it would have
     // reintroduced #247 from the other direction.
     const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("if (envResult.actionRequired) {");
-    const prBranch = html.slice(
-      html.indexOf("if (envResult.actionRequired) {")
-    );
-    const untilPoll = prBranch.slice(
-      0,
-      prBranch.indexOf("function pollVerify")
-    );
-    expect(untilPoll).toContain("showEnvActionRequired");
-    expect(untilPoll).toContain("return;");
+    expect(html).toContain("op.terminalState === 'action_required'");
+    expect(html).toContain("showEnvActionRequired");
   });
 
   it("has a dedicated banner that reads as informational, not as a failure", () => {
@@ -1445,20 +1461,14 @@ describe("environmentPage — pull-request terminal state", () => {
     expect(html).toContain("terminal.baseBranch");
   });
 
-  it("continues both setup POSTs with the same operation id", () => {
+  it("starts setup with one accepted operation request", () => {
     const html = environmentPage({
       contextRepo: "octo/app",
       contextBranch: "feature"
     });
-    expect(html).toContain(
-      "if (params.operationId) payload.operationId = params.operationId"
-    );
-    expect(html).toContain(
-      "operationId: setupResult && setupResult.operationId"
-    );
-    expect(html).toContain(
-      "operationId: err.operationId || params.operationId"
-    );
+    expect(html).toContain("fetch('/api/operations'");
+    expect(html).not.toContain("fetch('/api/azure-auto-setup'");
+    expect(html).not.toContain("fetch('/api/create-environment'");
   });
 
   it("captures and renders a planned-graph resume target", () => {
