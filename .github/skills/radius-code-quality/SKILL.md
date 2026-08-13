@@ -1,6 +1,6 @@
 ---
 name: radius-code-quality
-description: 'Mandatory repository-wide engineering workflow for every TypeScript or JavaScript change in radius-project/ai-extensions. Use whenever an agent adds, edits, refactors, or reviews code, tests, runtime behavior, HTTP routes, page renderers, browser behavior, build logic, or generated-extension inputs. Enforces the Radius Canvas re-architecture from PR #282, complete Vitest coverage with a goal of 100% coverage for changed production code, required boundary tests, and repository TypeScript/JavaScript conventions.'
+description: 'Mandatory repository-wide engineering workflow for every TypeScript or JavaScript change in radius-project/ai-extensions. Use whenever an agent adds, edits, refactors, or reviews code, tests, runtime behavior, HTTP routes, page renderers, browser behavior, build logic, or generated-extension inputs. Enforces the Radius Canvas re-architecture, complete Vitest coverage with a goal of 100% coverage for changed production code, required boundary tests, and repository TypeScript/JavaScript conventions.'
 argument-hint: 'The production-code change, bug, feature, or refactor to implement'
 user-invocable: true
 ---
@@ -16,12 +16,12 @@ The Radius Canvas test architecture and test plan add phase-specific migration d
 - `docs/design/2026-08-radius-canvas-test-architecture.md`
 - `docs/design/2026-08-radius-canvas-test-plan.md`
 
-Both are **proposed in [PR #282](https://github.com/radius-project/ai-extensions/pull/282) and still in draft**, so treat their phase gates, requirement identifiers, inventories, and migration mechanics as authoritative only for work that explicitly implements them, and only in the version merged or referenced by the task. If those files are not on the current branch, read them with `gh pr diff 282` or the GitHub contents API pinned to a commit SHA rather than a moving branch. Never guess at a requirement identifier, phase gate, route owner, page state, or test level, and prefer the documents over this summary if they disagree.
+That design is accepted and its rollout is underway: PR #288 extracted the runtime factories, and PR #318 landed the Phase 0 compatibility fixtures, the coverage baseline, and the Phase 1 runtime and artifact gates. Read the documents before changing a seam they define; if they are not yet on the current branch, read them with `gh pr diff 282` or the GitHub contents API. Never guess at a requirement identifier, phase gate, route owner, page state, or test level, and prefer the documents over this summary if they disagree.
 
 ## Required workflow
 
 1. **Understand the change.** Read the affected production modules, their existing tests, package configuration, and relevant architecture or design documentation. Trace callers and external boundaries before editing.
-2. **Classify the architecture seam.** Identify whether the change belongs to core, shared adapter, runtime, server, pages, browser, build and packaging, or plugin packaging. For Canvas re-architecture work, identify the PR #282 phase and requirement IDs affected.
+2. **Classify the architecture seam.** Identify whether the change belongs to core, shared adapter, runtime, server, pages, browser, build and packaging, or plugin packaging. For Canvas re-architecture work, identify the test-plan phase and requirement IDs affected.
 3. **Choose the required test levels.** Unit tests are mandatory for production logic. Add the cheapest additional test level that genuinely exercises every changed boundary; use the mapping below.
 4. **Implement through the intended seam.** Keep dependency direction, state ownership, public contracts, and artifact behavior consistent with the re-architecture. Do not preserve an architectural violation merely to make a test easy to write.
 5. **Add tests in the same change.** Cover successful behavior, validation, edge cases, failures, cleanup, and every changed branch. Refactors move or add their tests with the production module.
@@ -84,8 +84,9 @@ Both are **proposed in [PR #282](https://github.com/radius-project/ai-extensions
 
 - Collocate each unit test beside its production module as `*.test.ts`. There is no `test/unit/` directory.
 - When production code moves, move its tests to the same destination in the same change.
-- Put all non-unit Canvas suites under `packages/adapter-canvas/test/`: `component/`, `functional/`, `integration/`, `e2e/journeys/`, `accessibility/`, `keyboard/`, `visual/`, and `host/`.
-- Put reusable deterministic data in `test/fixtures/`, shared fakes and helpers in `test/support/`, and non-unit harness setup in `test/setup/`, following the existing layout. Production code must never import test support.
+- Put all non-unit Canvas suites under `packages/adapter-canvas/test/`: `integration/` (runtime and artifact contracts), `ci/`, and, as the test plan's later phases land, `component/`, `functional/`, `e2e/journeys/`, `accessibility/`, `keyboard/`, `visual/`, and `host/`.
+- Put reusable deterministic data in `test/fixtures/` and shared fakes and harnesses in `test/support/`, following the existing layout. Production code must never import test support.
+- A new suite directory only runs once it is added to `packages/adapter-canvas/vitest.config.ts` or a dedicated config such as `vitest.artifact.config.ts`, with a matching package script. Wire it up in the same change.
 
 ### Test design
 
@@ -104,7 +105,7 @@ Both are **proposed in [PR #282](https://github.com/radius-project/ai-extensions
 
 ## Required test level by change
 
-Use the PR #282 taxonomy exactly. Add a level when it exists and can run; when its infrastructure has not landed yet, add the strongest available lower-level test and note the gap rather than inventing a suite:
+Use the test-plan taxonomy exactly. Add a level when it exists and can run; when its infrastructure has not landed yet, add the strongest available lower-level test and note the gap rather than inventing a suite:
 
 | Changed boundary                                                              | Required evidence beyond collocated unit tests                                                                                                                           |
 |-------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -120,7 +121,7 @@ Use the PR #282 taxonomy exactly. Add a level when it exists and can run; when i
 | Stable visual behavior                                                        | Reviewed VIS baseline only when the changed state is in the approved visual set                                                                                          |
 | Real host discovery or panel lifecycle                                        | HOST; do not claim that HIT or an emulated contract covers the host                                                                                                      |
 
-Suite readiness follows PR #282's schedule: unit tests and any focused RCT, HIT, or ART introduced with a seam apply now; Chromium BCT, BFT, E2E, A11Y, and KBD become required once their Phase 6 infrastructure lands; VIS follows in Phase 7; HOST is a scheduled and release gate and is never a pull-request gate.
+Suite readiness follows the test plan's schedule. Unit tests, RCT (`packages/adapter-canvas/test/integration/runtime/`), and ART (`packages/adapter-canvas/test/integration/artifact/`) exist today and apply now; HIT applies as server seams land. Chromium BCT, BFT, E2E, A11Y, and KBD become required once their Phase 6 infrastructure lands; VIS follows in Phase 7; HOST is a scheduled and release gate and is never a pull-request gate.
 
 Match the evidence to the kind of change:
 
@@ -137,8 +138,8 @@ Choose the cheapest level that can faithfully represent the behavior, but do not
 
 - The goal is **100% line, statement, function, and branch coverage for every new or changed production-code path**.
 - Treat 100% as a quality goal, not a mandate to force coverage through unnatural testing techniques. Do not expose production internals solely for tests, add test-only branches or hooks, over-mock implementation details, invoke unreachable states artificially, or write assertions whose only purpose is to execute a line. Prefer behavior-focused tests through natural seams; when a legitimate path cannot be exercised naturally, document the limitation as described below.
-- Repository aggregate and per-package coverage must never decrease. Once a baseline is recorded in version-controlled Vitest configuration, treat it as the hard floor; until then, compare `pnpm run coverage` before and after your change and do not regress it.
-- PR #282's 80% line, 80% function, and 70% branch thresholds for newly extracted modules are minimum migration gates, not the target for new work under this skill.
+- Repository aggregate and per-package coverage must never decrease. The accepted baseline lives in `coverage-baseline.json` and is enforced as Vitest thresholds in `vitest.config.ts`; treat it as a hard floor. Raise it alongside tested production changes, and never lower it without explicit justification and review approval.
+- The 80% line, 80% function, and 70% branch thresholds recorded for newly extracted runtime modules are minimum migration gates, not the target for new work under this skill.
 - Coverage percentages do not replace scenario gates. Explicitly test worktree branch selection, stale source-reference rejection, external-error propagation, path confinement, resumable operation identity, destructive fail-closed behavior, and retained action, tool, lifecycle, route, and artifact contracts whenever affected.
 - Do not game coverage with ignored executable lines, uncovered allowlists, trivial assertions, or tests coupled to implementation details.
 - Exclude only generated bundle text, vendored libraries, and test fixtures as defined by the test architecture.
@@ -157,13 +158,20 @@ pnpm run coverage
 pnpm run build
 ```
 
-Also run every required RCT, HIT, ART, browser, Playwright, accessibility, keyboard, visual, or host command that exists for the affected boundary. Do not report completion when a required suite is skipped or replaced by manual validation; when a suite does not exist yet, say so explicitly instead of implying it passed.
+When the change touches the Canvas runtime, composition root, declarations, or the built artifact, also run:
+
+```text
+pnpm run test:integration:runtime
+pnpm run test:integration:artifact
+```
+
+Also run every other required HIT, browser, Playwright, accessibility, keyboard, visual, or host command that exists for the affected boundary. Do not report completion when a required suite is skipped or replaced by manual validation; when a suite does not exist yet, say so explicitly instead of implying it passed.
 
 Before finishing, confirm:
 
 - Every production behavior change has meaningful unit coverage.
 - Changed production paths target 100% line, statement, function, and branch coverage.
-- Required PR #282 boundary and scenario tests are checked in and executed.
+- Required boundary and scenario tests for the changed seam are checked in and executed.
 - Architecture, package boundaries, state ownership, branch behavior, safety, and artifact contracts are preserved.
 - Tests are deterministic, isolated, secret-free, and clean up all resources.
 - Typecheck, lint, format, applicable tests, coverage, and build pass.
