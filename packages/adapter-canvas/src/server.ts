@@ -501,7 +501,7 @@ interface FederatedCredential {
 
 // Legacy handler objects, kept per instance so the start hook can resume
 // recovered verification monitors and the activity gate can recognise the
-// server-owned token. Removed when the instance stops.
+// server-owned token. Released by the stopped hook when the instance stops.
 const legacyHandlers = new Map<
   string,
   ReturnType<typeof createLegacyRequestHandler>
@@ -531,6 +531,9 @@ const canvasServer = createCanvasServer(
     onStarted: (instanceId) => {
       shuttingDownInstances.delete(instanceId);
       legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+    },
+    onStopped: (instanceId) => {
+      legacyHandlers.delete(instanceId);
     },
     defaultPage: DEFAULT_CANVAS_PAGE,
     preferredPort: preferredPortForInstance
