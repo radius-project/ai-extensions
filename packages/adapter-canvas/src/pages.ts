@@ -16,7 +16,8 @@ import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS,
-  CLIENT_OPCHIP_JS
+  CLIENT_OPCHIP_JS,
+  CLIENT_DELETE_DIALOG_JS
 } from "./client.js";
 import { topNav, radiusMark, feedbackWidget } from "./ui.js";
 import { isWorkspaceSelection } from "./workspace.js";
@@ -95,10 +96,17 @@ ${getInlineVendorStyles()}
     --rad-warning-bg: color-mix(in srgb, var(--rad-warning) 16%, var(--rad-surface));
     --rad-danger-bg: color-mix(in srgb, var(--rad-danger) 14%, var(--rad-surface));
     --rad-node-bg: var(--rad-surface);
-    --rad-node-border: var(--rad-stroke);
-    --rad-edge: var(--rad-stroke-strong);
-    --rad-edge-muted: var(--rad-stroke);
-    --rad-grid: var(--rad-stroke);
+    /* Graph lines are data, not chrome, so they deliberately do NOT flow
+       through the host's border tokens: --border-color-muted is *fainter*
+       than --border-color-default in Primer, which made --rad-stroke-strong
+       resolve to the weakest line on the canvas. Mixing the active text
+       colour into the active background instead keeps a consistent contrast
+       ratio and inverts correctly in dark mode (light lines on a dark
+       canvas) without needing a second palette. */
+    --rad-node-border: color-mix(in srgb, var(--rad-text) 45%, var(--rad-bg));
+    --rad-edge: color-mix(in srgb, var(--rad-text) 55%, var(--rad-bg));
+    --rad-edge-muted: color-mix(in srgb, var(--rad-text) 38%, var(--rad-bg));
+    --rad-grid: color-mix(in srgb, var(--rad-text) 14%, var(--rad-bg));
     --rad-code-bg: var(--rad-bg-subtle);
     --rad-code-text: var(--rad-text);
     --rad-shadow: color-mix(in srgb, var(--rad-text) 18%, transparent);
@@ -207,6 +215,10 @@ ${getInlineVendorStyles()}
   }
   .rad-lede { color: var(--rad-text-tertiary); font-weight: 300; font-size: 15px; line-height: 22px; max-width: 720px; }
   .rad-lede strong, .rad-lede b { font-weight: 500; color: var(--rad-text-secondary); }
+  .rad-lede-link { color: var(--rad-link); text-decoration: none; border-bottom: 1px solid transparent; }
+  .rad-lede-link strong { color: inherit; }
+  .rad-lede-link:hover, .rad-lede-link:focus-visible { color: var(--rad-link-hover); border-bottom-color: currentColor; }
+  .rad-lede-link:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; border-radius: 2px; }
   h2 { font-size: 16px; font-weight: 600; margin: 16px 0 8px; }
 
   /* ─── Sub-tabs (underlined) ───────────────────────────────────────────── */
@@ -353,10 +365,10 @@ ${getInlineVendorStyles()}
   .legend { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
-  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-stroke-strong); box-sizing: border-box; }
+  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-node-border); box-sizing: border-box; }
   .rad-node {
     position: relative; width: 220px; min-height: 104px;
-    background: var(--rad-surface); border: 1px solid var(--rad-stroke);
+    background: var(--rad-surface); border: 2.5px solid var(--rad-node-border);
     border-radius: 16px; padding: 16px 18px;
     pointer-events: auto; cursor: pointer;
   }
@@ -450,6 +462,30 @@ ${getInlineVendorStyles()}
      Theme it as a CSS property instead, which does resolve var(). */
   .react-flow__background circle { fill: var(--rad-grid); }
   .react-flow__background path { stroke: var(--rad-grid); }
+  /* Delete confirmation dialog (Figma type-to-confirm flow). Global because
+     every surface that can delete a deployment shares this one dialog. */
+  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }
+  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke); }
+  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text); }
+  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary); padding:6px; border-radius:6px; }
+  .rad-ddlg__close:hover { background:var(--rad-neutral-bg); }
+  .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
+  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text); }
+  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text); }
+  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary); }
+  .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
+  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary); margin:0; }
+  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke); background:var(--rad-neutral-bg); color:var(--rad-text); }
+  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover); }
+  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
+  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
+  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
+  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
+  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
+  .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
+  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
+  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
+  .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
 </style>
 </head>
 <body>
@@ -460,6 +496,9 @@ ${CLIENT_REPO_BRANCH_JS}
 ${getInlineVendorScripts()}
 <script>
 ${CLIENT_GRAPH_JS}
+</script>
+<script>
+${CLIENT_DELETE_DIALOG_JS}
 </script>
 <div class="main-content">
 ${bodyContent}
@@ -635,11 +674,22 @@ export function graphHeader(activePage: string): string {
       return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
     })
     .join("\n  ");
+  // Each mode named in the lede links to its own sub-tab. Built from the same
+  // `pages` list as the nav so the two can never point at different routes.
+  const byLabel = Object.fromEntries(pages.map((p) => [p.label, p.id]));
+  const ledeLink = (label: string) =>
+    `<a href="?page=${byLabel[label]}" class="rad-lede-link" onclick="radiusNavTo(event, '${byLabel[label]}')"><strong>${label}</strong></a>`;
   return `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Application Graph</span></h1>
   <p class="rad-lede">
-    Visualize your application graph as you've designed it (<strong>Modeled</strong>), as you want it deployed (<strong>Planned</strong>), as it's running in your environments (<strong>Deployed</strong>), or as it differs between branches (<strong>Diff</strong>).
+    Visualize your application graph as you've designed it (${ledeLink(
+      "Modeled"
+    )}), as you want it deployed (${ledeLink(
+      "Planned"
+    )}), as it's running in your environments (${ledeLink(
+      "Deployed"
+    )}), or as it differs between branches (${ledeLink("Diff")}).
   </p>
 </div>
 <nav id="graph-nav" class="rad-subtabs">
@@ -673,6 +723,7 @@ export function graphPage(state: CanvasState = {}): string {
       "Application Graph",
       `
 ${graphHeader("graph")}
+<p class="rad-lede" id="modeled-subtitle" style="margin:0 0 24px;">The modeled application graph shows the high-level architecture of your application as it is designed in code.<span id="modeled-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -686,7 +737,7 @@ ${graphHeader("graph")}
       <option value="">Loading branches...</option>
     </select>
   </div>
-  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Deploy Application</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Plan Deployment</button>
 </div>
 <div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
 <div id="graph-container-wrapper"></div>
@@ -743,24 +794,24 @@ var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
 })();
 
 // Auto-generate the graph as soon as a branch is chosen, and enable the
-// Deploy Application button (greyed out until a branch is selected).
+// primary button (greyed out until a branch is selected, unless it is the
+// branch-independent "Create Environment" action).
 document.getElementById('graph-branch').addEventListener('change', function() {
     var deployBtn = document.getElementById('deploy-app-btn');
     if (this.value) {
         if (deployBtn) deployBtn.disabled = false;
         generateGraph();
-    } else if (deployBtn) {
+    } else if (deployBtn && deployBtn.dataset.mode !== 'create-env') {
         deployBtn.disabled = true;
     }
 });
 
-// Deploy Application → go to the Deployments page with the app preselected.
+// Primary action → Create Environment or Plan Deployment, depending on setup.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
-    if (this.disabled) return;
-    var appSel = document.getElementById('graph-app');
-    var app = appSel ? (appSel.value || '') : '';
-    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+    radiusModeledPrimaryAction(this);
 });
+
+radiusLoadModeledEnvState(CONTEXT_REPO);
 
 function generateGraph() {
     var repo = CONTEXT_REPO;
@@ -1015,6 +1066,7 @@ ${graphHeaderClose()}`
     "Application Graph",
     `
 ${graphHeader("graph")}
+<p class="rad-lede" id="modeled-subtitle" style="margin:0 0 24px;">The modeled application graph shows the high-level architecture of your application as it is designed in code.<span id="modeled-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
   <div class="rad-field">
@@ -1031,7 +1083,7 @@ ${graphHeader("graph")}
       )}</option>
     </select>
   </div>
-  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Deploy Application</button>
+  <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;">Plan Deployment</button>
 </div>
 <div id="graph-container"></div>
 <div id="graph-refresh-status" class="status error" style="display:none;"></div>
@@ -1100,12 +1152,12 @@ document.getElementById('graph-branch').addEventListener('change', function() {
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
 });
 
-// Deploy Application → go to the Deployments page with the app preselected.
+// Primary action → Create Environment or Plan Deployment, depending on setup.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {
-    var appSel = document.getElementById('graph-app');
-    var app = appSel ? (appSel.value || '') : '';
-    window.location.href = '/?page=deploying' + (app ? '&app=' + encodeURIComponent(app) : '');
+    radiusModeledPrimaryAction(this);
 });
+
+radiusLoadModeledEnvState(CONTEXT_REPO);
 
 var resources = ${resourcesJson};
 var repoUrl = 'https://github.com/' + document.getElementById('graph-repo').value.trim();
@@ -1156,6 +1208,10 @@ export function plannedGraphPage(state: CanvasState = {}): string {
   const provider = state?.plannedProvider || state?.deployProvider || "azure";
   const plannedResources = state?.plannedResources || [];
   const graphBranch = state?.plannedBranch || state?.contextBranch || "main";
+  // Default the Environment selector to the one last used for planning/deploying
+  // this repo, so re-opening the tab (or refreshing after a plan) keeps the
+  // same environment selected instead of falling back to the first option.
+  const defaultEnvironment = state?.plannedEnvironment || state?.envName || "";
   // Same provenance rule as graphPage: open local files in the editor canvas
   // when the planned graph was resolved against the local workspace checkout.
   // Prefer the authoritative persisted flag; fall back to repo+branch matching.
@@ -1171,6 +1227,7 @@ export function plannedGraphPage(state: CanvasState = {}): string {
       "Planned Graph",
       `
 ${graphHeader("planned")}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1190,31 +1247,38 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Plan Deployment">Plan Deployment</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
-<div id="plan-status" class="status info">Select an application, branch, and environment, then click "Plan Deployment" to see what resources will be created.</div>
+<div id="plan-status" class="status info">Generating the planned application graph…</div>
 <div id="graph-container-wrapper"></div>
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
+var CONTEXT_ENV = '${escapeHtml(defaultEnvironment)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
 
-document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim();
     var env = document.getElementById('planned-env').value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
-    if (!repo) return;
     var statusEl0 = document.getElementById('plan-status');
-    if (!branch) { if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to plan the deployment.'; statusEl0.className='status info'; } return; }
-    this.textContent = '⏳ Planning...';
-    this.disabled = true;
-    var btn = this;
-    var statusEl = document.getElementById('plan-status');
-    if (statusEl) statusEl.style.display = 'none';
+    if (RADIUS_PLAN_ENVS_STALE) {
+        if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Environments could not be loaded. Try again before planning a deployment.'; statusEl0.className='status error'; }
+        return Promise.resolve();
+    }
+    if (!repo || !branch) {
+        if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Select a branch to preview the planned deployment.'; statusEl0.className='status info'; }
+        return Promise.resolve();
+    }
+    if (!RADIUS_PLAN_HAS_ENV || !env) {
+        if (statusEl0) { statusEl0.style.display=''; statusEl0.textContent='Create an environment to preview the planned deployment for this application.'; statusEl0.className='status info'; }
+        var wrapper0 = document.getElementById('graph-container-wrapper');
+        if (wrapper0) wrapper0.innerHTML = '';
+        return Promise.resolve();
+    }
+    if (statusEl0) statusEl0.style.display = 'none';
+    RADIUS_PLAN_REQUEST_FAILED = false;
     var wrapper = document.getElementById('graph-container-wrapper');
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
@@ -1230,6 +1294,7 @@ document.getElementById('plan-btn').addEventListener('click', function() {
     var shownSteps = 0;
     var pollInterval = setInterval(function() {
         fetch('/api/progress').then(function(r) { return r.json(); }).then(function(d) {
+            if (!isCurrent()) return;
             var msgs = d.messages || [];
             for (var i = shownSteps; i < msgs.length; i++) {
                 var prev = stepsEl.querySelector('.step-active');
@@ -1242,12 +1307,11 @@ document.getElementById('plan-btn').addEventListener('click', function() {
             shownSteps = msgs.length;
         }).catch(function() {});
     }, 800);
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
+    return fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(pollInterval);
-            btn.textContent = 'Plan Deployment';
-            btn.disabled = false;
+            if (!isCurrent()) return;
             if (d.reload) {
                 var prev = stepsEl.querySelector('.step-active');
                 if (prev) prev.className = 'step-done';
@@ -1257,12 +1321,53 @@ document.getElementById('plan-btn').addEventListener('click', function() {
                 stepsEl.appendChild(doneDiv);
                 setTimeout(function() { window.location.reload(); }, 600);
             } else if (d.error) {
+                RADIUS_PLAN_REQUEST_FAILED = true;
                 clearInterval(pollInterval);
                 container.innerHTML = '';
-                if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + d.error; statusEl.className = 'status error'; }
+                if (statusEl0) { statusEl0.style.display = ''; statusEl0.textContent = 'Error: ' + d.error; statusEl0.className = 'status error'; }
+            } else {
+                RADIUS_PLAN_REQUEST_FAILED = true;
+                if (statusEl0) { statusEl0.style.display = ''; statusEl0.textContent = 'The planned deployment response was incomplete. Try again.'; statusEl0.className = 'status error'; }
             }
         })
-        .catch(function() { clearInterval(pollInterval); btn.textContent = 'Plan Deployment'; btn.disabled = false; });
+        .catch(function() {
+            clearInterval(pollInterval);
+            if (isCurrent() && statusEl0) {
+                RADIUS_PLAN_REQUEST_FAILED = true;
+                statusEl0.style.display = '';
+                statusEl0.textContent = 'The planned deployment could not be generated. Try again.';
+                statusEl0.className = 'status error';
+            }
+        });
+}
+
+var schedulePlan = radiusCreatePlanScheduler(runPlan, function() {
+    radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV, RADIUS_PLAN_ENVS_STALE);
+});
+function requestPlan(immediate) {
+    RADIUS_PLAN_REQUEST_FAILED = false;
+    var btn = document.getElementById('plan-btn');
+    if (btn && btn.dataset.mode === 'deploy') btn.disabled = true;
+    schedulePlan(immediate);
+}
+
+// Auto-generate the planned graph as soon as sensible defaults settle, then
+// re-generate it whenever the Application, Branch, or Environment selection
+// changes so the graph always reflects what's currently selected.
+radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV).then(function() {
+    requestPlan(true);
+});
+['planned-app', 'planned-branch', 'planned-env'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', function() {
+        radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV, RADIUS_PLAN_ENVS_STALE);
+        requestPlan(false);
+    });
+});
+
+document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+    radiusDeployPlannedApp(this, CONTEXT_REPO, ENV_PROVIDERS, '${provider}');
 });
 <\/script>
 ${graphHeaderClose()}`
@@ -1274,6 +1379,7 @@ ${graphHeaderClose()}`
     "Planned Graph",
     `
 ${graphHeader("planned")}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label>Application</label>
@@ -1293,39 +1399,77 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" data-plan-label="Re-Plan">Re-Plan</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
 </div>
-<div id="plan-env-note" style="display:none; margin-bottom:12px; font-size:12px; color:var(--rad-text-tertiary);">No Radius-managed environment exists for this repository yet. Create one first before planning a deployment.</div>
+<div id="plan-status" class="status error" style="display:none;"></div>
 <div id="graph-container"></div>
 
 <script>
 var CONTEXT_REPO = '${escapeHtml(targetRepo)}';
 var CONTEXT_BRANCH = '${escapeHtml(graphBranch)}';
+var CONTEXT_ENV = '${escapeHtml(defaultEnvironment)}';
 var ENV_PROVIDERS = {};
-radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH);
+var radiusPlannedSelectorsReady = radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH, CONTEXT_ENV);
 
-document.getElementById('plan-btn').addEventListener('click', function() {
-    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+// Re-generate the planned graph whenever the Application, Branch, or
+// Environment selection changes, so the graph always reflects what's
+// currently selected without requiring a separate "Re-Plan" click.
+function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
     var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
     var env = document.getElementById('planned-env').value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
-    if (!repo) return;
-    this.textContent = 'Planning...';
-    this.disabled = true;
-    var btn = this;
-    // Clear existing graph
+    if (!repo) return Promise.resolve();
     var container = document.getElementById('graph-container');
+    if (RADIUS_PLAN_ENVS_STALE) {
+        var staleStatus = document.getElementById('plan-status');
+        if (staleStatus) {
+            staleStatus.style.display = '';
+            staleStatus.textContent = 'Environments could not be loaded. The last planned graph is retained.';
+        }
+        return Promise.resolve();
+    }
+    if (!RADIUS_PLAN_HAS_ENV || !env) {
+        container.innerHTML = '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
+        return Promise.resolve();
+    }
+    RADIUS_PLAN_REQUEST_FAILED = false;
     container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--rad-text-tertiary);gap:10px;"><div class="spinner" style="width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-primary);border-radius:50%;animation:spin 0.8s linear infinite;"></div><span>Planning deployment...</span></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
-    fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
+    return fetch('/api/plan-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch, provider: provider, environment: env}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            btn.textContent = 'Re-Plan';
-            btn.disabled = false;
+            if (!isCurrent()) return;
             if (d.reload) { window.location.reload(); }
-            else if (d.needsAppBicep) { container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
-            else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
+            else if (d.needsAppBicep) { RADIUS_PLAN_REQUEST_FAILED = true; container.innerHTML = '<div class="status info">Copilot is generating .radius/app.bicep with the Radius app-bicep skill\u2026 the planned graph will appear once it is saved.</div>'; }
+            else if (d.error) { RADIUS_PLAN_REQUEST_FAILED = true; container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
+            else { RADIUS_PLAN_REQUEST_FAILED = true; container.innerHTML = '<div class="status error">The planned deployment response was incomplete. Try again.</div>'; }
+        })
+        .catch(function() {
+            if (!isCurrent()) return;
+            RADIUS_PLAN_REQUEST_FAILED = true;
+            container.innerHTML = '<div class="status error">The planned deployment could not be generated. Try again.</div>';
         });
+}
+var schedulePlan = radiusCreatePlanScheduler(runPlan, function() {
+    radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV, RADIUS_PLAN_ENVS_STALE);
+});
+function requestPlan() {
+    RADIUS_PLAN_REQUEST_FAILED = false;
+    var btn = document.getElementById('plan-btn');
+    if (btn && btn.dataset.mode === 'deploy') btn.disabled = true;
+    schedulePlan(false);
+}
+['planned-app', 'planned-branch', 'planned-env'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', function() {
+        radiusApplyPlanEnvState(RADIUS_PLAN_HAS_ENV, RADIUS_PLAN_ENVS_STALE);
+        requestPlan();
+    });
+});
+
+document.getElementById('plan-btn').addEventListener('click', function() {
+    if (this.dataset.mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+    radiusDeployPlannedApp(this, CONTEXT_REPO, ENV_PROVIDERS, '${provider}');
 });
 
 var resources = ${resourcesJson};
@@ -1335,10 +1479,44 @@ radiusRenderGraph('graph-container', resources, {
     localSource: ${localSource ? "true" : "false"},
     plannedMode: true
 });
+// The graph above reflects the last-persisted plan. If it turns out the repo
+// no longer has (or never had) a Radius-managed environment, replace it with
+// the "create an environment first" message rather than leaving a stale or
+// misleading plan on screen.
+radiusPlannedSelectorsReady.then(function() {
+    if (!RADIUS_PLAN_HAS_ENV && !RADIUS_PLAN_ENVS_STALE) {
+        var container0 = document.getElementById('graph-container');
+        if (container0) container0.innerHTML = '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
+    }
+});
 <\/script>
 ${graphHeaderClose()}`
   );
 }
+
+// Shared by both render paths of the Diff pane (empty selection and rendered
+// graph) so the two copies of the markup cannot drift apart.
+// Delete confirmation dialog (Figma 3-step type-to-confirm flow), shared by
+// every page that can delete a deployment. Tearing down live infrastructure is
+// irreversible, so a page must never ship a lighter-weight confirmation of its
+// own — that would quietly lower the bar for the whole product. The step
+// behaviour lives in radiusCreateDeleteDeploymentDialog (client.ts).
+const DELETE_DEPLOYMENT_DIALOG_HTML = `<div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="rad-ddlg" role="dialog" aria-modal="true" aria-labelledby="deploy-delete-title">
+    <div class="rad-ddlg__header">
+      <span class="rad-ddlg__title" id="deploy-delete-title">Delete Deployment</span>
+      <button type="button" class="rad-ddlg__close" id="deploy-delete-close" aria-label="Close">✕</button>
+    </div>
+    <div class="rad-ddlg__info">
+      <span class="rad-ddlg__info-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+      <span class="rad-ddlg__app" id="deploy-delete-app"></span>
+      <span class="rad-ddlg__env">Environment: <strong id="deploy-delete-env"></strong></span>
+    </div>
+    <div class="rad-ddlg__content" id="deploy-delete-body"></div>
+  </div>
+</div>`;
+
+const GRAPH_DIFF_SUBTITLE = `<p class="rad-lede" id="graph-diff-subtitle" style="margin:0 0 20px;">The application graph diff compares the application model between branches, allowing you to visualize changes in your application to reveal added, removed, or modified components. Use it to review the impact of a pull request before it is merged.</p>`;
 
 export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
@@ -1370,6 +1548,7 @@ export function graphDiffPage(state: CanvasState = {}): string {
       "Graph Diff",
       `
 ${graphHeader("graph-diff")}
+${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1456,6 +1635,7 @@ ${graphHeaderClose()}`
     "Graph Diff",
     `
 ${graphHeader("graph-diff")}
+${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
@@ -1569,10 +1749,31 @@ export function deployedGraphPage(state: CanvasState = {}): string {
     state?.plannedRepo ||
     state?.graphTargetRepo ||
     "";
+  // Branch the "Deploy Application" mode dispatches against. The Deployed pane
+  // has no branch selector (it shows what's already running), so fall back to
+  // the session/worktree branch the rest of the canvas is pinned to.
+  const deployBranch =
+    state?.contextBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
+  const deployProvider =
+    state?.plannedProvider || state?.deployProvider || "azure";
+  // The branch "View source code" links resolve against. The server returns the
+  // authoritative branch with the graph; this is only the value used before the
+  // first response lands. Previously this page hardcoded 'main', which broke
+  // source links for anyone working on a session worktree branch.
+  const targetBranch =
+    state?.contextBranch ||
+    state?.deployingBranch ||
+    state?.plannedBranch ||
+    state?.graphBranch ||
+    "main";
   return pageShell(
     "Deployed Graph",
     `
 ${graphHeader("deployed")}
+<p class="rad-lede" id="deployed-subtitle" style="margin:0 0 20px;">The deployed application graph depicts the selected application as it is currently deployed and running in a given environment.<span id="deployed-subtitle-hint"></span></p>
 <div class="rad-deployed-controls">
   <div class="rad-field">
     <label for="deployed-app-select">Application:</label>
@@ -1582,13 +1783,14 @@ ${graphHeader("deployed")}
     <label for="deployed-env-select">Environment:</label>
     <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
+  <button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0;" disabled>Delete Deployment</button>
 </div>
-<button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0 0 18px;" disabled>Delete Deployment</button>
 
 <div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 
 <div class="rad-card" style="margin:0;">
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5;"></div>
+  <div id="deployed-mode-note" style="display:none; font-size:12px; color:var(--rad-text-secondary); margin-bottom:12px;"></div>
   <div id="deployed-status" class="status info">Loading deployed application graph…</div>
   <div id="graph-container"></div>
 </div>
@@ -1598,17 +1800,9 @@ ${graphHeader("deployed")}
   <div id="deployed-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 
-<!-- Delete confirmation modal -->
-<div id="deployed-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:460px; width:90%; margin:0;">
-    <div class="rad-card__title" style="margin-bottom:8px;">Delete Deployment</div>
-    <p id="deployed-delete-text" style="margin:0 0 18px; font-size:14px; color:var(--rad-text-secondary); line-height:1.5;"></p>
-    <div style="display:flex; justify-content:flex-end; gap:10px;">
-      <button id="deployed-delete-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="deployed-delete-confirm" class="rad-btn rad-btn--danger-outline" style="margin:0;">Delete Deployment</button>
-    </div>
-  </div>
-</div>
+<!-- Delete confirmation: the same 3-step type-to-confirm dialog the Deployments
+     tab uses, so deleting from the graph is gated exactly as heavily. -->
+${DELETE_DEPLOYMENT_DIALOG_HTML}
 
 <!-- Deleting (transition) modal -->
 <div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
@@ -1624,9 +1818,16 @@ ${graphHeader("deployed")}
 <style>
   .rad-deployed-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:8px 0 16px; }
   .rad-deployed-controls .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
+  /* Keep the adaptive primary button baseline-aligned with the selects it sits
+     beside, rather than stretching to the row's full height. */
+  .rad-deployed-controls .rad-btn { align-self:flex-end; flex:0 0 auto; }
 </style>
 <script>
 var CONTEXT_REPO = ${JSON.stringify(targetRepo)};
+var CONTEXT_BRANCH = ${JSON.stringify(deployBranch)};
+var GRAPH_BRANCH = ${JSON.stringify(targetBranch)};
+var FALLBACK_PROVIDER = ${JSON.stringify(deployProvider)};
+var ENV_PROVIDERS = {};
 
 function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
@@ -1644,9 +1845,47 @@ function escapeHtmlClient(s) {
     var deleteBtn = document.getElementById('deployed-delete-btn');
     var statusEl = document.getElementById('deployed-status');
     var labelEl = document.getElementById('deployed-graph-label');
+    var modeNote = document.getElementById('deployed-mode-note');
     var container = document.getElementById('graph-container');
     var inlineStatus = document.getElementById('deployed-inline-status');
     var pollTimer = null;
+    var controller = null;
+    var LAST_MODE = '';
+    var graphFetchController = null;
+    // Artifact uploads take several seconds, so a faster poll returns the same
+    // bytes. The deploy log below the graph streams at 1.5s and carries the
+    // moment-to-moment liveness.
+    var POLL_MS = 15000;
+
+    // Adaptive primary-button state. HAS_ENVS gates "Create Environment";
+    // DEPLOYMENTS_BY_TARGET (application + environment → status from
+    // /api/list-deployments) decides between "Deploy Application" and "Delete
+    // Deployment" for the exact selection.
+    var HAS_ENVS = false;
+    var DEPLOYMENTS_BY_TARGET = {};
+    // Set when the deployment listing could not be read, so the button can be
+    // held disabled rather than acting on state we cannot confirm.
+    var DEPLOYMENT_STATES_STALE = false;
+
+    function deploymentKey(app, env) {
+        return encodeURIComponent(app) + '|' + encodeURIComponent(env);
+    }
+
+    // A deployment "exists" for the selection when the environment has any
+    // row at all, including a failed one: a failed deploy can leave partially
+    // provisioned infrastructure behind, so the user still needs "Delete
+    // Deployment" to clean it up.
+    function deploymentExists(app, env) {
+        if (!CONTEXT_REPO || !app || !env) return false;
+        return !!DEPLOYMENTS_BY_TARGET[deploymentKey(app, env)];
+    }
+
+    // The selected environment's deployment status, or '' when nothing is
+    // deployed there. "deleting" means a delete run is still in flight.
+    function deploymentStatus(app, env) {
+        if (!deploymentExists(app, env)) return '';
+        return DEPLOYMENTS_BY_TARGET[deploymentKey(app, env)] || '';
+    }
 
     // --- Deployment log streaming (shown under the graph while a deploy runs) ---
     var logSection = document.getElementById('deployed-log-section');
@@ -1684,6 +1923,17 @@ function escapeHtmlClient(s) {
         }).catch(function() {});
     }
 
+    // Show the deploy feed whenever this session has produced one, including
+    // after the run finished — that log is where a failure explains itself.
+    function maybeStartLogStream() {
+        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(d) {
+            if (!d) return;
+            if (d.status === 'in_progress' || d.status === 'complete' || d.status === 'success' || d.status === 'failed' || d.logTotal) {
+                startLogStream();
+            }
+        }).catch(function() {});
+    }
+
     function showInline(kind, msg) {
         inlineStatus.style.display = 'block';
         inlineStatus.textContent = msg;
@@ -1693,54 +1943,141 @@ function escapeHtmlClient(s) {
 
     function refreshControls() {
         var app = appSelect.value, env = envSelect.value;
-        deleteBtn.disabled = !(CONTEXT_REPO && app && env);
+        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env), DEPLOYMENT_STATES_STALE);
         labelEl.innerHTML = (app && env)
             ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
             : '';
+        // Both a delete in flight and an unreadable listing are transient, and
+        // both leave the button disabled — so poll until they resolve, or the
+        // button would stay stuck until a manual reload.
+        var status = deploymentStatus(app, env);
+        scheduleStatePoll(status === 'pending' || status === 'deleting' || DEPLOYMENT_STATES_STALE);
+    }
+
+    // Refresh the deployment listing while a delete runs, or while the listing
+    // is unreadable, so the button recovers on its own once real state arrives.
+    // Bounded so a stuck delete or a persistent outage never polls forever; on
+    // timeout the real status is whatever the listing last reported.
+    var statePollTimer = null;
+    var statePollTries = 0;
+    function scheduleStatePoll(active) {
+        if (!active) {
+            if (statePollTimer) { clearTimeout(statePollTimer); statePollTimer = null; }
+            statePollTries = 0;
+            return;
+        }
+        if (statePollTimer || statePollTries > 45) return; // ~3 min at 4s
+        statePollTimer = setTimeout(function() {
+            statePollTimer = null;
+            statePollTries++;
+            loadDeploymentStates().then(refreshControls);
+        }, 4000);
     }
 
     function showNothing(msg) {
         if (statusEl) { statusEl.style.display = 'none'; }
+        if (controller) { try { controller.destroy(); } catch (e) {} controller = null; }
         container.innerHTML = '<div style="display:flex; align-items:center; justify-content:center; min-height:240px; color:var(--rad-text-tertiary,#656d76); font-size:14px; border:1px dashed var(--rad-stroke,#d1d9e0); border-radius:6px;">' + (msg || 'Nothing deployed yet') + '</div>';
     }
 
-    function renderGraph(resources, showDeployStatus) {
+    // Render (or update in place). Updating through the controller preserves
+    // React Flow's viewport, so a status refresh never resets the user's pan
+    // or zoom mid-deploy.
+    function renderGraph(resources, branch) {
         if (statusEl) { statusEl.style.display = 'none'; }
-        radiusRenderGraph('graph-container', resources, {
+        if (controller) { controller.update(resources); return; }
+        controller = radiusRenderGraph('graph-container', resources, {
             repoUrl: 'https://github.com/' + CONTEXT_REPO,
-            branch: 'main',
+            branch: branch || GRAPH_BRANCH || 'main',
             showLegend: true,
-            deployedMode: !showDeployStatus,
-            deployMode: !!showDeployStatus
+            deployMode: true
         });
+    }
+
+    // Describe what the graph is showing. The freshness suffix reports the age
+    // of the DATA (the producer's updatedAt), not the age of our last fetch --
+    // polling more often does not make a three-day-old deployment newer.
+    function describeMode(mode, updatedAt, shownApp) {
+        if (mode === 'greyed') return 'Not deployed yet — showing the modeled application.';
+        var suffix = '';
+        var at = updatedAt ? Date.parse(updatedAt) : 0;
+        if (at) {
+            var secs = Math.max(0, Math.round((Date.now() - at) / 1000));
+            suffix = ' · updated ' + (secs < 60 ? secs + 's' : secs < 3600 ? Math.round(secs / 60) + 'm' : Math.round(secs / 3600) + 'h') + ' ago';
+        }
+        // The selected app may have no artifact yet, so the server falls back to
+        // an env-only match and returns which app it actually resolved. When that
+        // differs from the selection, say so rather than labeling app B's status
+        // as app A.
+        var appNote = (shownApp && appSelect.value && String(shownApp).toLowerCase() !== appSelect.value.toLowerCase())
+            ? ' · showing ' + shownApp
+            : '';
+        if (mode === 'live') {
+            // Be honest about the cadence: each artifact upload takes seconds,
+            // so a graph that looks static usually means "no new data yet".
+            return 'Deploying' + suffix + appNote + ' · refreshes every ' + Math.round(POLL_MS / 1000) + 's';
+        }
+        return 'Last deployment' + suffix + appNote + '.';
+    }
+
+    function setModeNote(text) {
+        if (!modeNote) return;
+        modeNote.textContent = text || '';
+        modeNote.style.display = text ? 'block' : 'none';
     }
 
     function loadGraph() {
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         if (!CONTEXT_REPO) { showNothing('Nothing deployed yet'); return; }
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
-        // Prefer a live/in-progress deployment so the graph fills in as it deploys.
-        fetch('/api/deploy-status').then(function(r) { return r.json(); }).then(function(s) {
-            var liveRes = (s && s.resources) || [];
-            var st = s && s.status;
-            // Stream deployment logs under the graph whenever a deploy is running
-            // or has produced log output.
-            if (st === 'in_progress' || st === 'success' || st === 'complete' || st === 'failed' || (s && s.logTotal)) {
-                startLogStream();
+        if (statusEl && !controller) { statusEl.style.display = ''; statusEl.textContent = 'Loading deployed application graph…'; }
+        var query = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO);
+        if (appSelect.value) { query += '&application=' + encodeURIComponent(appSelect.value); }
+        if (envSelect.value) { query += '&environment=' + encodeURIComponent(envSelect.value); }
+        // Abort any fetch still in flight so a slow response from a previous
+        // load (or one issued before the tab was hidden) cannot land and
+        // re-render after this one.
+        if (graphFetchController) { try { graphFetchController.abort(); } catch (e) {} }
+        graphFetchController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var fetchOpts = graphFetchController ? { signal: graphFetchController.signal } : undefined;
+        fetch(query, fetchOpts).then(function(r) { return r.json(); }).then(function(d) {
+            var resources = (d && d.resources) || [];
+            var mode = (d && d.mode) || 'greyed';
+            LAST_MODE = mode;
+            // Stream the deploy feed whenever there is one to show.
+            if (mode === 'live') { startLogStream(); }
+            if (!resources.length) {
+                // Genuinely nothing to draw: no deployed graph AND no modeled
+                // application to fall back to.
+                showNothing('Nothing deployed yet');
+                setModeNote('');
+            } else {
+                renderGraph(resources, d && d.branch);
+                setModeNote(describeMode(mode, d && d.updatedAt, d && d.application));
             }
-            if (liveRes.length && (st === 'in_progress' || st === 'success' || st === 'failed')) {
-                renderGraph(liveRes, true);
-                if (st === 'in_progress') { pollTimer = setTimeout(loadGraph, 3000); }
-                return;
-            }
-            // Fall back to the terminal deployed graph from the status branch.
-            fetch('/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO)).then(function(r) { return r.json(); }).then(function(d) {
-                var resources = (d && d.resources) || [];
-                if (!resources.length) { showNothing('Nothing deployed yet'); return; }
-                renderGraph(resources, false);
-            }).catch(function() { showNothing('Nothing deployed yet'); });
-        }).catch(function() { showNothing('Nothing deployed yet'); });
+            if (mode === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }
+        }).catch(function(err) {
+            // A fetch aborted on tab-hide (or superseded by a newer load) must
+            // not repaint or reschedule — that is the pause working.
+            if (err && err.name === 'AbortError') { return; }
+            if (!controller) { showNothing('Nothing deployed yet'); }
+            // Keep polling through a transient failure. Dropping the timer here
+            // would freeze the graph mid-deploy for the life of the page while
+            // the note still promised a refresh. Do not reschedule while hidden.
+            if (LAST_MODE === 'live' && document.visibilityState !== 'hidden') { pollTimer = setTimeout(loadGraph, POLL_MS); }
+        });
     }
+
+    // Pause polling while the panel is hidden; resume (and refresh once) when it
+    // comes back, but only for a live deploy -- a terminal or greyed view never
+    // scheduled a poll, so tabbing back to it must not start hitting the API.
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'hidden') {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            if (graphFetchController) { try { graphFetchController.abort(); } catch (e) {} graphFetchController = null; }
+        } else if (LAST_MODE === 'live' && !pollTimer) {
+            loadGraph();
+        }
+    });
 
     function loadApplications() {
         return fetch('/api/list-applications?repo=' + encodeURIComponent(CONTEXT_REPO))
@@ -1759,34 +2096,67 @@ function escapeHtmlClient(s) {
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var envs = (d && d.environments) || [];
-                if (!envs.length) { envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+                if (!envs.length) { HAS_ENVS = false; envSelect.innerHTML = '<option value="">No environments</option>'; return; }
+                HAS_ENVS = true;
+                envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || FALLBACK_PROVIDER; });
                 envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
                 if (wantEnv) { envSelect.value = wantEnv; }
             })
-            .catch(function() { envSelect.innerHTML = '<option value="">Could not load</option>'; });
+            .catch(function() { HAS_ENVS = false; envSelect.innerHTML = '<option value="">Could not load</option>'; });
+    }
+
+    // Resolve which environments currently hold a deployment, so the primary
+    // button can choose between deploying and deleting for the selection.
+    //
+    // /api/list-deployments answers a transient GitHub failure with HTTP 200 and
+    // { deployments: [], error } rather than a rejection. Treating that as "no
+    // deployments" would clear an environment that actually has a deploy or
+    // delete in flight, flipping the button back to "Deploy Application" and
+    // letting the user start a conflicting operation. So keep the last-known
+    // map and flag it stale; refreshControls disables the button until a
+    // subsequent poll reads real state. The Deployments tab handles the same
+    // shape the same way (see its load-error row).
+    function loadDeploymentStates() {
+        return fetch('/api/list-deployments?repo=' + encodeURIComponent(CONTEXT_REPO))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d && d.error) { DEPLOYMENT_STATES_STALE = true; return; }
+                DEPLOYMENT_STATES_STALE = false;
+                DEPLOYMENTS_BY_TARGET = {};
+                ((d && d.deployments) || []).forEach(function(dep) {
+                    if (dep && dep.app && dep.environment) {
+                        DEPLOYMENTS_BY_TARGET[deploymentKey(dep.app, dep.environment)] = dep.status || 'unknown';
+                    }
+                });
+            })
+            .catch(function() { DEPLOYMENT_STATES_STALE = true; });
     }
 
     appSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
     envSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });
 
-    // --- Delete deployment ---
-    var delModal = document.getElementById('deployed-delete-modal');
-    var delText = document.getElementById('deployed-delete-text');
-    var delConfirm = document.getElementById('deployed-delete-confirm');
-    var delCancel = document.getElementById('deployed-delete-cancel');
+    // --- Delete deployment (shared 3-step type-to-confirm dialog) ---
+    var deleteDialog = radiusCreateDeleteDeploymentDialog({ onConfirm: runDelete });
 
     deleteBtn.addEventListener('click', function() {
+        // The primary button is adaptive — route by the mode the current
+        // environment/deployment state selected.
+        var mode = this.dataset.mode;
+        if (mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
+        if (mode === 'deploy') {
+            radiusDeployDeployedApp(this, CONTEXT_REPO, CONTEXT_BRANCH, ENV_PROVIDERS, FALLBACK_PROVIDER);
+            return;
+        }
         var app = appSelect.value, env = envSelect.value;
-        if (!app || !env) return;
-        delText.innerHTML = 'Are you sure you want to delete the deployment of application <strong>' + escapeHtmlClient(app) + '</strong> in environment <strong>' + escapeHtmlClient(env) + '</strong>?';
-        delModal.style.display = 'flex';
+        if (!app || !env || !deleteDialog) return;
+        deleteDialog.open(app, env);
     });
-    delCancel.addEventListener('click', function() { delModal.style.display = 'none'; });
-    delModal.addEventListener('click', function(e) { if (e.target === delModal) { delModal.style.display = 'none'; } });
-    delConfirm.addEventListener('click', function() {
-        var app = appSelect.value, env = envSelect.value;
+
+    // Unlike the Deployments table, this page has no row to annotate with a
+    // "Deleting…" status, so it shows a transition modal and then hands the user
+    // to the Deployments tab to watch the workflow run.
+    function runDelete(app, env) {
         if (!app || !env) return;
-        delModal.style.display = 'none';
         document.getElementById('deployed-deleting-text').innerHTML = 'Deleting application <strong>' + escapeHtmlClient(app) + '</strong> from <strong>' + escapeHtmlClient(env) + '</strong> with <code>rad app delete</code>. This may take a few minutes.';
         document.getElementById('deployed-deleting-modal').style.display = 'flex';
         fetch('/api/delete-deployment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CONTEXT_REPO, environment: env, application: app }) })
@@ -1800,10 +2170,11 @@ function escapeHtmlClient(s) {
                 document.getElementById('deployed-deleting-modal').style.display = 'none';
                 showInline('error', 'Could not delete the deployment. Please try again.');
             });
-    });
+    }
 
-    Promise.all([loadApplications(), loadEnvironments()]).then(function() {
+    Promise.all([loadApplications(), loadEnvironments(), loadDeploymentStates()]).then(function() {
         refreshControls();
+        maybeStartLogStream();
         loadGraph();
     });
 })();
@@ -1850,7 +2221,11 @@ ${
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <script>
 document.getElementById('back-btn').addEventListener('click', function() {
-    fetch('/api/deploy-reset', { method: 'POST' }).then(function() { window.location.reload(); });
+    fetch('/api/deploy-reset', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({attemptId: ${JSON.stringify(state?.deployAttempt?.id || "")}})
+    }).then(function() { window.location.reload(); });
 });
 <\/script>`
     );
@@ -4254,6 +4629,19 @@ if (document.getElementById('pane-credentials').style.display !== 'none') { load
 // exist for the tab that started the work, and a reload — or a trip to the graph
 // and back — would look exactly like nothing was happening.
 resumeEnvProgress(CTX_REPO);
+
+// Deep link: '/?page=environment&new=1' opens the creation form directly
+// (used by the Modeled graph's "Create Environment" call to action) rather
+// than landing on the environments table. This runs after the resume call, but
+// that call is asynchronous, so an operation still in flight wins and replaces
+// the form with its progress once the lookup returns.
+(function() {
+    var wantsNew = false;
+    try { wantsNew = new URLSearchParams(window.location.search).get('new') === '1'; } catch (e) { /* URLSearchParams unavailable */ }
+    if (!wantsNew) return;
+    switchSubtab('environments');
+    showEnvForm({ name: '' });
+})();
 <\/script>`
   );
 }
@@ -4335,20 +4723,7 @@ function deployLandingView(state: CanvasState): string {
 <!-- Delete confirmation dialog (Figma 3-step type-to-confirm flow). The
      "deleting" transition is shown inline on the row (status → Deleting…),
      not as a blocking modal. -->
-<div id="deploy-delete-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="rad-ddlg" role="dialog" aria-modal="true" aria-labelledby="deploy-delete-title">
-    <div class="rad-ddlg__header">
-      <span class="rad-ddlg__title" id="deploy-delete-title">Delete Deployment</span>
-      <button type="button" class="rad-ddlg__close" id="deploy-delete-close" aria-label="Close">✕</button>
-    </div>
-    <div class="rad-ddlg__info">
-      <span class="rad-ddlg__info-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
-      <span class="rad-ddlg__app" id="deploy-delete-app"></span>
-      <span class="rad-ddlg__env">Environment: <strong id="deploy-delete-env"></strong></span>
-    </div>
-    <div class="rad-ddlg__content" id="deploy-delete-body"></div>
-  </div>
-</div>
+${DELETE_DEPLOYMENT_DIALOG_HTML}
 
 <style>
   .rad-deploy-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:0 0 20px; }
@@ -4384,29 +4759,8 @@ function deployLandingView(state: CanvasState): string {
   .rad-inline--success .rad-inline__icon { color:var(--rad-success); font-weight:700; }
   .rad-inline--error { background:var(--rad-danger-bg); border:1px solid var(--rad-danger); color:var(--rad-text); }
   .rad-inline--error .rad-inline__icon { color:var(--rad-danger); }
-  /* Delete confirmation dialog (Figma type-to-confirm flow). */
-  .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }
-  .rad-ddlg__header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--rad-stroke); }
-  .rad-ddlg__title { font-size:16px; font-weight:600; color:var(--rad-text); }
-  .rad-ddlg__close { background:none; border:none; cursor:pointer; font-size:14px; line-height:1; color:var(--rad-text-tertiary); padding:6px; border-radius:6px; }
-  .rad-ddlg__close:hover { background:var(--rad-neutral-bg); }
-  .rad-ddlg__info { display:flex; flex-direction:column; align-items:center; gap:4px; padding:24px 24px 16px; text-align:center; }
-  .rad-ddlg__info-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; color:var(--rad-text); }
-  .rad-ddlg__app { font-size:18px; font-weight:700; color:var(--rad-text); }
-  .rad-ddlg__env { font-size:14px; color:var(--rad-text-secondary); }
-  .rad-ddlg__content { display:flex; flex-direction:column; gap:16px; padding:24px; }
-  .rad-ddlg__text { font-size:14px; line-height:1.5; color:var(--rad-text-secondary); margin:0; }
-  .rad-ddlg__btn { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid var(--rad-stroke); background:var(--rad-neutral-bg); color:var(--rad-text); }
-  .rad-ddlg__btn:hover { background:var(--rad-neutral-bg-hover); }
-  .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
-  .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
-  .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
-  .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
-  .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
-  .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
-  .rad-ddlg__delete { width:100%; box-sizing:border-box; padding:10px 20px; border-radius:6px; border:none; font-size:14px; font-weight:600; color:#fff; background:var(--rad-danger-solid); cursor:pointer; }
-  .rad-ddlg__delete:hover { background:var(--rad-danger-solid-border); }
-  .rad-ddlg__delete:disabled { background:color-mix(in srgb, var(--rad-danger) 35%, var(--rad-surface)); cursor:default; }
+  /* Delete confirmation dialog styling now lives in the global pageShell CSS
+     so the Deployed graph page shares this exact dialog. */
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -4519,8 +4873,8 @@ function loadApplications() {
             HAS_APPS = apps.length > 0;
             if (apps.length === 0) { appSelect.innerHTML = '<option value="">No applications</option>'; refreshDeployBtn(); return; }
             appSelect.innerHTML = apps.map(function(a) { return '<option value="' + escapeHtmlClient(a.name) + '">' + escapeHtmlClient(a.name) + '</option>'; }).join('');
-            // Pre-select the application passed via ?app= (e.g. from the
-            // "Deploy Application" button on the Application Graph page).
+            // Pre-select the application passed via ?app= (e.g. from a redirect
+            // that resumes an in-flight deployment).
             try {
                 var preApp = new URLSearchParams(window.location.search).get('app');
                 if (preApp) {
@@ -4667,10 +5021,10 @@ function loadDeployments(fresh, quiet) {
                     ? '<a class="rad-deploy-applink" href="' + escapeHtmlClient(dep.runUrl) + '" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">' + arrowSvg + 'View Run</a>'
                     : '<span class="rad-cell-empty">—</span>';
                 // Failed deployments get a filled (solid) delete button; all
-                // others use the subtle outline variant. A row that's mid-delete
-                // disables its button to prevent a duplicate dispatch.
+                // others use the subtle outline variant. Any in-flight operation
+                // disables deletion so deploy/delete workflows cannot overlap.
                 var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
-                var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';
+                var delDisabled = (status === 'pending' || status === 'deleting' || dep.synthetic) ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
@@ -4685,57 +5039,10 @@ function loadDeployments(fresh, quiet) {
         .catch(function() { if (!quiet) body.innerHTML = '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>'; });
 }
 
-// --- Delete deployment: 3-step type-to-confirm dialog (Figma) ---
-var delModal = document.getElementById('deploy-delete-modal');
-var delBody = document.getElementById('deploy-delete-body');
-var delAppEl = document.getElementById('deploy-delete-app');
-var delEnvEl = document.getElementById('deploy-delete-env');
-var delClose = document.getElementById('deploy-delete-close');
-var pendingDelete = null;
-var delStep = 1;
+// --- Delete deployment: 3-step type-to-confirm dialog (shared, client.ts) ---
+var deleteDialog = radiusCreateDeleteDeploymentDialog({ onConfirm: runDelete });
 
-function closeDeleteModal() { delModal.style.display = 'none'; pendingDelete = null; delStep = 1; delBody.innerHTML = ''; }
-
-// Render the current step's body. Steps escalate the confirmation:
-//   1) intent, 2) acknowledge the irreversible effects, 3) type "app/env".
-function renderDeleteStep() {
-    if (!pendingDelete) return;
-    var app = pendingDelete.app, env = pendingDelete.environment;
-    if (delStep === 1) {
-        delBody.innerHTML =
-            '<p class="rad-ddlg__text">Deleting this deployment will tear down running containers and resources. To proceed, please confirm your intention.</p>' +
-            '<button type="button" class="rad-ddlg__btn" id="del-step1-btn">I want to delete this deployment</button>';
-        document.getElementById('del-step1-btn').addEventListener('click', function() { delStep = 2; renderDeleteStep(); });
-    } else if (delStep === 2) {
-        delBody.innerHTML =
-            '<div class="rad-ddlg__warn"><span aria-hidden="true">⚠</span><span>This action cannot be undone. Please read carefully!</span></div>' +
-            '<div class="rad-ddlg__bullet"><span>This will permanently delete the deployment of <strong>' + escapeHtmlClient(app) + '</strong> from environment <strong>' + escapeHtmlClient(env) + '</strong>, including all associated resources.</span></div>' +
-            '<button type="button" class="rad-ddlg__btn" id="del-step2-btn">I have read and understand these effects</button>';
-        document.getElementById('del-step2-btn').addEventListener('click', function() { delStep = 3; renderDeleteStep(); });
-    } else {
-        var token = app + '/' + env;
-        delBody.innerHTML =
-            '<p class="rad-ddlg__confirm-label">To confirm, type "' + escapeHtmlClient(token) + '" in the box below</p>' +
-            '<input type="text" class="rad-ddlg__input" id="del-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="' + escapeHtmlClient(token) + '">' +
-            '<button type="button" class="rad-ddlg__delete" id="del-confirm-btn" disabled>Delete this deployment</button>';
-        var input = document.getElementById('del-confirm-input');
-        var btn = document.getElementById('del-confirm-btn');
-        var matches = function() { return input.value.trim() === token; };
-        input.addEventListener('input', function() { btn.disabled = !matches(); });
-        input.addEventListener('keydown', function(e) { if (e.key === 'Enter' && matches()) runDelete(); });
-        btn.addEventListener('click', function() { if (matches()) runDelete(); });
-        input.focus();
-    }
-}
-
-function openDeleteModal(app, env) {
-    pendingDelete = { app: app, environment: env };
-    delStep = 1;
-    delAppEl.textContent = app;
-    delEnvEl.textContent = env;
-    renderDeleteStep();
-    delModal.style.display = 'flex';
-}
+function openDeleteModal(app, env) { if (deleteDialog) deleteDialog.open(app, env); }
 
 function wireDeleteButtons() {
     document.querySelectorAll('.js-del-dep').forEach(function(btn) {
@@ -4743,16 +5050,11 @@ function wireDeleteButtons() {
     });
 }
 
-delClose.addEventListener('click', closeDeleteModal);
-delModal.addEventListener('click', function(e) { if (e.target === delModal) closeDeleteModal(); });
-
 // Dispatch the delete, then let the row reflect "Deleting…" while the workflow
 // runs. When the deployment finally clears from the listing, show the green
 // "successfully deleted" banner (Figma deployments-deleted state).
-function runDelete() {
-    if (!pendingDelete) return;
-    var dep = pendingDelete;
-    closeDeleteModal();
+function runDelete(app, env) {
+    var dep = { app: app, environment: env };
     // Acknowledge the action immediately: the delete workflow takes a moment to
     // start, so without an instant cue the button click looks like it did
     // nothing. Mirror the deploy flow — flip the row to "Deleting…" and show a
@@ -4920,7 +5222,7 @@ function showDeployFailed(app, env, errText, runUrl, kind, branch, repairing, ha
 deployBtn.addEventListener('click', function() {
     var mode = deployBtn.dataset.mode || 'deploy';
     if (mode === 'create-app') { window.location.href = '/?page=graph'; return; }
-    if (mode === 'create-env') { window.location.href = '/?page=environment'; return; }
+    if (mode === 'create-env') { window.location.href = '/?page=environment&new=1'; return; }
     var env = envSelect.value;
     var app = appSelect.value;
     if (!CTX_REPO || !env || !app) return;
@@ -5016,7 +5318,19 @@ deployBtn.addEventListener('click', function() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ environment: env, provider: provider, targetRepo: CTX_REPO, branch: deployBranch, appFile: '.radius/app.bicep' })
-    }).then(function(r) { return r.json().catch(function() { return {}; }); })
+    }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; });
+    }).then(function(result) {
+        if (result.ok) return;
+        clearInterval(wfPoll);
+        clearTimeout(autoHide);
+        delete OP_STATUS[opKey(app, env)];
+        document.getElementById('deploy-progress-modal').style.display = 'none';
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+        showInline('error', (result.d && result.d.error) || 'Could not start the deployment.');
+        loadDeployments(true);
+    })
       .catch(function() {
           clearInterval(wfPoll);
           clearTimeout(autoHide);
@@ -5044,10 +5358,63 @@ deployBtn.addEventListener('click', function() {
     });
 })();
 
+// Deploys started from the Planned or Deployed graph redirect here. Carrying
+// the selected app/environment in the URL lets this page restore the same
+// optimistic row and polling used for deployments started locally, closing the
+// gap before GitHub publishes the deployment record.
+function resumeRedirectedDeployment() {
+    var params;
+    try { params = new URLSearchParams(window.location.search); } catch (e) { return false; }
+    var app = params.get('application') || '';
+    var env = params.get('environment') || '';
+    if (!app || !env || !CTX_REPO) return false;
+
+    var key = opKey(app, env);
+    OP_STATUS[key] = 'pending';
+    DEPLOYED_ENVS[env] = 'pending';
+    refreshDeployBtn();
+    loadDeployments(true);
+
+    var ticks = 0;
+    var recordSeen = false;
+    var poll = setInterval(function() {
+        if (++ticks > 720) {
+            clearInterval(poll);
+            delete OP_STATUS[key];
+            loadDeployments(true);
+            return;
+        }
+        fetch('/api/deploy-status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var attempt = (d && d.attempt) || {};
+                var sameAttempt = (!attempt.targetRepo || attempt.targetRepo === CTX_REPO) &&
+                    (!attempt.environment || attempt.environment === env);
+                if (d && d.active && sameAttempt) {
+                    // Once GitHub has published the real deployment record, the
+                    // optimistic override keeps its status pending; repeatedly
+                    // bypassing the list cache after that would fan out several
+                    // GitHub API calls per environment every 2.5 seconds.
+                    if (!recordSeen && DEPLOY_RECORDS_PRESENT[key]) recordSeen = true;
+                    if (!recordSeen) loadDeployments(true, true);
+                    return;
+                }
+                clearInterval(poll);
+                delete OP_STATUS[key];
+                if (d && d.status === 'failed' && sameAttempt) {
+                    showDeployFailed(app, env, d.error || '', d.deployRunUrl || '', d.errorKind || '', d.errorBranch || '', d.repairing || false, d.handoff || {});
+                }
+                loadDeployments(true);
+            })
+            .catch(function() {});
+    }, 2500);
+    return true;
+}
+
 loadApplications();
 loadEnvironmentsDropdown();
 loadBranches();
-loadDeployments();
+if (!resumeRedirectedDeployment()) loadDeployments();
 <\/script>`,
     "deployments"
   );
