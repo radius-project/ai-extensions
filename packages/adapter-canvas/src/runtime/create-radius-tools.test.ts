@@ -100,6 +100,33 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     expect(result).toContain("Could not generate app graph diff");
     expect(result).toContain("rad exploded");
   });
+
+  it("logs graph build progress when available without letting a logging failure break the diff", async () => {
+    const { tools, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    const session = deps.session.get();
+    session.log = vi.fn(() => {
+      throw new Error("log unavailable");
+    });
+    (
+      deps.rad.radArtifactsDirForSelection as ReturnType<typeof vi.fn>
+    ).mockImplementation(async ({ log }) => {
+      log("building graph");
+      return { dir: "/workspace/.radius", remote: false };
+    });
+
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
+
+    expect(session.log).toHaveBeenCalledWith("building graph");
+    expect(result).toContain("Application Graph Diff");
+  });
 });
 
 // RU-09: publish custom extension confinement/defaults/invoke/errors.
@@ -330,6 +357,49 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain("Could not start the deploy");
     expect(result).toContain("workflow dispatch failed");
   });
+
+  it("surfaces a deploy transport failure", async () => {
+    const { tools, deps } = setup();
+    deps.servers.set("radius-panel", {
+      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
+      baseUrl: "http://127.0.0.1:9999",
+      url: "http://127.0.0.1:9999/?page=deployed",
+      page: "deployed",
+      state: {}
+    });
+    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("connection reset")
+    );
+
+    const result = await findTool(tools, "radius_deploy").handler({
+      repo: "acme/widgets",
+      environment: "production"
+    });
+
+    expect(result).toContain("Could not start the deploy");
+    expect(result).toContain("connection reset");
+  });
+
+  it("treats an empty successful deploy response as a started deploy", async () => {
+    const { tools, deps } = setup();
+    deps.servers.set("radius-panel", {
+      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
+      baseUrl: "http://127.0.0.1:9999",
+      url: "http://127.0.0.1:9999/?page=deployed",
+      page: "deployed",
+      state: {}
+    });
+    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response("not json", { status: 200 })
+    );
+
+    const result = await findTool(tools, "radius_deploy").handler({
+      repo: "acme/widgets",
+      environment: "production"
+    });
+
+    expect(result).toContain("started");
+  });
 });
 
 // RU-12: deploy status/log bounds/URL/diagnostics.
@@ -407,5 +477,44 @@ describe("RU-12: radius_deploy_status", () => {
     const result = await findTool(tools, "radius_deploy_status").handler({});
     expect(result).toContain("Could not read the deploy status");
     expect(result).toContain("HTTP 500");
+  });
+
+  it("surfaces a deploy-status transport failure", async () => {
+    const { tools, deps } = setup();
+    deps.servers.set("radius-panel", {
+      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
+      baseUrl: "http://127.0.0.1:9999",
+      url: "http://127.0.0.1:9999/?page=deployed",
+      page: "deployed",
+      state: {}
+    });
+    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("status connection reset")
+    );
+
+    const result = await findTool(tools, "radius_deploy_status").handler({});
+
+    expect(result).toContain("Could not read the deploy status");
+    expect(result).toContain("status connection reset");
+  });
+
+  it("normalizes an empty successful status response", async () => {
+    const { tools, deps } = setup();
+    deps.servers.set("radius-panel", {
+      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
+      baseUrl: "http://127.0.0.1:9999",
+      url: "http://127.0.0.1:9999/?page=deployed",
+      page: "deployed",
+      state: {}
+    });
+    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response("not json", { status: 200 })
+    );
+
+    const result = JSON.parse(
+      await findTool(tools, "radius_deploy_status").handler({})
+    );
+
+    expect(result.status).toBe("pending");
   });
 });

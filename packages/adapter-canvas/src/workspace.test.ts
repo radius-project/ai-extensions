@@ -9,6 +9,7 @@ import {
   toSafeRepoRelPath,
   isWorkspaceSelection,
   resolveSessionId,
+  resolvePersistedSessionId,
   workspaceFileExists
 } from "./workspace.js";
 
@@ -194,6 +195,44 @@ describe("resolveSessionId", () => {
   it("skips a traceparent COPILOT_AGENT_SESSION_ID and uses SESSION_ID when its workspace.yaml exists", async () => {
     const env = { COPILOT_AGENT_SESSION_ID: TRACEPARENT, SESSION_ID: REAL_ID };
     expect(await resolveSessionId(env, HOME, existsFor(REAL_ID))).toBe(REAL_ID);
+  });
+
+  describe("resolvePersistedSessionId", () => {
+    const HOME = "C:/Users/dev";
+    const REAL_ID = "e40edfce-64f9-4717-8296-96fea82c4760";
+    const TRACEPARENT =
+      "00-29c84416000000000000000000000000-0000000000000000-00";
+    const yamlFor = (id: string) =>
+      `${HOME}/.copilot/session-state/${id}/workspace.yaml`.replace(
+        /\//g,
+        path.sep
+      );
+    const existsFor = (validId: string) => async (candidate: string) =>
+      path.normalize(candidate) === path.normalize(yamlFor(validId));
+
+    it("uses the first candidate with a real session workspace", async () => {
+      const env = {
+        COPILOT_AGENT_SESSION_ID: TRACEPARENT,
+        SESSION_ID: REAL_ID
+      };
+      expect(
+        await resolvePersistedSessionId(env, HOME, existsFor(REAL_ID))
+      ).toBe(REAL_ID);
+    });
+
+    it("does not use an unverified traceparent as persistent storage identity", async () => {
+      const env = { COPILOT_AGENT_SESSION_ID: TRACEPARENT };
+      expect(
+        await resolvePersistedSessionId(env, HOME, async () => false)
+      ).toBe("");
+    });
+
+    it("returns no persistent identity when no session directory matches", async () => {
+      const env = { SESSION_ID: REAL_ID };
+      expect(
+        await resolvePersistedSessionId(env, HOME, async () => false)
+      ).toBe("");
+    });
   });
 
   it("prefers COPILOT_AGENT_SESSION_ID when its own workspace.yaml exists", async () => {

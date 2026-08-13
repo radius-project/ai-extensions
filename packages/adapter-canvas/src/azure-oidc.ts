@@ -109,6 +109,29 @@ export interface ResolveOidcSubjectResult {
   subjectConfig: OidcSubjectConfig;
 }
 
+export function findLegacyMutableCredentialName(
+  resolved: ResolveOidcSubjectResult,
+  suffix: string,
+  existingNameToSubject: ReadonlyMap<string, string>
+): string | undefined {
+  if (
+    !resolved.subjectConfig.useDefault ||
+    resolved.subjectConfig.useImmutableSubject !== true
+  ) {
+    return undefined;
+  }
+  const mutableSubject = buildOidcSubject({
+    repoFullName: resolved.fullName,
+    ownerId: resolved.ownerId,
+    repoId: resolved.repoId,
+    suffix,
+    subjectConfig: { useDefault: true, useImmutableSubject: false }
+  });
+  return [...existingNameToSubject.entries()].find(
+    ([, subject]) => subject === mutableSubject
+  )?.[0];
+}
+
 // owner/repo using GitHub's real charset — an owner is 1-39 chars starting
 // alphanumeric with internal hyphens; a repo is 1-100 of [A-Za-z0-9._-]. This
 // rejects spaces and shell metacharacters (`&`, `?`, ...) that could otherwise
@@ -806,12 +829,11 @@ export async function fetchGitHubJson(
  * - Treat ONLY an explicit 404 from the customization endpoint as "not opted
  *   into a custom subject" (default format). Any other non-OK status is a hard,
  *   actionable failure — never silently default.
- * - DEFAULT (not customized) subject: rather than fail closed on undetermined
- *   immutability, emit BOTH federated credentials — the mutable
- *   `repo:{owner}/{repo}:{suffix}` and the immutable
- *   `repo:{owner}@{ownerId}/{repo}@{repoId}:{suffix}`. GitHub presents exactly
- *   one subject at token time; the matching credential authorizes login and the
- *   other is inert. Azure allows ~20 FICs/app, so two-per-environment is fine.
+ * - DEFAULT (not customized) subject: emit only the immutable credential when
+ *   GitHub explicitly reports immutable subjects. Otherwise emit both forms.
+ *   `use_immutable_subject=false` is an opt-out setting and does not prove the
+ *   effective format for repositories covered by GitHub's immutable-default
+ *   rollout, so the compatibility hedge remains for false/absent signals.
  * - CUSTOM subject: build the single exact subject from the customization
  *   config (buildOidcSubject fails loud if a repo/repository key needs an
  *   immutability decision it cannot make).
@@ -891,10 +913,27 @@ export async function resolveOidcSubject(
       subjectConfig.useImmutableSubject = c.use_immutable_subject;
     }
     if (typeof c.sub_claim_prefix === "string" && c.sub_claim_prefix) {
-      subjectConfig.subClaimPrefix = c.sub_claim_prefix;
+      const prefixSlug = c.sub_claim_prefix.replace(
+        /^(?:repo|repository):/,
+        ""
+      );
+      subjectConfig.subClaimPrefix = prefixSlug;
       if (subjectConfig.useImmutableSubject === undefined) {
-        // A prefix containing owner@id/repo@id is the immutable form.
-        subjectConfig.useImmutableSubject = c.sub_claim_prefix.includes("@");
+        const [owner, repoName] = fullName.split("/");
+        const expectedImmutableSlug = `${owner}@${ownerId}/${repoName}@${repoId}`;
+        if (
+          prefixSlug.toLowerCase() === expectedImmutableSlug.toLowerCase() ||
+          (!subjectConfig.useDefault && prefixSlug.includes("@"))
+        ) {
+          // Customized subjects have no dual-credential hedge, so GitHub's
+          // reported @-bearing prefix remains authoritative there. Defaults use
+          // the stricter canonical comparison before removing mutable trust.
+          subjectConfig.useImmutableSubject = true;
+        } else if (!prefixSlug.includes("@")) {
+          // GitHub logins and repository names cannot contain "@", so a
+          // name-only prefix is provably mutable even when the boolean is absent.
+          subjectConfig.useImmutableSubject = false;
+        }
       }
     }
   } else if (custRes?.status === 404) {
@@ -913,19 +952,26 @@ export async function resolveOidcSubject(
   const federatedCredentials: FederatedCredential[] = [];
 
   if (subjectConfig.useDefault) {
-    // Emit BOTH default forms so whichever GitHub actually mints matches. This
-    // removes the fail-closed dead-end and any user mutable/immutable choice.
-    federatedCredentials.push({
-      name: buildFederatedCredentialName({
-        repoFullName: fullName,
-        envName,
-        variant: "mutable"
-      }),
-      subject: buildOidcSubject({
-        ...commonInput,
-        subjectConfig: { useDefault: true, useImmutableSubject: false }
-      })
-    });
+    // An explicit/proven immutable result is security-sensitive: retaining the
+    // mutable name-based trust would permit namespace recycling. All other
+    // states remain dual because GitHub's rollout can enforce immutable defaults
+    // independently of the repository opt-in setting. An unverified @-bearing
+    // default prefix is deliberately not reused to construct the immutable FIC;
+    // the ID-derived form is safer, though a genuinely authoritative divergent
+    // prefix would still cause login mismatch and needs an explicit diagnostic.
+    if (subjectConfig.useImmutableSubject !== true) {
+      federatedCredentials.push({
+        name: buildFederatedCredentialName({
+          repoFullName: fullName,
+          envName,
+          variant: "mutable"
+        }),
+        subject: buildOidcSubject({
+          ...commonInput,
+          subjectConfig: { useDefault: true, useImmutableSubject: false }
+        })
+      });
+    }
     federatedCredentials.push({
       name: buildFederatedCredentialName({
         repoFullName: fullName,
@@ -937,7 +983,9 @@ export async function resolveOidcSubject(
         subjectConfig: {
           useDefault: true,
           useImmutableSubject: true,
-          subClaimPrefix: subjectConfig.subClaimPrefix
+          ...(subjectConfig.useImmutableSubject === true ?
+            { subClaimPrefix: subjectConfig.subClaimPrefix }
+          : {})
         }
       })
     });

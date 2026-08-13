@@ -274,6 +274,60 @@ describe("GET /api/operations/{id}", () => {
     expect(body.operation.operationId).toBe(op.operationId);
   });
 
+  describe("GET /api/verify-status operation identity", () => {
+    it("rejects an unknown operation id instead of adopting a repository run", async () => {
+      const { status, body } = await getJson(
+        "/api/verify-status?repo=contoso%2Fstore&environment=dev&operationId=op_missing"
+      );
+      expect(status).toBe(200);
+      expect(body).toEqual({
+        state: "expired",
+        terminal: true,
+        error: "The verification operation does not match this request."
+      });
+    });
+
+    it("rejects incomplete verification identity instead of adopting a run", async () => {
+      const op = seed("contoso/incomplete-identity");
+      enterStage(op, STAGE_VERIFY);
+      op.verification = { dispatchedAt: Date.now() };
+
+      const { body } = await getJson(
+        `/api/verify-status?repo=contoso%2Fincomplete-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+      );
+
+      expect(body).toEqual({
+        state: "expired",
+        terminal: true,
+        error: "The verification operation has incomplete dispatch identity."
+      });
+    });
+
+    it("keeps the persisted workflow identity on an operation-bound lookup", async () => {
+      const op = seed("contoso/workflow-identity");
+      enterStage(op, STAGE_VERIFY);
+      op.verification = {
+        dispatchedAt: Date.now(),
+        workflow: "renamed-verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "12345",
+        runUrl:
+          "https://github.com/contoso/workflow-identity/actions/runs/12345"
+      };
+
+      const { status, body } = await getJson(
+        `/api/verify-status?repo=contoso%2Fworkflow-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+      );
+
+      expect(status).toBe(200);
+      expect(body.runId).toBe("12345");
+      expect(body.runUrl).toBe(
+        "https://github.com/contoso/workflow-identity/actions/runs/12345"
+      );
+    });
+  });
+
   it("404s an unknown id instead of inventing an empty record", async () => {
     const { status, body } = await getJson("/api/operations/op_does-not-exist");
     expect(status).toBe(404);

@@ -704,6 +704,71 @@ describe("deployingPage — Deployments landing", () => {
     );
     expect(html).toContain("branch: deployBranch");
   });
+
+  it("auto-refreshes the deployments table after a deploy starts (synthetic row + quiet in-flight polling)", () => {
+    const html = deployingPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    // Fix 1: loadDeployments takes a quiet flag and renders a synthetic row for
+    // any optimistic OP_STATUS op that has no server record yet, so a brand-new
+    // deployment appears immediately instead of staying invisible until the run
+    // reaches a terminal state or Refresh is clicked.
+    expect(html).toContain("function loadDeployments(fresh, quiet) {");
+    expect(html).toContain("var synthetic = [];");
+    expect(html).toContain("var rows = synthetic.concat(deps);");
+    // The quiet flag suppresses the "Loading…" placeholder on background refreshes.
+    expect(html).toContain(
+      'if (!quiet) body.innerHTML = \'<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>\';'
+    );
+    // Fix 2: while the run is still in flight, the deploy-status poll quietly
+    // refreshes the list so the real GitHub record replaces the synthetic row.
+    expect(html).toContain("loadDeployments(true, true);");
+    // Synthetic rows are tagged so they can't offer a Delete button for a
+    // deployment record GitHub hasn't created yet (which would falsely report a
+    // successful delete mid-deploy).
+    expect(html).toContain("synthetic: true");
+    expect(html).toContain(
+      "var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+    );
+    // The in-flight list refresh stops once the real record shows up, and the
+    // poll is capped so a stuck run can't fan out fresh=1 fetches forever.
+    expect(html).toContain("if (recordSeen) return;");
+    expect(html).toContain(
+      "if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }"
+    );
+    expect(html).toContain("if (++wfTicks > 720) {");
+  });
+
+  it("applies the same quiet in-flight polling to the Delete Deployment flow", () => {
+    const html = deployingPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature-x"
+    });
+    // The delete poll keeps the row showing "Deleting…" via a quiet refresh, so
+    // the table no longer flashes a loading placeholder every ~4s during a
+    // delete (matching the deploy flow's in-flight polling).
+    expect(html).toContain(
+      'loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)'
+    );
+    // The initial optimistic "deleting" refresh is also quiet so the existing
+    // row flips in place without a flash.
+    expect(html).toContain(
+      "OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';"
+    );
+    // A synthetic row is only created for a not-yet-recorded op (deploy's
+    // "pending"), never for "deleting" — a delete acts on an existing record, so
+    // once it's gone there must be no phantom "Deleting…" row.
+    expect(html).toContain(
+      "if (present[k] || OP_STATUS[k] === 'deleting') return;"
+    );
+    // The delete is acknowledged immediately with a banner (mirroring the deploy
+    // flow) so the button click isn't left looking like it did nothing while the
+    // workflow spins up.
+    expect(html).toContain(
+      "'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app)"
+    );
+  });
 });
 
 describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
@@ -1005,7 +1070,7 @@ describe("environmentPage — non-blocking setup progress", () => {
       "// Verification is tracked separately from the process-local"
     );
     expect(html).toContain(
-      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment)"
+      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId)"
     );
     expect(html).toContain(
       "if (v.state === 'success') {\n                                hideEnvProgress();"
@@ -1058,7 +1123,20 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(liveVerify).toBeGreaterThan(-1);
     expect(verifyRequest).toBeGreaterThan(liveVerify);
     expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
-      "v.state === 'success' || v.state === 'failed' ? 0 : 1500"
+      "v.state === 'expired' || v.terminal"
+    );
+  });
+
+  it("bounds reconnect verification without treating transient unknown as terminal", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain("var verifyDeadlineMs = 45 * 60 * 1000;");
+    expect(html).toContain(
+      "Date.now() - verifyDispatchedAtMs > verifyDeadlineMs"
+    );
+    expect(html).toContain("v.state === 'expired' || v.terminal");
+    expect(html).not.toContain("v.state === 'unknown' || v.terminal");
+    expect(html).toContain(
+      "if (op.verification && op.verification.dispatchedAt) verifyDispatchedAtMs = Number(op.verification.dispatchedAt);"
     );
   });
 

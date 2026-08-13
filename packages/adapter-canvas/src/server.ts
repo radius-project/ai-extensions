@@ -59,8 +59,10 @@ import {
   setPreferredGhLogin
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
+import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
   resolveOidcSubject,
+  findLegacyMutableCredentialName,
   buildAppCreateArgs,
   buildAppDeleteArgs,
   buildAppOwnerAddArgs,
@@ -118,6 +120,7 @@ import {
 import {
   operations,
   isStale,
+  hasCompleteVerificationIdentity,
   toClientView,
   createOperation,
   buildStages,
@@ -167,6 +170,7 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE
 } from "./infra.js";
+import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
   getRunDetail,
@@ -215,6 +219,57 @@ interface CommandResult {
 interface PullRequestState {
   branch: string;
   base: string;
+}
+
+export async function persistMutationCheckpoint({
+  operation,
+  persist,
+  report,
+  fail
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+  fail: (status: number, error: string, code: string) => Promise<void>;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    // Do not retry the same deterministic write or continue making cloud
+    // changes without durable provenance for what already succeeded.
+    await fail(
+      500,
+      "Radius changed no further cloud resources because it could not save the setup recovery record.",
+      "operation-persistence-failed"
+    );
+    return false;
+  }
+}
+
+export async function persistBestEffort({
+  operation,
+  persist,
+  report
+}: {
+  operation: any;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+}): Promise<boolean> {
+  try {
+    await persist();
+    return true;
+  } catch (error) {
+    report?.({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+    });
+    return false;
+  }
 }
 
 interface EnvironmentListResult {
@@ -622,22 +677,25 @@ const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
-// are in sync with the upstream Radius templates so the run never executes a
-// drifted copy. Unlike the throttled background pass (kickoffWorkflowSync), this
-// is scoped to just the workflow about to run (`only`) and is awaited so any
-// in-place update lands before the dispatch — but a sync failure never blocks
-// the dispatch (we log and proceed). `provider` may be "" when unknown; deploy
-// and delete workflow content is provider-agnostic, so it only matters for
-// verify. `workingBranch` (when it matches the repo) is synced alongside the
-// default branch so a worktree-consistent run uses current files on both.
+// are present on the branch it runs from AND in sync with the upstream Radius
+// templates, so the dispatch never 404s on a missing file or executes a drifted
+// copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
+// scoped to just the workflow about to run (`only`), authors a missing file
+// (`create`), and is awaited so any create/update lands before the dispatch —
+// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// may be "" when unknown; deploy and delete workflow content is
+// provider-agnostic, so it only matters for verify. `workingBranch` (when it
+// matches the repo) is synced alongside the default branch so a
+// worktree-consistent run uses current files on both.
 async function ensureWorkflowsCurrent(
   repo: string,
   environment: string,
   provider: string,
   only: string[],
   workingBranch = ""
-): Promise<void> {
-  if (!repo || !environment || !only || only.length === 0) return;
+): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
+  if (!repo || !environment || !only || only.length === 0)
+    return { created: [], failed: [] };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -645,18 +703,27 @@ async function ensureWorkflowsCurrent(
       {
         workingBranch: workingBranch || "",
         only,
+        // Author the workflow if it's missing on the branch it will run from,
+        // not just update drift. `gh workflow run` resolves the workflow from
+        // the default branch, so a never-committed (or wrongly-refed) file 404s;
+        // creating it here makes the dispatch self-healing.
+        create: true,
         log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
       }
     );
-    if (r && r.updated && r.updated.length) {
+    if (
+      r &&
+      ((r.updated && r.updated.length) || (r.created && r.created.length))
+    ) {
+      const changed = [...(r.updated || []), ...(r.created || [])];
       console.error(
-        `[radius workflow-presync] ${repo}: updated ${r.updated.join(
-          ", "
-        )} before dispatch`
+        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
+    return { created: r.created || [], failed: r.failed || [] };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
+    return { created: [], failed: [] };
   }
 }
 
@@ -825,6 +892,9 @@ function triggerAppBicepHandoff(
 // is pending or retryable and gives up after DEPLOY_HANDOFF_MAX_ATTEMPTS.
 export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
 
+// Backoff before re-sending a handoff whose delivery was rejected.
+export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
+
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
   instanceId = ""
@@ -856,10 +926,19 @@ export function triggerDeployRepairHandoff(
     // owned; it becomes retryable until the attempt budget runs out.
     const failed = () => {
       state.deployRepairing = false;
-      state.deployHandoffState =
-        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS ?
-          "failed"
-        : "retryable";
+      const exhausted =
+        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
+      state.deployHandoffState = exhausted ? "failed" : "retryable";
+      // Retry from the server too. /api/deploy-status also retries, but only
+      // while the webview polls it, so a transient delivery failure would
+      // otherwise strand the handoff as retryable with budget left over -
+      // exactly the unmounted-panel case this trigger exists to cover.
+      if (exhausted) return;
+      const timer = setTimeout(() => {
+        triggerDeployRepairHandoff(entry, instanceId);
+      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      // Never hold the process open for a retry.
+      timer.unref?.();
     };
     try {
       Promise.resolve(
@@ -2933,6 +3012,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         if (!targetRepo || !resourceGroup || !clusterName) {
           await fail(
@@ -3091,6 +3177,35 @@ function createRequestHandler(instanceId: string) {
                 error: `Setup is already running for ${targetRepo}.`,
                 code: "operation-in-progress",
                 operationId: started.conflict.operationId
+              })
+            );
+            return;
+          }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
               })
             );
             return;
@@ -3310,23 +3425,23 @@ function createRequestHandler(instanceId: string) {
 
         // Step 2: Resolve the federated credential(s) BEFORE creating
         // anything. This reads the canonical repo + subject customization
-        // from GitHub. For the default (not customized) subject we create
-        // BOTH the mutable and immutable forms so whichever GitHub mints
-        // at token time matches; for a customized subject we build the
-        // single exact subject (failing loud only if a repo/repository
-        // claim needs an immutability decision it cannot make).
+        // from GitHub. A proven immutable default creates only ID-bound trust;
+        // an inconclusive default creates both forms for rollout compatibility.
+        // A customized subject builds the single exact subject (failing loud
+        // only if a repo/repository claim needs an immutability decision).
         steps.push("Resolving GitHub OIDC subject...");
         // Note: enterprise-claim rejection (AADSTS7002381) is handled at
         // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
         // which surfaces a tenant-agnostic explanation. Package-scope /
         // workflow-permission changes remain out of scope for this fix.
-        let oidc;
+        const oidcSuffix = buildEnvironmentSuffix(envName);
+        let oidc: ResolveOidcSubjectResult;
         try {
           oidc = await resolveOidcSubject(
             {
               targetRepo,
               envName,
-              suffix: buildEnvironmentSuffix(envName)
+              suffix: oidcSuffix
             },
             ghJsonRunner
           );
@@ -3556,6 +3671,35 @@ function createRequestHandler(instanceId: string) {
               appId: clientId,
               displayName: null
             });
+            try {
+              await operations.persist();
+            } catch (error) {
+              operations.report?.({
+                code: "operation-store-write-failed",
+                message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+              });
+              finish(op, "failed", {
+                failure: {
+                  code: "operation-persistence-failed",
+                  stage: op.currentStage,
+                  stepSeq: null,
+                  message:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  classification: "unknown"
+                }
+              });
+              res.setHeader("Content-Type", "application/json");
+              res.writeHead(500);
+              res.end(
+                JSON.stringify({
+                  error:
+                    "Radius changed no cloud resources because it could not save the setup recovery record.",
+                  code: "operation-persistence-failed",
+                  operationId: op.operationId
+                })
+              );
+              return;
+            }
           }
           // 'fallthrough' (empty / stale not-found) → name lookup below.
         }
@@ -3780,6 +3924,35 @@ function createRequestHandler(instanceId: string) {
                 appId: clientId,
                 displayName: appName
               });
+              try {
+                await operations.persist();
+              } catch (error) {
+                operations.report?.({
+                  code: "operation-store-write-failed",
+                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+                });
+                finish(op, "failed", {
+                  failure: {
+                    code: "operation-persistence-failed",
+                    stage: op.currentStage,
+                    stepSeq: null,
+                    message:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    classification: "unknown"
+                  }
+                });
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(500);
+                res.end(
+                  JSON.stringify({
+                    error:
+                      "Radius changed no cloud resources because it could not save the setup recovery record.",
+                    code: "operation-persistence-failed",
+                    operationId: op.operationId
+                  })
+                );
+                return;
+              }
             } else {
               // Create a fresh App Registration. Attempt WITHOUT a
               // Service Management Reference first; only if Entra policy
@@ -3825,6 +3998,7 @@ function createRequestHandler(instanceId: string) {
                 displayName: appName,
                 serviceManagementReference: serviceManagementReference || null
               });
+              if (!(await checkpoint())) return;
               const me = await getSignedInUserId();
               if (!me.ok) {
                 await rollbackCreatedAppAndFail(
@@ -3974,6 +4148,7 @@ function createRequestHandler(instanceId: string) {
           appId: clientId,
           ...(spReady.objectId ? { objectId: spReady.objectId } : {})
         });
+        if (!(await checkpoint())) return;
 
         // Step 5: Create the Federated Credential(s) (FATAL on failure).
         // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
@@ -3984,8 +4159,8 @@ function createRequestHandler(instanceId: string) {
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join } = await import("node:path");
-        let existingSubjects = [];
-        let existingNameToSubject = new Map();
+        let existingSubjects: string[] = [];
+        let existingNameToSubject = new Map<string, string>();
         // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
         // on SUBJECT (below), but we also need the NAME→subject map to
         // detect a name collision: clean() collapses ':' and '-' to the
@@ -4019,6 +4194,19 @@ function createRequestHandler(instanceId: string) {
           } catch {
             /* fall back to attempting all, guarded by the read-back below */
           }
+        }
+        const mutableCredentialName = findLegacyMutableCredentialName(
+          oidc,
+          oidcSuffix,
+          existingNameToSubject
+        );
+        if (mutableCredentialName) {
+          steps.push(
+            `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
+              `After immutable OIDC verification succeeds, remove it with: ` +
+              `az ad app federated-credential delete --id ${clientId} ` +
+              `--federated-credential-id ${mutableCredentialName}`
+          );
         }
         const ficsToCreate = selectMissingFederatedCredentials(
           oidc.federatedCredentials,
@@ -4131,6 +4319,7 @@ function createRequestHandler(instanceId: string) {
               name: fic.name,
               subject: fic.subject
             });
+            if (!(await checkpoint())) return;
           }
         }
 
@@ -4234,6 +4423,7 @@ function createRequestHandler(instanceId: string) {
           return;
         }
         recordServicePrincipal(op, { objectId: spObjectId });
+        if (!(await checkpoint())) return;
 
         const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
         steps.push(`Assigning Contributor role on ${resourceGroup}...`);
@@ -4258,6 +4448,7 @@ function createRequestHandler(instanceId: string) {
             scope: contributorScope,
             principalObjectId: spObjectId
           });
+          if (!(await checkpoint())) return;
         }
 
         // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
@@ -4304,6 +4495,7 @@ function createRequestHandler(instanceId: string) {
               scope: clusterScope,
               principalObjectId: spObjectId
             });
+            if (!(await checkpoint())) return;
           }
         } else {
           // Non-fatal: control-plane access is already in place, and
@@ -4652,6 +4844,35 @@ function createRequestHandler(instanceId: string) {
             );
             return;
           }
+          try {
+            await operations.persist();
+          } catch (error) {
+            operations.report?.({
+              code: "operation-store-write-failed",
+              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
+            });
+            finish(op, "failed", {
+              failure: {
+                code: "operation-persistence-failed",
+                stage: op.currentStage,
+                stepSeq: null,
+                message:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                classification: "unknown"
+              }
+            });
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error:
+                  "Radius changed no cloud resources because it could not save the setup recovery record.",
+                code: "operation-persistence-failed",
+                operationId: op.operationId
+              })
+            );
+            return;
+          }
           enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
         }
 
@@ -4777,6 +4998,13 @@ function createRequestHandler(instanceId: string) {
           res.writeHead(failure.status);
           res.end(JSON.stringify(failure.body));
         };
+        const checkpoint = () =>
+          persistMutationCheckpoint({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic),
+            fail
+          });
 
         // The host often injects GH_TOKEN (an OAuth app token) that lacks the
         // `workflow` scope, which is required to create/update files under
@@ -5004,6 +5232,7 @@ function createRequestHandler(instanceId: string) {
           repo: targetRepo,
           name: envName
         });
+        if (!(await checkpoint())) return;
         // Tag the environment as Radius-managed so the listing can filter
         // out environments created outside this extension.
         await setEnvironmentVariable("RADIUS_MANAGED", "true");
@@ -5125,6 +5354,7 @@ function createRequestHandler(instanceId: string) {
           branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
           mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
         });
+        if (!(await checkpoint())) return;
 
         // Step 4: Also commit the deploy workflows (dispatcher + both
         // provider workflows). The dispatcher references both provider
@@ -5175,6 +5405,7 @@ function createRequestHandler(instanceId: string) {
               deployCommit.viaPr ? prState?.branch || null : defaultBranch,
             mode: deployCommit.viaPr ? "pull_request" : "default_branch"
           });
+          if (!(await checkpoint())) return;
         }
         // Best-effort: remove the legacy monolithic deploy workflow so it
         // does not double-trigger alongside the new dispatcher. Skipped in
@@ -5218,6 +5449,7 @@ function createRequestHandler(instanceId: string) {
                   delCommit.viaPr ? prState?.branch || null : defaultBranch,
                 mode: delCommit.viaPr ? "pull_request" : "default_branch"
               });
+              if (!(await checkpoint())) return;
             }
           }
           steps.push("✅ Delete workflows committed.");
@@ -5392,6 +5624,16 @@ function createRequestHandler(instanceId: string) {
         // Record dispatch markers so the deploy monitor can track the
         // correct (newly-triggered) runs rather than any stale runs.
         {
+          op.verification = {
+            dispatchedAt,
+            workflow: VERIFY_WORKFLOW_FILE,
+            ref: verifyPlan.ref || defaultBranch,
+            environment: envName,
+            runId: verifyRunId == null ? null : String(verifyRunId),
+            runUrl: verifyRunUrl || null
+          };
+          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
+          if (!(await checkpoint())) return;
           const entry = servers.get(instanceId);
           if (entry) {
             entry.state.deployDispatchedAt = dispatchedAt;
@@ -5435,6 +5677,11 @@ function createRequestHandler(instanceId: string) {
                   }" to finish setup.`
             }
           });
+          await persistBestEffort({
+            operation: op,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
         } else {
           recordCommitState(op, {
             mode: prState ? "pull_request" : "default_branch",
@@ -5443,10 +5690,8 @@ function createRequestHandler(instanceId: string) {
               prState?.base || verifyPlan.defaultBranch || defaultBranch,
             pullRequestUrl: pullRequestUrl || null
           });
-          // Verification is dispatched but still running; the client
-          // polls /api/verify-status and the record stays open until it
-          // reaches a verdict.
-          enterStage(op, STAGE_VERIFY);
+          // Verification is dispatched but still running; stage and exact
+          // dispatch identity were persisted together above.
         }
 
         res.setHeader("Content-Type", "application/json");
@@ -6309,15 +6554,47 @@ function createRequestHandler(instanceId: string) {
         // GitHub Environment (and its credentials) intact.
         //
         // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy. Delete
-        // workflow content is provider-agnostic, and workflow_dispatch runs
-        // from the default branch, so provider/workingBranch aren't needed.
-        await ensureWorkflowsCurrent(repo, environment, "", [
+        // dispatching, so the run never executes a drifted copy — and author
+        // them if they're missing (the #273 case). Delete workflow content is
+        // provider-agnostic, and workflow_dispatch runs from the default
+        // branch, so provider/workingBranch aren't needed.
+        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
           DELETE_APP_DISPATCHER_FILE,
           DELETE_AZURE_FILE
         ]);
+        // If the sync couldn't commit the dispatcher to the default branch
+        // (e.g. it's protected, or the token lacks write access), the dispatch
+        // below will 404 on a genuinely-absent workflow. Fail fast with a
+        // specific message naming the branch instead of the generic hint.
+        const commitFail = sync.failed.find(
+          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
+        if (commitFail) {
+          respond(400, {
+            error:
+              "Couldn't commit the delete workflow (" +
+              DELETE_APP_DISPATCHER_FILE +
+              ') to the "' +
+              commitFail.branch +
+              '" branch of ' +
+              repo +
+              ", so there's nothing to dispatch. The branch may be protected" +
+              " or your GitHub token may lack write access to " +
+              repo +
+              "."
+          });
+          return;
+        }
+        // A just-authored workflow isn't registered by GitHub synchronously, so
+        // an immediate workflow_dispatch would 404. When we created it, wait
+        // briefly and retry the not-found race a few times (mirroring the
+        // create-environment verify dispatch); when it was already present, the
+        // single [0]-delay attempt keeps the common path fast.
+        const justCreated = sync.created.some(
+          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+        );
         const dispatchedAt = Date.now();
-        const dispatch = await ghWorkflow([
+        const dispatchArgs = [
           "workflow",
           "run",
           DELETE_APP_DISPATCHER_FILE,
@@ -6327,17 +6604,28 @@ function createRequestHandler(instanceId: string) {
           "application=" + application,
           "--repo",
           repo
-        ]);
+        ];
+        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
+        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
+        for (const delay of dispatchDelays) {
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          dispatch = await ghWorkflow(dispatchArgs);
+          if (dispatch.code === 0) break;
+          // Only the not-found registration race self-resolves; any other
+          // failure (scope, Actions disabled, …) won't, so stop retrying.
+          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+        }
         if (dispatch.code !== 0) {
           const de = (dispatch.stderr || "").trim();
           const hint =
             /workflow.{0,20}scope/i.test(de) ?
               ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " Ensure " +
-              DELETE_APP_DISPATCHER_FILE +
-              " exists on the default branch (recreate the environment to commit it) and that Actions are enabled for " +
+            : " The delete workflow is committed to the default branch" +
+              " automatically before dispatch, so a persistent failure usually" +
+              " means GitHub Actions is disabled for " +
               repo +
-              ".";
+              " or the default branch is protected — check both and retry.";
           respond(400, {
             error:
               "Failed to start the delete workflow (" +
@@ -6374,6 +6662,7 @@ function createRequestHandler(instanceId: string) {
 
     if (pathname === "/api/verify-status" && req.method === "GET") {
       const repo = url.searchParams.get("repo") || "";
+      const operationId = url.searchParams.get("operationId") || "";
       const respond = (payload: unknown): void => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -6387,16 +6676,58 @@ function createRequestHandler(instanceId: string) {
 
       try {
         const entry = servers.get(instanceId);
-        const dispatchedAt = entry?.state?.deployDispatchedAt || 0;
-        let runId = entry?.state?.verifyRunId || null;
+        const verifyOp = operationId ? operations.get(operationId) : null;
+        if (
+          operationId &&
+          (!verifyOp ||
+            verifyOp.repo !== repo ||
+            verifyOp.environment !==
+              (url.searchParams.get("environment") || verifyOp.environment))
+        ) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error: "The verification operation does not match this request."
+          });
+          return;
+        }
+        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
+          respond({
+            state: "expired",
+            terminal: true,
+            error:
+              "The verification operation has incomplete dispatch identity."
+          });
+          return;
+        }
+        const dispatchedAt =
+          verifyOp?.verification?.dispatchedAt ||
+          entry?.state?.deployDispatchedAt ||
+          0;
+        let runId =
+          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
         if (!runId) {
           runId = await findWorkflowRun(
             repo,
-            "radius-verify-credentials.yml",
+            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
             dispatchedAt,
             null
           );
-          if (runId && entry) entry.state.verifyRunId = runId;
+          if (runId && verifyOp) {
+            verifyOp.verification = {
+              dispatchedAt: verifyOp.verification.dispatchedAt,
+              workflow: verifyOp.verification.workflow,
+              ref: verifyOp.verification.ref,
+              environment: verifyOp.verification.environment,
+              runId: String(runId),
+              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
+            };
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          } else if (runId && entry) entry.state.verifyRunId = runId;
         }
         if (!runId) {
           respond({ state: "pending", runId: null });
@@ -6428,10 +6759,15 @@ function createRequestHandler(instanceId: string) {
           });
           return;
         }
-        const verifyOp = operations.running(repo);
         if (detail.conclusion === "success") {
-          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY)
+          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
             finishSucceeded(verifyOp);
+            await persistBestEffort({
+              operation: verifyOp,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic)
+            });
+          }
           respond({ state: "success", runId, runUrl });
           return;
         }
@@ -6474,6 +6810,11 @@ function createRequestHandler(instanceId: string) {
               classification: "user-fixable",
               evidence: errMsg
             }
+          });
+          await persistBestEffort({
+            operation: verifyOp,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
           });
         }
         respond({ state: "failed", runId, runUrl, error: errMsg });
@@ -8052,24 +8393,36 @@ function createRequestHandler(instanceId: string) {
               "/actions/runs/" +
               dRunId;
             entry.state.deployStatus = "failed";
-          })().catch((monErr) => {
-            // Never let the background monitor die silently (which would
-            // leave the page stuck polling an 'in_progress' that never
-            // resolves). Surface the error and settle the status.
-            try {
-              addLog(
-                "❌ Deploy monitor stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr)
-              );
-              if (!entry.state.deployError)
-                entry.state.deployError =
-                  "Deploy monitoring stopped unexpectedly: " +
-                  (monErr && monErr.message ? monErr.message : monErr);
-              entry.state.deployStatus = "failed";
-            } catch {
-              /* ignore */
-            }
-          });
+          })()
+            .catch((monErr) => {
+              // Never let the background monitor die silently (which would
+              // leave the page stuck polling an 'in_progress' that never
+              // resolves). Surface the error and settle the status.
+              try {
+                addLog(
+                  "❌ Deploy monitor stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr)
+                );
+                if (!entry.state.deployError)
+                  entry.state.deployError =
+                    "Deploy monitoring stopped unexpectedly: " +
+                    (monErr && monErr.message ? monErr.message : monErr);
+                entry.state.deployStatus = "failed";
+              } catch {
+                /* ignore */
+              }
+            })
+            .finally(() => {
+              // The monitor owns every terminal transition of this deploy, so
+              // firing here makes the repair loop independent of the webview.
+              // Previously the only trigger was the /api/deploy-status route,
+              // which the browser polls solely while the deployments page is
+              // mounted: closing the panel, navigating away, or reopening onto
+              // another page left a failed deploy orphaned with the handoff
+              // never attempted. The route keeps its own call as a fallback,
+              // and triggerDeployRepairHandoff is idempotent per repair loop.
+              triggerDeployRepairHandoff(entry, instanceId);
+            });
         }
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
@@ -8457,5 +8810,8 @@ export async function getOrCreateServer(
     }
     return entry;
   }
+  // Start warming the page assets only when a canvas is actually opened. The
+  // first HTML request awaits this same in-flight promise before rendering.
+  void ensureVendorScripts();
   return await startServer(instanceId, page);
 }
