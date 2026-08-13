@@ -158,6 +158,11 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/operations",
   "GET /api/operations/",
   "POST /api/open-source",
+  "GET /api/credential-profiles",
+  "GET /api/github-identity",
+  "POST /api/github-account",
+  "POST /api/save-credential-profile",
+  "POST /api/delete-credential-profile",
   "GET /api/user-repos",
   "POST /api/repo-branches",
   "POST /api/discover-branches"

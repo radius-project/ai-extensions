@@ -14,6 +14,7 @@ import {
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
+import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -48,6 +49,28 @@ const productionHandlers = {
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
+  }),
+  ...createIdentityProfilesRoutes({
+    listCredentialProfiles: () => [],
+    saveCredentialProfile: () => null,
+    deleteCredentialProfile: () => false,
+    getGitHubIdentity: () =>
+      Promise.resolve({
+        actingLogin: "",
+        displayLogin: "",
+        mismatch: false,
+        actingHasWorkflow: false,
+        actingHasPackages: false,
+        preferredLogin: null,
+        reason: "",
+        accounts: []
+      }),
+    resetGhIdentityCache: () => {},
+    switchGhAccount: () => Promise.resolve({ ok: true }),
+    setPreferredGitHubLogin: () => {},
+    preflightRepoAdmin: () => Promise.resolve(""),
+    isValidRepoSlug: () => false,
+    errorMessage: (error) => String(error)
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -68,12 +91,17 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  it("owns the liveness-source, operations-status, and repositories families and leaves 30 routes on the legacy fallback", () => {
+  it("owns the liveness-source, operations-status, repositories, and identity-profile families and leaves 25 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
       "GET /api/operations/",
       "POST /api/open-source",
+      "GET /api/credential-profiles",
+      "GET /api/github-identity",
+      "POST /api/github-account",
+      "POST /api/save-credential-profile",
+      "POST /api/delete-credential-profile",
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches"
@@ -81,7 +109,7 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(30);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(25);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)
@@ -104,7 +132,9 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
+    // Derived from the inventory, never hand-written: 25 of 37 after this slice.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
+    expect(residualLegacyCount).toBe(25);
 
     for (const route of table) {
       const matcher =

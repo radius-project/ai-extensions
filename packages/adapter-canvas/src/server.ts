@@ -204,6 +204,7 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -510,12 +511,32 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
+// Composition root for the credential-profile and GitHub-identity half of the
+// `identity-credentials` family. Ten narrow function seams: the three profile
+// store operations, the four gh identity operations, the advisory repo
+// preflight, the repo-slug guard, and the error formatter. `preflightRepoAdmin`
+// and `errorMessage` stay defined here and are injected rather than moved, so
+// the route module spawns nothing and touches no disk.
+const identityProfilesRoutes = createIdentityProfilesRoutes({
+  listCredentialProfiles,
+  saveCredentialProfile,
+  deleteCredentialProfile,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  switchGhAccount,
+  setPreferredGitHubLogin,
+  preflightRepoAdmin,
+  isValidRepoSlug,
+  errorMessage
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
-  ...repositoriesRoutes
+  ...repositoriesRoutes,
+  ...identityProfilesRoutes
 });
 
 const canvasServer = createCanvasServer(
@@ -2674,141 +2695,6 @@ function createLegacyRequestHandler(instanceId: string) {
             error: "AWS CLI verification failed: " + errorMessage(e)
           })
         );
-      }
-      return;
-    }
-
-    // List the saved credential profiles for a repo.
-    if (pathname === "/api/credential-profiles" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ profiles: repo ? listCredentialProfiles(repo) : [] })
-      );
-      return;
-    }
-
-    // Report the GitHub identity setup will act as, plus switchable accounts.
-    // Used by the Create Environment dialog to warn when the acting account
-    // differs from the one the host UI shows, or lacks the workflow scope.
-    if (pathname === "/api/github-identity" && req.method === "GET") {
-      res.setHeader("Content-Type", "application/json");
-      try {
-        // A re-check (?fresh=1) means the user just changed their gh auth
-        // out-of-band (e.g. ran `gh auth refresh` to add write:packages).
-        // The snapshot is memoized for the process, so drop it first and
-        // force `gh auth status` to be re-read; otherwise we'd return the
-        // stale pre-refresh scopes and the warning would never clear.
-        if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
-        // Resolve identity first — this primes the token strategy, so the
-        // repo preflight below (via ghApiJson→ghChildEnv) acts as the same
-        // account setup will. When the dialog passes its repo, fold in the
-        // admin/read preflight so a non-admin (write/maintain) account is
-        // surfaced HERE, at dialog open next to the account it concerns,
-        // instead of only after the user fills the form and submits. This
-        // mirrors the submit-time gates (which stay authoritative); a
-        // missing/invalid repo just skips the preflight — the identity
-        // response must still render.
-        const identity = await getGitHubIdentity();
-        const repoParam = (url.searchParams.get("repo") || "").trim();
-        if (repoParam && isValidRepoSlug(repoParam)) {
-          try {
-            const accessMsg = await preflightRepoAdmin(repoParam);
-            if (accessMsg) identity.repoAccess = accessMsg;
-          } catch {
-            /* preflight is advisory here; never fail identity on it */
-          }
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify(identity));
-      } catch (e) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), accounts: [] }));
-      }
-      return;
-    }
-
-    // Switch the active GitHub account setup acts as.
-    if (pathname === "/api/github-account" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      try {
-        const data = JSON.parse(body || "{}");
-        const login = (data.login || "").trim();
-        const result = await switchGhAccount(login);
-        if (!result.ok) {
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: result.error || "Failed to switch account."
-            })
-          );
-          return;
-        }
-        // Persist the explicit choice machine-wide so it survives a
-        // restart. Without this the in-memory preference dies with the
-        // process and the token strategy reverts to the injected token's
-        // account — the same wrong-identity failure this flow exists to
-        // prevent, deferred by one process lifetime.
-        setPreferredGitHubLogin(login);
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({ success: true, identity: await getGitHubIdentity() })
-        );
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Create / update a credential profile (already verified client-side).
-    if (pathname === "/api/save-credential-profile" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        if (!repo || !name) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "repo and name are required." }));
-          return;
-        }
-        const saved = saveCredentialProfile(repo, data);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, profile: saved }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Delete a credential profile.
-    if (
-      pathname === "/api/delete-credential-profile" &&
-      req.method === "POST"
-    ) {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        const removed = deleteCredentialProfile(repo, name);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, removed }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
