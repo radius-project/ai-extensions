@@ -57,26 +57,49 @@ function request(method: string, url: string, body = ""): IncomingMessage {
   }) as unknown as IncomingMessage;
 }
 
-// A scripted `cliExec` fake. Every expected invocation is matched by the first
-// argument of the `gh` argv; anything unscripted throws so an accidental extra
-// subprocess call fails loudly instead of silently resolving to an empty list.
+// A scripted `cliExec` fake keyed on the *exact* command line. Nothing is
+// normalized: a dropped `--paginate`, a swapped `--limit`, a missing `--jq`, or
+// one route issuing another route's invocation all miss the script and throw,
+// rather than quietly matching a looser key. Every scripted vector also returns
+// a distinct, identifiable value, so a handler that calls the right command with
+// the wrong arguments cannot pass by accident.
 interface CliScript {
-  [key: string]: { error?: Error; stdout?: string; stderr?: string };
+  [commandLine: string]: { error?: Error; stdout?: string; stderr?: string };
+}
+
+// Exact argv vectors the three routes are allowed to issue.
+const ARGV = {
+  personal:
+    "gh repo list --limit 30 --json nameWithOwner --jq .[].nameWithOwner",
+  orgs: "gh org list",
+  orgRepos: (org: string) =>
+    `gh repo list ${org} --limit 20 --json nameWithOwner --jq .[].nameWithOwner`,
+  // `repo-branches` asks for names only; `discover-branches` asks for the full
+  // objects. The two differ solely by the trailing `--jq`, so they must stay
+  // distinguishable keys.
+  branchNames: (repo: string) =>
+    `gh api --paginate /repos/${repo}/branches?per_page=100 --jq .[].name`,
+  branchObjects: (repo: string) =>
+    `gh api --paginate /repos/${repo}/branches?per_page=100`
+};
+
+function commandLine(command: string, args: string[]): string {
+  return [command, ...args].join(" ");
 }
 
 function cliFake(script: CliScript) {
-  const calls: { command: string; args: string[]; timeout: number }[] = [];
+  const calls: { line: string; timeout: number }[] = [];
   const exec: RepositoriesDependencies["cliExec"] = (
     command,
     args,
     options,
     callback
   ) => {
-    calls.push({ command, args, timeout: options.timeout });
-    const key = scriptKey(args);
-    const scripted = script[key];
+    const line = commandLine(command, args);
+    calls.push({ line, timeout: options.timeout });
+    const scripted = script[line];
     if (!scripted) {
-      throw new Error(`unscripted cliExec call: ${command} ${args.join(" ")}`);
+      throw new Error(`unscripted cliExec call: ${line}`);
     }
     // Async like the real subprocess callback, so parallelism is real.
     setTimeout(() => {
@@ -88,15 +111,6 @@ function cliFake(script: CliScript) {
     }, 0);
   };
   return { calls, exec };
-}
-
-function scriptKey(args: string[]): string {
-  if (args[0] === "org") return "orgs";
-  if (args[0] === "api") return `api:${args[2]}`;
-  // `gh repo list [<org>] --limit ...`
-  return args[1] === "list" && args[2] !== "--limit" ?
-      `org-repos:${args[2]}`
-    : "personal";
 }
 
 // Fakes throw on anything the route is not supposed to reach, so an accidental
@@ -155,10 +169,10 @@ describe("repositories routes (SU-05)", () => {
 
   it("merges personal and org repositories, personal first, deduped", async () => {
     const cli = cliFake({
-      personal: { stdout: "octo/app\nocto/site\n" },
-      orgs: { stdout: "acme\nglobex\n" },
-      "org-repos:acme": { stdout: "acme/api\nocto/app\n" },
-      "org-repos:globex": { stdout: "globex/web\n" }
+      [ARGV.personal]: { stdout: "octo/app\nocto/site\n" },
+      [ARGV.orgs]: { stdout: "acme\nglobex\n" },
+      [ARGV.orgRepos("acme")]: { stdout: "acme/api\nocto/app\n" },
+      [ARGV.orgRepos("globex")]: { stdout: "globex/web\n" }
     });
     const recording = await run(
       "GET",
@@ -171,38 +185,27 @@ describe("repositories routes (SU-05)", () => {
     expect(recording.headerOrder).toEqual(JSON_ONLY);
     expect(recording.headers).toEqual({ "Content-Type": "application/json" });
     // Personal entries keep their leading position and `octo/app` is not
-    // repeated even though the org listing also returned it.
+    // repeated even though the org listing also returned it. Each scripted
+    // vector returned a distinct value, so this order could not have arisen
+    // from the fake collapsing two invocations.
     expect(recording.body).toBe(
       '{"repos":["octo/app","octo/site","acme/api","globex/web"]}'
     );
-    // Personal and org listings are issued together, not serially.
-    expect(cli.calls.slice(0, 2).map((call) => call.args[0])).toEqual([
-      "repo",
-      "org"
+    // Exact argv, in order: the two top-level listings are issued together, and
+    // per-org listings only afterwards.
+    expect(cli.calls.map((call) => call.line)).toEqual([
+      ARGV.personal,
+      ARGV.orgs,
+      ARGV.orgRepos("acme"),
+      ARGV.orgRepos("globex")
     ]);
     expect(cli.calls.every((call) => call.timeout === 15000)).toBe(true);
-    expect(cli.calls[0].args).toEqual([
-      "repo",
-      "list",
-      "--limit",
-      "30",
-      "--json",
-      "nameWithOwner",
-      "--jq",
-      ".[].nameWithOwner"
-    ]);
-    expect(cli.calls[2].args.slice(0, 4)).toEqual([
-      "repo",
-      "list",
-      "acme",
-      "--limit"
-    ]);
   });
 
   it("degrades an unauthenticated gh to an empty list rather than an error", async () => {
     const cli = cliFake({
-      personal: { error: new Error("gh: not logged in") },
-      orgs: { error: new Error("gh: not logged in") }
+      [ARGV.personal]: { error: new Error("gh: not logged in") },
+      [ARGV.orgs]: { error: new Error("gh: not logged in") }
     });
     const recording = await run(
       "GET",
@@ -218,8 +221,8 @@ describe("repositories routes (SU-05)", () => {
 
   it("keeps personal repositories when only the org listing fails", async () => {
     const cli = cliFake({
-      personal: { stdout: "octo/app\n" },
-      orgs: { error: new Error("no orgs") }
+      [ARGV.personal]: { stdout: "octo/app\n" },
+      [ARGV.orgs]: { error: new Error("no orgs") }
     });
     const recording = await run(
       "GET",
@@ -233,8 +236,8 @@ describe("repositories routes (SU-05)", () => {
 
   it("treats blank org output as no orgs and skips per-org listing", async () => {
     const cli = cliFake({
-      personal: { stdout: "octo/app\n" },
-      orgs: { stdout: "   \n" }
+      [ARGV.personal]: { stdout: "octo/app\n" },
+      [ARGV.orgs]: { stdout: "   \n" }
     });
     const recording = await run(
       "GET",
@@ -244,15 +247,18 @@ describe("repositories routes (SU-05)", () => {
       dependencies({ cliExec: cli.exec })
     );
     expect(recording.body).toBe('{"repos":["octo/app"]}');
-    expect(cli.calls).toHaveLength(2);
+    expect(cli.calls.map((call) => call.line)).toEqual([
+      ARGV.personal,
+      ARGV.orgs
+    ]);
   });
 
   it("drops a single failing org without losing the others", async () => {
     const cli = cliFake({
-      personal: { stdout: "" },
-      orgs: { stdout: "acme\nglobex\n" },
-      "org-repos:acme": { error: new Error("forbidden") },
-      "org-repos:globex": { stdout: "globex/web\n" }
+      [ARGV.personal]: { stdout: "" },
+      [ARGV.orgs]: { stdout: "acme\nglobex\n" },
+      [ARGV.orgRepos("acme")]: { error: new Error("forbidden") },
+      [ARGV.orgRepos("globex")]: { stdout: "globex/web\n" }
     });
     const recording = await run(
       "GET",
@@ -262,6 +268,22 @@ describe("repositories routes (SU-05)", () => {
       dependencies({ cliExec: cli.exec })
     );
     expect(recording.body).toBe('{"repos":["globex/web"]}');
+  });
+
+  it("rejects a repository listing issued with the wrong arguments", async () => {
+    // Guards the fake itself: the script is keyed on the exact command line, so
+    // an invocation that swaps a limit or drops a flag is unscripted and throws
+    // rather than matching a looser key. Without this, a mutation that swaps two
+    // `gh` invocations could pass unnoticed.
+    const cli = cliFake({ [ARGV.personal]: { stdout: "octo/app\n" } });
+    expect(() =>
+      cli.exec(
+        "gh",
+        ["repo", "list", "--limit", "20", "--json", "nameWithOwner"],
+        { timeout: 15000 },
+        () => {}
+      )
+    ).toThrow("unscripted cliExec call");
   });
 
   it("answers 200 with an empty list when the whole lookup throws", async () => {
@@ -285,7 +307,7 @@ describe("repositories routes (SU-05)", () => {
 
   it("lists branch names for a repository", async () => {
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": { stdout: "main\ndev\n" }
+      [ARGV.branchNames("octo/app")]: { stdout: "main\ndev\n" }
     });
     const recording = await run(
       "POST",
@@ -297,13 +319,10 @@ describe("repositories routes (SU-05)", () => {
     expect(recording.status).toBe(200);
     expect(recording.headerOrder).toEqual(JSON_ONLY);
     expect(recording.body).toBe('{"branches":["main","dev"]}');
-    expect(cli.calls[0].args).toEqual([
-      "api",
-      "--paginate",
-      "/repos/octo/app/branches?per_page=100",
-      "--jq",
-      ".[].name"
+    expect(cli.calls.map((c) => c.line)).toEqual([
+      ARGV.branchNames("octo/app")
     ]);
+    expect(cli.calls[0].timeout).toBe(15000);
   });
 
   it("answers a missing repo with 200 and no Content-Type at all", async () => {
@@ -323,7 +342,7 @@ describe("repositories routes (SU-05)", () => {
 
   it("answers 200 with an empty branch list when gh fails", async () => {
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": { error: new Error("404") }
+      [ARGV.branchNames("octo/app")]: { error: new Error("404") }
     });
     const recording = await run(
       "POST",
@@ -353,7 +372,7 @@ describe("repositories routes (SU-05)", () => {
   it("discovers branches and caches them on instance state", async () => {
     const state: CanvasState = {};
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([
           { name: "main", commit: { sha: "aaa" } },
           { name: "dev", commit: { sha: "bbb" } }
@@ -390,7 +409,7 @@ describe("repositories routes (SU-05)", () => {
       workspaceRepo: "octo/app"
     };
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
       }
     });
@@ -426,7 +445,7 @@ describe("repositories routes (SU-05)", () => {
       workspaceRepo: "octo/app"
     };
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
       }
     });
@@ -452,7 +471,7 @@ describe("repositories routes (SU-05)", () => {
       workspaceRepo: "octo/other"
     };
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
       }
     });
@@ -479,7 +498,7 @@ describe("repositories routes (SU-05)", () => {
       diffTargetRepo: "octo/old"
     };
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
       }
     });
@@ -502,7 +521,7 @@ describe("repositories routes (SU-05)", () => {
   it("surfaces a gh failure as a 200 error payload and caches nothing", async () => {
     const state: CanvasState = {};
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         error: new Error("exit 1"),
         stderr: "gh: repository not found"
       }
@@ -526,7 +545,7 @@ describe("repositories routes (SU-05)", () => {
 
   it("falls back to the error message when gh writes nothing to stderr", async () => {
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         error: new Error("spawn ENOENT"),
         stderr: ""
       }
@@ -548,7 +567,7 @@ describe("repositories routes (SU-05)", () => {
 
   it("reports unparseable branch output as a 200 error payload", async () => {
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": { stdout: "<html>" }
+      [ARGV.branchObjects("octo/app")]: { stdout: "<html>" }
     });
     const recording = await run(
       "POST",
@@ -568,7 +587,7 @@ describe("repositories routes (SU-05)", () => {
   it("treats a non-array branch payload as no branches", async () => {
     const state: CanvasState = {};
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: '{"message":"Not Found"}'
       }
     });
@@ -590,7 +609,7 @@ describe("repositories routes (SU-05)", () => {
 
   it("answers 503 without Content-Type when the instance has no entry", async () => {
     const cli = cliFake({
-      "api:/repos/octo/app/branches?per_page=100": {
+      [ARGV.branchObjects("octo/app")]: {
         stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
       }
     });
@@ -857,57 +876,123 @@ interface DifferentialCase {
   missingEntry?: boolean;
 }
 
-async function differential(
-  input: DifferentialCase
-): Promise<
-  [Recording, Recording, CanvasState | undefined, CanvasState | undefined]
-> {
-  const body = input.body ?? "";
-  const makeCli = (): LegacyCliExec =>
-    input.throwingCli ?
-      () => {
+// One side's outcome. `thrown` and `ran` are recorded rather than allowed to
+// propagate so that neither implementation can prevent the other from being
+// driven -- a throw on the legacy side must not make the migrated side
+// unreachable, which would turn a case that proves nothing into a passing test.
+interface Outcome {
+  recording: Recording;
+  thrown: string | null;
+  calls: string[];
+  state: CanvasState | undefined;
+  ran: boolean;
+}
+
+function makeCli(input: DifferentialCase): {
+  exec: LegacyCliExec;
+  calls: string[];
+} {
+  if (input.throwingCli) {
+    const calls: string[] = [];
+    return {
+      calls,
+      exec: (command, args) => {
+        calls.push(commandLine(command, args));
         throw new Error("spawn failed");
       }
-    : cliFake(input.script ?? {}).exec;
-
-  const legacyState: CanvasState | undefined =
-    input.missingEntry ? undefined : structuredClone(input.state ?? {});
-  const migratedState: CanvasState | undefined =
-    input.missingEntry ? undefined : structuredClone(input.state ?? {});
-
-  const legacyRecorder = recorder();
-  if (input.route === "user-repos") {
-    await legacyUserRepos(legacyRecorder.response, makeCli());
-  } else if (input.route === "repo-branches") {
-    await legacyRepoBranches(body, legacyRecorder.response, makeCli());
-  } else {
-    await legacyDiscoverBranches(
-      body,
-      legacyRecorder.response,
-      makeCli(),
-      legacyState ? { state: legacyState } : undefined
-    );
+    };
   }
+  const fake = cliFake(input.script ?? {});
+  const calls: string[] = [];
+  return {
+    calls,
+    exec: (command, args, options, callback) => {
+      calls.push(commandLine(command, args));
+      fake.exec(command, args, options, callback);
+    }
+  };
+}
 
-  // The migrated handler reaches the same subprocess results and the same state
-  // through its three narrow ports, so any divergence is the handler's and not
-  // the data's.
+// Drives ONLY the legacy transcription. Builds its own fake and its own state
+// clone, so it shares nothing with the migrated drive.
+async function driveLegacy(input: DifferentialCase): Promise<Outcome> {
+  const body = input.body ?? "";
+  const cli = makeCli(input);
+  const state: CanvasState | undefined =
+    input.missingEntry ? undefined : structuredClone(input.state ?? {});
+  const { recording, response } = recorder();
+  let thrown: string | null = null;
+  try {
+    if (input.route === "user-repos") {
+      await legacyUserRepos(response, cli.exec);
+    } else if (input.route === "repo-branches") {
+      await legacyRepoBranches(body, response, cli.exec);
+    } else {
+      await legacyDiscoverBranches(
+        body,
+        response,
+        cli.exec,
+        state ? { state } : undefined
+      );
+    }
+  } catch (e) {
+    thrown = e instanceof Error ? e.message : String(e);
+  }
+  return { recording, thrown, calls: cli.calls, state, ran: true };
+}
+
+// Drives ONLY the migrated handler, through its three narrow ports, against an
+// independent fake and an independent state clone. Any divergence is therefore
+// the handler's and not shared harness state.
+async function driveMigrated(input: DifferentialCase): Promise<Outcome> {
+  const body = input.body ?? "";
+  const cli = makeCli(input);
+  const state: CanvasState | undefined =
+    input.missingEntry ? undefined : structuredClone(input.state ?? {});
+  const { recording, response } = recorder();
+  const context = createRequestContext(
+    request(
+      input.route === "user-repos" ? "GET" : "POST",
+      `/api/${input.route}`,
+      body
+    ),
+    response,
+    "panel-a",
+    new Map<string, CanvasServerEntry>()
+  );
   const deps = dependencies({
-    cliExec: makeCli(),
-    readInstanceState: () => migratedState,
+    cliExec: cli.exec,
+    readInstanceState: () => state,
     repoMatchesWorkspace: legacyRepoMatchesWorkspace
   });
-  const migrated = await run(
-    input.route === "user-repos" ? "GET" : "POST",
-    `/api/${input.route}`,
-    body,
-    input.route === "user-repos" ? handleUserRepos
-    : input.route === "repo-branches" ? handleRepoBranches
-    : handleDiscoverBranches,
-    deps
-  );
+  let thrown: string | null = null;
+  try {
+    if (input.route === "user-repos") await handleUserRepos(context, deps);
+    else if (input.route === "repo-branches")
+      await handleRepoBranches(context, deps);
+    else await handleDiscoverBranches(context, deps);
+  } catch (e) {
+    thrown = e instanceof Error ? e.message : String(e);
+  }
+  return { recording, thrown, calls: cli.calls, state, ran: true };
+}
 
-  return [legacyRecorder.recording, migrated, legacyState, migratedState];
+// Compares two independently produced outcomes. Asserting `ran` on both sides is
+// what stops a case from silently degenerating into a one-sided test.
+async function expectIdentical(input: DifferentialCase): Promise<Outcome> {
+  const legacy = await driveLegacy(input);
+  const migrated = await driveMigrated(input);
+  expect(legacy.ran, "legacy side was not driven").toBe(true);
+  expect(migrated.ran, "migrated side was not driven").toBe(true);
+  expect(migrated.thrown).toEqual(legacy.thrown);
+  expect(migrated.recording).toEqual(legacy.recording);
+  // The subprocess invocations are as much a part of the contract as the
+  // response: the exact-argv fake makes a swapped or malformed `gh` call visible
+  // here even when the response happens to coincide.
+  expect(migrated.calls).toEqual(legacy.calls);
+  // The cache write is as observable as the response, so compare it too.
+  expect(migrated.state).toEqual(legacy.state);
+  return migrated;
 }
 
 const BRANCH_JSON = JSON.stringify([
@@ -922,9 +1007,9 @@ describe("repositories legacy/migrated differential contract", () => {
       {
         route: "user-repos",
         script: {
-          personal: { stdout: "octo/app\nocto/site\n" },
-          orgs: { stdout: "acme\n" },
-          "org-repos:acme": { stdout: "acme/api\nocto/app\n" }
+          [ARGV.personal]: { stdout: "octo/app\nocto/site\n" },
+          [ARGV.orgs]: { stdout: "acme\n" },
+          [ARGV.orgRepos("acme")]: { stdout: "acme/api\nocto/app\n" }
         }
       }
     ],
@@ -933,8 +1018,8 @@ describe("repositories legacy/migrated differential contract", () => {
       {
         route: "user-repos",
         script: {
-          personal: { error: new Error("no auth") },
-          orgs: { error: new Error("no auth") }
+          [ARGV.personal]: { error: new Error("no auth") },
+          [ARGV.orgs]: { error: new Error("no auth") }
         }
       }
     ],
@@ -942,7 +1027,10 @@ describe("repositories legacy/migrated differential contract", () => {
       "empty org output",
       {
         route: "user-repos",
-        script: { personal: { stdout: "octo/app\n" }, orgs: { stdout: "" } }
+        script: {
+          [ARGV.personal]: { stdout: "octo/app\n" },
+          [ARGV.orgs]: { stdout: "" }
+        }
       }
     ],
     [
@@ -950,10 +1038,10 @@ describe("repositories legacy/migrated differential contract", () => {
       {
         route: "user-repos",
         script: {
-          personal: { stdout: "" },
-          orgs: { stdout: "acme\nglobex\n" },
-          "org-repos:acme": { error: new Error("forbidden") },
-          "org-repos:globex": { stdout: "globex/web\n" }
+          [ARGV.personal]: { stdout: "" },
+          [ARGV.orgs]: { stdout: "acme\nglobex\n" },
+          [ARGV.orgRepos("acme")]: { error: new Error("forbidden") },
+          [ARGV.orgRepos("globex")]: { stdout: "globex/web\n" }
         }
       }
     ],
@@ -961,8 +1049,7 @@ describe("repositories legacy/migrated differential contract", () => {
   ])(
     "produces an identical /api/user-repos response for a %s",
     async (_l, c) => {
-      const [legacy, migrated] = await differential(c);
-      expect(migrated).toEqual(legacy);
+      await expectIdentical(c);
     }
   );
 
@@ -973,7 +1060,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "repo-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: "main\ndev\n" }
+          [ARGV.branchNames("octo/app")]: { stdout: "main\ndev\n" }
         }
       }
     ],
@@ -988,7 +1075,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "repo-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": {
+          [ARGV.branchNames("octo/app")]: {
             error: new Error("404")
           }
         }
@@ -1000,15 +1087,14 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "repo-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: "  \n" }
+          [ARGV.branchNames("octo/app")]: { stdout: "  \n" }
         }
       }
     ]
   ])(
     "produces an identical /api/repo-branches response for a %s",
     async (_label, input) => {
-      const [legacy, migrated] = await differential(input);
-      expect(migrated).toEqual(legacy);
+      await expectIdentical(input);
     }
   );
 
@@ -1019,7 +1105,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1030,7 +1116,7 @@ describe("repositories legacy/migrated differential contract", () => {
         body: '{"repo":"octo/app"}',
         state: { workspaceBranch: "feature/x", workspaceRepo: "octo/app" },
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1041,7 +1127,7 @@ describe("repositories legacy/migrated differential contract", () => {
         body: '{"repo":"octo/app"}',
         state: { workspaceBranch: "main", workspaceRepo: "octo/app" },
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1052,7 +1138,7 @@ describe("repositories legacy/migrated differential contract", () => {
         body: '{"repo":"octo/app"}',
         state: { workspaceBranch: "feature/x", workspaceRepo: "octo/other" },
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1067,7 +1153,7 @@ describe("repositories legacy/migrated differential contract", () => {
           diffTargetRepo: "octo/old"
         },
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1077,7 +1163,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": {
+          [ARGV.branchObjects("octo/app")]: {
             error: new Error("exit 1"),
             stderr: "gh: not found"
           }
@@ -1090,7 +1176,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": {
+          [ARGV.branchObjects("octo/app")]: {
             error: new Error("spawn ENOENT")
           }
         }
@@ -1102,7 +1188,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: "<html>" }
+          [ARGV.branchObjects("octo/app")]: { stdout: "<html>" }
         }
       }
     ],
@@ -1112,7 +1198,7 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         script: {
-          "api:/repos/octo/app/branches?per_page=100": {
+          [ARGV.branchObjects("octo/app")]: {
             stdout: '{"message":"Not Found"}'
           }
         }
@@ -1123,7 +1209,7 @@ describe("repositories legacy/migrated differential contract", () => {
       {
         route: "discover-branches",
         body: "{}",
-        script: { "api:/repos//branches?per_page=100": { stdout: "[]" } }
+        script: { [ARGV.branchObjects("")]: { stdout: "[]" } }
       }
     ],
     [
@@ -1133,7 +1219,7 @@ describe("repositories legacy/migrated differential contract", () => {
         body: '{"repo":"octo/app"}',
         missingEntry: true,
         script: {
-          "api:/repos/octo/app/branches?per_page=100": { stdout: BRANCH_JSON }
+          [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
       }
     ],
@@ -1142,11 +1228,7 @@ describe("repositories legacy/migrated differential contract", () => {
   ])(
     "produces an identical /api/discover-branches response and state for a %s",
     async (_label, input) => {
-      const [legacy, migrated, legacyState, migratedState] =
-        await differential(input);
-      expect(migrated).toEqual(legacy);
-      // The cache write is as observable as the response, so compare it too.
-      expect(migratedState).toEqual(legacyState);
+      await expectIdentical(input);
     }
   );
 });

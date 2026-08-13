@@ -26,12 +26,28 @@ interface Harness {
   setEntryMissing(missing: boolean): void;
 }
 
-function key(args: string[]): string {
-  if (args[0] === "org") return "orgs";
-  if (args[0] === "api") return `api:${args[2]}`;
-  return args[1] === "list" && args[2] !== "--limit" ?
-      `org-repos:${args[2]}`
-    : "personal";
+// Exact argv vectors the three routes are allowed to issue. The fake keys on the
+// full joined command line and throws on anything else, so a dropped
+// `--paginate`, a swapped `--limit`, a missing `--jq`, or one route issuing
+// another route's invocation fails loudly instead of silently matching a looser
+// key.
+const ARGV = {
+  personal:
+    "gh repo list --limit 30 --json nameWithOwner --jq .[].nameWithOwner",
+  orgs: "gh org list",
+  orgRepos: (org: string) =>
+    `gh repo list ${org} --limit 20 --json nameWithOwner --jq .[].nameWithOwner`,
+  // `repo-branches` asks for names only; `discover-branches` asks for the full
+  // objects. They differ solely by the trailing `--jq`, so they must stay
+  // distinguishable keys.
+  branchNames: (repo: string) =>
+    `gh api --paginate /repos/${repo}/branches?per_page=100 --jq .[].name`,
+  branchObjects: (repo: string) =>
+    `gh api --paginate /repos/${repo}/branches?per_page=100`
+};
+
+function key(command: string, args: string[]): string {
+  return [command, ...args].join(" ");
 }
 
 function start(): Harness {
@@ -41,10 +57,10 @@ function start(): Harness {
 
   const routes = createTestRouteTable(
     createRepositoriesRoutes({
-      cliExec: (_command, args, _options, callback) => {
-        const scripted = script.get(key(args));
+      cliExec: (command, args, _options, callback) => {
+        const scripted = script.get(key(command, args));
         if (!scripted) {
-          throw new Error(`unscripted cliExec call: ${args.join(" ")}`);
+          throw new Error(`unscripted cliExec call: ${key(command, args)}`);
         }
         setTimeout(() => {
           callback(
@@ -96,9 +112,11 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 describe("repositories real-loopback HIT (RF-04)", () => {
   it("serves the merged repository list over a real socket", async () => {
     const harness = start();
-    harness.script.set("personal", { stdout: "octo/app\nocto/site\n" });
-    harness.script.set("orgs", { stdout: "acme\n" });
-    harness.script.set("org-repos:acme", { stdout: "acme/api\nocto/app\n" });
+    harness.script.set(ARGV.personal, { stdout: "octo/app\nocto/site\n" });
+    harness.script.set(ARGV.orgs, { stdout: "acme\n" });
+    harness.script.set(ARGV.orgRepos("acme"), {
+      stdout: "acme/api\nocto/app\n"
+    });
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/user-repos`);
@@ -116,8 +134,8 @@ describe("repositories real-loopback HIT (RF-04)", () => {
 
   it("answers 200 with an empty list when gh is unauthenticated", async () => {
     const harness = start();
-    harness.script.set("personal", { error: new Error("no auth") });
-    harness.script.set("orgs", { error: new Error("no auth") });
+    harness.script.set(ARGV.personal, { error: new Error("no auth") });
+    harness.script.set(ARGV.orgs, { error: new Error("no auth") });
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/user-repos`);
@@ -127,7 +145,7 @@ describe("repositories real-loopback HIT (RF-04)", () => {
 
   it("lists branches and omits Content-Type for a missing repo", async () => {
     const harness = start();
-    harness.script.set("api:/repos/octo/app/branches?per_page=100", {
+    harness.script.set(ARGV.branchNames("octo/app"), {
       stdout: "main\ndev\n"
     });
     const entry = await container!.getOrCreate("panel-a");
@@ -162,7 +180,7 @@ describe("repositories real-loopback HIT (RF-04)", () => {
     const harness = start();
     harness.state.workspaceRepo = "octo/app";
     harness.state.workspaceBranch = "feature/x";
-    harness.script.set("api:/repos/octo/app/branches?per_page=100", {
+    harness.script.set(ARGV.branchObjects("octo/app"), {
       stdout: JSON.stringify([{ name: "main", commit: { sha: "aaa" } }])
     });
     const entry = await container!.getOrCreate("panel-a");
@@ -191,7 +209,7 @@ describe("repositories real-loopback HIT (RF-04)", () => {
 
   it("reports gh failure as 200 and a malformed body as 400", async () => {
     const harness = start();
-    harness.script.set("api:/repos/octo/app/branches?per_page=100", {
+    harness.script.set(ARGV.branchObjects("octo/app"), {
       error: new Error("exit 1"),
       stderr: "gh: not found"
     });
@@ -220,7 +238,7 @@ describe("repositories real-loopback HIT (RF-04)", () => {
 
   it("answers 503 without Content-Type when the instance entry is gone", async () => {
     const harness = start();
-    harness.script.set("api:/repos/octo/app/branches?per_page=100", {
+    harness.script.set(ARGV.branchObjects("octo/app"), {
       stdout: "[]"
     });
     harness.setEntryMissing(true);
