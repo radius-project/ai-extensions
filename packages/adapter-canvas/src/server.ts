@@ -703,15 +703,41 @@ export interface DeploymentDispatchReservation {
   repo: string;
   environment: string;
   kind: "deploy" | "delete";
+  expiresAt: number;
+  attemptId?: string;
+}
+
+export const DEPLOYMENT_MUTATION_LEASE_MS = 30 * 60 * 1000;
+
+type DeploymentDispatchReservationInput = Omit<
+  DeploymentDispatchReservation,
+  "expiresAt"
+>;
+
+export function activeDeploymentMutation(
+  state: CanvasState,
+  now = Date.now()
+): DeploymentDispatchReservation | undefined {
+  const current = state.deploymentMutation;
+  if (current && current.expiresAt <= now) {
+    delete state.deploymentMutation;
+    return undefined;
+  }
+  return current;
 }
 
 export function reserveDeploymentMutation(
   state: CanvasState,
-  reservation: DeploymentDispatchReservation
+  reservation: DeploymentDispatchReservationInput,
+  now = Date.now()
 ): DeploymentDispatchReservation | null {
-  if (state.deploymentMutation) return null;
-  state.deploymentMutation = reservation;
-  return reservation;
+  if (activeDeploymentMutation(state, now)) return null;
+  const owner = {
+    ...reservation,
+    expiresAt: now + DEPLOYMENT_MUTATION_LEASE_MS
+  };
+  state.deploymentMutation = owner;
+  return owner;
 }
 
 export function releaseDeploymentMutation(
@@ -725,6 +751,69 @@ export function deploymentStatusBlocksMutation(status: unknown): boolean {
   return (
     status === "pending" || status === "in_progress" || status === "deleting"
   );
+}
+
+export function localDeploymentBlocksMutation(
+  state: CanvasState,
+  now = Date.now()
+): boolean {
+  if (state.deployStatus !== "in_progress") return false;
+  return (
+    typeof state.deployStartedAt !== "number" ||
+    state.deployStartedAt + DEPLOYMENT_MUTATION_LEASE_MS > now
+  );
+}
+
+export function resolveDeploymentEnvironment(
+  state: CanvasState,
+  requestedEnvironment: unknown
+): string {
+  return (
+    (typeof requestedEnvironment === "string" && requestedEnvironment) ||
+    (typeof state.envName === "string" && state.envName) ||
+    ""
+  );
+}
+
+export function beginPlannedGraphRequest(state: CanvasState): number {
+  const generation =
+    typeof state.plannedRequestGeneration === "number" ?
+      state.plannedRequestGeneration + 1
+    : 1;
+  state.plannedRequestGeneration = generation;
+  state.plannedResources = null;
+  return generation;
+}
+
+export function isCurrentPlannedGraphRequest(
+  state: CanvasState,
+  generation: number
+): boolean {
+  return state.plannedRequestGeneration === generation;
+}
+
+export function resetDeploymentViewState(
+  state: CanvasState,
+  attemptId: unknown,
+  now = Date.now()
+): void {
+  const requestedAttemptId =
+    typeof attemptId === "string" ? attemptId : undefined;
+  if (
+    state.deployAttempt?.id &&
+    requestedAttemptId !== state.deployAttempt.id
+  ) {
+    return;
+  }
+  delete state.deployResult;
+  const mutation = activeDeploymentMutation(state, now);
+  if (
+    mutation?.attemptId &&
+    mutation.attemptId === requestedAttemptId &&
+    state.deployAttempt?.id === requestedAttemptId
+  ) {
+    releaseDeploymentMutation(state, mutation);
+  }
 }
 
 // Throttle for the background workflow drift-sync kicked off from the
@@ -7349,16 +7438,14 @@ function createRequestHandler(
           attempt?.targetRepo || entry.state.deployingRepo || "";
         const activeEnvironment =
           attempt?.environment || entry.state.envName || "";
-        const reserved = entry.state.deploymentMutation;
-        if (
-          (entry.state.deployStatus === "in_progress" &&
-            activeRepo === repo &&
-            activeEnvironment === environment) ||
-          (reserved?.repo === repo && reserved?.environment === environment)
-        ) {
+        const reserved = activeDeploymentMutation(entry.state);
+        if (localDeploymentBlocksMutation(entry.state) || reserved) {
+          const operation = reserved?.kind || "deploy";
+          const conflictRepo = reserved?.repo || activeRepo || repo;
+          const conflictEnvironment =
+            reserved?.environment || activeEnvironment || environment;
           respond(409, {
-            error:
-              "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
+            error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
           });
           return;
         }
@@ -7370,8 +7457,12 @@ function createRequestHandler(
           kind: "delete"
         });
         if (!deleteReservation) {
+          const conflict = activeDeploymentMutation(entry.state);
           respond(409, {
-            error: "Another deployment operation is already starting."
+            error:
+              conflict ?
+                `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
+              : "Another deployment operation is already starting."
           });
           return;
         }
@@ -7861,6 +7952,7 @@ function createRequestHandler(
         }
         const branch = data.branch || defaultBranchForState(entry.state);
         const provider = data.provider || "azure";
+        const planGeneration = beginPlannedGraphRequest(entry.state);
         // Persist the selected environment so re-opening (or reloading) the
         // Planned tab re-selects it by default, matching the graph just shown.
         entry.state.plannedEnvironment =
@@ -7964,6 +8056,12 @@ function createRequestHandler(
         );
 
         if (entry && sourceRefContext) {
+          if (!isCurrentPlannedGraphRequest(entry.state, planGeneration)) {
+            res.setHeader("Content-Type", "application/json");
+            res.writeHead(409);
+            res.end(JSON.stringify({ stale: true }));
+            return;
+          }
           if (
             !setSourceRefResources(
               entry,
@@ -8252,20 +8350,31 @@ function createRequestHandler(
             entry.state.plannedRepo ||
             entry.state.contextRepo ||
             "";
-          const environment = data.environment || "";
+          const environment = resolveDeploymentEnvironment(
+            entry.state,
+            data.environment
+          );
           if (!repo || !environment) {
             throw new Error("targetRepo and environment are required.");
           }
-          if (
-            entry.state.deployStatus === "in_progress" ||
-            entry.state.deploymentMutation
-          ) {
+          const activeMutation = activeDeploymentMutation(entry.state);
+          if (localDeploymentBlocksMutation(entry.state) || activeMutation) {
+            const activeRepo =
+              activeMutation?.repo ||
+              entry.state.deployAttempt?.targetRepo ||
+              entry.state.deployingRepo ||
+              repo;
+            const activeEnvironment =
+              activeMutation?.environment ||
+              entry.state.deployAttempt?.environment ||
+              entry.state.envName ||
+              environment;
+            const operation = activeMutation?.kind || "deploy";
             res.setHeader("Content-Type", "application/json");
             res.writeHead(409);
             res.end(
               JSON.stringify({
-                error:
-                  "A deployment is already in progress. Wait for it to finish before starting another operation."
+                error: `A ${operation} operation for ${activeRepo} in environment ${activeEnvironment} is already in progress. Wait for it to finish before starting another operation.`
               })
             );
             return;
@@ -8346,10 +8455,10 @@ function createRequestHandler(
             ).trim();
             branch = detectedDefault || "main";
           }
-          entry.state.deployParams = data;
-          entry.state.envName = data.environment;
+          entry.state.deployParams = { ...data, environment };
+          entry.state.envName = environment;
           entry.state.deployProvider = data.provider;
-          entry.state.deployingRepo = data.targetRepo;
+          entry.state.deployingRepo = repo;
           entry.state.appFile = data.appFile;
 
           // Snapshot the planned graph (nodes start as pending). If the
@@ -8381,6 +8490,8 @@ function createRequestHandler(
             repairLoop: loop.repairLoop,
             attemptId: loop.attemptId
           });
+          if (reservation)
+            reservation.attemptId = entry.state.deployAttempt?.id;
           // Bounded ring buffer: a verbose deploy can stream tens of
           // thousands of recipe/terraform log lines. Keeping them all in
           // memory (and re-serializing the whole array to every 1.5s
@@ -9420,8 +9531,19 @@ function createRequestHandler(
 
     if (pathname === "/api/deploy-reset" && req.method === "POST") {
       const entry = servers.get(instanceId);
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let data: Record<string, unknown>;
+      try {
+        data = body ? record(JSON.parse(body)) : {};
+      } catch (error) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: errorMessage(error) }));
+        return;
+      }
       if (entry) {
-        delete entry.state.deployResult;
+        resetDeploymentViewState(entry.state, data.attemptId);
       }
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);

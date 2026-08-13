@@ -148,10 +148,16 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
             .catch(function() { branchSel.innerHTML = '<option value="">Unable to load branches</option>'; })
         : Promise.resolve();
     var hasEnvResult = false;
+    var envsUnavailable = false;
     var envPromise = envSel ?
         fetch('/api/list-environments?repo=' + encodeURIComponent(repo))
             .then(function(r) { return r.json(); })
             .then(function(d) {
+                if (d && d.error) {
+                    envsUnavailable = true;
+                    envSel.innerHTML = '<option value="">Unable to load environments</option>';
+                    return;
+                }
                 var envs = (d && d.environments) || [];
                 if (!envs.length) {
                     envSel.innerHTML = '<option value="">No environments</option>';
@@ -166,7 +172,10 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
                 });
                 hasEnvResult = true;
             })
-            .catch(function() { envSel.innerHTML = '<option value="">Unable to load environments</option>'; })
+            .catch(function() {
+                envsUnavailable = true;
+                envSel.innerHTML = '<option value="">Unable to load environments</option>';
+            })
         : Promise.resolve();
     // Apply the button/hint state only after BOTH the application and
     // environment selectors have finished populating, so the hint can name
@@ -174,7 +183,7 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
     // text (appSel.value would still be empty while its own fetch is
     // in-flight if this ran as soon as the environment fetch settled).
     return Promise.all([appPromise, branchPromise, envPromise]).then(function() {
-        radiusApplyPlanEnvState(hasEnvResult);
+        radiusApplyPlanEnvState(hasEnvResult, envsUnavailable);
     });
 }
 
@@ -182,6 +191,8 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
 // change handlers can refresh the subtitle hint (which names the selected
 // application/environment) without re-querying /api/list-environments.
 var RADIUS_PLAN_HAS_ENV = false;
+var RADIUS_PLAN_ENVS_STALE = false;
+var RADIUS_PLAN_REQUEST_FAILED = false;
 
 // Toggle the planned-graph primary button between "Create Environment" (when
 // the repo has no Radius-managed environment) and "Deploy Application" (which
@@ -194,8 +205,9 @@ var RADIUS_PLAN_HAS_ENV = false;
 // and an empty branch there is not inert: the server falls back to the repo's
 // default branch, which would deploy something other than the graph the user
 // just previewed.
-function radiusApplyPlanEnvState(hasEnv) {
+function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
     RADIUS_PLAN_HAS_ENV = !!hasEnv;
+    RADIUS_PLAN_ENVS_STALE = !!statesUnavailable;
     var btn = document.getElementById('plan-btn');
     var hint = document.getElementById('planned-subtitle-hint');
     var appSel = document.getElementById('planned-app');
@@ -205,7 +217,12 @@ function radiusApplyPlanEnvState(hasEnv) {
     var env = (envSel && envSel.value) || '';
     if (btn) {
         btn.removeAttribute('title');
-        if (hasEnv) {
+        if (statesUnavailable) {
+            btn.dataset.mode = 'unavailable';
+            btn.textContent = 'Deploy Application';
+            btn.disabled = true;
+            btn.setAttribute('title', 'Environments could not be loaded. Try again before deploying.');
+        } else if (hasEnv) {
             btn.dataset.mode = 'deploy';
             btn.textContent = 'Deploy Application';
             btn.disabled = !(branch && env);
@@ -215,6 +232,9 @@ function radiusApplyPlanEnvState(hasEnv) {
                 btn.setAttribute('title', 'Select the branch to deploy.');
             } else if (!env) {
                 btn.setAttribute('title', 'Select the environment to deploy to.');
+            } else if (RADIUS_PLAN_REQUEST_FAILED) {
+                btn.disabled = true;
+                btn.setAttribute('title', 'The selected deployment plan could not be generated. Try another selection.');
             }
         } else {
             btn.dataset.mode = 'create-env';
@@ -223,7 +243,9 @@ function radiusApplyPlanEnvState(hasEnv) {
         }
     }
     if (hint) {
-        if (hasEnv) {
+        if (statesUnavailable) {
+            hint.textContent = ' Environments could not be loaded, so deployment planning is temporarily unavailable.';
+        } else if (hasEnv) {
             var appName = (appSel && appSel.value) || 'this application';
             var envName = env || 'the selected environment';
             hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
@@ -231,6 +253,49 @@ function radiusApplyPlanEnvState(hasEnv) {
             hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
         }
     }
+}
+
+// Coalesce rapid selector changes and serialize plan requests. A selection made
+// while a request is active invalidates that response and queues exactly one
+// request for the latest values, preventing older plans from overwriting newer
+// selections in either the browser or the server's canvas state.
+function radiusCreatePlanScheduler(run, onIdle, debounceMs) {
+    var version = 0;
+    var active = false;
+    var queued = false;
+    var timer = null;
+    var delayMs = typeof debounceMs === 'number' ? debounceMs : 150;
+
+    function drain() {
+        timer = null;
+        if (active || !queued) return;
+        queued = false;
+        active = true;
+        var requestVersion = version;
+        Promise.resolve()
+            .then(function() {
+                return run(function() { return requestVersion === version; });
+            })
+            .catch(function(error) {
+                console.error('Planned graph request failed.', error);
+            })
+            .then(function() {
+                active = false;
+                if (queued) {
+                    timer = setTimeout(drain, delayMs);
+                } else if (onIdle) {
+                    onIdle();
+                }
+            });
+    }
+
+    return function schedule(immediate) {
+        version++;
+        queued = true;
+        if (timer) clearTimeout(timer);
+        if (active) return;
+        timer = setTimeout(drain, immediate ? 0 : delayMs);
+    };
 }
 
 // Trigger a deployment of the currently-selected application/branch to the

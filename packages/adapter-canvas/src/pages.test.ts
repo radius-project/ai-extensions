@@ -384,6 +384,23 @@ describe("plannedGraphPage", () => {
     expect(html).not.toContain("Cloud Resource");
     for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
   });
+
+  it("serializes selector-triggered planning in both render paths", () => {
+    const empty = plannedGraphPage({
+      contextRepo: "octo/app",
+      contextBranch: "main"
+    });
+    const loaded = plannedGraphPage({
+      plannedResources: sampleResources,
+      plannedRepo: "octo/app",
+      plannedBranch: "main"
+    });
+    for (const html of [empty, loaded]) {
+      expect(html).toContain("radiusCreatePlanScheduler(runPlan");
+      expect(html).toContain("if (!isCurrent()) return;");
+      expect(html).toContain("RADIUS_PLAN_ENVS_STALE");
+    }
+  });
 });
 
 describe("environmentPage — Credentials/Profiles restructure", () => {
@@ -1008,7 +1025,7 @@ describe("deployedGraphPage", () => {
       const source = html.slice(start, end);
 
       const state = {
-        DEPLOYMENTS_BY_ENV: { ...previous },
+        DEPLOYMENTS_BY_TARGET: { ...previous },
         DEPLOYMENT_STATES_STALE: false
       };
       const fetchFake = () =>
@@ -1019,11 +1036,14 @@ describe("deployedGraphPage", () => {
         "CONTEXT_REPO",
         "fetch",
         "state",
-        `var DEPLOYMENTS_BY_ENV = state.DEPLOYMENTS_BY_ENV;
+        `var DEPLOYMENTS_BY_TARGET = state.DEPLOYMENTS_BY_TARGET;
+         function deploymentKey(app, env) {
+          return encodeURIComponent(app) + '|' + encodeURIComponent(env);
+         }
          var DEPLOYMENT_STATES_STALE = state.DEPLOYMENT_STATES_STALE;
          ${source}
          return loadDeploymentStates().then(function () {
-           return { map: DEPLOYMENTS_BY_ENV, stale: DEPLOYMENT_STATES_STALE };
+           return { map: DEPLOYMENTS_BY_TARGET, stale: DEPLOYMENT_STATES_STALE };
          });`
       );
       return (await harness("octo/app", fetchFake, state)) as {
@@ -1035,32 +1055,55 @@ describe("deployedGraphPage", () => {
     it("keeps the last-known deployments and flags them stale on an error payload", async () => {
       const result = await runLoad(
         { deployments: [], error: "GitHub API rate limit exceeded" },
-        { prod: "deleting" }
+        { "web-app|prod": "deleting" }
       );
-      expect(result.map).toEqual({ prod: "deleting" });
+      expect(result.map).toEqual({ "web-app|prod": "deleting" });
       expect(result.stale).toBe(true);
     });
 
     it("keeps the last-known deployments when the request itself fails", async () => {
       const result = await runLoad(new Error("network down"), {
-        prod: "success"
+        "web-app|prod": "success"
       });
-      expect(result.map).toEqual({ prod: "success" });
+      expect(result.map).toEqual({ "web-app|prod": "success" });
       expect(result.stale).toBe(true);
     });
 
     it("replaces the map and clears the stale flag on a good response", async () => {
       const result = await runLoad(
-        { deployments: [{ environment: "staging", status: "success" }] },
-        { prod: "deleting" }
+        {
+          deployments: [
+            { app: "web-app", environment: "staging", status: "success" }
+          ]
+        },
+        { "web-app|prod": "deleting" }
       );
-      expect(result.map).toEqual({ staging: "success" });
+      expect(result.map).toEqual({ "web-app|staging": "success" });
       expect(result.stale).toBe(false);
+    });
+
+    it("keeps deployments for different applications in the same environment distinct", async () => {
+      const result = await runLoad(
+        {
+          deployments: [
+            { app: "frontend", environment: "prod", status: "success" },
+            { app: "worker", environment: "prod", status: "failed" }
+          ]
+        },
+        {}
+      );
+      expect(result.map).toEqual({
+        "frontend|prod": "success",
+        "worker|prod": "failed"
+      });
     });
 
     // An empty list is a real answer, unlike an error, so it must clear.
     it("clears the map when the listing is genuinely empty", async () => {
-      const result = await runLoad({ deployments: [] }, { prod: "success" });
+      const result = await runLoad(
+        { deployments: [] },
+        { "web-app|prod": "success" }
+      );
       expect(result.map).toEqual({});
       expect(result.stale).toBe(false);
     });
@@ -1094,7 +1137,9 @@ describe("deployedGraphPage", () => {
 
   it("treats a failed deployment as deployed so it can be cleaned up", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
-    expect(html).toContain("return !!DEPLOYMENTS_BY_ENV[env];");
+    expect(html).toContain(
+      "return !!DEPLOYMENTS_BY_TARGET[deploymentKey(app, env)];"
+    );
     expect(html).toContain("dep.status || 'unknown'");
   });
 });

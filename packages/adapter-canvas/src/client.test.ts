@@ -231,7 +231,9 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     hasEnv: boolean,
     appValue = "web-app",
     envValue = "prod",
-    branchValue = "main"
+    branchValue = "main",
+    statesUnavailable = false,
+    planFailed = false
   ) {
     const btn: FakeBtn = {
       dataset: {},
@@ -256,11 +258,15 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
       "planned-env": envSel
     };
     const document = { getElementById: (id: string) => elements[id] || null };
-    const apply = new Function(
+    const controls = new Function(
       "document",
-      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyPlanEnvState;`
+      `${CLIENT_REPO_BRANCH_JS}; return {
+        apply: radiusApplyPlanEnvState,
+        fail: function() { RADIUS_PLAN_REQUEST_FAILED = true; }
+      };`
     )(document);
-    apply(hasEnv);
+    if (planFailed) controls.fail();
+    controls.apply(hasEnv, statesUnavailable);
     return { btn, hint };
   }
 
@@ -272,6 +278,87 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(hint.textContent).toContain("must first create an environment");
   });
 
+  it("fails closed when environments cannot be loaded", () => {
+    const { btn, hint } = runApply(false, "web-app", "", "main", true);
+    expect(btn.dataset.mode).toBe("unavailable");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+    expect(hint.textContent).toContain("temporarily unavailable");
+  });
+
+  it("does not treat an environment request failure as an empty list", async () => {
+    const option = () => ({
+      value: "",
+      textContent: "",
+      selected: false
+    });
+    const select = () => ({
+      value: "",
+      innerHTML: "",
+      appendChild(child: { value: string; selected: boolean }) {
+        if (!this.value || child.selected) this.value = child.value;
+      }
+    });
+    const appSel = select();
+    const branchSel = select();
+    const envSel = select();
+    const btn = {
+      dataset: {},
+      textContent: "",
+      disabled: false,
+      title: "",
+      setAttribute(_name: string, value: string) {
+        this.title = value;
+      },
+      removeAttribute() {
+        this.title = "";
+      }
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const elements = {
+      "planned-app": appSel,
+      "planned-branch": branchSel,
+      "planned-env": envSel,
+      "plan-btn": btn,
+      "planned-subtitle-hint": hint
+    };
+    const document = {
+      getElementById: (id: keyof typeof elements) => elements[id] || null,
+      createElement: option
+    };
+    const fetch = (url: string) => {
+      if (url.startsWith("/api/list-environments"))
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({
+              environments: [],
+              error: "GitHub API unavailable"
+            })
+        });
+      if (url === "/api/discover-branches")
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({ branches: [{ name: "main", sha: "1234567" }] })
+        });
+      return Promise.resolve({
+        json: () => Promise.resolve({ applications: [{ name: "web-app" }] })
+      });
+    };
+    const populate = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusPopulatePlannedSelectors;`
+    )(document, { location: { search: "" } }, fetch);
+
+    await populate("octo/app", {}, "main", "");
+
+    expect(envSel.innerHTML).toContain("Unable to load environments");
+    expect(btn.dataset.mode).toBe("unavailable");
+    expect(btn.disabled).toBe(true);
+  });
+
   it("offers Deploy Application and names the app/environment in bold when one exists", () => {
     const { btn, hint } = runApply(true, "web-app", "prod");
     expect(btn.textContent).toBe("Deploy Application");
@@ -280,6 +367,46 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(hint.innerHTML).toContain("<strong>web-app</strong>");
     expect(hint.innerHTML).toContain("<strong>prod</strong>");
     expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  describe("CLIENT_REPO_BRANCH_JS — Planned graph request scheduler", () => {
+    it("debounces changes and serializes requests so stale work cannot win", async () => {
+      const runs: Array<{
+        isCurrent: () => boolean;
+        resolve: () => void;
+      }> = [];
+      let idleCalls = 0;
+      const schedulerFactory = new Function(
+        `${CLIENT_REPO_BRANCH_JS}; return radiusCreatePlanScheduler;`
+      )();
+      const schedule = schedulerFactory(
+        (isCurrent: () => boolean) =>
+          new Promise<void>((resolve) => runs.push({ isCurrent, resolve })),
+        () => {
+          idleCalls++;
+        },
+        0
+      );
+
+      schedule(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(runs).toHaveLength(1);
+
+      schedule(false);
+      schedule(false);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].isCurrent()).toBe(false);
+
+      runs[0].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(runs).toHaveLength(2);
+      expect(runs[1].isCurrent()).toBe(true);
+
+      runs[1].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(idleCalls).toBe(1);
+    });
   });
 
   // An empty branch is not inert at the server: /api/deploy resolves it to the
@@ -296,6 +423,12 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     const { btn } = runApply(true, "web-app", "", "main");
     expect(btn.disabled).toBe(true);
     expect(btn.title).toContain("environment");
+  });
+
+  it("stays disabled when the latest selected plan failed", () => {
+    const { btn } = runApply(true, "web-app", "prod", "main", false, true);
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be generated");
   });
 
   it("stays disabled when neither a branch nor an environment is selected", () => {
