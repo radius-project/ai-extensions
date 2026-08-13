@@ -190,6 +190,47 @@ describe("server route ownership boundary", () => {
     expect(matchRoute(table, "DELETE", "/api/operations")).toBeUndefined();
   });
 
+  it("leaves main's undeclared sub-routes under /api/operations/ to the legacy chain", () => {
+    // `main` serves two routes under this family's prefix with regexes rather
+    // than declarations: POST /api/operations/:id/resume/:code and
+    // POST /api/operations/:id/abandon. They are not in the route table, so the
+    // dispatcher must not claim them -- and it only fails to claim them because
+    // the migrated prefix route is GET-only. That disjointness is the whole
+    // reason the migration is safe for those paths, so pin it: the dispatcher
+    // now runs the table BEFORE the entire legacy chain, so if either route
+    // were ever widened past POST this route would start shadowing it silently.
+    expect(
+      matchRoute(table, "POST", "/api/operations/op-1/resume/abc")
+    ).toBeUndefined();
+    expect(
+      matchRoute(table, "POST", "/api/operations/op-1/abandon")
+    ).toBeUndefined();
+
+    // The shadowing is real for GET, and is pre-existing rather than a
+    // regression: legacy's GET prefix branch claimed these composite paths too,
+    // answering 404 for the whole tail as an operation id.
+    const resumeAsGet = matchRoute(
+      table,
+      "GET",
+      "/api/operations/op-1/resume/abc"
+    );
+    expect(routeKey(resumeAsGet!)).toBe("GET /api/operations/");
+  });
+
+  it("treats a missing request method as matching nothing but ANY routes", () => {
+    // Node types `req.method` as optional, so the table must not blow up or
+    // accidentally match a verb route when it is absent.
+    expect(matchRoute(table, undefined, "/api/operations")).toBeUndefined();
+    expect(matchRoute(table, undefined, "/api/operations/abc")).toBeUndefined();
+    expect(routeKey(matchRoute(table, undefined, "/api/ping")!)).toBe(
+      "ANY /api/ping"
+    );
+    // Method comparison is case-insensitive on the way in.
+    expect(routeKey(matchRoute(table, "get", "/api/operations")!)).toBe(
+      "GET /api/operations"
+    );
+  });
+
   it("fails on duplicate, unowned, or handlerless routes", () => {
     const legacyRoute = table.find((route) => route.migration === "legacy")!;
     expect(() => assertRouteTable([...table, table[0]])).toThrow(

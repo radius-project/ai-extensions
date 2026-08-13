@@ -41,14 +41,20 @@ describe("canvas server dependencies (SU-01)", () => {
   it("composes the production seams with the lifecycle defaults", () => {
     const createRequestHandler = vi.fn();
     const preferredPort = vi.fn(async () => 41234);
+    const onStarted = vi.fn();
+    const onStopped = vi.fn();
     const composed = createProductionCanvasServerDependencies({
       createRequestHandler,
       defaultPage: "planned",
+      onStarted,
+      onStopped,
       preferredPort
     });
 
     expect(composed.createRequestHandler).toBe(createRequestHandler);
     expect(composed.preferredPort).toBe(preferredPort);
+    expect(composed.onStarted).toBe(onStarted);
+    expect(composed.onStopped).toBe(onStopped);
     expect(composed.defaultPage).toBe("planned");
     expect(composed.createState()).toEqual({});
     expect(composed.now()).toBeGreaterThan(0);
