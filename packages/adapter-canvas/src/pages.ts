@@ -3015,7 +3015,13 @@ function trackEnvProgress(repo, environment, provider, onTerminal) {
                         }).catch(function(error) {
                             if (error && error.abandonOperation) {
                                 fetch('/api/operations/' + encodeURIComponent(operationId) + '/abandon', { method: 'POST' })
-                                    .then(function() { envProgressTimer = setTimeout(tick, 0); })
+                                    .then(function(response) {
+                                        if (!response.ok) {
+                                            promptingRequestedAt = '';
+                                            throw new Error('Unable to cancel environment setup.');
+                                        }
+                                        envProgressTimer = setTimeout(tick, 0);
+                                    })
                                     .catch(function() { envProgressTimer = setTimeout(tick, 1500); });
                                 return;
                             }
@@ -3835,12 +3841,11 @@ deployBtn.addEventListener('click', function() {
         }
         showEnvError(msg);
     }
-    var needsAzureCreds = provider === 'azure' && !document.getElementById('az-client-id').value.trim();
-    if (needsAzureCreds && !(selectedProfile.subscriptionId || '').trim()) {
+    if (provider === 'azure' && (!(selectedProfile.subscriptionId || '').trim() || !(selectedProfile.tenantId || '').trim())) {
         // Still a form-level error, so it belongs on the form, which is still on
         // screen: nothing has started yet.
         btn.textContent = 'Create Environment'; btn.disabled = false;
-        fail('The selected profile has no subscription ID. Edit the profile to add one so setup targets the correct tenant/subscription.');
+        fail('The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment.');
         return;
     }
 

@@ -393,6 +393,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
             if (closeTimer) clearTimeout(closeTimer);
             if (closeGenerations.get(ctx.instanceId) !== closeGeneration) return;
             if (deps.servers.get(ctx.instanceId) !== entry) return;
+            deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
             deps.servers.delete(ctx.instanceId);
             closeGenerations.delete(ctx.instanceId);
             entry.server.close();
@@ -410,6 +411,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           closeTimer.unref?.();
           return;
         }
+        deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
         deps.servers.delete(ctx.instanceId);
         closeGenerations.delete(ctx.instanceId);
         await new Promise<void>((resolve) =>

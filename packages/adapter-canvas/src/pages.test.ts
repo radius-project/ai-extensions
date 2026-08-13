@@ -368,6 +368,18 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     expect(html).toContain(
       "'/api/operations/' + encodeURIComponent(operationId) + '/abandon'"
     );
+    expect(html).toContain("if (!response.ok) {");
+    expect(html).toContain("promptingRequestedAt = '';");
+  });
+
+  it("validates Azure tenant and subscription before switching to progress", () => {
+    const html = environmentPage({ contextRepo: "octo/app" });
+    expect(html).toContain(
+      "provider === 'azure' && (!(selectedProfile.subscriptionId || '').trim() || !(selectedProfile.tenantId || '').trim())"
+    );
+    expect(html).toContain(
+      "The selected profile needs both a tenant ID and subscription ID."
+    );
   });
 
   it("renders the app-registration picker + editable name + use-existing action", () => {

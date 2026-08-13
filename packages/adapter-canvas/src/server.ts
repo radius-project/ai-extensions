@@ -511,9 +511,15 @@ const environmentTasksSettledListeners = new Map<
   string,
   Set<() => void>
 >();
+const shuttingDownInstances = new Set<string>();
+const activeVerificationMonitors = new Set<string>();
 
 export function hasActiveEnvironmentTasks(instanceId: string): boolean {
   return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
+}
+
+export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
+  shuttingDownInstances.add(instanceId);
 }
 
 export function onEnvironmentTasksSettled(
@@ -525,6 +531,7 @@ export function onEnvironmentTasksSettled(
     listeners = new Set();
     environmentTasksSettledListeners.set(instanceId, listeners);
   }
+
   listeners.add(listener);
   let listening = true;
   const stop = () => {
@@ -2409,6 +2416,7 @@ function createRequestHandler(
       .then(task)
       .catch(async (error) => {
         const current = operations.get(operationId);
+        if (shuttingDownInstances.has(instanceId)) return;
         if (current && !current.endedAt) {
           finish(current, "failed", {
             failure: {
@@ -2486,6 +2494,31 @@ function createRequestHandler(
         );
       }
       if (result?.state === "success" || result?.state === "failed") return;
+      if (result?.terminal || result?.state === "expired") {
+        const current = operations
+          .all()
+          .find((candidate: any) => candidate.operationId === operationId);
+        if (current && !current.endedAt) {
+          finish(current, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: current.currentStage,
+              stepSeq: null,
+              message:
+                result?.error ||
+                "Credential verification is no longer being tracked.",
+              classification: "user-fixable",
+              evidence: null
+            }
+          });
+          await persistBestEffort({
+            operation: current,
+            persist: () => operations.persist(),
+            report: (diagnostic) => operations.report?.(diagnostic)
+          });
+        }
+        return;
+      }
       const jitterMs = Math.floor(Math.random() * 1000);
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
@@ -2529,7 +2562,27 @@ function createRequestHandler(
     await monitorVerification(operationId);
   }
 
-  return async (
+  function startRecoveredVerificationTasks(): void {
+    for (const op of operations.all()) {
+      if (
+        op.recoveryState !== "verification_pending" ||
+        op.currentStage !== STAGE_VERIFY ||
+        op.endedAt ||
+        activeVerificationMonitors.has(op.operationId)
+      )
+        continue;
+      activeVerificationMonitors.add(op.operationId);
+      scheduleServerOwnedTask(op.operationId, async () => {
+        try {
+          await monitorVerification(op.operationId);
+        } finally {
+          activeVerificationMonitors.delete(op.operationId);
+        }
+      });
+    }
+  }
+
+  const handler = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
@@ -9337,6 +9390,7 @@ function createRequestHandler(
       res.end(environmentPage(state));
     }
   };
+  return { handler, startRecoveredVerificationTasks };
 }
 
 const PAGE_RENDERERS = {
@@ -9396,7 +9450,7 @@ async function startServer(
   page = DEFAULT_CANVAS_PAGE
 ): Promise<CanvasServerEntry> {
   let baseUrl = "";
-  const handler = createRequestHandler(instanceId, () => baseUrl);
+  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
   // Restore the user's explicitly chosen GitHub account (if any) before priming
   // so the very first strategy resolution honors it. This is what makes the
   // account choice stable across restarts.
@@ -9407,7 +9461,7 @@ async function startServer(
   // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
   // self-healing, so a failure here just means the next caller re-primes.
   primeGhIdentity().catch(() => {});
-  const server = createServer(handler);
+  const server = createServer(requestHandler.handler);
   let port: number;
   // Try the stable, instanceId-derived port first; fall back to an ephemeral
   // port (listen(0)) only if it's already taken/unavailable.
@@ -9431,6 +9485,8 @@ async function startServer(
     state: {}
   };
   servers.set(instanceId, entry);
+  shuttingDownInstances.delete(instanceId);
+  requestHandler.startRecoveredVerificationTasks();
   return entry;
 }
 

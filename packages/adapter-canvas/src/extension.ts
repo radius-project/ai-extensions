@@ -55,6 +55,7 @@ import {
   servers,
   getOrCreateServer,
   hasActiveEnvironmentTasks,
+  markEnvironmentInstanceShuttingDown,
   onEnvironmentTasksSettled,
   getLastWebviewActivityAt,
   setAppBicepHandoff,
@@ -166,6 +167,7 @@ const dependencies: RadiusExtensionDependencies = {
   operations: {
     setupInFlight,
     hasActiveEnvironmentTasks,
+    markEnvironmentInstanceShuttingDown,
     onEnvironmentTasksSettled
   },
   radiusAppBicepSkill,

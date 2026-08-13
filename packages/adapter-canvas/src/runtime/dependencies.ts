@@ -242,6 +242,7 @@ export interface ProcessDependencies {
 export interface OperationsDependencies {
   setupInFlight(): boolean;
   hasActiveEnvironmentTasks(instanceId: string): boolean;
+  markEnvironmentInstanceShuttingDown(instanceId: string): void;
   onEnvironmentTasksSettled(
     instanceId: string,
     listener: () => void

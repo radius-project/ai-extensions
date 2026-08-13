@@ -459,6 +459,12 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     });
 
     await ext.shutdown("SIGTERM");
+    expect(
+      deps.operations.markEnvironmentInstanceShuttingDown
+    ).toHaveBeenCalledWith("panel-a");
+    expect(
+      deps.operations.markEnvironmentInstanceShuttingDown
+    ).toHaveBeenCalledWith("panel-b");
     expect(closeA).toHaveBeenCalledTimes(1);
     expect(closeB).toHaveBeenCalledTimes(1);
     expect(deps.servers.size).toBe(0);
