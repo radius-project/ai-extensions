@@ -448,7 +448,8 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     hasDeployment: boolean,
     appValue = "web-app",
     envValue = "prod",
-    deploymentStatus?: string
+    deploymentStatus?: string,
+    statesUnavailable?: boolean
   ) {
     const btn: FakeBtn = {
       dataset: {},
@@ -474,9 +475,62 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
       "document",
       `${CLIENT_REPO_BRANCH_JS}; return radiusApplyDeployedEnvState;`
     )(document);
-    const mode = apply(hasEnv, hasDeployment, deploymentStatus);
+    const mode = apply(
+      hasEnv,
+      hasDeployment,
+      deploymentStatus,
+      statesUnavailable
+    );
     return { btn, hint, mode };
   }
+
+  // /api/list-deployments answers a transient GitHub failure with HTTP 200 and
+  // { deployments: [], error }. The page keeps the last-known state on screen
+  // and flags it stale; the button must not stay actionable against state that
+  // could not be confirmed, or the user can start an operation that conflicts
+  // with one already running.
+  it("disables Delete Deployment while the deployment listing is unreadable", () => {
+    const { btn, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "success",
+      true
+    );
+    expect(mode).toBe("delete");
+    expect(btn.textContent).toBe("Delete Deployment");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+  });
+
+  it("disables Deploy Application while the deployment listing is unreadable", () => {
+    const { btn, mode } = runApply(true, false, "web-app", "prod", "", true);
+    expect(mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+  });
+
+  // Creating an environment doesn't act on deployment state, so an unreadable
+  // listing is no reason to block it.
+  it("keeps Create Environment enabled while the listing is unreadable", () => {
+    const { btn } = runApply(false, false, "web-app", "prod", "", true);
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("re-enables the button once the listing becomes readable again", () => {
+    const { btn } = runApply(true, true, "web-app", "prod", "success", false);
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
+  });
+
+  // A delete in flight is the more specific explanation, so it wins the tooltip.
+  it("prefers the deleting message over the stale-listing message", () => {
+    const { btn } = runApply(true, true, "web-app", "prod", "deleting", true);
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deleting…");
+    expect(btn.title).toContain("already being deleted");
+  });
 
   it("offers Create Environment when the repo has no environment", () => {
     const { btn, hint, mode } = runApply(false, false);
@@ -630,6 +684,41 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     )(document, { location: { href: "" } }, fetch);
 
     deploy(btn, "octo/app", "main", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+
+  // The branch is resolved server-side and should never arrive empty, but the
+  // dispatch must not rely on that: /api/deploy resolves an empty branch to the
+  // repo's default, deploying code the user never selected.
+  it.each([
+    ["", "empty"],
+    ["   ", "whitespace-only"],
+    [undefined, "missing"]
+  ])("does not dispatch a deployment with a %s branch (%s)", (branch) => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", branch, {}, "azure");
 
     expect(fetchCalled).toBe(false);
   });

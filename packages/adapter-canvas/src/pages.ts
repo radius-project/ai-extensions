@@ -1781,6 +1781,9 @@ function escapeHtmlClient(s) {
     // between "Deploy Application" and "Delete Deployment" for the selection.
     var HAS_ENVS = false;
     var DEPLOYMENTS_BY_ENV = {};
+    // Set when the deployment listing could not be read, so the button can be
+    // held disabled rather than acting on state we cannot confirm.
+    var DEPLOYMENT_STATES_STALE = false;
 
     // A deployment "exists" for the selection when the environment has any
     // row at all, including a failed one: a failed deploy can leave partially
@@ -1843,30 +1846,32 @@ function escapeHtmlClient(s) {
 
     function refreshControls() {
         var app = appSelect.value, env = envSelect.value;
-        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env));
+        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env), DEPLOYMENT_STATES_STALE);
         labelEl.innerHTML = (app && env)
             ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
             : '';
-        // A delete in flight is transient, so poll until it resolves — otherwise
-        // the button stays stuck on "Deleting…" until a manual reload.
-        scheduleDeletePoll(deploymentStatus(app, env) === 'deleting');
+        // Both a delete in flight and an unreadable listing are transient, and
+        // both leave the button disabled — so poll until they resolve, or the
+        // button would stay stuck until a manual reload.
+        scheduleStatePoll(deploymentStatus(app, env) === 'deleting' || DEPLOYMENT_STATES_STALE);
     }
 
-    // Refresh the deployment listing while a delete runs so the button re-enables
-    // on its own once the delete finishes. Bounded so a stuck delete never polls
-    // forever; on timeout the real status is whatever the listing last reported.
-    var deletePollTimer = null;
-    var deletePollTries = 0;
-    function scheduleDeletePoll(active) {
+    // Refresh the deployment listing while a delete runs, or while the listing
+    // is unreadable, so the button recovers on its own once real state arrives.
+    // Bounded so a stuck delete or a persistent outage never polls forever; on
+    // timeout the real status is whatever the listing last reported.
+    var statePollTimer = null;
+    var statePollTries = 0;
+    function scheduleStatePoll(active) {
         if (!active) {
-            if (deletePollTimer) { clearTimeout(deletePollTimer); deletePollTimer = null; }
-            deletePollTries = 0;
+            if (statePollTimer) { clearTimeout(statePollTimer); statePollTimer = null; }
+            statePollTries = 0;
             return;
         }
-        if (deletePollTimer || deletePollTries > 45) return; // ~3 min at 4s
-        deletePollTimer = setTimeout(function() {
-            deletePollTimer = null;
-            deletePollTries++;
+        if (statePollTimer || statePollTries > 45) return; // ~3 min at 4s
+        statePollTimer = setTimeout(function() {
+            statePollTimer = null;
+            statePollTries++;
             loadDeploymentStates().then(refreshControls);
         }, 4000);
     }
@@ -1942,16 +1947,27 @@ function escapeHtmlClient(s) {
 
     // Resolve which environments currently hold a deployment, so the primary
     // button can choose between deploying and deleting for the selection.
+    //
+    // /api/list-deployments answers a transient GitHub failure with HTTP 200 and
+    // { deployments: [], error } rather than a rejection. Treating that as "no
+    // deployments" would clear an environment that actually has a deploy or
+    // delete in flight, flipping the button back to "Deploy Application" and
+    // letting the user start a conflicting operation. So keep the last-known
+    // map and flag it stale; refreshControls disables the button until a
+    // subsequent poll reads real state. The Deployments tab handles the same
+    // shape the same way (see its load-error row).
     function loadDeploymentStates() {
         return fetch('/api/list-deployments?repo=' + encodeURIComponent(CONTEXT_REPO))
             .then(function(r) { return r.json(); })
             .then(function(d) {
+                if (d && d.error) { DEPLOYMENT_STATES_STALE = true; return; }
+                DEPLOYMENT_STATES_STALE = false;
                 DEPLOYMENTS_BY_ENV = {};
                 ((d && d.deployments) || []).forEach(function(dep) {
                     if (dep && dep.environment) DEPLOYMENTS_BY_ENV[dep.environment] = dep.status || 'unknown';
                 });
             })
-            .catch(function() { DEPLOYMENTS_BY_ENV = {}; });
+            .catch(function() { DEPLOYMENT_STATES_STALE = true; });
     }
 
     appSelect.addEventListener('change', function() { refreshControls(); loadGraph(); });

@@ -280,7 +280,13 @@ var RADIUS_DEPLOYED_HAS_DEPLOYMENT = false;
 // already in flight disables the button, matching the Deployments table, whose
 // per-row delete button is likewise disabled while status is "deleting" —
 // dispatching a second delete would only fail or race the first.
-function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus) {
+//
+// statesUnavailable means the deployment listing could not be read (a transient
+// GitHub failure). The button is disabled while that holds: the last-known
+// state is kept on screen, but it may be out of date, and dispatching against
+// state we cannot confirm risks starting an operation that conflicts with one
+// already running.
+function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, statesUnavailable) {
     RADIUS_DEPLOYED_HAS_ENV = !!hasEnv;
     RADIUS_DEPLOYED_HAS_DEPLOYMENT = !!hasDeployment;
     var btn = document.getElementById('deployed-delete-btn');
@@ -290,6 +296,7 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus) {
     var app = (appSel && appSel.value) || '';
     var env = (envSel && envSel.value) || '';
     var deleting = deploymentStatus === 'deleting';
+    var unavailable = !!statesUnavailable;
     var mode = !hasEnv ? 'create-env' : (hasDeployment ? 'delete' : 'deploy');
     if (btn) {
         btn.dataset.mode = mode;
@@ -297,17 +304,24 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus) {
         if (mode === 'create-env') {
             btn.textContent = 'Create Environment';
             btn.className = 'rad-btn rad-btn--primary';
+            // Creating an environment doesn't act on deployment state, so an
+            // unreadable listing is no reason to block it.
             btn.disabled = false;
         } else if (mode === 'deploy') {
             btn.textContent = 'Deploy Application';
             btn.className = 'rad-btn rad-btn--primary';
-            btn.disabled = !(app && env);
+            btn.disabled = !(app && env) || unavailable;
+            if (unavailable) {
+                btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
+            }
         } else {
             btn.textContent = deleting ? 'Deleting…' : 'Delete Deployment';
             btn.className = 'rad-btn rad-btn--danger-outline';
-            btn.disabled = !(app && env) || deleting;
+            btn.disabled = !(app && env) || deleting || unavailable;
             if (deleting) {
                 btn.setAttribute('title', 'This deployment is already being deleted from environment "' + env + '". Wait for the delete to finish.');
+            } else if (unavailable) {
+                btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
             }
         }
     }
@@ -335,14 +349,19 @@ function radiusDeployDeployedApp(btn, repo, branch, envProviders, fallbackProvid
     if (!btn || btn.disabled) return;
     var envSel = document.getElementById('deployed-env-select');
     var env = envSel ? envSel.value : '';
-    if (!repo || !env) return;
+    // The branch is resolved server-side (contextBranch → plannedBranch →
+    // graphBranch → "main") so it should never arrive empty, but refuse to
+    // dispatch if it ever does: /api/deploy resolves an empty branch to the
+    // repo's default, which would deploy code the user never selected.
+    var deployBranch = (branch && String(branch).trim()) || '';
+    if (!repo || !env || !deployBranch) return;
     var provider = (envProviders && envProviders[env]) || fallbackProvider || 'azure';
     btn.disabled = true;
     btn.textContent = 'Starting deployment…';
     fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: branch || '', appFile: '.radius/app.bicep' })
+        body: JSON.stringify({ environment: env, provider: provider, targetRepo: repo, branch: deployBranch, appFile: '.radius/app.bicep' })
     }).then(function(r) { return r.json().catch(function() { return {}; }); })
       .then(function() { window.location.href = '/?page=deploying'; })
       .catch(function() { window.location.href = '/?page=deploying'; });

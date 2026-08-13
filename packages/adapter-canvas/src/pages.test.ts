@@ -930,8 +930,113 @@ describe("deployedGraphPage", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
     expect(html).toContain("deploymentStatus(app, env)");
     expect(html).toContain("function deploymentStatus(");
-    expect(html).toContain("scheduleDeletePoll(");
+    expect(html).toContain("scheduleStatePoll(");
     expect(html).toContain("deploymentStatus(app, env) === 'deleting'");
+  });
+
+  // A transient GitHub failure comes back as HTTP 200 with
+  // { deployments: [], error }. Clearing the map on that response would make an
+  // environment with an in-flight deploy/delete look empty, flipping the button
+  // back to "Deploy Application" and letting the user start a conflicting
+  // operation. This runs the emitted function for real, because the behavior
+  // only exists as a string in the page and a substring assertion would not
+  // prove the error path preserves anything.
+  describe("deployment-state loading survives a transient listing failure", () => {
+    // Pull the emitted loadDeploymentStates out of the page and run it against
+    // fake state, returning what it left behind.
+    async function runLoad(
+      response: unknown,
+      previous: Record<string, string>
+    ) {
+      const html = deployedGraphPage({ contextRepo: "octo/app" });
+      const start = html.indexOf("function loadDeploymentStates()");
+      expect(start).toBeGreaterThan(-1);
+      // Brace-match to the end of the function so the harness gets exactly it.
+      let depth = 0;
+      let end = -1;
+      for (let i = html.indexOf("{", start); i < html.length; i++) {
+        if (html[i] === "{") depth++;
+        else if (html[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i + 1;
+            break;
+          }
+        }
+      }
+      expect(end).toBeGreaterThan(start);
+      const source = html.slice(start, end);
+
+      const state = {
+        DEPLOYMENTS_BY_ENV: { ...previous },
+        DEPLOYMENT_STATES_STALE: false
+      };
+      const fetchFake = () =>
+        response instanceof Error ?
+          Promise.reject(response)
+        : Promise.resolve({ json: () => Promise.resolve(response) });
+      const harness = new Function(
+        "CONTEXT_REPO",
+        "fetch",
+        "state",
+        `var DEPLOYMENTS_BY_ENV = state.DEPLOYMENTS_BY_ENV;
+         var DEPLOYMENT_STATES_STALE = state.DEPLOYMENT_STATES_STALE;
+         ${source}
+         return loadDeploymentStates().then(function () {
+           return { map: DEPLOYMENTS_BY_ENV, stale: DEPLOYMENT_STATES_STALE };
+         });`
+      );
+      return (await harness("octo/app", fetchFake, state)) as {
+        map: Record<string, string>;
+        stale: boolean;
+      };
+    }
+
+    it("keeps the last-known deployments and flags them stale on an error payload", async () => {
+      const result = await runLoad(
+        { deployments: [], error: "GitHub API rate limit exceeded" },
+        { prod: "deleting" }
+      );
+      expect(result.map).toEqual({ prod: "deleting" });
+      expect(result.stale).toBe(true);
+    });
+
+    it("keeps the last-known deployments when the request itself fails", async () => {
+      const result = await runLoad(new Error("network down"), {
+        prod: "success"
+      });
+      expect(result.map).toEqual({ prod: "success" });
+      expect(result.stale).toBe(true);
+    });
+
+    it("replaces the map and clears the stale flag on a good response", async () => {
+      const result = await runLoad(
+        { deployments: [{ environment: "staging", status: "success" }] },
+        { prod: "deleting" }
+      );
+      expect(result.map).toEqual({ staging: "success" });
+      expect(result.stale).toBe(false);
+    });
+
+    // An empty list is a real answer, unlike an error, so it must clear.
+    it("clears the map when the listing is genuinely empty", async () => {
+      const result = await runLoad({ deployments: [] }, { prod: "success" });
+      expect(result.map).toEqual({});
+      expect(result.stale).toBe(false);
+    });
+  });
+
+  // The button must be held disabled while the listing is unreadable, and the
+  // page must keep polling so it recovers without a manual reload.
+  it("feeds the stale flag into the button state and polls until it clears", () => {
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("DEPLOYMENT_STATES_STALE");
+    expect(html).toContain(
+      "deploymentStatus(app, env), DEPLOYMENT_STATES_STALE"
+    );
+    expect(html).toContain(
+      "deploymentStatus(app, env) === 'deleting' || DEPLOYMENT_STATES_STALE"
+    );
   });
 
   it("places the primary button inline with the selectors", () => {
