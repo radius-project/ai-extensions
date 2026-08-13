@@ -48,6 +48,14 @@ describe("server scaffolding real-loopback HIT", () => {
     expect(
       table.find((route) => routeKey(route) === "ANY /api/ping")?.handler
     ).toBe(supplied);
+    // The stub's whole purpose is to fail loudly rather than silently answer,
+    // so an unexpected dispatch to a family this test did not stub must throw.
+    const stubbed = unreachableRoutes.find(
+      (route) => routeKey(route) === "ANY /api/ping"
+    )!;
+    expect(() => (stubbed.handler as unknown as () => void)()).toThrow(
+      "unexpected dispatch to un-stubbed route: ANY /api/ping"
+    );
   });
 
   it("binds an OS-assigned loopback port and preserves facade lifecycle behavior", async () => {
