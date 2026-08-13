@@ -105,10 +105,12 @@ function start(): Harness {
       }),
       isCliCommandMissing: (detail) => String(detail).includes("ENOENT"),
       isUuid: (value) => uuids.has(String(value)),
-      buildAzureCliAssistPrompt: ({ action, tenantId }) =>
-        `prompt:${action}:${tenantId}`,
-      runSessionPrompt: (prompt) => {
-        harness.calls.push(`prompt(${prompt})`);
+      buildAzureCliAssistMessage: ({ action, tenantId }) => ({
+        prompt: `prompt:${action}:${tenantId}`,
+        displayPrompt: `display:${action}:${tenantId}`
+      }),
+      runSessionPrompt: (message) => {
+        harness.calls.push(`prompt(${JSON.stringify(message)})`);
         return Promise.resolve(harness.promptOutcome);
       },
       runCommand: (command, args) => {
@@ -332,7 +334,9 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
       `{"action":"install","tenantId":"${TENANT_A}"}`
     );
     expect(ok.status).toBe(200);
-    expect(harness.calls).toContain(`prompt(prompt:install:${TENANT_A})`);
+    expect(harness.calls).toContain(
+      `prompt({"prompt":"prompt:install:${TENANT_A}","displayPrompt":"display:install:${TENANT_A}"})`
+    );
     expect(
       String(((await ok.json()) as { message: string }).message)
     ).toContain("Asked Copilot to help install Azure CLI");

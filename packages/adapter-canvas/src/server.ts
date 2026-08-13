@@ -564,7 +564,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   azureLoginRequiredResponse,
   isCliCommandMissing,
   isUuid,
-  buildAzureCliAssistPrompt,
+  buildAzureCliAssistMessage: azureCliAssistMessage,
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),

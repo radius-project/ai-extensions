@@ -21,6 +21,11 @@ export interface SessionPromptOutcome {
   error?: string;
 }
 
+export interface SessionPromptMessage {
+  prompt: string;
+  displayPrompt: string;
+}
+
 export interface AzureCliAssistInput {
   action: "install" | "login";
   tenantId: string;
@@ -78,10 +83,12 @@ export interface IdentityAuthDependencies {
   ): AzureLoginRequiredResponse;
   isCliCommandMissing(detail: unknown): boolean;
   isUuid(value: unknown): boolean;
-  buildAzureCliAssistPrompt(input: AzureCliAssistInput): string;
+  buildAzureCliAssistMessage(input: AzureCliAssistInput): SessionPromptMessage;
   // Binds the live session-prompt handler at the composition root, so this
   // module never reads the mutable module-level hook in `server.ts`.
-  runSessionPrompt(prompt: string): Promise<SessionPromptOutcome>;
+  runSessionPrompt(
+    message: SessionPromptMessage
+  ): Promise<SessionPromptOutcome>;
   runCommand: IdentityAuthRunCommand;
   errorMessage(error: unknown): string;
 }
@@ -324,8 +331,11 @@ export async function handleAzureCliAssist(
       typeof data.tenantId === "string" ? data.tenantId.trim() : "";
     const tenantId =
       dependencies.isUuid(requestedTenantId) ? requestedTenantId : "";
-    const prompt = dependencies.buildAzureCliAssistPrompt({ action, tenantId });
-    const promptResult = await dependencies.runSessionPrompt(prompt);
+    const message = dependencies.buildAzureCliAssistMessage({
+      action,
+      tenantId
+    });
+    const promptResult = await dependencies.runSessionPrompt(message);
     if (promptResult.error) {
       response.setHeader("Content-Type", "application/json");
       response.writeHead(promptResult.status);

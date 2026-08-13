@@ -240,12 +240,15 @@ function fakes(
       calls.log.push(`isUuid(${String(value)})`);
       return uuids.has(String(value));
     },
-    buildAzureCliAssistPrompt: ({ action, tenantId }) => {
-      calls.log.push(`buildAzureCliAssistPrompt(${action}|${tenantId})`);
-      return `prompt:${action}:${tenantId}`;
+    buildAzureCliAssistMessage: ({ action, tenantId }) => {
+      calls.log.push(`buildAzureCliAssistMessage(${action}|${tenantId})`);
+      return {
+        prompt: `prompt:${action}:${tenantId}`,
+        displayPrompt: `display:${action}:${tenantId}`
+      };
     },
-    runSessionPrompt: (prompt) => {
-      calls.log.push(`runSessionPrompt(${prompt})`);
+    runSessionPrompt: (message) => {
+      calls.log.push(`runSessionPrompt(${JSON.stringify(message)})`);
       if (options.promptThrows) return Promise.reject(options.promptThrows);
       return Promise.resolve(options.promptOutcome ?? { status: 200 });
     },
@@ -696,8 +699,8 @@ describe("identity-auth routes (SU-08)", () => {
     });
     expect(calls.log).toEqual([
       `isUuid(${TENANT_A})`,
-      `buildAzureCliAssistPrompt(login|${TENANT_A})`,
-      `runSessionPrompt(prompt:login:${TENANT_A})`
+      `buildAzureCliAssistMessage(login|${TENANT_A})`,
+      `runSessionPrompt({"prompt":"prompt:login:${TENANT_A}","displayPrompt":"display:login:${TENANT_A}"})`
     ]);
   });
 
@@ -724,7 +727,7 @@ describe("identity-auth routes (SU-08)", () => {
       handleAzureCliAssist,
       otherDeps
     );
-    expect(other.log[1]).toBe("buildAzureCliAssistPrompt(login|)");
+    expect(other.log[1]).toBe("buildAzureCliAssistMessage(login|)");
     expect(
       String((JSON.parse(fallback.body) as { message: string }).message)
     ).toContain("Asked Copilot to start Azure login.");
@@ -743,8 +746,8 @@ describe("identity-auth routes (SU-08)", () => {
     // Trimmed first, then rejected, so the prompt carries an empty tenant.
     expect(calls.log).toEqual([
       `isUuid(${NOT_A_GUID})`,
-      "buildAzureCliAssistPrompt(login|)",
-      "runSessionPrompt(prompt:login:)"
+      "buildAzureCliAssistMessage(login|)",
+      'runSessionPrompt({"prompt":"prompt:login:","displayPrompt":"display:login:"})'
     ]);
   });
 
@@ -790,7 +793,7 @@ describe("identity-auth routes (SU-08)", () => {
       deps
     );
     expect(recording.status).toBe(200);
-    expect(calls.log[1]).toBe("buildAzureCliAssistPrompt(login|)");
+    expect(calls.log[1]).toBe("buildAzureCliAssistMessage(login|)");
   });
 
   it("400s a malformed body with the inline detail", async () => {
@@ -927,7 +930,7 @@ interface LegacyPorts {
   azureLoginRequiredResponse: IdentityAuthDependencies["azureLoginRequiredResponse"];
   isCliCommandMissing: IdentityAuthDependencies["isCliCommandMissing"];
   isUuid: IdentityAuthDependencies["isUuid"];
-  buildAzureCliAssistPrompt: IdentityAuthDependencies["buildAzureCliAssistPrompt"];
+  buildAzureCliAssistMessage: IdentityAuthDependencies["buildAzureCliAssistMessage"];
   runSessionPrompt: IdentityAuthDependencies["runSessionPrompt"];
   runCommand: IdentityAuthDependencies["runCommand"];
   errorMessage: IdentityAuthDependencies["errorMessage"];
@@ -1120,8 +1123,8 @@ async function legacyAzureCliAssist(
     const requestedTenantId =
       typeof data.tenantId === "string" ? data.tenantId.trim() : "";
     const tenantId = ports.isUuid(requestedTenantId) ? requestedTenantId : "";
-    const prompt = ports.buildAzureCliAssistPrompt({ action, tenantId });
-    const promptResult = await ports.runSessionPrompt(prompt);
+    const message = ports.buildAzureCliAssistMessage({ action, tenantId });
+    const promptResult = await ports.runSessionPrompt(message);
     if (promptResult.error) {
       res.setHeader("Content-Type", "application/json");
       res.writeHead(promptResult.status);
@@ -1238,7 +1241,7 @@ function legacyPortsFrom(deps: IdentityAuthDependencies): LegacyPorts {
     azureLoginRequiredResponse: deps.azureLoginRequiredResponse,
     isCliCommandMissing: deps.isCliCommandMissing,
     isUuid: deps.isUuid,
-    buildAzureCliAssistPrompt: deps.buildAzureCliAssistPrompt,
+    buildAzureCliAssistMessage: deps.buildAzureCliAssistMessage,
     runSessionPrompt: deps.runSessionPrompt,
     runCommand: deps.runCommand,
     errorMessage: deps.errorMessage
