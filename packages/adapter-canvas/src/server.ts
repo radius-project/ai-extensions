@@ -998,11 +998,13 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
-// Marks a deploy that failed only in the sense that we stopped watching it —
-// the monitor timed out or died before the workflow reported a conclusion, so
-// the run may still be in flight. Distinct from a confirmed workflow failure,
-// which is the only kind a repair redeploy may act on.
-export const DEPLOY_MONITOR_LOST_KIND = "monitor-lost";
+// Marks a deploy that failed without proving that no workflow is running: the
+// dispatch outcome was never confirmed, or monitoring stopped before the run
+// reported one. Distinct from a confirmed failure — a workflow GitHub refused
+// to start, or one that ran and reported its own failure — which is the only
+// kind a repair redeploy may act on, because it is the only kind that cannot
+// leave a run in flight for a redeploy to race.
+export const DEPLOY_RUN_UNCONFIRMED_KIND = "run-unconfirmed";
 
 // Decide, server-side, whether an incoming deploy continues an existing repair
 // loop, and whether that loop still has budget. The tool validates the attempt
@@ -1052,19 +1054,21 @@ export function resolveDeployRepairLoop(
     };
   }
   // "failed" covers two different things, and only one is safe to redeploy.
-  // When monitoring timed out or died, the workflow was never observed
-  // reaching a conclusion and may still be running, so a redeploy would race a
+  // A confirmed failure — GitHub refused the dispatch, or the run finished and
+  // reported failure — leaves nothing in flight. The rest do not: the dispatch
+  // may have been accepted without us learning of it, or monitoring may have
+  // stopped before the run reported, in which case a redeploy would race a
   // second run against the same target — exactly what the in_progress check
   // above prevents, arriving by a different route. Deciding this from stored
   // state keeps the resolver synchronous; re-querying the run would put an
   // await in front of beginDeployAttempt, which must not happen.
-  if ((state?.deployErrorKind || "") === DEPLOY_MONITOR_LOST_KIND) {
+  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
     const runUrl = state?.deployRunUrl || "";
     return {
       repairLoop: false,
       attemptId: "",
       repairAttempt: 0,
-      error: `Deploy attempt "${requested}" stopped being monitored before the workflow reported a result, so it may still be running and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the run on GitHub"} and tell the user what it shows; once it has finished, they can start a new deploy.`
+      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
     };
   }
   // The cap the handoff prompt states is also enforced here, because prompt
@@ -8767,6 +8771,12 @@ function createRequestHandler(
                 ". " +
                 (de || "The dispatch request failed.") +
                 scopeHint;
+              // A non-zero exit is not proof that GitHub created no run: the
+              // request can be accepted and the answer lost (the CLI timing
+              // out, for one), and the retry above may have dispatched twice.
+              // The recognized rejections return before this point, so what
+              // reaches here is a dispatch of unknown outcome.
+              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -8796,6 +8806,11 @@ function createRequestHandler(
                 ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
                 repo +
                 ".";
+              // The dispatch succeeded, so a run was very likely created — it
+              // just never became visible here. Treating that as an ordinary
+              // failure would let a repair redeploy race a run that is queued
+              // or merely slow to surface.
+              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -9238,7 +9253,7 @@ function createRequestHandler(
             // Monitoring gave up; the run itself may still be going. Mark it so
             // an attempt-bound repair redeploy is refused rather than racing a
             // second workflow against the same target.
-            entry.state.deployErrorKind = DEPLOY_MONITOR_LOST_KIND;
+            entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
             entry.state.deployStatus = "failed";
           })()
             .catch((monErr) => {
@@ -9257,7 +9272,7 @@ function createRequestHandler(
                 // Same reasoning as the timeout above: the monitor died, so
                 // the workflow's real outcome is unknown and a repair redeploy
                 // must not assume the run is over.
-                entry.state.deployErrorKind = DEPLOY_MONITOR_LOST_KIND;
+                entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
                 entry.state.deployStatus = "failed";
               } catch {
                 /* ignore */

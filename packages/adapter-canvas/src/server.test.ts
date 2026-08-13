@@ -31,7 +31,7 @@ import {
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
-  DEPLOY_MONITOR_LOST_KIND
+  DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
@@ -1724,22 +1724,27 @@ describe("triggerDeployRepairHandoff", () => {
       expect(running.error).toMatch(/still running/);
     });
 
-    it("refuses a redeploy when monitoring was lost, since the run may still be live", () => {
+    it("refuses a redeploy when the run's outcome was never confirmed", () => {
       // The timeout path sets deployStatus to "failed" while saying the run may
-      // still be going. Without this, an attempt-bound retry would sail through
-      // the failed check and race a second workflow against the same target.
+      // still be going, and a dispatch of unknown outcome does the same. Without
+      // this, an attempt-bound retry would sail through the failed check and
+      // race a second workflow against the same target.
       const lost = resolveDeployRepairLoop(
         {
           deployAttempt: { id: "attempt-A" },
           deployStatus: "failed",
-          deployErrorKind: DEPLOY_MONITOR_LOST_KIND,
+          deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
           deployRunUrl: "https://github.com/acme/widgets/actions/runs/7"
         } as CanvasState,
         "attempt-A"
       );
       expect(lost.repairLoop).toBe(false);
       expect(lost.repairAttempt).toBe(0);
-      expect(lost.error).toMatch(/may still be running/);
+      expect(lost.error).toMatch(/may still be in flight/);
+      // The handoff told the agent to keep passing this id; the way out has to
+      // be spelled out or it will keep addressing an attempt that can never be
+      // repaired, because its outcome will never be confirmed.
+      expect(lost.error).toMatch(/without an attemptId/);
       expect(lost.error).toContain(
         "https://github.com/acme/widgets/actions/runs/7"
       );
