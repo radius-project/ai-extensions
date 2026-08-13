@@ -132,7 +132,37 @@ function dependencies(
   };
 }
 
-// The identity ports, wired as one discriminating group. `getGitHubIdentity`
+// Fixture preconditions for the narrowest differential cases.
+//
+// Slice 3c found cases whose discriminating power rested on a fixture value, so
+// an innocent fixture edit silently degraded the oracle while everything stayed
+// green. I looked for the same weakness here and measured it rather than
+// assuming: it does not reproduce. This suite records every port call in an
+// ordered log that `compare()` diffs, so wrong-port, wrong-order and
+// wrong-argument bugs are detected from the log even when the fixture values
+// collapse. Verified twice by degrading a fixture and re-running the matching
+// mutation: reversing the persist/re-read pair still fails 3 differential cases
+// with SWITCH_TARGET_LOGIN === INITIAL_LOGIN, and dropping the slug guard still
+// fails 4 with INVALID_REPO_SLUG made valid.
+//
+// So the guard below is defense in depth, not the primary detector. It pins the
+// preconditions that keep the *payload* comparison a second independent signal
+// alongside the call log, and it turns a silent fixture drift into a named
+// failure that explains itself:
+//
+// - the ordering cases read a payload derived from the preferred login, which
+//   only differs across the swap while the switched-to login differs from the
+//   login the fake starts on;
+// - the "invalid repo slug" case needs a repo the slug check rejects while
+//   another is accepted, so rejection is selective rather than blanket;
+// - the "silent preflight" case needs a falsy message and its sibling a truthy
+//   one, or the `if (accessMsg)` truthiness guard stops being pinned.
+const INITIAL_LOGIN = "initial-login";
+const SWITCH_TARGET_LOGIN = "octocat";
+const INVALID_REPO_SLUG = "nonsense";
+const VALID_REPO_SLUG = "octo/app";
+const TRUTHY_PREFLIGHT = "write, not admin";
+const SILENT_PREFLIGHT = ""; // The identity ports, wired as one discriminating group. `getGitHubIdentity`
 // answers with whatever `setPreferredGitHubLogin` last recorded, so a handler
 // that re-reads the identity *before* persisting the choice returns a
 // different, detectably-stale payload.
@@ -147,7 +177,7 @@ function identityPorts(
     validSlugs?: string[];
   } = {}
 ): Partial<IdentityProfilesDependencies> {
-  let currentLogin = options.initialLogin ?? "initial-login";
+  let currentLogin = options.initialLogin ?? INITIAL_LOGIN;
   return {
     resetGhIdentityCache: () => {
       calls.log.push("resetGhIdentityCache");
@@ -793,7 +823,9 @@ function legacyCredentialProfiles(
   res.setHeader("Content-Type", "application/json");
   res.writeHead(200);
   res.end(
-    JSON.stringify({ profiles: repo ? ports.listCredentialProfiles(repo) : [] })
+    JSON.stringify({
+      profiles: repo ? ports.listCredentialProfiles(repo) : []
+    })
   );
 }
 
@@ -1090,6 +1122,41 @@ async function recordMigrated(input: DifferentialCase): Promise<Side> {
 }
 
 describe("identity-profiles legacy/migrated differential contract", () => {
+  it("keeps the fixtures that make the narrowest cases discriminating", async () => {
+    // The ordering cases pin persist-before-re-read. That is only observable
+    // because the switched-to login differs from the login the fake starts on.
+    expect(SWITCH_TARGET_LOGIN).not.toBe(INITIAL_LOGIN);
+    expect(identityFor(SWITCH_TARGET_LOGIN)).not.toEqual(
+      identityFor(INITIAL_LOGIN)
+    );
+
+    // Assert it against the fake itself rather than against the constants, so
+    // this still fails if `identityPorts` stops threading the preference
+    // through to `getGitHubIdentity` (which is what makes order observable).
+    const calls: Calls = { log: [] };
+    const ports = identityPorts(calls);
+    const before = await ports.getGitHubIdentity!();
+    ports.setPreferredGitHubLogin!(SWITCH_TARGET_LOGIN);
+    const after = await ports.getGitHubIdentity!();
+    expect(before).not.toEqual(after);
+    expect(before).toEqual(identityFor(INITIAL_LOGIN));
+    expect(after).toEqual(identityFor(SWITCH_TARGET_LOGIN));
+
+    // The slug check must reject the "invalid" fixture and accept the valid one,
+    // or the skipped-preflight case silently becomes a valid-repo case.
+    const slugPorts = identityPorts(
+      { log: [] },
+      { validSlugs: [VALID_REPO_SLUG] }
+    );
+    expect(slugPorts.isValidRepoSlug!(VALID_REPO_SLUG)).toBe(true);
+    expect(slugPorts.isValidRepoSlug!(INVALID_REPO_SLUG)).toBe(false);
+
+    // The two preflight cases must differ in truthiness, not merely in text,
+    // or the `if (accessMsg)` guard stops being pinned.
+    expect(Boolean(TRUTHY_PREFLIGHT)).toBe(true);
+    expect(Boolean(SILENT_PREFLIGHT)).toBe(false);
+  });
+
   it.each<[string, DifferentialCase]>([
     [
       "populated repo",
@@ -1127,21 +1194,31 @@ describe("identity-profiles legacy/migrated differential contract", () => {
       "valid repo with a preflight message",
       {
         route: "github-identity",
-        query: "?repo=octo/app",
-        identity: { validSlugs: ["octo/app"], preflight: "write, not admin" }
+        query: `?repo=${VALID_REPO_SLUG}`,
+        identity: {
+          validSlugs: [VALID_REPO_SLUG],
+          preflight: TRUTHY_PREFLIGHT
+        }
       }
     ],
     [
       "valid repo with a silent preflight",
       {
         route: "github-identity",
-        query: "?repo=octo/app",
-        identity: { validSlugs: ["octo/app"], preflight: "" }
+        query: `?repo=${VALID_REPO_SLUG}`,
+        identity: {
+          validSlugs: [VALID_REPO_SLUG],
+          preflight: SILENT_PREFLIGHT
+        }
       }
     ],
     [
       "invalid repo slug",
-      { route: "github-identity", query: "?repo=nonsense", identity: {} }
+      {
+        route: "github-identity",
+        query: `?repo=${INVALID_REPO_SLUG}`,
+        identity: { validSlugs: [VALID_REPO_SLUG] }
+      }
     ],
     ["whitespace repo", { route: "github-identity", query: "?repo=%20" }],
     [
@@ -1179,11 +1256,17 @@ describe("identity-profiles legacy/migrated differential contract", () => {
   it.each<[string, DifferentialCase]>([
     [
       "successful switch",
-      { route: "github-account", body: '{"login":"octocat"}' }
+      {
+        route: "github-account",
+        body: JSON.stringify({ login: SWITCH_TARGET_LOGIN })
+      }
     ],
     [
       "untrimmed login",
-      { route: "github-account", body: '{"login":"  octocat  "}' }
+      {
+        route: "github-account",
+        body: JSON.stringify({ login: `  ${SWITCH_TARGET_LOGIN}  ` })
+      }
     ],
     [
       "failed switch with a reason",
@@ -1223,7 +1306,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
       "throwing switch",
       {
         route: "github-account",
-        body: '{"login":"octocat"}',
+        body: JSON.stringify({ login: SWITCH_TARGET_LOGIN }),
         identity: { switchThrows: new Error("spawn failed") }
       }
     ],
@@ -1231,7 +1314,7 @@ describe("identity-profiles legacy/migrated differential contract", () => {
       "throwing identity re-read after a successful switch",
       {
         route: "github-account",
-        body: '{"login":"octocat"}',
+        body: JSON.stringify({ login: SWITCH_TARGET_LOGIN }),
         identity: { identityThrows: new Error("gh unavailable") }
       }
     ]
