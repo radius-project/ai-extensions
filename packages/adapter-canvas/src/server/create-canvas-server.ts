@@ -168,6 +168,7 @@ export function createCanvasServer(
       if (!entry) return;
       instances.delete(instanceId);
       await closeServer(entry.server, force);
+      dependencies.onStopped?.(instanceId);
     })();
     stopping.set(instanceId, work);
     void work.then(

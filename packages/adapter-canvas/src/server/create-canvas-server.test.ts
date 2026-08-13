@@ -193,4 +193,50 @@ describe("createCanvasServer (SU-02)", () => {
     expect(secondFinished).toBe(true);
     expect(server.closeCalls).toBe(1);
   });
+
+  it("signals the stopped hook once per instance, after the entry is gone and the socket is closed", async () => {
+    const { container, dependencies, fakeServers } = setup();
+    const stopped: string[] = [];
+    const observedAtStop: Array<{ instances: number; closeCalls: number }> = [];
+    dependencies.onStopped = (instanceId) => {
+      stopped.push(instanceId);
+      observedAtStop.push({
+        instances: container.instances.size,
+        closeCalls: fakeServers[0].closeCalls
+      });
+    };
+    await container.getOrCreate("panel-a");
+
+    await Promise.all([container.stop("panel-a"), container.stop("panel-a")]);
+    await container.stop("panel-a");
+
+    expect(stopped).toEqual(["panel-a"]);
+    expect(observedAtStop).toEqual([{ instances: 0, closeCalls: 1 }]);
+  });
+
+  it("still signals the stopped hook when closing the socket throws", async () => {
+    const { container, dependencies, fakeServers } = setup();
+    const stopped: string[] = [];
+    dependencies.onStopped = (instanceId) => stopped.push(instanceId);
+    await container.getOrCreate("panel-a");
+    fakeServers[0].close = () => {
+      throw new Error("close failed");
+    };
+
+    await expect(container.stop("panel-a")).resolves.toBeUndefined();
+
+    expect(stopped).toEqual(["panel-a"]);
+    expect(container.instances.size).toBe(0);
+  });
+
+  it("does not signal a stop for an instance that was never started", async () => {
+    const { container, dependencies } = setup();
+    const stopped: string[] = [];
+    dependencies.onStopped = (instanceId) => stopped.push(instanceId);
+
+    await container.stop("never-started");
+    await container.stopAll();
+
+    expect(stopped).toEqual([]);
+  });
 });
