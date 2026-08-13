@@ -6681,7 +6681,12 @@ function createRequestHandler(
         const reader = createDeployStatusReader({
           repo,
           environment: requestedEnv,
-          application: requestedApp
+          application: requestedApp,
+          // While a deploy is in flight, scope to its run so a previous
+          // deployment's newest-repo-wide artifact can't overwrite the live
+          // topology/status. The in-flight run hasn't uploaded yet, so this
+          // read is empty and the seeded live statuses stand.
+          runId: deploying ? (state.deployRunId ?? null) : null
         });
         const result = await reader.graph();
         graph = result.graph;
