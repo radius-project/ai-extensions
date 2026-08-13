@@ -12,6 +12,10 @@ import { describe, expect, it } from "vitest";
 // characters. Nothing caught it: the corruption sat in comments, so tsc, eslint,
 // prettier and the whole suite stayed green. These assertions turn that class of
 // corruption into a failing gate instead of a silent commit.
+//
+// The glyph pins below also cover a second, quieter failure mode: writing a file
+// as ASCII silently transliterates every non-ASCII character to "?", which
+// leaves no BOM, no U+FFFD and no mojibake for the scans above to find.
 
 const ROOT = join(__dirname, "..", "..");
 const SCANNED_DIRS = ["src", "test", "plugins"];
@@ -77,12 +81,14 @@ describe("server.ts response glyphs", () => {
 
   // Pinned by code point rather than by pasting the glyph, so this assertion
   // still means something if the test file itself is ever re-encoded.
+  // The code point is carried as its own label so a failure names the missing
+  // character rather than printing the (possibly mangled) glyph back at you.
   it.each([
-    ["check mark", "\u2705"],
-    ["cross mark", "\u274C"],
-    ["warning sign", "\u26A0"],
-    ["rightwards arrow", "\u2192"]
-  ])("still emits the %s (U+%s) verbatim", (_label, glyph) => {
+    ["check mark", "2705", "\u2705"],
+    ["cross mark", "274C", "\u274C"],
+    ["warning sign", "26A0", "\u26A0"],
+    ["rightwards arrow", "2192", "\u2192"]
+  ])("still emits the %s (U+%s) verbatim", (_label, _codePoint, glyph) => {
     expect(server).toContain(glyph);
   });
 
