@@ -93,6 +93,7 @@ export function createCanvasServer(
       markActivity
     });
     dependencies.prepareIdentity();
+    const state = dependencies.createState();
     const server = dependencies.createHttpServer(handler);
     const preferredPort = await dependencies.preferredPort(instanceId);
     try {
@@ -107,7 +108,7 @@ export function createCanvasServer(
       baseUrl,
       url: `${baseUrl}/?page=${page}`,
       page,
-      state: dependencies.createState()
+      state
     };
     instances.set(instanceId, entry);
     return entry;
