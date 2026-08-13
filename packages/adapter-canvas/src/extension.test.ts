@@ -25,7 +25,18 @@ describe("RU-20: extension.ts is a thin joinSession composition root", () => {
     expect(matches).toHaveLength(1);
   });
 
-  it("does not inline any of the 6 action or 10 tool declarations (they live in runtime/declarations.ts)", () => {
+  it("finishes bootstrap and session attachment before installing shutdown handlers", () => {
+    const bootstrap = source.indexOf(
+      "const radiusExtension = await bootstrapRadiusExtension("
+    );
+    const signalHandlers = source.indexOf(
+      'for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"])'
+    );
+    expect(bootstrap).toBeGreaterThan(-1);
+    expect(signalHandlers).toBeGreaterThan(bootstrap);
+  });
+
+  it("does not inline any of the 2 action or 6 tool declarations (they live in runtime/declarations.ts)", () => {
     expect(source).not.toContain('name: "render_graph"');
     expect(source).not.toContain('name: "radius_deploy"');
   });

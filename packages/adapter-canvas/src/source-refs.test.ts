@@ -167,4 +167,29 @@ describe("source-code reference state", () => {
     expect(rebuilt[0].codeReference).toBe("src/later.ts");
     expect(state.state.pendingSourceRefs).toEqual([]);
   });
+
+  it("replaces an already queued reference for the same context and resource", () => {
+    const state = entry();
+    setSourceRefResources(state, "graph", [], {
+      repo: "acme/app",
+      branch: "main"
+    });
+    const token = getSourceRefResources(state, "graph").context?.token || "";
+
+    updateSourceRefs(state, token, [
+      { id: "later", codeReference: "src/old.ts" }
+    ]);
+    const result = updateSourceRefs(state, token, [
+      { id: "later", codeReference: "src/new.ts" }
+    ]);
+
+    expect(result).toMatchObject({ updated: 0, queued: 1, skipped: 0 });
+    expect(state.state.pendingSourceRefs).toEqual([
+      {
+        contextToken: token,
+        id: "later",
+        codeReference: "src/new.ts"
+      }
+    ]);
+  });
 });
