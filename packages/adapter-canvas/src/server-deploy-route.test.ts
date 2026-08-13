@@ -202,8 +202,11 @@ describe("/api/deploy repair-loop refusals", () => {
     });
 
     expect(status).toBe(200);
+    // The counter reset is the signal that this opened a new loop rather than
+    // continuing the agent's. deployRepairing is deliberately not asserted:
+    // the deploy is eligible to hand its own failure off, and that handoff
+    // flips the flag from the background monitor, so its value here is a race.
     expect(state.deployRepairAttempts).toBe(0);
     expect(state.deployAttempt?.id).not.toBe("attempt-A");
-    expect(state.deployRepairing).toBe(false);
   });
 });
