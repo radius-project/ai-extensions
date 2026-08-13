@@ -1000,7 +1000,27 @@ const BRANCH_JSON = JSON.stringify([
   { name: "dev", commit: { sha: "bbb" } }
 ]);
 
+// Two differential cases only exercise the behavior they are named for while a
+// fixture precondition holds: the workspace-branch case needs a branch the
+// listing does NOT return (otherwise it silently becomes the "already listed"
+// case and stops covering the front-insert), and the stale-cache case needs a
+// cached sha key the listing does NOT return (otherwise a merge and a rebuild
+// are indistinguishable). Both preconditions are asserted below so that editing
+// a fixture degrades loudly instead of quietly weakening the oracle.
+const WORKSPACE_ONLY_BRANCH = "feature/x";
+const STALE_SHA_KEY = "old";
+
 describe("repositories legacy/migrated differential contract", () => {
+  it("keeps the fixtures that make the two narrowest cases discriminating", () => {
+    const names = (
+      JSON.parse(BRANCH_JSON) as { name: string; commit: { sha: string } }[]
+    ).map((b) => b.name);
+    // If either of these ever becomes false, the corresponding differential case
+    // still passes but no longer distinguishes the behavior it exists to pin.
+    expect(names).not.toContain(WORKSPACE_ONLY_BRANCH);
+    expect(names).not.toContain(STALE_SHA_KEY);
+  });
+
   it.each<[string, DifferentialCase]>([
     [
       "merged personal and org listing",
@@ -1114,7 +1134,10 @@ describe("repositories legacy/migrated differential contract", () => {
       {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
-        state: { workspaceBranch: "feature/x", workspaceRepo: "octo/app" },
+        state: {
+          workspaceBranch: WORKSPACE_ONLY_BRANCH,
+          workspaceRepo: "octo/app"
+        },
         script: {
           [ARGV.branchObjects("octo/app")]: { stdout: BRANCH_JSON }
         }
@@ -1148,8 +1171,8 @@ describe("repositories legacy/migrated differential contract", () => {
         route: "discover-branches",
         body: '{"repo":"octo/app"}',
         state: {
-          branches: ["old"],
-          branchShas: { old: "zzz" },
+          branches: [STALE_SHA_KEY],
+          branchShas: { [STALE_SHA_KEY]: "zzz" },
           diffTargetRepo: "octo/old"
         },
         script: {
