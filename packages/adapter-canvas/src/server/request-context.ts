@@ -30,6 +30,7 @@ export function createRequestContext(
   instances: ReadonlyMap<string, CanvasServerEntry>
 ): CanvasRequestContext {
   const url = new URL(request.url || "/", "http://localhost");
+  syncRequestedPage(instances.get(instanceId), url.searchParams.get("page"));
   let body: Promise<string> | undefined;
 
   function readTextBody(): Promise<string> {
