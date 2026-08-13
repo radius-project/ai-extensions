@@ -4,7 +4,11 @@ import {
   DEFAULT_CANVAS_PAGE,
   appBicepReminder,
   appBicepHandoffPrompt,
+  appBicepHandoffDisplayPrompt,
+  appBicepHandoffMessage,
   deployRepairHandoffPrompt,
+  deployRepairHandoffDisplayPrompt,
+  deployRepairHandoffMessage,
   DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   graphTriggerTargets,
@@ -122,6 +126,58 @@ describe("appBicepHandoffPrompt", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph");
     expect(msg).not.toContain("(branch ");
     expect(msg).not.toContain("(branches ");
+  });
+});
+
+describe("appBicepHandoffDisplayPrompt", () => {
+  it("states the repo, view, and branch without the agent-only mechanics", () => {
+    const msg = appBicepHandoffDisplayPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).toBe(
+      "Generating the application model for acme/widgets (branch `feat`) so the Radius graph view can render."
+    );
+  });
+
+  it("names both branches for a graph diff so the user can tell what is being modeled", () => {
+    const msg = appBicepHandoffDisplayPrompt("acme/widgets", "graph-diff", [
+      "main",
+      "feat"
+    ]);
+    expect(msg).toContain("branches `main`, `feat`");
+    expect(msg).toContain("graph-diff");
+  });
+
+  it("omits the repo and branch clauses when neither is known", () => {
+    expect(appBicepHandoffDisplayPrompt("")).toBe(
+      "Generating the application model so the Radius graph view can render."
+    );
+  });
+
+  it("withholds the skill and tool mechanics the agent half carries", () => {
+    const full = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const display = appBicepHandoffDisplayPrompt("acme/widgets", "graph", [
+      "feat"
+    ]);
+    // Guard the assertion itself: these tokens must really be in the agent
+    // half, or "not.toContain" below would pass vacuously.
+    expect(full).toContain("radius_generate_app");
+    expect(full).toContain("radius-app-bicep");
+    expect(display).not.toContain("radius_generate_app");
+    expect(display).not.toContain("radius-app-bicep");
+    expect(display).not.toContain("recipe pack");
+  });
+});
+
+describe("appBicepHandoffMessage", () => {
+  it("pairs the agent prompt with its display stand-in without swapping them", () => {
+    const message = appBicepHandoffMessage("acme/widgets", "graph", ["feat"]);
+    expect(message.prompt).toBe(
+      appBicepHandoffPrompt("acme/widgets", "graph", ["feat"])
+    );
+    expect(message.displayPrompt).toBe(
+      appBicepHandoffDisplayPrompt("acme/widgets", "graph", ["feat"])
+    );
+    expect(message.prompt).toContain("radius_generate_app");
+    expect(message.displayPrompt).not.toContain("radius_generate_app");
   });
 });
 
@@ -510,5 +566,57 @@ describe("deployRepairHandoffPrompt", () => {
     expect(
       deployRepairHandoffPrompt("octo/app", "main", failure)
     ).not.toContain("attemptId");
+  });
+});
+
+describe("deployRepairHandoffDisplayPrompt", () => {
+  it("states the repo and branch without the diagnostic or the repair mechanics", () => {
+    const msg = deployRepairHandoffDisplayPrompt("octo/app", "feat");
+    expect(msg).toBe(
+      "Diagnosing the failed Radius deploy of octo/app (branch `feat`) and repairing it if the app model caused it."
+    );
+  });
+
+  it("omits the repo and branch clauses when neither is known", () => {
+    expect(deployRepairHandoffDisplayPrompt("", "")).toBe(
+      "Diagnosing the failed Radius deploy and repairing it if the app model caused it."
+    );
+  });
+
+  it("withholds the diagnostic and tool names the agent half carries", () => {
+    const full = deployRepairHandoffPrompt("octo/app", "feat", {
+      error: "BCP037: unknown property",
+      deployRunUrl: "https://github.com/octo/app/actions/runs/42"
+    });
+    const display = deployRepairHandoffDisplayPrompt("octo/app", "feat");
+    // Guard against a vacuous "not.toContain" if the agent half is reworded.
+    expect(full).toContain("radius_deploy_status");
+    expect(full).toContain("BCP037");
+    expect(display).not.toContain("radius_deploy_status");
+    expect(display).not.toContain("radius_generate_app");
+    expect(display).not.toContain("BCP037");
+    expect(display).not.toContain("actions/runs/42");
+  });
+});
+
+describe("deployRepairHandoffMessage", () => {
+  it("pairs the agent prompt with its display stand-in without swapping them", () => {
+    const message = deployRepairHandoffMessage("octo/app", "feat", {
+      error: "BCP037: unknown property",
+      deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+      attemptId: "attempt-A"
+    });
+    expect(message.prompt).toBe(
+      deployRepairHandoffPrompt("octo/app", "feat", {
+        error: "BCP037: unknown property",
+        deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+        attemptId: "attempt-A"
+      })
+    );
+    expect(message.displayPrompt).toBe(
+      deployRepairHandoffDisplayPrompt("octo/app", "feat")
+    );
+    expect(message.prompt).toContain("attempt-A");
+    expect(message.displayPrompt).not.toContain("attempt-A");
   });
 });
