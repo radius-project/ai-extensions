@@ -26,8 +26,8 @@ const legacySource = readFileSync(
 );
 
 describe("server route ownership boundary", () => {
-  it("pins all 37 routes to one owner and an explicit legacy fallback", () => {
-    expect(SERVER_ROUTE_TABLE).toHaveLength(37);
+  it("pins all 38 routes to one owner and an explicit legacy fallback", () => {
+    expect(SERVER_ROUTE_TABLE).toHaveLength(38);
     expect(
       SERVER_ROUTE_TABLE.map(({ method, path, match }) => ({
         method,
@@ -53,7 +53,18 @@ describe("server route ownership boundary", () => {
         route.match === "prefix" ?
           `pathname.startsWith("${route.path}")`
         : `pathname === "${route.path}"`;
-      const offset = legacySource.indexOf(matcher);
+      const methodMatcher =
+        route.method === "ANY" ? "" : `req.method === "${route.method}"`;
+      // A path can carry more than one method (GET and POST /api/operations),
+      // so advance past occurrences whose method does not match.
+      let offset = legacySource.indexOf(matcher);
+      while (
+        offset >= 0 &&
+        methodMatcher &&
+        !legacySource.slice(offset, offset + 180).includes(methodMatcher)
+      ) {
+        offset = legacySource.indexOf(matcher, offset + matcher.length);
+      }
       expect(offset, routeKey(route)).toBeGreaterThan(-1);
       if (route.method !== "ANY") {
         expect(legacySource.slice(offset, offset + 180)).toContain(

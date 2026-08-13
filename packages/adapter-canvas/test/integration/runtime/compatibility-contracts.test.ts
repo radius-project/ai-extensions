@@ -172,9 +172,18 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     }
   });
 
-  it("pins all 37 loopback route method and path declarations", () => {
-    expect(fixture.routes).toHaveLength(37);
-    expect(SERVER_ROUTE_TABLE).toHaveLength(37);
+  it("pins all 38 loopback route method and path declarations", () => {
+    const source = readFileSync(
+      resolve(REPO_ROOT, "packages/adapter-canvas/src/server.ts"),
+      "utf8"
+    );
+
+    expect(fixture.routes).toHaveLength(38);
+    expect(SERVER_ROUTE_TABLE).toHaveLength(38);
+    expect(
+      new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
+        .size
+    ).toBe(38);
     expect(
       SERVER_ROUTE_TABLE.map(({ method, path, match }) => ({
         method,
@@ -182,6 +191,32 @@ describe("Phase 0 reviewed compatibility oracles", () => {
         match
       }))
     ).toEqual(fixture.routes);
+
+    // The route table is the single source of routing truth, so the total is
+    // asserted against it rather than by counting matchers in server.ts. Only
+    // routes still on the legacy fallback are required to have a matcher there,
+    // which keeps this contract correct as families migrate out.
+    for (const route of SERVER_ROUTE_TABLE) {
+      if (route.migration !== "legacy") continue;
+      const matcher =
+        route.match === "prefix" ?
+          `pathname.startsWith("${route.path}")`
+        : `pathname === "${route.path}"`;
+      const methodMatcher =
+        route.method === "ANY" ? "" : `req.method === "${route.method}"`;
+      let offset = source.indexOf(matcher);
+      while (
+        offset >= 0 &&
+        methodMatcher &&
+        !source.slice(offset, offset + 180).includes(methodMatcher)
+      ) {
+        offset = source.indexOf(matcher, offset + matcher.length);
+      }
+      expect(offset, `${route.method} ${route.path}`).toBeGreaterThan(-1);
+      if (route.method !== "ANY") {
+        expect(source.slice(offset, offset + 180)).toContain(methodMatcher);
+      }
+    }
   });
 
   it("pins selected stable markers for every page renderer", () => {

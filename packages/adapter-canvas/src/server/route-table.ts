@@ -116,6 +116,7 @@ export const SERVER_ROUTE_TABLE: readonly ServerRoute[] = [
     "identity-credentials"
   ),
   legacy("POST", "/api/delete-environment", "exact", "json", "environments"),
+  legacy("POST", "/api/operations", "exact", "json", "operations-status"),
   legacy("POST", "/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   legacy(
     "GET",
