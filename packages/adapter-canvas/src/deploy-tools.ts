@@ -32,6 +32,10 @@ export interface DeployPayload extends CanvasDeployParams {
   branch: string;
   appFile: string;
   agentInitiated: true;
+  // Empty unless this call is bound to a repair loop. The route — not the
+  // client — decides what it means: it validates the ID against the attempt it
+  // currently holds and derives repair-loop ownership from that.
+  attemptId: string;
 }
 
 export interface DeployStatusInput {
@@ -144,7 +148,12 @@ export function buildDeployPayload(
     branch: args.branch || snapshot.branch || last.branch || "",
     appFile:
       args.appFile || snapshot.appFile || last.appFile || ".radius/app.bicep",
-    agentInitiated: true
+    agentInitiated: true,
+    // Forward the attempt this call belongs to so the route can re-check it
+    // atomically and keep the redeploy inside the same repair loop. An
+    // unbound call carries no attempt: it is an ordinary deploy that must stay
+    // eligible to hand its failure off.
+    attemptId: args.attemptId || ""
   };
 }
 

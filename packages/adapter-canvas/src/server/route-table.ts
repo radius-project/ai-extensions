@@ -113,6 +113,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "identity-credentials"
   ),
   declare("POST", "/api/delete-environment", "exact", "json", "environments"),
+  declare("POST", "/api/operations", "exact", "json", "operations-status"),
   declare("POST", "/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   declare(
     "GET",

@@ -15,7 +15,7 @@ export function composeCanvasServerDependencies(
 export function createProductionCanvasServerDependencies(
   seams: Pick<
     CanvasServerDependencies,
-    "createRequestHandler" | "defaultPage" | "preferredPort"
+    "createRequestHandler" | "defaultPage" | "onStarted" | "preferredPort"
   >,
   overrides: CanvasServerDependencyOverrides = {}
 ): CanvasServerDependencies {
@@ -26,6 +26,7 @@ export function createProductionCanvasServerDependencies(
       createState: () => ({}),
       defaultPage: seams.defaultPage,
       now: () => Date.now(),
+      onStarted: seams.onStarted,
       preferredPort: seams.preferredPort,
       prepareIdentity: () => {
         const persistedLogin = getPreferredGitHubLogin();
