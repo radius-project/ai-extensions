@@ -14,6 +14,7 @@ import {
   announcementOptions,
   buildStages,
   createOperation,
+  canResumeInput,
   createRegistry,
   enterStage,
   finish,
@@ -22,6 +23,8 @@ import {
   isTerminalState,
   requestStop,
   requireInput,
+  resumeAfterInput,
+  setExecutionActive,
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
@@ -31,7 +34,6 @@ import {
   recordGitHubEnvironment,
   recordServicePrincipal,
   reconcileRestoredOperation,
-  resumeAfterInput,
   sanitizeResumeTarget,
   setCloudContext,
   setStageState,
@@ -52,6 +54,19 @@ function newOp(overrides = {}) {
     environment: "dev",
     ...overrides
   });
+}
+
+function addSafeResumeRequest(op) {
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: {
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider
+    }
+  };
+  return op;
 }
 
 describe("stage inventory", () => {
@@ -293,19 +308,28 @@ describe("journey capture", () => {
   });
 
   describe("interactive input transitions", () => {
-    it("keeps an operation running while input is requested, then resumes it", () => {
+    it("marks an operation input-required, then resumes it", () => {
       const op = newOp();
       requireInput(op, {
         code: "app-selection-required",
         message: "Choose an app."
       });
-      expect(op.state).toBe("running");
+      expect(op.state).toBe("input_required");
       expect(op.inputRequired).toMatchObject({
         code: "app-selection-required"
       });
       resumeAfterInput(op);
       expect(op.state).toBe("running");
       expect(op.inputRequired).toBeNull();
+    });
+
+    it("uses the default prompt code as the default checkpoint", () => {
+      const op = newOp();
+      requireInput(op, { message: "Provide input." });
+      expect(op.inputRequired).toMatchObject({
+        code: "input-required",
+        checkpoint: "input-required"
+      });
     });
   });
 
@@ -838,6 +862,7 @@ describe("registry", () => {
     const first = createRegistry({ store });
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     first.put(op);
     await first.persist();
 
@@ -852,6 +877,7 @@ describe("registry", () => {
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     let envelope = {
       schemaVersion: 1,
       operations: [
@@ -910,6 +936,7 @@ describe("registry", () => {
   it("keeps valid restored records when rewriting a cleaned envelope fails", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     const diagnostics = [];
     const store = {
       report(diagnostic) {
@@ -983,6 +1010,7 @@ describe("startup reconciliation", () => {
   it("restores input-required operations without stale filtering", () => {
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     reconcileRestoredOperation(op);
     expect(op.recoveryState).toBe("waiting_input");
@@ -1031,10 +1059,147 @@ describe("keepalive predicate", () => {
     expect(setupInFlight()).toBe(false);
   });
 
+  describe("server-owned input lifecycle", () => {
+    it("keeps the repository lock while excluding input waits from execution keepalive", () => {
+      const registry = createRegistry();
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/input",
+        environment: "dev"
+      });
+      registry.start(op);
+      setExecutionActive(op, true);
+      expect(registry.anyExecuting()).toBe(true);
+
+      setExecutionActive(op, false);
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+
+      expect(op.state).toBe("input_required");
+      expect(registry.running("contoso/input")).toBe(op);
+      expect(registry.anyExecuting()).toBe(false);
+      expect(
+        registry.start(
+          createOperation({
+            provider: "azure",
+            repo: "contoso/input",
+            environment: "prod"
+          })
+        )
+      ).toMatchObject({
+        ok: false,
+        conflict: { operationId: op.operationId }
+      });
+    });
+
+    it("resumes only the matching idle operation checkpoint", () => {
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/input",
+        environment: "dev"
+      });
+      requireInput(op, {
+        code: "service-management-reference-required",
+        checkpoint: "azure-service-management-reference",
+        message: "Enter the Service Management Reference."
+      });
+
+      expect(
+        canResumeInput(op, {
+          code: "service-management-reference-required",
+          checkpoint: "azure-service-management-reference",
+          repo: "contoso/input",
+          environment: "dev",
+          provider: "azure"
+        })
+      ).toBe(true);
+      expect(canResumeInput(op, { code: "app-selection-required" })).toBe(
+        false
+      );
+
+      resumeAfterInput(op);
+      expect(op.state).toBe("running");
+      expect(op.inputRequired).toBeNull();
+      expect(canResumeInput(op)).toBe(false);
+    });
+
+    it("keeps an input wait resumable for an hour", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 59 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/abandoned-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.running(op.repo)).toBe(op);
+    });
+
+    it("turns an expired input wait into a durable typed terminal record", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 61 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/expired-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.get(op.operationId)).toBe(op);
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure.code).toBe("operation-input-expired");
+      expect(registry.latest(op.repo)).toBe(op);
+    });
+  });
+
   it("holds the process open while a setup is running", () => {
     operations.clear();
     const op = newOp();
     operations.start(op);
+    setExecutionActive(op, true);
+    expect(setupInFlight()).toBe(true);
+    finishSucceeded(op);
+    expect(setupInFlight()).toBe(false);
+    operations.clear();
+  });
+
+  it("holds the process open while dispatched verification is pending", () => {
+    operations.clear();
+    const op = newOp();
+    operations.start(op);
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      sha: null,
+      runId: null,
+      runUrl: null
+    };
+
     expect(setupInFlight()).toBe(true);
     finishSucceeded(op);
     expect(setupInFlight()).toBe(false);
@@ -1285,7 +1450,8 @@ describe("the step-marker convention at the call sites", () => {
     const out = [];
     const re = /steps\.push\(\s*([\s\S]*?)\);/g;
     let m;
-    while ((m = re.exec(SERVER_SRC))) out.push(m[1].trim());
+    while ((m = re.exec(SERVER_SRC)))
+      out.push(m[1].trim().replace(/,\s*$/, ""));
     return out;
   }
 
@@ -1340,6 +1506,9 @@ describe("environment creation boundaries", () => {
   const createStart = SERVER_SRC.indexOf(
     'pathname === "/api/create-environment"'
   );
+  const operationStart = SERVER_SRC.indexOf(
+    'pathname === "/api/operations" && req.method === "POST"'
+  );
   const createEnd = SERVER_SRC.indexOf(
     'pathname === "/api/load-graph-stream"',
     createStart + 'pathname === "/api/create-environment"'.length
@@ -1348,6 +1517,29 @@ describe("environment creation boundaries", () => {
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
+
+  it("registers and accepts a server-owned operation before scheduling setup", () => {
+    const route = SERVER_SRC.slice(operationStart, azureStart);
+    expect(operationStart).toBeGreaterThan(-1);
+    expect(route).toContain("operations.start(op)");
+    expect(route).toContain("res.writeHead(202)");
+    expect(route).toContain("scheduleServerOwnedTask");
+    expect(route.indexOf("res.end(")).toBeLessThan(
+      route.indexOf("scheduleServerOwnedTask")
+    );
+  });
+
+  it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
+    expect(SERVER_SRC).toContain('"X-Radius-Server-Owned": serverOwnedToken');
+    expect(SERVER_SRC).toContain(
+      'req.headers["x-radius-server-owned"] === serverOwnedToken'
+    );
+    expect(SERVER_SRC).toContain(
+      "if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now()"
+    );
+    expect(SERVER_SRC).toContain('postInternal("/api/azure-auto-setup"');
+    expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');
+  });
 
   it("preflights GHCR package scopes before selecting the Azure subscription", () => {
     const ghcrPreflight = azureRoute.indexOf("preflightGhcrPackageWriteAccess");

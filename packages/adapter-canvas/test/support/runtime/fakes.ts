@@ -279,7 +279,12 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       )
     },
     operations: {
-      setupInFlight: vi.fn(() => false)
+      setupInFlight: vi.fn(() => false),
+      hasActiveEnvironmentTasks: vi.fn((_instanceId: string) => false),
+      markEnvironmentInstanceShuttingDown: vi.fn(),
+      onEnvironmentTasksSettled: vi.fn(
+        (_instanceId: string, _listener: () => void) => () => {}
+      )
     },
     radiusAppBicepSkill: vi.fn(
       (repoPath?: string) => `SKILL.md content for ${repoPath || "."}`

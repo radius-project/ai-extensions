@@ -180,6 +180,7 @@ export function createRadiusExtension(
         const closes: Array<Promise<void>> = [];
         for (const [id, entry] of deps.servers) {
           try {
+            deps.operations.markEnvironmentInstanceShuttingDown(id);
             entry.server.closeAllConnections?.();
             closes.push(
               new Promise<void>((resolve) => {

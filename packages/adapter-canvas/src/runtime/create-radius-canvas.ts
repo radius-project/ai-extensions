@@ -24,6 +24,8 @@ import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
 import type { CanvasState } from "../shared.js";
 
+const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
+
 interface CanvasContext {
   extensionId: string;
   canvasId: string;
@@ -46,6 +48,7 @@ function isCurrentSourceRefToken(
 // Everything below this line is created by createRadiusCanvas so it can close
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
 export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
+  const closeGenerations = new Map<string, number>();
   const { workspaceState, fetchBicepForBranch } =
     createGraphContextHelpers(deps);
 
@@ -215,6 +218,10 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     inputSchema: buildRadiusCanvasInputSchema(DEFAULT_CANVAS_PAGE),
     actions,
     open: async (ctx: CanvasContext) => {
+      closeGenerations.set(
+        ctx.instanceId,
+        (closeGenerations.get(ctx.instanceId) || 0) + 1
+      );
       const input = record(ctx.input);
       const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
       const entry = await deps.getOrCreateServer(ctx.instanceId, page);
@@ -378,7 +385,36 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
+        if (deps.operations.hasActiveEnvironmentTasks(ctx.instanceId)) {
+          const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
+          let closeTimer: ReturnType<typeof setTimeout> | undefined;
+          const closeEntry = () => {
+            stopListening();
+            if (closeTimer) clearTimeout(closeTimer);
+            if (closeGenerations.get(ctx.instanceId) !== closeGeneration)
+              return;
+            if (deps.servers.get(ctx.instanceId) !== entry) return;
+            deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
+            deps.servers.delete(ctx.instanceId);
+            closeGenerations.delete(ctx.instanceId);
+            entry.server.close();
+          };
+          const stopListening = deps.operations.onEnvironmentTasksSettled(
+            ctx.instanceId,
+            () => {
+              closeEntry();
+            }
+          );
+          closeTimer = setTimeout(
+            closeEntry,
+            MAX_DEFERRED_ENVIRONMENT_CLOSE_MS
+          );
+          closeTimer.unref?.();
+          return;
+        }
+        deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
         deps.servers.delete(ctx.instanceId);
+        closeGenerations.delete(ctx.instanceId);
         await new Promise<void>((resolve) =>
           entry.server.close(() => resolve())
         );

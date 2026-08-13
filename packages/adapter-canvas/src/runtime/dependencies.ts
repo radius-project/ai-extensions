@@ -243,6 +243,12 @@ export interface ProcessDependencies {
 
 export interface OperationsDependencies {
   setupInFlight(): boolean;
+  hasActiveEnvironmentTasks(instanceId: string): boolean;
+  markEnvironmentInstanceShuttingDown(instanceId: string): void;
+  onEnvironmentTasksSettled(
+    instanceId: string,
+    listener: () => void
+  ): () => void;
 }
 
 // The single dependency object shared by createRadiusCanvas, createRadiusTools,
