@@ -14,6 +14,12 @@ const unreachableRoutes = createServerRouteTable({
   },
   "POST /api/open-source": () => {
     throw new Error("unexpected open-source dispatch");
+  },
+  "GET /api/operations": () => {
+    throw new Error("unexpected latest-operation dispatch");
+  },
+  "GET /api/operations/": () => {
+    throw new Error("unexpected operation-by-id dispatch");
   }
 });
 

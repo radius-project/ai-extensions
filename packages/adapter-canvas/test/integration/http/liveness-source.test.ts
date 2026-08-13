@@ -4,6 +4,7 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createServerRouteTable } from "../../../src/server/route-table.js";
 import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
+import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type { OpenSourceRequest } from "../../../src/server/routes/liveness-source.js";
@@ -34,15 +35,30 @@ function start(): Harness {
   let openSource: ((input: OpenSourceRequest) => unknown) | null = null;
   let instanceStates: ReadonlyMap<string, { state: CanvasState }> = new Map();
 
-  const routes = createServerRouteTable(
-    createLivenessSourceRoutes({
+  const routes = createServerRouteTable({
+    ...createLivenessSourceRoutes({
       // Read through a getter so a handler registered after the server exists
       // is still honored, exactly as the SDK entry does in production.
       getOpenSourceHandler: () => openSource,
       readInstanceState: (instanceId) => instanceStates.get(instanceId)?.state,
       toSafeRepoRelPath: safePath
+    }),
+    // Declared so the table is complete; this HIT never dispatches them.
+    ...createOperationsStatusRoutes({
+      latest: () => {
+        throw new Error("unexpected latest dispatch");
+      },
+      latestAny: () => {
+        throw new Error("unexpected latestAny dispatch");
+      },
+      get: () => {
+        throw new Error("unexpected operation lookup dispatch");
+      },
+      toClientView: () => {
+        throw new Error("unexpected projection dispatch");
+      }
     })
-  );
+  });
 
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),

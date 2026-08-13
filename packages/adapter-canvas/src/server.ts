@@ -202,6 +202,7 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -496,13 +497,26 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
+// Composition root for the migrated `operations-status` family. It receives the
+// four narrow lookup and projection functions it calls; the registry
+// implementation and the client projection stay in `operations.ts`.
+const operationsStatusRoutes = createOperationsStatusRoutes({
+  latest: (repo) => operations.latest(repo),
+  latestAny: () => operations.latestAny(),
+  get: (operationId) => operations.get(operationId),
+  toClientView
+});
+
 const canvasServer = createCanvasServer(
   createProductionCanvasServerDependencies({
     createRequestHandler: ({ instanceId, instances, markActivity }) =>
       createScaffoldRequestHandler({
         instanceId,
         instances,
-        routes: createServerRouteTable(livenessSourceRoutes),
+        routes: createServerRouteTable({
+          ...livenessSourceRoutes,
+          ...operationsStatusRoutes
+        }),
         legacyFallback: createLegacyRequestHandler(instanceId),
         markActivity,
         preRoute: preRouteCanvasRequest
@@ -2374,44 +2388,6 @@ function createLegacyRequestHandler(instanceId: string) {
     // shared pre-routing step so migrated routes cannot bypass them; the page
     // fallback below still needs the raw value.
     const requestedPage = url.searchParams.get("page");
-
-    // Operation status. The panel polls this instead of waiting on the POST,
-    // which is what lets it stop blocking: the record outlives the request
-    // that created it, so a reload or a trip to another page can rejoin an
-    // operation already in flight.
-    //
-    // Polled rather than streamed on purpose. SSE would be smoother, but the
-    // canvas reloads on navigation and a reload mid-operation is a routine
-    // event here, not an edge case — a plain GET is trivially resumable and
-    // a reconnecting EventSource is not.
-    if (pathname === "/api/operations" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const record = repo ? operations.latest(repo) : operations.latestAny();
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ operation: record ? toClientView(record) : null })
-      );
-      return;
-    }
-    if (pathname.startsWith("/api/operations/") && req.method === "GET") {
-      const operationId = decodeURIComponent(
-        pathname.slice("/api/operations/".length)
-      );
-      const record = operations.get(operationId);
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(record ? 200 : 404);
-      res.end(
-        JSON.stringify(
-          record ?
-            { operation: toClientView(record) }
-          : { error: "Unknown operation." }
-        )
-      );
-      return;
-    }
 
     // JSON API: OIDC validation
     if (pathname === "/api/oidc" && req.method === "POST") {

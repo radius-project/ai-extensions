@@ -155,6 +155,8 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
 // migration ledger the boundary test enforces after every slice.
 export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "ANY /api/ping",
+  "GET /api/operations",
+  "GET /api/operations/",
   "POST /api/open-source"
 ];
 
