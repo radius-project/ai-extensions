@@ -1638,7 +1638,10 @@ describe("triggerDeployRepairHandoff", () => {
     it("keeps a redeploy on the attempt it was handed so the loop stays addressable", () => {
       expect(
         resolveDeployRepairLoop(
-          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed"
+          } as CanvasState,
           "attempt-A"
         )
       ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
@@ -1668,6 +1671,7 @@ describe("triggerDeployRepairHandoff", () => {
         resolveDeployRepairLoop(
           {
             deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
             deployRepairAttempts: 2
           } as CanvasState,
           "attempt-A"
@@ -1682,6 +1686,7 @@ describe("triggerDeployRepairHandoff", () => {
       const spent = resolveDeployRepairLoop(
         {
           deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
           deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP
         } as CanvasState,
         "attempt-A"
@@ -1695,11 +1700,44 @@ describe("triggerDeployRepairHandoff", () => {
         resolveDeployRepairLoop(
           {
             deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
             deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP - 1
           } as CanvasState,
           "attempt-A"
         ).error
       ).toBeUndefined();
+    });
+
+    it("refuses a redeploy while the attempt is still running", () => {
+      // Otherwise a duplicate call would dispatch a second workflow run and a
+      // second monitor over the same state.
+      const running = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "in_progress"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(running.repairLoop).toBe(false);
+      expect(running.repairAttempt).toBe(0);
+      expect(running.error).toMatch(/still running/);
+    });
+
+    it("refuses a redeploy on an attempt that already succeeded", () => {
+      // The attempt stays current after it settles and the agent keeps passing
+      // its id, so reuse has to be sent down the new-deploy path: a loop
+      // redeploy is marked agent-owned, which would suppress the handoff if
+      // this one failed.
+      const done = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "complete",
+          deployRepairAttempts: 2
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(done.repairLoop).toBe(false);
+      expect(done.error).toMatch(/without an attemptId/);
     });
   });
 

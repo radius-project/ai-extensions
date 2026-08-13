@@ -1026,6 +1026,25 @@ export function resolveDeployRepairLoop(
       error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
     };
   }
+  // A repair redeploy only makes sense against a deploy that actually failed.
+  // The attempt stays current after it settles, and the agent was told to keep
+  // passing its id, so without this an attempt-bound call could land on a
+  // deploy that is still running (starting a second workflow run and a second
+  // monitor over the same state) or on one that already succeeded (spending
+  // repair budget on a finished loop, and — because a loop redeploy is marked
+  // agent-owned — silently suppressing the handoff if it fails).
+  const deployStatus = state?.deployStatus || "";
+  if (deployStatus !== "failed") {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error:
+        deployStatus === "in_progress" ?
+          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
+        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+    };
+  }
   // The cap the handoff prompt states is also enforced here, because prompt
   // text alone is an instruction the agent can lose track of across a long
   // repair loop. Refusing before anything is dispatched keeps a runaway loop
