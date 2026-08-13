@@ -888,19 +888,33 @@ describe("deployedGraphPage", () => {
     // life of the page while the note still promised a refresh.
     const html = deployedGraphPage({ contextRepo: "octo/app" });
     expect(html).toContain(
-      "if (LAST_MODE === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }"
+      "if (LAST_MODE === 'live' && document.visibilityState !== 'hidden') { pollTimer = setTimeout(loadGraph, POLL_MS); }"
     );
   });
 
   it("reports the age of the data, not the age of the last fetch", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
-    expect(html).toContain("setModeNote(describeMode(mode, d && d.updatedAt))");
+    expect(html).toContain(
+      "setModeNote(describeMode(mode, d && d.updatedAt, d && d.application))"
+    );
     expect(html).toContain("var at = updatedAt ? Date.parse(updatedAt) : 0;");
   });
 
-  it("pauses polling while the panel is hidden", () => {
+  it("names the resolved application when it differs from the selection", () => {
+    // The server falls back to an env-only match when the selected app has no
+    // artifact yet; the note must say which app is actually on screen.
+    const html = deployedGraphPage({ contextRepo: "octo/app" });
+    expect(html).toContain("' \u00b7 showing ' + shownApp");
+  });
+
+  it("pauses polling while the panel is hidden and only resumes for a live deploy", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
     expect(html).toContain("document.visibilityState === 'hidden'");
+    // Resume only when a deploy is live; a terminal/greyed view never polled.
+    expect(html).toContain("else if (LAST_MODE === 'live' && !pollTimer)");
+    // A slow in-flight fetch is aborted on hide so it cannot land after pause.
+    expect(html).toContain("graphFetchController.abort()");
+    expect(html).toContain("if (err && err.name === 'AbortError') { return; }");
   });
 });
 

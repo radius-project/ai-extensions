@@ -734,7 +734,21 @@ describe("createDeployStatusReader", () => {
     expect(graph).toEqual({ resources: [{ name: "frontend" }] });
   });
 
-  it("exposes a status map keyed for node lookup", async () => {
+  it("surfaces the control-plane log when the artifact carries one", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => ({
+        ...okFiles(),
+        [DEPLOY_STATUS_FILES.controlPlane]: "recipe failed: boom"
+      })
+    });
+    expect(await reader.controlPlaneLog()).toBe("recipe failed: boom");
+  });
+
+  it("returns null control-plane log when the artifact omits one", async () => {
     const reader = createDeployStatusReader({
       ...baseOptions,
       listArtifacts: async () => [
@@ -742,7 +756,7 @@ describe("createDeployStatusReader", () => {
       ],
       downloadArtifact: async () => okFiles()
     });
-    expect((await reader.statusMap()).get("frontend")).toBe("success");
+    expect(await reader.controlPlaneLog()).toBeNull();
   });
 
   it("reports missing when no deploy-status artifact exists", async () => {

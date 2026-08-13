@@ -635,12 +635,52 @@ async function deployStatusReaderFromState(
     );
     if (application && state) state.deployAppName = application;
   }
-  return createDeployStatusReader({
+  return cachedDeployStatusReader({
     repo,
     environment,
     application,
     runId: runId ?? state?.deployRunId ?? null
   });
+}
+
+// createDeployStatusReader keeps its TTL cache, single-flight de-dup and
+// monotonic `sequence` guard in the reader instance, so building a fresh reader
+// per request makes all three inert and lets the deploy monitor and an
+// /api/deployed-graph poll download the same artifact concurrently. Cache
+// readers by their identity so callers reading the same deployment share one.
+const deployStatusReaders = new Map<
+  string,
+  ReturnType<typeof createDeployStatusReader>
+>();
+const MAX_DEPLOY_STATUS_READERS = 32;
+
+function cachedDeployStatusReader(
+  options: Parameters<typeof createDeployStatusReader>[0]
+): ReturnType<typeof createDeployStatusReader> {
+  const key = [
+    options.repo,
+    options.environment || "",
+    options.application || "",
+    options.runId ?? ""
+  ].join("\n");
+  const existing = deployStatusReaders.get(key);
+  if (existing) {
+    // Refresh LRU position so the cap evicts genuinely idle readers, not the
+    // one a live deploy is actively polling.
+    deployStatusReaders.delete(key);
+    deployStatusReaders.set(key, existing);
+    return existing;
+  }
+  const reader = createDeployStatusReader(options);
+  deployStatusReaders.set(key, reader);
+  // Bounded: each run mints a new key (runId is part of it), so a long session
+  // cycling through deploys/environments must not grow the map without limit.
+  while (deployStatusReaders.size > MAX_DEPLOY_STATUS_READERS) {
+    const oldest = deployStatusReaders.keys().next().value;
+    if (oldest === undefined) break;
+    deployStatusReaders.delete(oldest);
+  }
+  return reader;
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -6676,9 +6716,15 @@ function createRequestHandler(
       let graph: unknown = null;
       let readOk = false;
       let updatedAt: string | null = null;
+      // The app selector is a hint, not a hard filter: the reader falls back to
+      // an env-only match when the selected app has no artifact yet (the app
+      // name can itself be a guess from the repo short name). Surface the app it
+      // actually resolved so the page can say which one is on screen rather than
+      // mislabeling another app's status under the selected name.
+      let resolvedApp: string | null = requestedApp || null;
       const messageByKey = new Map<string, string>();
       try {
-        const reader = createDeployStatusReader({
+        const reader = cachedDeployStatusReader({
           repo,
           environment: requestedEnv,
           application: requestedApp,
@@ -6693,6 +6739,7 @@ function createRequestHandler(
         readOk = result.status === "ok" || result.status === "stale";
         const progress = await reader.progress();
         updatedAt = progress?.updatedAt || null;
+        if (progress?.application) resolvedApp = progress.application;
         for (const [key, status] of buildDeployStatusMap(progress)) {
           if (!statusByKey.has(key)) statusByKey.set(key, status);
         }
@@ -6744,7 +6791,16 @@ function createRequestHandler(
       // itself in the popup instead of just being red.
       applyDeployMessages(resources, messageByKey);
       res.writeHead(200);
-      res.end(JSON.stringify({ resources, repo, branch, mode, updatedAt }));
+      res.end(
+        JSON.stringify({
+          resources,
+          repo,
+          branch,
+          mode,
+          updatedAt,
+          application: resolvedApp
+        })
+      );
       return;
     }
 
@@ -9109,6 +9165,30 @@ function createRequestHandler(
                     addLog("──────── failure details ────────");
                     detailBlock.split("\n").forEach((l) => addLog("  " + l));
                     addLog("─────────────────────────────────");
+                  }
+                  // The producer ships a dedicated control-plane/recipe log in
+                  // the status artifact. It carries the precise recipe/terraform
+                  // failure cause, which the summarized run-log block above can
+                  // miss, so surface its tail when present.
+                  let cpLog: string | null = null;
+                  try {
+                    cpLog = await statusReader.controlPlaneLog();
+                  } catch {
+                    cpLog = null;
+                  }
+                  if (cpLog) {
+                    const cpTail = cpLog
+                      .replace(/\s+$/, "")
+                      .split("\n")
+                      .slice(-40)
+                      .join("\n");
+                    if (cpTail.trim()) {
+                      dErr += "\n\n— control-plane log —\n" + cpTail;
+                      addLog("");
+                      addLog("──────── control-plane log ────────");
+                      cpTail.split("\n").forEach((l) => addLog("  " + l));
+                      addLog("───────────────────────────────────");
+                    }
                   }
                   dErr +=
                     "\n\nView the full run: https://github.com/" +

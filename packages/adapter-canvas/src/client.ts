@@ -618,9 +618,8 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
 
     var diffMode = options.diffMode || false;
     var deployMode = options.deployMode || false;
-    var deployedMode = options.deployedMode || false;
     var plannedMode = options.plannedMode || false;
-    var resolvedMode = plannedMode || deployMode || deployedMode;
+    var resolvedMode = plannedMode || deployMode;
     var repoUrl = options.repoUrl || '';
     var branch = options.branch || 'main';
     // In diff mode a "removed" resource's source file lived on the base
@@ -760,13 +759,6 @@ function radiusRenderGraphUnsafe(containerId, resources, options) {
                 case 'modified': return { bg: 'var(--rad-node-bg)', border: 'var(--rad-warning)' };
                 default: return { bg: 'var(--rad-node-bg)', border: 'var(--rad-node-border)' };
             }
-        }
-        // The terminal "Deployed Graph" keeps every non-failed card neutral gray;
-        // a failed resource remains red when terminal status data is available.
-        if (deployedMode) {
-            return r.deployStatus === 'failed'
-                ? RADIUS_DEPLOY_STATUS_COLORS.failed
-                : RADIUS_DEPLOY_STATUS_COLORS.pending;
         }
         // The "Deploying" page passes deployMode. A managed-cluster node always
         // stays gray — its overall status is conveyed by the corner status badge,

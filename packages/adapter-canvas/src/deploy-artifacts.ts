@@ -506,7 +506,11 @@ export function applyDeployStatusToResources(
  * settleDeployStatuses - apply the run's terminal conclusion to the graph.
  *
  * On success every node is forced green: the run concluded successfully, so
- * every resource provisioned, whatever the last snapshot happened to say.
+ * every resource provisioned, whatever the last snapshot happened to say. This
+ * deliberately overrides a resource the producer positively reported as
+ * `failed` (and discards its deployMessage): the run conclusion is authoritative
+ * for the overall outcome, so a partially-failed-yet-succeeded run shows all
+ * green rather than a stale per-resource failure.
  * On any other conclusion, nodes still pending or in progress become failed,
  * while nodes already terminal keep the status the producer reported — the run
  * conclusion decides the overall label, not an individual resource's outcome
@@ -859,9 +863,17 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       const result = await read();
       return result.progress || lastGood?.progress || null;
     },
-    /** statusMap - the latest accepted payload indexed for node lookup. */
-    async statusMap(): Promise<Map<string, DeployStatus>> {
-      return buildDeployStatusMap(await this.progress());
+    /**
+     * controlPlaneLog - the deploy-controlplane.log text from the latest
+     * accepted artifact, or null. The producer ships it alongside the status
+     * payload; it carries the precise recipe/terraform failure cause that the
+     * run log only summarizes, so the failure block surfaces its tail.
+     */
+    async controlPlaneLog(): Promise<string | null> {
+      const result = await read();
+      const files = result.files ?? lastGood?.files ?? null;
+      const text = files?.[DEPLOY_STATUS_FILES.controlPlane];
+      return typeof text === "string" && text.trim() ? text : null;
     },
     /**
      * graph - the deployed application graph, with the status the read

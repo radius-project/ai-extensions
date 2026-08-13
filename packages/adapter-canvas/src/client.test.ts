@@ -493,7 +493,7 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
   it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
     expect(CLIENT_GRAPH_JS).toContain(
-      "var resolvedMode = plannedMode || deployMode || deployedMode"
+      "var resolvedMode = plannedMode || deployMode"
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "if (!resolvedMode && r.outputResources && r.outputResources.length > 0)"
@@ -585,12 +585,6 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 });
 
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
-  it("renders deployed graph cards gray except for failed resources", () => {
-    expect(CLIENT_GRAPH_JS).toContain("if (deployedMode) {");
-    expect(CLIENT_GRAPH_JS).toContain("? RADIUS_DEPLOY_STATUS_COLORS.failed");
-    expect(CLIENT_GRAPH_JS).toContain(": RADIUS_DEPLOY_STATUS_COLORS.pending");
-  });
-
   it("keeps managed-cluster nodes gray unless they fail and colors ordinary compute nodes by deploy status", () => {
     expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
     expect(CLIENT_GRAPH_JS).toContain(
@@ -724,9 +718,9 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
   it("never mounts output resources as child nodes in deploy mode", () => {
     // The Deployed view is one node per Radius resource; expanding recipe
     // outputs would make the topology shift once a deploy resolves them.
-    // resolvedMode covers plannedMode, deployMode and deployedMode.
+    // resolvedMode covers plannedMode and deployMode.
     expect(CLIENT_GRAPH_JS).toContain(
-      "var resolvedMode = plannedMode || deployMode || deployedMode"
+      "var resolvedMode = plannedMode || deployMode"
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "if (!resolvedMode && r.outputResources && r.outputResources.length > 0) {"

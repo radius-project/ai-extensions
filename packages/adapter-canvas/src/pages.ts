@@ -1662,6 +1662,7 @@ function escapeHtmlClient(s) {
     var pollTimer = null;
     var controller = null;
     var LAST_MODE = '';
+    var graphFetchController = null;
     // Artifact uploads take several seconds, so a faster poll returns the same
     // bytes. The deploy log below the graph streams at 1.5s and carries the
     // moment-to-moment liveness.
@@ -1752,7 +1753,7 @@ function escapeHtmlClient(s) {
     // Describe what the graph is showing. The freshness suffix reports the age
     // of the DATA (the producer's updatedAt), not the age of our last fetch --
     // polling more often does not make a three-day-old deployment newer.
-    function describeMode(mode, updatedAt) {
+    function describeMode(mode, updatedAt, shownApp) {
         if (mode === 'greyed') return 'Not deployed yet — showing the modeled application.';
         var suffix = '';
         var at = updatedAt ? Date.parse(updatedAt) : 0;
@@ -1760,12 +1761,19 @@ function escapeHtmlClient(s) {
             var secs = Math.max(0, Math.round((Date.now() - at) / 1000));
             suffix = ' · updated ' + (secs < 60 ? secs + 's' : secs < 3600 ? Math.round(secs / 60) + 'm' : Math.round(secs / 3600) + 'h') + ' ago';
         }
+        // The selected app may have no artifact yet, so the server falls back to
+        // an env-only match and returns which app it actually resolved. When that
+        // differs from the selection, say so rather than labeling app B's status
+        // as app A.
+        var appNote = (shownApp && appSelect.value && String(shownApp).toLowerCase() !== appSelect.value.toLowerCase())
+            ? ' · showing ' + shownApp
+            : '';
         if (mode === 'live') {
             // Be honest about the cadence: each artifact upload takes seconds,
             // so a graph that looks static usually means "no new data yet".
-            return 'Deploying' + suffix + ' · refreshes every ' + Math.round(POLL_MS / 1000) + 's';
+            return 'Deploying' + suffix + appNote + ' · refreshes every ' + Math.round(POLL_MS / 1000) + 's';
         }
-        return 'Last deployment' + suffix + '.';
+        return 'Last deployment' + suffix + appNote + '.';
     }
 
     function setModeNote(text) {
@@ -1781,7 +1789,13 @@ function escapeHtmlClient(s) {
         var query = '/api/deployed-graph?repo=' + encodeURIComponent(CONTEXT_REPO);
         if (appSelect.value) { query += '&application=' + encodeURIComponent(appSelect.value); }
         if (envSelect.value) { query += '&environment=' + encodeURIComponent(envSelect.value); }
-        fetch(query).then(function(r) { return r.json(); }).then(function(d) {
+        // Abort any fetch still in flight so a slow response from a previous
+        // load (or one issued before the tab was hidden) cannot land and
+        // re-render after this one.
+        if (graphFetchController) { try { graphFetchController.abort(); } catch (e) {} }
+        graphFetchController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var fetchOpts = graphFetchController ? { signal: graphFetchController.signal } : undefined;
+        fetch(query, fetchOpts).then(function(r) { return r.json(); }).then(function(d) {
             var resources = (d && d.resources) || [];
             var mode = (d && d.mode) || 'greyed';
             LAST_MODE = mode;
@@ -1794,24 +1808,29 @@ function escapeHtmlClient(s) {
                 setModeNote('');
             } else {
                 renderGraph(resources, d && d.branch);
-                setModeNote(describeMode(mode, d && d.updatedAt));
+                setModeNote(describeMode(mode, d && d.updatedAt, d && d.application));
             }
             if (mode === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }
-        }).catch(function() {
+        }).catch(function(err) {
+            // A fetch aborted on tab-hide (or superseded by a newer load) must
+            // not repaint or reschedule — that is the pause working.
+            if (err && err.name === 'AbortError') { return; }
             if (!controller) { showNothing('Nothing deployed yet'); }
             // Keep polling through a transient failure. Dropping the timer here
             // would freeze the graph mid-deploy for the life of the page while
-            // the note still promised a refresh.
-            if (LAST_MODE === 'live') { pollTimer = setTimeout(loadGraph, POLL_MS); }
+            // the note still promised a refresh. Do not reschedule while hidden.
+            if (LAST_MODE === 'live' && document.visibilityState !== 'hidden') { pollTimer = setTimeout(loadGraph, POLL_MS); }
         });
     }
 
-    // Pause polling while the panel is hidden; resume (and refresh once) when
-    // it comes back, so a backgrounded tab does not keep hitting the API.
+    // Pause polling while the panel is hidden; resume (and refresh once) when it
+    // comes back, but only for a live deploy -- a terminal or greyed view never
+    // scheduled a poll, so tabbing back to it must not start hitting the API.
     document.addEventListener('visibilitychange', function() {
         if (document.visibilityState === 'hidden') {
             if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-        } else if (!pollTimer) {
+            if (graphFetchController) { try { graphFetchController.abort(); } catch (e) {} graphFetchController = null; }
+        } else if (LAST_MODE === 'live' && !pollTimer) {
             loadGraph();
         }
     });
