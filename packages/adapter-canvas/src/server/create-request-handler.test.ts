@@ -6,12 +6,17 @@ import { createRequestContext, syncRequestedPage } from "./request-context.js";
 import type { ServerRoute } from "./route-table.js";
 import type { CanvasServerEntry } from "./types.js";
 
-function request(url: string, method = "GET", body = ""): IncomingMessage {
+function request(
+  url: string,
+  method = "GET",
+  body = "",
+  headers: Record<string, string> = {}
+): IncomingMessage {
   const stream = Readable.from(body ? [body] : []);
   return Object.assign(stream, {
     url,
     method,
-    headers: {}
+    headers
   }) as unknown as IncomingMessage;
 }
 
@@ -124,6 +129,68 @@ describe("createRequestHandler (SU-03)", () => {
       new Map()
     );
     await expect(malformed.readJsonBody()).rejects.toBeInstanceOf(SyntaxError);
+  });
+
+  it("applies global pre-routing before migrated handlers and the legacy fallback", async () => {
+    const migrated = vi.fn();
+    const route: ServerRoute = {
+      method: "POST",
+      path: "/api/example",
+      match: "exact",
+      bodyPolicy: "json",
+      owner: "liveness-source",
+      migration: "migrated",
+      handler: migrated
+    };
+    const legacyFallback = vi.fn();
+    const canvasEntry = entry();
+    const instances = new Map([["panel", canvasEntry]]);
+    const handler = createRequestHandler({
+      instanceId: "panel",
+      instances,
+      routes: [route],
+      legacyFallback,
+      markActivity: vi.fn(),
+      preRoute: (context) => {
+        if (context.request.headers["sec-fetch-site"] === "cross-site") {
+          context.json(403, { code: "cross-site-forbidden" });
+          return true;
+        }
+        syncRequestedPage(
+          instances.get(context.instanceId),
+          context.url.searchParams.get("page")
+        );
+        return false;
+      }
+    }) as (
+      request: IncomingMessage,
+      response: ServerResponse<IncomingMessage>
+    ) => Promise<void>;
+
+    const rejected = responseRecorder();
+    await handler(
+      request("/api/example", "POST", "", { "sec-fetch-site": "cross-site" }),
+      rejected.response
+    );
+    expect(rejected.recorder.status).toBe(403);
+    expect(migrated).not.toHaveBeenCalled();
+    expect(legacyFallback).not.toHaveBeenCalled();
+
+    const rejectedLegacy = responseRecorder();
+    await handler(
+      request("/api/other", "POST", "", { "sec-fetch-site": "cross-site" }),
+      rejectedLegacy.response
+    );
+    expect(rejectedLegacy.recorder.status).toBe(403);
+    expect(legacyFallback).not.toHaveBeenCalled();
+
+    await handler(
+      request("/api/example?page=planned", "POST"),
+      responseRecorder().response
+    );
+    expect(migrated).toHaveBeenCalledTimes(1);
+    expect(canvasEntry.page).toBe("planned");
+    expect(canvasEntry.state.activeGraphView).toBe("planned");
   });
 
   it("preserves page aliases and active-view updates without normalizing unknown pages", () => {

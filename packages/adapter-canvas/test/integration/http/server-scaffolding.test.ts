@@ -24,10 +24,15 @@ describe("server scaffolding real-loopback HIT", () => {
           instances,
           routes: SERVER_ROUTE_TABLE,
           markActivity,
-          legacyFallback: (request, response) => {
-            const url = new URL(request.url || "/", "http://localhost");
+          preRoute: (context) => {
+            syncRequestedPage(
+              instances.get(context.instanceId),
+              context.url.searchParams.get("page")
+            );
+            return false;
+          },
+          legacyFallback: (_request, response) => {
             const entry = instances.get(instanceId);
-            syncRequestedPage(entry, url.searchParams.get("page"));
             response.setHeader("Content-Type", "application/json");
             response.writeHead(200);
             response.end(

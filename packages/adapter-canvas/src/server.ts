@@ -195,6 +195,10 @@ import {
 } from "./pages.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import {
+  syncRequestedPage,
+  type CanvasRequestContext
+} from "./server/request-context.js";
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { SERVER_ROUTE_TABLE } from "./server/route-table.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -489,7 +493,8 @@ const canvasServer = createCanvasServer(
         instances,
         routes: SERVER_ROUTE_TABLE,
         legacyFallback: createLegacyRequestHandler(instanceId),
-        markActivity
+        markActivity,
+        preRoute: preRouteCanvasRequest
       }),
     defaultPage: DEFAULT_CANVAS_PAGE,
     preferredPort: preferredPortForInstance
@@ -2270,6 +2275,26 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
+// Global pre-routing shared by migrated routes and the legacy fallback. It
+// preserves the exact order the legacy dispatcher used at the top of its
+// if-chain: reject cross-site mutations before any routing or body parse, then
+// synchronise the requested page onto the instance entry.
+function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+  const { request } = context;
+  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
+    context.json(403, {
+      error: "Cross-site request rejected.",
+      code: "cross-site-forbidden"
+    });
+    return true;
+  }
+  syncRequestedPage(
+    canvasServer.instances.get(context.instanceId),
+    context.url.searchParams.get("page")
+  );
+  return false;
+}
+
 function createLegacyRequestHandler(instanceId: string) {
   return async (
     req: IncomingMessage,
@@ -2277,34 +2302,10 @@ function createLegacyRequestHandler(instanceId: string) {
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
-    // CSRF defense-in-depth: reject cross-site state-changing requests before
-    // any routing or body parse. See isCrossSiteMutation for the rules.
-    if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(403);
-      res.end(
-        JSON.stringify({
-          error: "Cross-site request rejected.",
-          code: "cross-site-forbidden"
-        })
-      );
-      return;
-    }
+    // Cross-site rejection and requested-page synchronisation now run in the
+    // shared pre-routing step so migrated routes cannot bypass them; the page
+    // fallback below still needs the raw value.
     const requestedPage = url.searchParams.get("page");
-    const canvasEntry = servers.get(instanceId);
-    if (canvasEntry && requestedPage) {
-      canvasEntry.page = requestedPage;
-      if (requestedPage === "graph")
-        canvasEntry.state.activeGraphView = "graph";
-      else if (requestedPage === "planned")
-        canvasEntry.state.activeGraphView = "planned";
-      else if (
-        requestedPage === "graph-diff" ||
-        requestedPage === "graphDiff"
-      ) {
-        canvasEntry.state.activeGraphView = "diff";
-      }
-    }
 
     // Lightweight liveness probe used by the client-side heartbeat so pages
     // can detect when the server has come back after an idle respawn.

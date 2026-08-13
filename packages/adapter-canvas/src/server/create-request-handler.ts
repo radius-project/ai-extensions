@@ -1,5 +1,8 @@
 import type { RequestListener } from "node:http";
-import { createRequestContext } from "./request-context.js";
+import {
+  createRequestContext,
+  type CanvasRequestContext
+} from "./request-context.js";
 import {
   assertRouteTable,
   matchRoute,
@@ -13,6 +16,11 @@ export interface CreateRequestHandlerInput {
   routes: readonly ServerRoute[];
   legacyFallback: RequestListener;
   markActivity(): void;
+  // Global pre-routing applied to every request. It runs before route
+  // selection and before any body read so migrated routes cannot bypass the
+  // checks the legacy dispatcher performed at the top of its if-chain.
+  // Returning true means the request was fully answered.
+  preRoute?(context: CanvasRequestContext): boolean;
 }
 
 export function createRequestHandler({
@@ -20,7 +28,8 @@ export function createRequestHandler({
   instances,
   routes,
   legacyFallback,
-  markActivity
+  markActivity,
+  preRoute
 }: CreateRequestHandlerInput): RequestListener {
   assertRouteTable(routes);
   return async (request, response) => {
@@ -31,6 +40,7 @@ export function createRequestHandler({
       instanceId,
       instances
     );
+    if (preRoute?.(context)) return;
     const route = matchRoute(routes, request.method, context.pathname);
     if (route?.migration === "migrated") {
       await route.handler(context);
