@@ -4512,6 +4512,10 @@ var HAS_ENVS = false;
 // up (or while a cached listing is still warm). Cleared when the op resolves.
 var OP_STATUS = {};
 function opKey(app, env) { return app + '\\u0000' + env; }
+// Keys (app\u0000env) whose real GitHub deployment record was present in the
+// last successful listing. Lets an in-flight deploy poll stop refreshing the
+// list once the real record has replaced its optimistic synthetic row.
+var DEPLOY_RECORDS_PRESENT = {};
 // Environments that currently have an IN-PROGRESS operation which blocks a NEW
 // deploy (status pending = a deploy run still in flight, or deleting = a delete
 // run still in flight), keyed by env name → status. Rebuilt from each successful
@@ -4701,12 +4705,16 @@ function loadDeployments(fresh, quiet) {
             // is done, and a synthetic "Deleting…" row would be a phantom.
             var present = {};
             deps.forEach(function(dep) { present[opKey(dep.app, dep.environment)] = true; });
+            DEPLOY_RECORDS_PRESENT = present;
             var synthetic = [];
             Object.keys(OP_STATUS).forEach(function(k) {
                 if (present[k] || OP_STATUS[k] === 'deleting') return;
                 var parts = k.split('\\u0000');
                 if (parts.length !== 2 || !parts[0] || !parts[1]) return;
-                synthetic.push({ app: parts[0], environment: parts[1], status: OP_STATUS[k], runUrl: '' });
+                // synthetic: no GitHub deployment record exists yet, so this row
+                // must not offer Delete (it would dispatch against a nonexistent
+                // record and falsely report success).
+                synthetic.push({ app: parts[0], environment: parts[1], status: OP_STATUS[k], runUrl: '', synthetic: true });
             });
             var rows = synthetic.concat(deps);
             if (rows.length === 0) { DEPLOYED_ENVS = {}; refreshDeployBtn(); body.innerHTML = '<tr><td class="rad-table__env" colspan="6">No application deployments yet.</td></tr>'; return; }
@@ -4739,7 +4747,7 @@ function loadDeployments(fresh, quiet) {
                 // others use the subtle outline variant. A row that's mid-delete
                 // disables its button to prevent a duplicate dispatch.
                 var delClass = status === 'failed' ? 'rad-btn--danger-solid' : 'rad-btn--danger-outline';
-                var delDisabled = status === 'deleting' ? ' disabled' : '';
+                var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';
                 return '<tr>' +
                     '<td class="rad-table__env"><a class="rad-deploy-applink" href="' + escapeHtmlClient(deployedHref) + '" title="View deployed application graph">' + arrowSvg + escapeHtmlClient(dep.app) + '</a></td>' +
                     '<td>' + escapeHtmlClient(dep.environment) + '</td>' +
@@ -5026,7 +5034,20 @@ deployBtn.addEventListener('click', function() {
     // and to surface a failure dialog if the deploy can't start (e.g. an unpushed
     // branch). We stay on the Deployments page throughout.
     var failedPolls = 0;
+    var wfTicks = 0;
+    // Once the real record replaces the synthetic row, keep polling deploy-status
+    // for the terminal transition but stop the per-tick fresh=1 list fetches.
+    var recordSeen = false;
     var wfPoll = setInterval(function() {
+        // Safety cap so a deploy-status that never reaches a terminal state can't
+        // poll forever (~30 min at 2.5s/tick); fall back to GitHub's real status.
+        if (++wfTicks > 720) {
+            clearInterval(wfPoll);
+            clearTimeout(autoHide);
+            delete OP_STATUS[opKey(app, env)];
+            loadDeployments(true);
+            return;
+        }
         fetch('/api/deploy-status')
             .then(function(r) { return r.json(); })
             .then(function(d) {
@@ -5052,10 +5073,13 @@ deployBtn.addEventListener('click', function() {
                     loadDeployments(true);
                     return;
                 }
-                // Still in flight: quietly refresh the table so the real GitHub
-                // deployment record (with its "View Run" link) replaces the
-                // optimistic synthetic row as soon as GitHub creates it — without
-                // flashing the table to a loading placeholder on each tick.
+                // Still in flight. Quietly refresh the table only until the real
+                // GitHub deployment record (with its "View Run" link) replaces the
+                // optimistic synthetic row; after that the row is real and driven
+                // by the OP_STATUS override, so further fresh=1 fetches (which
+                // bypass the cache and fan out per-environment) are wasted.
+                if (recordSeen) return;
+                if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }
                 loadDeployments(true, true);
             })
             .catch(function() {});

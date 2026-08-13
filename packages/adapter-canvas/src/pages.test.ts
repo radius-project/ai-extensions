@@ -724,6 +724,20 @@ describe("deployingPage — Deployments landing", () => {
     // Fix 2: while the run is still in flight, the deploy-status poll quietly
     // refreshes the list so the real GitHub record replaces the synthetic row.
     expect(html).toContain("loadDeployments(true, true);");
+    // Synthetic rows are tagged so they can't offer a Delete button for a
+    // deployment record GitHub hasn't created yet (which would falsely report a
+    // successful delete mid-deploy).
+    expect(html).toContain("synthetic: true");
+    expect(html).toContain(
+      "var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
+    );
+    // The in-flight list refresh stops once the real record shows up, and the
+    // poll is capped so a stuck run can't fan out fresh=1 fetches forever.
+    expect(html).toContain("if (recordSeen) return;");
+    expect(html).toContain(
+      "if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }"
+    );
+    expect(html).toContain("if (++wfTicks > 720) {");
   });
 
   it("applies the same quiet in-flight polling to the Delete Deployment flow", () => {
