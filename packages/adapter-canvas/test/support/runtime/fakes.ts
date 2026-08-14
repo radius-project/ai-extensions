@@ -15,7 +15,8 @@ import {
   buildDeployPayload,
   validateDeployPayload,
   validateDeployAttempt,
-  summarizeDeployStatus
+  summarizeDeployStatus,
+  describeDeployStarted
 } from "../../../src/deploy-tools.js";
 import {
   getSourceRefResources,
@@ -228,7 +229,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       buildDeployPayload,
       validateDeployPayload,
       validateDeployAttempt,
-      summarizeDeployStatus
+      summarizeDeployStatus,
+      describeDeployStarted
     },
     sourceRefs: {
       getSourceRefResources,

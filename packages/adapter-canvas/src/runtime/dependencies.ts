@@ -125,6 +125,10 @@ export interface DeployToolsDependencies {
     input: DeployStatusInput,
     logLines?: number
   ): DeployStatusSummary;
+  describeDeployStarted(
+    payload: { targetRepo?: string; branch?: string; environment?: string },
+    result: { repairAttempt?: unknown; repairAttemptCap?: unknown }
+  ): string;
 }
 
 export interface SourceRefsDependencies {
