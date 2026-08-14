@@ -5,7 +5,7 @@
 // the removed generated-bicep state, while smoke-rendering every page so the
 // module's branches stay exercised.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
@@ -1794,5 +1794,336 @@ describe("delete-deployment confirmation is uniform", () => {
       );
     };
     expect(extract(deployedGraphPage({}))).toBe(extract(deployingPage({})));
+  });
+});
+
+// Graph sub-tab navigation is a client-side partial swap (radiusNavTo replaces
+// #graph-page-content), so the document never unloads and work scheduled by the
+// page being left behind still runs — against a DOM whose controls are gone.
+// Issue #366: a pending debounced runDiff dereferenced them and threw an
+// uncaught TypeError attributed to the destination page. Both emitted copies of
+// each scheduled function must resolve their elements before dereferencing.
+function extractBrowserFunction(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  expect(start).toBeGreaterThan(-1);
+  let depth = 0;
+  for (let i = source.indexOf("{", start); i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+interface FakeStatus {
+  className: string;
+  innerHTML: string;
+  textContent: string;
+  style: { display: string };
+}
+
+interface FetchCall {
+  url: string;
+  body: unknown;
+}
+
+interface ScheduledTimer {
+  fn: () => void;
+  delay: number;
+}
+
+interface DiffHarness {
+  runDiff: () => void;
+  queueDiff: () => void;
+  fetchCalls: FetchCall[];
+  scheduled: ScheduledTimer[];
+  cleared: unknown[];
+  win: { __radiusDiffTimeout: unknown };
+}
+
+function diffControls(): {
+  elements: Record<string, unknown>;
+  status: FakeStatus;
+} {
+  const status: FakeStatus = {
+    className: "",
+    innerHTML: "",
+    textContent: "",
+    style: { display: "none" }
+  };
+  return {
+    status,
+    elements: {
+      "base-branch": { value: "main" },
+      "head-branch": { value: "dev" },
+      "diff-repo-select": { value: "octo/app" },
+      "diff-status": status
+    }
+  };
+}
+
+function loadDiffScript(
+  html: string,
+  elements: Record<string, unknown>,
+  response: Record<string, unknown> = { message: "Diff ready" }
+): DiffHarness {
+  const src = `${extractBrowserFunction(html, "queueDiff")}\n${extractBrowserFunction(html, "runDiff")}`;
+  const fetchCalls: FetchCall[] = [];
+  const scheduled: ScheduledTimer[] = [];
+  const cleared: unknown[] = [];
+  const win: { __radiusDiffTimeout: unknown } = { __radiusDiffTimeout: null };
+  const api = new Function(
+    "document",
+    "window",
+    "fetch",
+    "escapeHtmlClient",
+    "setTimeout",
+    "clearTimeout",
+    `${src}\nreturn { runDiff: runDiff, queueDiff: queueDiff };`
+  )(
+    { getElementById: (id: string) => elements[id] ?? null },
+    win,
+    (url: string, init: { body: string }) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return Promise.resolve({ json: () => Promise.resolve(response) });
+    },
+    (value: unknown) => String(value),
+    (fn: () => void, delay: number) => {
+      scheduled.push({ fn, delay });
+      return scheduled.length;
+    },
+    (id: unknown) => {
+      cleared.push(id);
+    }
+  ) as Pick<DiffHarness, "runDiff" | "queueDiff">;
+  return { ...api, fetchCalls, scheduled, cleared, win };
+}
+
+describe.each([
+  [
+    "empty state",
+    () =>
+      graphDiffPage({
+        branches: ["main", "dev"],
+        diffBase: "main",
+        diffHead: "dev"
+      })
+  ],
+  [
+    "rendered diff",
+    () =>
+      graphDiffPage({
+        diffResources: sampleResources,
+        diffBase: "main",
+        diffHead: "dev"
+      })
+  ]
+] as Array<[string, () => string]>)(
+  "graphDiffPage (%s) — runDiff after a client-side sub-tab swap",
+  (_name, render) => {
+    it("returns quietly when every diff control has been swapped out", () => {
+      const harness = loadDiffScript(render(), {});
+      expect(() => harness.runDiff()).not.toThrow();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it.each(["base-branch", "head-branch", "diff-repo-select", "diff-status"])(
+      "returns quietly when only #%s is missing",
+      (missing) => {
+        const { elements } = diffControls();
+        delete elements[missing];
+        const harness = loadDiffScript(render(), elements);
+        expect(() => harness.runDiff()).not.toThrow();
+        expect(harness.fetchCalls).toEqual([]);
+      }
+    );
+
+    it("returns quietly when a branch has not been selected yet", () => {
+      const { elements } = diffControls();
+      (elements["head-branch"] as { value: string }).value = "";
+      const harness = loadDiffScript(render(), elements);
+      harness.runDiff();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it("still requests and reports the diff when the controls are present", async () => {
+      const { elements, status } = diffControls();
+      const harness = loadDiffScript(render(), elements);
+      harness.runDiff();
+      expect(harness.fetchCalls).toEqual([
+        {
+          url: "/api/diff-branches",
+          body: { base: "main", head: "dev", repo: "octo/app" }
+        }
+      ]);
+      expect(status.className).toBe("status info");
+      await vi.waitFor(() => expect(status.textContent).toBe("Diff ready"));
+    });
+
+    it("debounces through the timer the navigation cancel hook clears", () => {
+      const { elements } = diffControls();
+      const harness = loadDiffScript(render(), elements);
+      harness.queueDiff();
+      harness.queueDiff();
+      expect(harness.cleared).toEqual([1]);
+      expect(harness.win.__radiusDiffTimeout).toBe(2);
+      expect(harness.scheduled[1].delay).toBe(500);
+    });
+
+    it("survives a debounced diff that fires after the controls are gone", () => {
+      const { elements } = diffControls();
+      const harness = loadDiffScript(render(), elements);
+      harness.queueDiff();
+      for (const id of Object.keys(elements)) delete elements[id];
+      expect(() => harness.scheduled[0].fn()).not.toThrow();
+      expect(harness.fetchCalls).toEqual([]);
+      expect(harness.win.__radiusDiffTimeout).toBeNull();
+    });
+  }
+);
+
+interface PlanHarness {
+  runPlan: (isCurrent: () => boolean) => Promise<void>;
+  fetchCalls: FetchCall[];
+}
+
+function loadPlanScript(
+  html: string,
+  elements: Record<string, unknown>,
+  options: { hasEnv?: boolean; envsStale?: boolean } = {}
+): PlanHarness {
+  const fetchCalls: FetchCall[] = [];
+  const runPlan = new Function(
+    "document",
+    "window",
+    "fetch",
+    "CONTEXT_REPO",
+    "CONTEXT_BRANCH",
+    "ENV_PROVIDERS",
+    "RADIUS_PLAN_HAS_ENV",
+    "RADIUS_PLAN_ENVS_STALE",
+    "RADIUS_PLAN_REQUEST_FAILED",
+    "setInterval",
+    "clearInterval",
+    "setTimeout",
+    `${extractBrowserFunction(html, "runPlan")}\nreturn runPlan;`
+  )(
+    { getElementById: (id: string) => elements[id] ?? null },
+    { location: { reload: () => undefined } },
+    (url: string, init: { body: string }) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return Promise.resolve({
+        json: () => Promise.resolve({ message: "ok" })
+      });
+    },
+    "octo/app",
+    "main",
+    { prod: "azure" },
+    options.hasEnv ?? true,
+    options.envsStale ?? false,
+    false,
+    () => 1,
+    () => undefined,
+    () => 1
+  ) as PlanHarness["runPlan"];
+  return { runPlan, fetchCalls };
+}
+
+function planControls(): Record<string, unknown> {
+  const status: FakeStatus = {
+    className: "",
+    innerHTML: "",
+    textContent: "",
+    style: { display: "none" }
+  };
+  const container = {
+    innerHTML: "",
+    querySelector: () => null,
+    appendChild: () => undefined
+  };
+  return {
+    "planned-branch": { value: "feature-x" },
+    "planned-env": { value: "prod" },
+    "plan-status": status,
+    "graph-container-wrapper": { innerHTML: "" },
+    "graph-container": container,
+    "progress-steps": container
+  };
+}
+
+describe.each([
+  [
+    "empty state",
+    () => plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" })
+  ],
+  [
+    "rendered plan",
+    () =>
+      plannedGraphPage({
+        plannedResources: sampleResources,
+        plannedRepo: "octo/app",
+        plannedBranch: "main"
+      })
+  ]
+] as Array<[string, () => string]>)(
+  "plannedGraphPage (%s) — runPlan after a client-side sub-tab swap",
+  (_name, render) => {
+    it("resolves without a request when every plan control has been swapped out", async () => {
+      const harness = loadPlanScript(render(), {});
+      await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it.each(["planned-branch", "planned-env"])(
+      "resolves without a request when only #%s is missing",
+      async (missing) => {
+        const elements = planControls();
+        delete elements[missing];
+        const harness = loadPlanScript(render(), elements);
+        await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+        expect(harness.fetchCalls).toEqual([]);
+      }
+    );
+
+    it("resolves without a request when the graph container is gone", async () => {
+      const elements = planControls();
+      delete elements["graph-container"];
+      const harness = loadPlanScript(render(), elements);
+      await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it("still plans against the selected branch and environment", async () => {
+      const harness = loadPlanScript(render(), planControls());
+      await harness.runPlan(() => true);
+      expect(harness.fetchCalls).toEqual([
+        {
+          url: "/api/plan-graph",
+          body: {
+            repo: "octo/app",
+            branch: "feature-x",
+            provider: "azure",
+            environment: "prod"
+          }
+        }
+      ]);
+    });
+  }
+);
+
+// The empty-state copy renders into a wrapper it recreates on each run, so that
+// lookup is a stale-DOM hazard of its own, distinct from the graph container.
+describe("plannedGraphPage (empty state) — runPlan without its graph wrapper", () => {
+  it("resolves without a request when the wrapper has been swapped out", async () => {
+    const elements = planControls();
+    delete elements["graph-container-wrapper"];
+    const harness = loadPlanScript(
+      plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" }),
+      elements
+    );
+    await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+    expect(harness.fetchCalls).toEqual([]);
   });
 });

@@ -6,7 +6,7 @@
 // a remote-branch graph links to the committed file on GitHub (recipe-pack
 // model — no server-generated bicep endpoint).
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
@@ -1822,5 +1822,103 @@ describe("CLIENT_DELETE_DIALOG_JS — shared 3-step delete confirmation", () => 
     expect(els["deploy-delete-body"].innerHTML).toBe("");
     dialog.open("todoapp", "prod");
     expect(els["deploy-delete-body"].innerHTML).toContain("del-step1-btn");
+  });
+});
+
+// Graph sub-tab navigation is a client-side partial swap: radiusNavTo replaces
+// #graph-page-content while the document stays loaded, so work the outgoing
+// page scheduled keeps running. Cancelling the pending diff debounce before the
+// swap stops stale work rather than merely tolerating it (issue #366).
+describe("CLIENT_GRAPH_JS - radiusNavTo cancels the outgoing page's pending work", () => {
+  interface NavResult {
+    timerAtFetch: unknown;
+    timerAtSwap: unknown;
+    cleared: unknown[];
+    pendingAfter: unknown;
+    swappedHtml: string;
+  }
+
+  async function navigate(pendingTimer: unknown): Promise<NavResult> {
+    const cleared: unknown[] = [];
+    let timerAtFetch: unknown = "not-fetched";
+    let timerAtSwap: unknown = "not-swapped";
+    let swappedHtml = "";
+    const win = {
+      __radiusDiffTimeout: pendingTimer,
+      location: { href: "", search: "" },
+      addEventListener: () => undefined
+    };
+    const contentEl = {
+      set innerHTML(value: string) {
+        timerAtSwap = win.__radiusDiffTimeout;
+        swappedHtml = value;
+      },
+      get innerHTML() {
+        return swappedHtml;
+      },
+      querySelectorAll: () => [] as unknown[]
+    };
+    const nav = new Function(
+      "document",
+      "window",
+      "fetch",
+      "DOMParser",
+      "history",
+      "clearTimeout",
+      `${CLIENT_GRAPH_JS}; return radiusNavTo;`
+    )(
+      {
+        getElementById: (id: string) =>
+          id === "graph-page-content" ? contentEl : null
+      },
+      win,
+      () => {
+        timerAtFetch = win.__radiusDiffTimeout;
+        return Promise.resolve({
+          text: () => Promise.resolve("<html></html>")
+        });
+      },
+      class {
+        parseFromString() {
+          return {
+            getElementById: (id: string) =>
+              id === "graph-page-content" ?
+                { innerHTML: "<p>planned</p>" }
+              : null
+          };
+        }
+      },
+      { pushState: () => undefined },
+      (id: unknown) => {
+        cleared.push(id);
+      }
+    ) as (e: { preventDefault: () => void }, pageId: string) => void;
+
+    nav({ preventDefault: () => undefined }, "planned");
+    await vi.waitFor(() => expect(timerAtSwap).not.toBe("not-swapped"));
+    return {
+      timerAtFetch,
+      timerAtSwap,
+      cleared,
+      pendingAfter: win.__radiusDiffTimeout,
+      swappedHtml
+    };
+  }
+
+  // Cancelling only at the swap still leaves the whole destination fetch as a
+  // window in which the debounce can fire, so the cancel must happen up front.
+  it("clears a pending diff debounce before the destination page is fetched", async () => {
+    const result = await navigate(7);
+    expect(result.cleared).toEqual([7]);
+    expect(result.timerAtFetch).toBeNull();
+    expect(result.timerAtSwap).toBeNull();
+    expect(result.pendingAfter).toBeNull();
+    expect(result.swappedHtml).toBe("<p>planned</p>");
+  });
+
+  it("swaps normally when no diff debounce is pending", async () => {
+    const result = await navigate(null);
+    expect(result.cleared).toEqual([]);
+    expect(result.swappedHtml).toBe("<p>planned</p>");
   });
 });
