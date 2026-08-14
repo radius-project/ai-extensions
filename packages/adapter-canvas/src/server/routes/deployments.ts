@@ -1,6 +1,7 @@
 import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import type { DeployRequestService } from "../services/deploy-request.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
 
 // What the webview needs to decide whether to keep polling after a failed
@@ -133,6 +134,10 @@ export interface DeploymentsDependencies {
   // the real environment.
   readProcessEnv(): NodeJS.ProcessEnv;
   setTimer(callback: () => void, ms: number): TimerHandle;
+  // The admission half of POST /api/deploy. Everything that route does beyond
+  // reading the body and writing the response lives behind this port, because
+  // the deploy is a multi-stage runtime operation rather than an HTTP concern.
+  deployRequest: DeployRequestService;
 }
 
 function errorMessage(error: unknown): string {
@@ -668,6 +673,22 @@ export async function handleDeleteDeployment(
   }
 }
 
+// Starts a deploy. The adapter is deliberately thin: the body is read exactly
+// once, handed to the admission service, and its result is serialized verbatim.
+// Every refusal, reservation, attempt-identity and background-monitor concern
+// belongs to that service, because none of it is an HTTP decision.
+export async function handleDeploy(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  const body = await context.readTextBody();
+  const result = await dependencies.deployRequest.deploy({
+    instanceId: context.instanceId,
+    body
+  });
+  context.json(result.status, result.body);
+}
+
 export function createDeploymentsRoutes(
   dependencies: DeploymentsDependencies
 ): RouteHandlerRegistry {
@@ -678,6 +699,7 @@ export function createDeploymentsRoutes(
       handleListApplications(context, dependencies),
     "GET /api/list-deployments": (context) =>
       handleListDeployments(context, dependencies),
+    "POST /api/deploy": (context) => handleDeploy(context, dependencies),
     "POST /api/deploy-reset": (context) =>
       handleDeployReset(context, dependencies),
     "POST /api/delete-deployment": (context) =>

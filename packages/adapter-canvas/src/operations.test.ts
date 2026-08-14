@@ -1524,65 +1524,6 @@ describe("environment creation boundaries", () => {
     "utf8"
   );
 
-  // This suite reads `server.ts` as raw text and slices route bodies out of the
-  // legacy if-chain by their `pathname === ...` markers, so it carries an
-  // undeclared textual coupling to that chain: every slice that migrates a route
-  // onto the route table can delete a delimiter this suite depends on. The
-  // route-table boundary test cannot see that coupling.
-  //
-  // A missing marker must never be allowed to silently resize a slice.
-  // `String.prototype.slice` reads a -1 end as `length - 1`, so a deleted end
-  // delimiter widens a route body to essentially the whole file. The ordering
-  // assertions below then search that widened region for tokens like
-  // `buildAppCreateArgs` that also occur in other routes, and can keep passing
-  // while no longer constraining the route they name.
-  //
-  // Resolving every marker through this helper turns that into an immediate,
-  // self-describing failure naming the marker that needs re-pointing, and it
-  // fails the whole suite rather than only the assertions unlucky enough to
-  // notice.
-  function markerIndex(marker: string, from = 0): number {
-    const at = SERVER_SRC.indexOf(marker, from);
-    if (at < 0) {
-      throw new Error(
-        `No legacy branch matching \`${marker}\` remains in server.ts. That ` +
-          "route has most likely migrated onto the route table; re-point this " +
-          "delimiter at the next legacy branch that still bounds the same route."
-      );
-    }
-    return at;
-  }
-
-  // A named end delimiter inherits the migration expiry of whichever route it
-  // names: when that neighbour migrates, the marker dies and the slice widens.
-  // That has now happened repeatedly on this stack, so every remaining end is
-  // resolved structurally instead — as "the next legacy route of any
-  // kind" — which is exactly what the slice means and cannot be invalidated by
-  // any one route migrating. The pattern matches `pathname.startsWith` arms as
-  // well, so a prefix-matched neighbour still bounds the slice.
-  function nextLegacyRouteIndex(start: number, marker: string): number {
-    const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
-    legacyRoute.lastIndex = start + marker.length;
-    const match = legacyRoute.exec(SERVER_SRC);
-    if (!match) {
-      throw new Error(
-        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
-          "re-scope the raw-text slice that uses this delimiter."
-      );
-    }
-    if (match.index <= start) {
-      throw new Error(
-        `The next legacy route after \`${marker}\` did not produce a bounded slice.`
-      );
-    }
-    return match.index;
-  }
-
-  const deployMarker = 'pathname === "/api/deploy"';
-  const deployStart = markerIndex(deployMarker);
-  const deployEnd = nextLegacyRouteIndex(deployStart, deployMarker);
-  const deployRoute = SERVER_SRC.slice(deployStart, deployEnd);
-
   it("no longer answers POST /api/operations from the legacy chain", () => {
     // The registration/scheduling arm moved to the operations-status route
     // module (its own unit and loopback tests cover the 202-then-schedule
@@ -1603,18 +1544,8 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).not.toContain('pathname === "/api/create-environment"');
   });
 
-  it("bounds every sliced route body on markers that still exist", () => {
-    // Pins the coupling itself rather than leaving it to whichever ordering
-    // assertion happens to notice. Each slice must be non-empty and strictly
-    // smaller than the file, so neither a collapsed nor a widened slice can
-    // reach the assertions below.
-    for (const [name, start, end] of [
-      ["deploy", deployStart, deployEnd]
-    ] as const) {
-      expect(start, name).toBeGreaterThan(-1);
-      expect(end, name).toBeGreaterThan(start);
-    }
-    expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
+  it("no longer answers POST /api/deploy from the legacy chain", () => {
+    expect(SERVER_SRC).not.toContain('pathname === "/api/deploy"');
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
@@ -1686,11 +1617,13 @@ describe("environment creation boundaries", () => {
     expect(credentialCall).toBeGreaterThan(applicationCall);
   });
 
-  it("provisions model-specific values when deployment begins", () => {
-    expect(deployRoute).toContain("app.bicep");
-    expect(deployRoute).toContain("RADIUS_DEPLOY_PARAMS");
-    expect(deployRoute).toContain("RADIUS_RAD_COMMANDS");
-  });
+  // The "provisions model-specific values when deployment begins" assertion
+  // that used to slice the `/api/deploy` legacy arm out of `server.ts` moved to
+  // `server/services/deploy-dispatch.test.ts` when that route migrated onto the
+  // route table. Reading `.radius/app.bicep` (and the `app.bicep` fallback),
+  // provisioning `RADIUS_DEPLOY_PARAMS`, and falling back to the environment's
+  // `RADIUS_RAD_COMMANDS` are executed there against the real dispatch service
+  // rather than asserted as source text here.
 });
 
 describe("how finish resolves the stage that was still running", () => {
