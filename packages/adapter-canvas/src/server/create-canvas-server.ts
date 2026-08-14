@@ -99,7 +99,16 @@ export function createCanvasServer(
     try {
       await listenOn(server, preferredPort);
     } catch {
-      await listenOn(server, 0);
+      // The preferred port is advisory, so only the ephemeral retry is
+      // terminal. A terminal bind failure never reaches `instances.set`, so
+      // neither stop() nor stopAll() can ever discover this socket to close
+      // it — release it here or the handle leaks for the life of the process.
+      try {
+        await listenOn(server, 0);
+      } catch (error) {
+        await closeServer(server, true);
+        throw error;
+      }
     }
     const port = boundPort(server);
     const baseUrl = `http://127.0.0.1:${port}`;
@@ -111,7 +120,27 @@ export function createCanvasServer(
       state
     };
     instances.set(instanceId, entry);
-    dependencies.onStarted?.(instanceId, entry);
+    try {
+      dependencies.onStarted?.(instanceId, entry);
+    } catch (error) {
+      // Registration and the started hook have to succeed or fail together.
+      // Leaving a live entry behind would hand the next caller an instance
+      // whose facade-side setup never ran, and the socket would stay bound.
+      //
+      // Unwinding unconditionally is safe because `start` is single-flight per
+      // instance id: `getOrCreate` reaches `starting.set` with no intervening
+      // await, and `stop` awaits that promise instead of deleting concurrently.
+      // So nothing can observe or replace this entry between `instances.set`
+      // above and this unwind, and the socket is closed exactly once.
+      try {
+        instances.delete(instanceId);
+        await closeServer(server, true);
+        dependencies.onStopped?.(instanceId);
+      } catch {
+        // A failure while unwinding must not mask why startup failed.
+      }
+      throw error;
+    }
     return entry;
   }
 
@@ -163,7 +192,9 @@ export function createCanvasServer(
     if (pending) return pending;
     const work = (async () => {
       const startingEntry = starting.get(instanceId);
-      if (startingEntry) await startingEntry;
+      // A startup that fails unwinds itself, so a stop racing it must not
+      // adopt that rejection: stop() is cleanup and stays resolvable.
+      if (startingEntry) await startingEntry.catch(() => {});
       const entry = instances.get(instanceId);
       if (!entry) return;
       instances.delete(instanceId);
