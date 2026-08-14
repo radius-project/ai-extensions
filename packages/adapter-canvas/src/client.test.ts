@@ -11,7 +11,8 @@ import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
   CLIENT_HEARTBEAT_JS,
-  CLIENT_OPCHIP_JS
+  CLIENT_OPCHIP_JS,
+  CLIENT_DELETE_DIALOG_JS
 } from "./client.js";
 
 describe("client.ts exports", () => {
@@ -152,6 +153,823 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
   it("has no reference to the removed bicepGenerated / generatedWarning state", () => {
     expect(CLIENT_GRAPH_JS).not.toContain("bicepGenerated");
     expect(CLIENT_GRAPH_JS).not.toContain("generatedWarning");
+  });
+});
+
+describe("CLIENT_REPO_BRANCH_JS — Modeled graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string; planLabel?: string };
+    textContent: string;
+    disabled: boolean;
+  }
+
+  function runApply(hasEnv: boolean) {
+    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: true };
+    const hint = { textContent: "" };
+    const elements: Record<string, unknown> = {
+      "deploy-app-btn": btn,
+      "modeled-subtitle-hint": hint
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const apply = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyModeledEnvState;`
+    )(document);
+    apply(hasEnv);
+    return { btn, hint };
+  }
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint } = runApply(false);
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("offers Plan Deployment when the repo has an environment", () => {
+    const { btn, hint } = runApply(true);
+    expect(btn.textContent).toBe("Plan Deployment");
+    expect(btn.dataset.mode).toBe("plan");
+    expect(hint.textContent).toContain("Plan Deployment");
+  });
+
+  it("routes the primary button to the environment form or the planned graph", () => {
+    function navigate(mode: string) {
+      const location = { href: "" };
+      const elements: Record<string, unknown> = {
+        "graph-app": { value: "demo" }
+      };
+      const document = { getElementById: (id: string) => elements[id] || null };
+      const act = new Function(
+        "document",
+        "window",
+        `${CLIENT_REPO_BRANCH_JS}; return radiusModeledPrimaryAction;`
+      )(document, { location });
+      act({ dataset: { mode }, disabled: false });
+      return location.href;
+    }
+    expect(navigate("create-env")).toBe("/?page=environment&new=1");
+    expect(navigate("plan")).toBe("/?page=planned&app=demo");
+  });
+});
+
+describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string };
+    textContent: string;
+    disabled: boolean;
+    title?: string;
+    setAttribute(name: string, value: string): void;
+    removeAttribute(name: string): void;
+  }
+  interface FakeSelect {
+    value: string;
+  }
+
+  function runApply(
+    hasEnv: boolean,
+    appValue = "web-app",
+    envValue = "prod",
+    branchValue = "main",
+    statesUnavailable = false,
+    planFailed = false
+  ) {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      disabled: true,
+      setAttribute(name: string, value: string) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute(name: string) {
+        if (name === "title") delete this.title;
+      }
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const appSel: FakeSelect = { value: appValue };
+    const envSel: FakeSelect = { value: envValue };
+    const branchSel: FakeSelect = { value: branchValue };
+    const elements: Record<string, unknown> = {
+      "plan-btn": btn,
+      "planned-subtitle-hint": hint,
+      "planned-app": appSel,
+      "planned-branch": branchSel,
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const controls = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return {
+        apply: radiusApplyPlanEnvState,
+        fail: function() { RADIUS_PLAN_REQUEST_FAILED = true; }
+      };`
+    )(document);
+    if (planFailed) controls.fail();
+    controls.apply(hasEnv, statesUnavailable);
+    return { btn, hint };
+  }
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint } = runApply(false);
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("fails closed when environments cannot be loaded", () => {
+    const { btn, hint } = runApply(false, "web-app", "", "main", true);
+    expect(btn.dataset.mode).toBe("unavailable");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+    expect(hint.textContent).toContain("temporarily unavailable");
+  });
+
+  it("does not treat an environment request failure as an empty list", async () => {
+    const option = () => ({
+      value: "",
+      textContent: "",
+      selected: false
+    });
+    const select = () => ({
+      value: "",
+      innerHTML: "",
+      appendChild(child: { value: string; selected: boolean }) {
+        if (!this.value || child.selected) this.value = child.value;
+      }
+    });
+    const appSel = select();
+    const branchSel = select();
+    const envSel = select();
+    const btn = {
+      dataset: {},
+      textContent: "",
+      disabled: false,
+      title: "",
+      setAttribute(_name: string, value: string) {
+        this.title = value;
+      },
+      removeAttribute() {
+        this.title = "";
+      }
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const elements = {
+      "planned-app": appSel,
+      "planned-branch": branchSel,
+      "planned-env": envSel,
+      "plan-btn": btn,
+      "planned-subtitle-hint": hint
+    };
+    const document = {
+      getElementById: (id: keyof typeof elements) => elements[id] || null,
+      createElement: option
+    };
+    const fetch = (url: string) => {
+      if (url.startsWith("/api/list-environments"))
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({
+              environments: [],
+              error: "GitHub API unavailable"
+            })
+        });
+      if (url === "/api/discover-branches")
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({ branches: [{ name: "main", sha: "1234567" }] })
+        });
+      return Promise.resolve({
+        json: () => Promise.resolve({ applications: [{ name: "web-app" }] })
+      });
+    };
+    const populate = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusPopulatePlannedSelectors;`
+    )(document, { location: { search: "" } }, fetch);
+
+    await populate("octo/app", {}, "main", "");
+
+    expect(envSel.innerHTML).toContain("Unable to load environments");
+    expect(btn.dataset.mode).toBe("unavailable");
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("offers Deploy Application and names the app/environment in bold when one exists", () => {
+    const { btn, hint } = runApply(true, "web-app", "prod");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  describe("CLIENT_REPO_BRANCH_JS — Planned graph request scheduler", () => {
+    it("debounces changes and serializes requests so stale work cannot win", async () => {
+      const runs: Array<{
+        isCurrent: () => boolean;
+        resolve: () => void;
+      }> = [];
+      let idleCalls = 0;
+      const schedulerFactory = new Function(
+        `${CLIENT_REPO_BRANCH_JS}; return radiusCreatePlanScheduler;`
+      )();
+      const schedule = schedulerFactory(
+        (isCurrent: () => boolean) =>
+          new Promise<void>((resolve) => runs.push({ isCurrent, resolve })),
+        () => {
+          idleCalls++;
+        },
+        0
+      );
+
+      schedule(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(runs).toHaveLength(1);
+
+      schedule(false);
+      schedule(false);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].isCurrent()).toBe(false);
+
+      runs[0].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(runs).toHaveLength(2);
+      expect(runs[1].isCurrent()).toBe(true);
+
+      runs[1].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(idleCalls).toBe(1);
+    });
+  });
+
+  // An empty branch is not inert at the server: /api/deploy resolves it to the
+  // repo's default branch, so an enabled button here would deploy code the user
+  // never previewed on the planned graph.
+  it("stays disabled until a branch is selected", () => {
+    const { btn } = runApply(true, "web-app", "prod", "");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("branch");
+  });
+
+  it("stays disabled until an environment is selected", () => {
+    const { btn } = runApply(true, "web-app", "", "main");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("environment");
+  });
+
+  it("stays disabled when the latest selected plan failed", () => {
+    const { btn } = runApply(true, "web-app", "prod", "main", false, true);
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be generated");
+  });
+
+  it("stays disabled when neither a branch nor an environment is selected", () => {
+    const { btn } = runApply(true, "web-app", "", "");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("branch");
+    expect(btn.title).toContain("environment");
+  });
+
+  it("treats a whitespace-only branch as unselected", () => {
+    const { btn } = runApply(true, "web-app", "prod", "   ");
+    expect(btn.disabled).toBe(true);
+  });
+
+  // The state is re-applied on every selector change, so a tooltip explaining a
+  // now-resolved gap must not linger.
+  it("clears the explanatory tooltip once the selection is complete", () => {
+    const { btn } = runApply(true, "web-app", "prod", "main");
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
+  });
+
+  // Create Environment navigates rather than deploying, so it has nothing to
+  // wait on and must stay clickable.
+  it("keeps Create Environment enabled regardless of branch/environment", () => {
+    const { btn } = runApply(false, "", "", "");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("HTML-escapes app/environment names in the hint to avoid injection", () => {
+    const { hint } = runApply(true, "<img>", "prod\"'");
+    expect(hint.innerHTML).not.toContain("<img>");
+    expect(hint.innerHTML).toContain("&lt;img&gt;");
+    expect(hint.innerHTML).toContain("prod&quot;&#39;");
+  });
+
+  it("triggers a deployment and redirects to the Deployments tab", async () => {
+    const btn: FakeBtn & { textContent: string } = {
+      dataset: {},
+      textContent: "Deploy Application",
+      disabled: false
+    };
+    const branchSel: FakeSelect = { value: "main" };
+    const envSel: FakeSelect = { value: "prod" };
+    const elements: Record<string, unknown> = {
+      "planned-app": { value: "web-app" },
+      "planned-branch": branchSel,
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    let requestedUrl = "";
+    let requestedBody: Record<string, unknown> = {};
+    const fetch = (url: string, init: { body: string }) => {
+      requestedUrl = url;
+      requestedBody = JSON.parse(init.body);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", { prod: "azure" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestedUrl).toBe("/api/deploy");
+    expect(requestedBody).toMatchObject({
+      environment: "prod",
+      provider: "azure",
+      targetRepo: "octo/app",
+      branch: "main",
+      appFile: ".radius/app.bicep"
+    });
+    expect(btn.disabled).toBe(true);
+    expect(location.href).toBe(
+      "/?page=deploying&application=web-app&environment=prod"
+    );
+  });
+
+  it("does not redirect when the server rejects a conflicting deployment", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      disabled: false,
+      setAttribute(name, value) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "planned-app": { value: "web-app" },
+      "planned-branch": { value: "main" },
+      "planned-env": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    const fetch = () =>
+      Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({ error: "Deployment already running." })
+      });
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", { prod: "azure" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(location.href).toBe("");
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.title).toBe("Deployment already running.");
+  });
+
+  it("refuses to dispatch without an explicit branch", () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      disabled: false,
+      setAttribute() {},
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "planned-branch": { value: "  " },
+      "planned-env": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+
+  it("does nothing when there is no selected environment", () => {
+    const btn: FakeBtn = { dataset: {}, textContent: "", disabled: false };
+    const envSel: FakeSelect = { value: "" };
+    const elements: Record<string, unknown> = {
+      "planned-branch": { value: "main" },
+      "planned-env": envSel
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployPlannedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+});
+
+describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () => {
+  interface FakeBtn {
+    dataset: { mode?: string };
+    textContent: string;
+    className: string;
+    disabled: boolean;
+    title?: string;
+    setAttribute(name: string, value: string): void;
+    removeAttribute(name: string): void;
+  }
+
+  function runApply(
+    hasEnv: boolean,
+    hasDeployment: boolean,
+    appValue = "web-app",
+    envValue = "prod",
+    deploymentStatus?: string,
+    statesUnavailable?: boolean
+  ) {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: true,
+      setAttribute(name: string, value: string) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute(name: string) {
+        if (name === "title") delete this.title;
+      }
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const elements: Record<string, unknown> = {
+      "deployed-delete-btn": btn,
+      "deployed-subtitle-hint": hint,
+      "deployed-app-select": { value: appValue },
+      "deployed-env-select": { value: envValue }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const apply = new Function(
+      "document",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusApplyDeployedEnvState;`
+    )(document);
+    const mode = apply(
+      hasEnv,
+      hasDeployment,
+      deploymentStatus,
+      statesUnavailable
+    );
+    return { btn, hint, mode };
+  }
+
+  // /api/list-deployments answers a transient GitHub failure with HTTP 200 and
+  // { deployments: [], error }. The page keeps the last-known state on screen
+  // and flags it stale; the button must not stay actionable against state that
+  // could not be confirmed, or the user can start an operation that conflicts
+  // with one already running.
+  it("disables Delete Deployment while the deployment listing is unreadable", () => {
+    const { btn, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "success",
+      true
+    );
+    expect(mode).toBe("delete");
+    expect(btn.textContent).toBe("Delete Deployment");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+  });
+
+  it("disables Deploy Application while the deployment listing is unreadable", () => {
+    const { btn, mode } = runApply(true, false, "web-app", "prod", "", true);
+    expect(mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
+  });
+
+  // Creating an environment doesn't act on deployment state, so an unreadable
+  // listing is no reason to block it.
+  it("keeps Create Environment enabled while the listing is unreadable", () => {
+    const { btn } = runApply(false, false, "web-app", "prod", "", true);
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("re-enables the button once the listing becomes readable again", () => {
+    const { btn } = runApply(true, true, "web-app", "prod", "success", false);
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
+  });
+
+  // A delete in flight is the more specific explanation, so it wins the tooltip.
+  it("prefers the deleting message over the stale-listing message", () => {
+    const { btn } = runApply(true, true, "web-app", "prod", "deleting", true);
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deleting…");
+    expect(btn.title).toContain("already being deleted");
+  });
+
+  it("offers Create Environment when the repo has no environment", () => {
+    const { btn, hint, mode } = runApply(false, false);
+    expect(mode).toBe("create-env");
+    expect(btn.textContent).toBe("Create Environment");
+    expect(btn.dataset.mode).toBe("create-env");
+    expect(btn.className).toContain("rad-btn--primary");
+    expect(btn.disabled).toBe(false);
+    expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("offers Deploy Application when an environment exists but nothing is deployed", () => {
+    const { btn, hint, mode } = runApply(true, false, "web-app", "prod");
+    expect(mode).toBe("deploy");
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.className).toContain("rad-btn--primary");
+    expect(btn.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Deploy Application");
+  });
+
+  // A delete already in flight must not be dispatchable a second time. This
+  // mirrors the Deployments table, whose per-row delete button is disabled while
+  // the status is "deleting" — the two surfaces drive the same operation, so a
+  // gap here would just be a second way around the same guard.
+  it("disables the button while a delete is already in flight", () => {
+    const { btn, hint, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "deleting"
+    );
+    expect(mode).toBe("delete");
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deleting\u2026");
+    expect(btn.title).toContain("already being deleted");
+    expect(hint.innerHTML).toContain("currently being deleted");
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+  });
+
+  it("disables deletion while a deployment is still pending", () => {
+    const { btn, hint, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "pending"
+    );
+    expect(mode).toBe("delete");
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("Deploying…");
+    expect(btn.title).toContain("still in progress");
+    expect(hint.innerHTML).toContain("currently being deployed");
+  });
+
+  it.each(["success", "failed", "unknown", undefined])(
+    "leaves the button enabled for terminal status %s",
+    (status) => {
+      const { btn } = runApply(true, true, "web-app", "prod", status);
+      expect(btn.disabled).toBe(false);
+      expect(btn.textContent).toBe("Delete Deployment");
+      expect(btn.title).toBeUndefined();
+    }
+  );
+
+  // The state is re-applied on every selector change, so a stale title left over
+  // from a deleting environment must not follow the user to a healthy one.
+  it("clears the deleting tooltip when the selection changes to a free environment", () => {
+    const { btn } = runApply(true, false, "web-app", "staging", "deleting");
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBeUndefined();
+  });
+
+  it("offers Delete Deployment when a deployment already exists", () => {
+    const { btn, hint, mode } = runApply(true, true, "web-app", "prod");
+    expect(mode).toBe("delete");
+    expect(btn.textContent).toBe("Delete Deployment");
+    expect(btn.dataset.mode).toBe("delete");
+    expect(btn.className).toContain("rad-btn--danger-outline");
+    expect(btn.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("deep link into the cloud portal");
+    expect(hint.innerHTML).toContain("<strong>web-app</strong>");
+    expect(hint.innerHTML).toContain("<strong>prod</strong>");
+    expect(hint.innerHTML).toContain("Delete Deployment");
+  });
+
+  it("disables deploy/delete until an application and environment are selected", () => {
+    expect(runApply(true, false, "", "").btn.disabled).toBe(true);
+    expect(runApply(true, true, "web-app", "").btn.disabled).toBe(true);
+    // Creating an environment never depends on a selection.
+    expect(runApply(false, false, "", "").btn.disabled).toBe(false);
+  });
+
+  it("HTML-escapes app/environment names in the hint", () => {
+    const { hint } = runApply(true, true, "<img>", "prod\"'");
+    expect(hint.innerHTML).not.toContain("<img>");
+    expect(hint.innerHTML).toContain("&lt;img&gt;");
+    expect(hint.innerHTML).toContain("prod&quot;&#39;");
+  });
+
+  it("dispatches a deployment and redirects to the Deployments tab", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-app-select": { value: "web-app" },
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    let requestedUrl = "";
+    let requestedBody: Record<string, unknown> = {};
+    const fetch = (url: string, init: { body: string }) => {
+      requestedUrl = url;
+      requestedBody = JSON.parse(init.body);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", "feature-x", { prod: "aws" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestedUrl).toBe("/api/deploy");
+    expect(requestedBody).toMatchObject({
+      environment: "prod",
+      provider: "aws",
+      targetRepo: "octo/app",
+      branch: "feature-x",
+      appFile: ".radius/app.bicep"
+    });
+    expect(location.href).toBe(
+      "/?page=deploying&application=web-app&environment=prod"
+    );
+  });
+
+  it("does not redirect when the server rejects a conflicting deployment", async () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "Deploy Application",
+      className: "",
+      disabled: false,
+      setAttribute(name, value) {
+        if (name === "title") this.title = value;
+      },
+      removeAttribute() {}
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-app-select": { value: "web-app" },
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    const location = { href: "" };
+    const fetch = () =>
+      Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({ error: "Deployment already running." })
+      });
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location }, fetch);
+
+    deploy(btn, "octo/app", "feature-x", { prod: "aws" }, "azure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(location.href).toBe("");
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe("Deploy Application");
+    expect(btn.title).toBe("Deployment already running.");
+  });
+
+  it("does not dispatch a deployment without a selected environment", () => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-env-select": { value: "" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", "main", {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+
+  // The branch is resolved server-side and should never arrive empty, but the
+  // dispatch must not rely on that: /api/deploy resolves an empty branch to the
+  // repo's default, deploying code the user never selected.
+  it.each([
+    ["", "empty"],
+    ["   ", "whitespace-only"],
+    [undefined, "missing"]
+  ])("does not dispatch a deployment with a %s branch (%s)", (branch) => {
+    const btn: FakeBtn = {
+      dataset: {},
+      textContent: "",
+      className: "",
+      disabled: false
+    };
+    const elements: Record<string, unknown> = {
+      "deployed-env-select": { value: "prod" }
+    };
+    const document = { getElementById: (id: string) => elements[id] || null };
+    let fetchCalled = false;
+    const fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve({ json: () => Promise.resolve({}) });
+    };
+    const deploy = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusDeployDeployedApp;`
+    )(document, { location: { href: "" } }, fetch);
+
+    deploy(btn, "octo/app", branch, {}, "azure");
+
+    expect(fetchCalled).toBe(false);
+  });
+});
+
+describe("CLIENT_GRAPH_JS — line weights", () => {
+  it("draws edges and node borders thick enough to read at a glance", () => {
+    // Up from the original 1.5 / 1 / 2 so the graph stays legible.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var style = { stroke: stroke, strokeWidth: 2.5 };"
+    );
+    expect(CLIENT_GRAPH_JS).toContain("(d.borderWidth || 2.5) + 'px'");
+    expect(CLIENT_GRAPH_JS).not.toContain("strokeWidth: 1.5");
+  });
+
+  it("uses one node border width for every mode", () => {
+    // Diff nodes used to be twice as thick as modeled/planned ones, which read
+    // as an unintended emphasis difference rather than a diff signal — diff
+    // status is already carried by the border colour.
+    expect(CLIENT_GRAPH_JS).toContain("borderWidth: 2.5,");
+    expect(CLIENT_GRAPH_JS).not.toContain("borderWidth: diffMode");
   });
 });
 
@@ -493,7 +1311,7 @@ describe("CLIENT_GRAPH_JS — Graph Diff visual design", () => {
 describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
   it("keeps modeled topology instead of rendering recipe outputs as child nodes", () => {
     expect(CLIENT_GRAPH_JS).toContain(
-      "var resolvedMode = plannedMode || deployMode || deployedMode"
+      "var resolvedMode = plannedMode || deployMode"
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "if (!resolvedMode && r.outputResources && r.outputResources.length > 0)"
@@ -585,12 +1403,6 @@ describe("CLIENT_GRAPH_JS — Planned graph visual design", () => {
 });
 
 describe("CLIENT_GRAPH_JS — deployment status colors", () => {
-  it("renders deployed graph cards gray except for failed resources", () => {
-    expect(CLIENT_GRAPH_JS).toContain("if (deployedMode) {");
-    expect(CLIENT_GRAPH_JS).toContain("? RADIUS_DEPLOY_STATUS_COLORS.failed");
-    expect(CLIENT_GRAPH_JS).toContain(": RADIUS_DEPLOY_STATUS_COLORS.pending");
-  });
-
   it("keeps managed-cluster nodes gray unless they fail and colors ordinary compute nodes by deploy status", () => {
     expect(CLIENT_GRAPH_JS).toContain("if (deployMode) {");
     expect(CLIENT_GRAPH_JS).toContain(
@@ -686,6 +1498,50 @@ describe("CLIENT_GRAPH_JS — deployment status colors", () => {
     );
     expect(CLIENT_GRAPH_JS).toContain(
       "var shortType = resolvedMode && resolvedResource"
+    );
+  });
+
+  it("renders the status legend in deploy mode instead of the category legend", () => {
+    // Ported from PR #200 (@nithyatsu): the Deployed view's legend explains
+    // deploy status, since that is what its badges encode.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "if (options.showLegend && !diffMode && deployMode) {"
+    );
+    expect(CLIENT_GRAPH_JS).toContain("'Pending / deploying'");
+    expect(CLIENT_GRAPH_JS).toContain("'Deployed'");
+    expect(CLIENT_GRAPH_JS).toContain("'Failed'");
+    expect(CLIENT_GRAPH_JS).toContain(
+      "radiusDeployBadgeSvg(statusItems[si].kind)"
+    );
+    // Modeled/Planned keep the resource-category legend.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "} else if (options.showLegend && !diffMode) {"
+    );
+  });
+
+  it("surfaces the producer's status message in the node popup", () => {
+    // A failed node has to explain itself. Without this the graph reports that
+    // something failed but never what went wrong, at the moment the user most
+    // needs the detail.
+    expect(CLIENT_GRAPH_JS).toContain("deployMessage: r.deployMessage || ''");
+    expect(CLIENT_GRAPH_JS).toContain("if (d.deployMessage) {");
+    // Escaped as text, never interpolated as markup.
+    expect(CLIENT_GRAPH_JS).toContain("escLocal(d.deployMessage)");
+    // A failure reads red; anything else is muted secondary text.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var msgIsFailure = d.deployStatus === 'failed';"
+    );
+  });
+
+  it("never mounts output resources as child nodes in deploy mode", () => {
+    // The Deployed view is one node per Radius resource; expanding recipe
+    // outputs would make the topology shift once a deploy resolves them.
+    // resolvedMode covers plannedMode and deployMode.
+    expect(CLIENT_GRAPH_JS).toContain(
+      "var resolvedMode = plannedMode || deployMode"
+    );
+    expect(CLIENT_GRAPH_JS).toContain(
+      "if (!resolvedMode && r.outputResources && r.outputResources.length > 0) {"
     );
   });
 });
@@ -868,5 +1724,103 @@ describe("CLIENT_OPCHIP_JS — the ambient operation chip", () => {
     const h = mount({ operation: running, stored: "op_1" });
     await h.feed(running);
     expect(h.chip.hidden).toBe(false);
+  });
+});
+
+describe("CLIENT_DELETE_DIALOG_JS — shared 3-step delete confirmation", () => {
+  function makeEl(id: string) {
+    return {
+      id,
+      value: "",
+      disabled: false,
+      textContent: "",
+      innerHTML: "",
+      style: { display: "none" } as Record<string, string>,
+      handlers: {} as Record<string, (e: unknown) => void>,
+      addEventListener(type: string, fn: (e: unknown) => void) {
+        this.handlers[type] = fn;
+      },
+      focus() {}
+    };
+  }
+
+  function setup() {
+    const els: Record<string, ReturnType<typeof makeEl>> = {};
+    const get = (id: string) => (els[id] = els[id] || makeEl(id));
+    // The dialog's own chrome must exist for the factory to attach.
+    [
+      "deploy-delete-modal",
+      "deploy-delete-body",
+      "deploy-delete-app",
+      "deploy-delete-env",
+      "deploy-delete-close"
+    ].forEach(get);
+    const doc = {
+      getElementById: (id: string) =>
+        id in els ? els[id]
+        : /^del-/.test(id) ? get(id)
+        : null,
+      addEventListener() {}
+    };
+    const factory = new Function(
+      "document",
+      CLIENT_DELETE_DIALOG_JS + "\nreturn radiusCreateDeleteDeploymentDialog;"
+    )(doc);
+    return { els, factory, get };
+  }
+
+  it("requires all three steps before it will confirm", () => {
+    const { els, factory, get } = setup();
+    const confirmed: Array<[string, string]> = [];
+    const dialog = factory({
+      onConfirm: (a: string, e: string) => confirmed.push([a, e])
+    });
+    dialog.open("todoapp", "prod");
+
+    expect(els["deploy-delete-modal"].style.display).toBe("flex");
+    expect(els["deploy-delete-app"].textContent).toBe("todoapp");
+    expect(els["deploy-delete-body"].innerHTML).toContain("del-step1-btn");
+
+    get("del-step1-btn").handlers.click({});
+    expect(els["deploy-delete-body"].innerHTML).toContain("cannot be undone");
+
+    get("del-step2-btn").handlers.click({});
+    const input = get("del-confirm-input");
+    const btn = get("del-confirm-btn");
+    expect(els["deploy-delete-body"].innerHTML).toContain("todoapp/prod");
+
+    // A wrong token must neither enable the button nor confirm.
+    input.value = "todoapp";
+    input.handlers.input({});
+    expect(btn.disabled).toBe(true);
+    btn.handlers.click({});
+    expect(confirmed).toEqual([]);
+
+    input.value = "todoapp/prod";
+    input.handlers.input({});
+    expect(btn.disabled).toBe(false);
+    btn.handlers.click({});
+    expect(confirmed).toEqual([["todoapp", "prod"]]);
+    expect(els["deploy-delete-modal"].style.display).toBe("none");
+  });
+
+  it("escapes app and environment names in the dialog body", () => {
+    const { els, factory, get } = setup();
+    const dialog = factory({ onConfirm: () => {} });
+    dialog.open("<img>", "prod");
+    get("del-step1-btn").handlers.click({});
+    expect(els["deploy-delete-body"].innerHTML).toContain("&lt;img&gt;");
+    expect(els["deploy-delete-body"].innerHTML).not.toContain("<img>");
+  });
+
+  it("resets to step one after being closed", () => {
+    const { els, factory, get } = setup();
+    const dialog = factory({ onConfirm: () => {} });
+    dialog.open("todoapp", "prod");
+    get("del-step1-btn").handlers.click({});
+    dialog.close();
+    expect(els["deploy-delete-body"].innerHTML).toBe("");
+    dialog.open("todoapp", "prod");
+    expect(els["deploy-delete-body"].innerHTML).toContain("del-step1-btn");
   });
 });
