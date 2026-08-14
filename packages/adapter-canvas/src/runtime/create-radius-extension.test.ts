@@ -195,13 +195,13 @@ describe("RU-19: onPreToolUse hook", () => {
 });
 
 describe("RU-19: onSessionStart hook", () => {
-  it("returns additionalContext with the stable instanceId + core tool guidance", async () => {
+  it("returns additionalContext with stable canvas guidance without requiring PR graph diffs", async () => {
     const { ext } = setup();
     const result = await ext.hooks.onSessionStart();
     expect(result.additionalContext).toContain("radius-panel");
     expect(result.additionalContext).toContain("radius_generate_app");
-    expect(result.additionalContext).toContain(
-      "radius_generate_pr_diff_markdown"
+    expect(result.additionalContext).not.toContain(
+      "When a pull request is created"
     );
   });
 });
