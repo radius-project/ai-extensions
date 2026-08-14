@@ -23,6 +23,10 @@ interface Script {
   fetchThrows?: Error;
   buildThrows?: Error;
   commit?: boolean;
+  // When set, buildGraphViaRad emits its progress line, then blocks on this
+  // promise before resolving. Lets a test prove progress frames reach the socket
+  // WHILE the build is still in flight, not just once the stream has ended.
+  buildGate?: Promise<void>;
 }
 
 interface Harness {
@@ -90,14 +94,17 @@ function start(): Harness {
         `/ws/${bicepRepoPath}.graph.json`,
       radArtifactsDirForSelection: () =>
         Promise.resolve({ dir: "/tmp/rad", remote: true }),
-      buildGraphViaRad: (_content, _bicepPath, options) => {
+      buildGraphViaRad: async (_content, _bicepPath, options) => {
         if (script.buildThrows) return Promise.reject(script.buildThrows);
         // Emit two log lines through the real progress callback so the stream
         // carries handler-authored frames, not just terminal ones.
         options.log("compiling app.bicep...");
-        return Promise.resolve([
+        // Block here while a gate is held so a test can observe the emitted
+        // progress frame on the socket before the build resolves.
+        if (script.buildGate) await script.buildGate;
+        return [
           { id: "res-a", name: "api", type: "Radius.Compute/containers" }
-        ]);
+        ];
       },
       canvasGraphResources: (values) => values as CanvasGraphResource[],
       errorMessage: (error) =>
@@ -153,6 +160,51 @@ async function readFrames(
   return { raw, frames };
 }
 
+// Incrementally drain the SSE body from the socket, yielding parsed frames as
+// their blank-line terminators arrive. Unlike `readFrames`, this does NOT wait
+// for `end()`: it lets a test assert that early progress frames are flushed
+// while the handler is still mid-build. A buffering regression that withheld
+// every frame until the stream closed would hang `next()` here and fail.
+function frameStream(response: Response): {
+  next(): Promise<{ event: string; data: unknown }>;
+  cancel(): Promise<void>;
+} {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const pending: { event: string; data: unknown }[] = [];
+
+  const parse = (part: string): { event: string; data: unknown } => {
+    const match = /^event: (\w+)\ndata: (.*)$/s.exec(part);
+    if (!match) throw new Error(`malformed SSE frame: ${JSON.stringify(part)}`);
+    return { event: match[1], data: JSON.parse(match[2]) };
+  };
+
+  const drainBuffer = (): void => {
+    let index = buffer.indexOf("\n\n");
+    while (index !== -1) {
+      pending.push(parse(buffer.slice(0, index)));
+      buffer = buffer.slice(index + 2);
+      index = buffer.indexOf("\n\n");
+    }
+  };
+
+  return {
+    async next() {
+      while (pending.length === 0) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("stream ended before a frame arrived");
+        buffer += decoder.decode(value, { stream: true });
+        drainBuffer();
+      }
+      return pending.shift()!;
+    },
+    async cancel() {
+      await reader.cancel();
+    }
+  };
+}
+
 describe("graphs-planning load-graph-stream real-loopback HIT", () => {
   it("sets SSE headers and streams progress then a reload done frame over a real socket", async () => {
     const harness = start();
@@ -204,6 +256,51 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       { method: "POST" }
     );
     expect(posted.status).toBe(418);
+  });
+
+  it("flushes progress frames on the socket while the build is still in flight", async () => {
+    const harness = start();
+    // Hold the build open so the only way the first frames can be read is if the
+    // handler flushed them incrementally rather than buffering to end().
+    let releaseBuild!: () => void;
+    harness.script.buildGate = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp`
+    );
+    const stream = frameStream(response);
+
+    // These three arrive from a build that has NOT resolved yet — proof the
+    // stream is live, not a single buffered response.
+    expect(await stream.next()).toEqual({
+      event: "progress",
+      data: { message: "Checking octo/app for existing app.bicep..." }
+    });
+    expect(await stream.next()).toEqual({
+      event: "progress",
+      data: { message: "Found existing app.bicep — parsing resources..." }
+    });
+    expect(await stream.next()).toEqual({
+      event: "progress",
+      data: { message: "compiling app.bicep..." }
+    });
+    // The build has not committed yet, so no terminal state has been written.
+    expect(harness.state.graphResources).toBeUndefined();
+
+    releaseBuild();
+
+    expect(await stream.next()).toEqual({
+      event: "progress",
+      data: { message: "Mapped 1 resource(s) — rendering graph..." }
+    });
+    expect(await stream.next()).toEqual({
+      event: "done",
+      data: { reload: true }
+    });
+    await stream.cancel();
   });
 
   it("answers 503 with a plain body and no event-stream header when the instance is gone", async () => {
