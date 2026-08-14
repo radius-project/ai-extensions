@@ -108,6 +108,7 @@ const productionHandlers = {
   }),
   ...createAzureDiscoveryRoutes({
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    runCli: () => Promise.resolve(""),
     isUuid: () => false,
     parseServedReposFromSubjects: () => []
   }),
@@ -348,15 +349,15 @@ describe("server route ownership boundary", () => {
   // family owns all three of its routes. Three families remain deliberately
   // split, and each is named here so no later slice can read one as fully
   // migrated in the ledger.
-  // - azure-discovery: its two read routes are migrated; its two writes
-  //   (POST /api/azure-auto-setup, ~1,672 lines, and POST /api/discover, ~220)
-  //   are far larger and stay on the fallback for their own slices.
+  // - azure-discovery: its two read routes and POST /api/discover are migrated;
+  //   its remaining write (POST /api/azure-auto-setup, ~1,672 lines) is far
+  //   larger and stays on the fallback for its own slice.
   // - deployments: everything but POST /api/deploy has migrated; that route is
   //   deferred because it needs its own multi-slice treatment.
   // - graphs-planning: the whole family is migrated — its two reads, the SSE
   //   stream, and its three writes.
   // - environments: the whole family has migrated; its residual is now zero.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, graphs-planning, and environments families, the azure-discovery reads, and every deployments route but POST /api/deploy, and leaves 3 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, graphs-planning, and environments families, the azure-discovery reads and discover write, and every deployments route but POST /api/deploy, and leaves 2 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -392,12 +393,13 @@ describe("server route ownership boundary", () => {
       "POST /api/load-graph",
       "POST /api/plan-graph",
       "POST /api/diff-branches",
-      "POST /api/create-environment"
+      "POST /api/create-environment",
+      "POST /api/discover"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(3);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(2);
     // The now-completed operations-status family, pinned explicitly so a later
     // slice cannot quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
@@ -408,7 +410,7 @@ describe("server route ownership boundary", () => {
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
-    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain(
       "POST /api/create-environment"
     );
@@ -456,13 +458,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 3 of 38
+    // Cross-checked against the inventory, and independently pinned: 2 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(3);
+    expect(residualLegacyCount).toBe(2);
 
     for (const route of table) {
       const matcher =
