@@ -35,7 +35,12 @@ import {
   deleteCredentialProfile,
   setPreferredGitHubLogin
 } from "./shared.js";
-import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  DeployErrorKind,
+  GraphView
+} from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
