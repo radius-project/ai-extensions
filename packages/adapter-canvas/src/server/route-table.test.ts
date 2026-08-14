@@ -24,6 +24,9 @@ import {
   createGraphsPlanningStreamRoutes
 } from "./routes/graphs-planning-reads.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
+import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
+import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
 
@@ -176,6 +179,43 @@ const productionHandlers = {
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false
   }),
+  ...createGraphsPlanningWritesRoutes({
+    workflows: createGraphPlanningWorkflows({
+      readInstanceEntry: () => undefined,
+      pipeline: createGraphPipeline({
+        fetchBicepSelection: () =>
+          Promise.resolve({
+            content: null,
+            fromWorkspace: false,
+            branch: "",
+            bicepPath: ""
+          }),
+        resolveRadArtifactsDir: () =>
+          Promise.resolve({ dir: "", remote: false }),
+        buildGraphViaRad: () => Promise.resolve([]),
+        canvasGraphResources: () => [],
+        workspaceGraphJsonPath: () => "",
+        graphDefinitionHash: () => "",
+        radArtifactsFingerprint: () => "",
+        removeDirectory: () => {}
+      }),
+      triggerAppBicepHandoff: () => {},
+      prepareSourceRefResources: () => ({ view: "graph", token: "" }),
+      setSourceRefResources: () => false,
+      isCurrentSourceRefToken: () => false,
+      defaultBranchForState: () => "main",
+      canReuseModeledGraph: () => false,
+      addGraphProgress: () => false,
+      beginPlannedGraphRequest: () => 1,
+      isCurrentPlannedGraphRequest: () => false,
+      fetchRecipePack: () => Promise.resolve([]),
+      resolveRecipeOutputs: () => Promise.resolve([]),
+      computeGraphDiff: () => [],
+      record: () => ({}),
+      optionalString: () => "",
+      errorMessage: (error) => String(error)
+    })
+  }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false,
@@ -319,15 +359,13 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and the base slice moved it onto the route table too, so the
-  // family owns all three of its routes. azure-discovery completed on the base
-  // (main migrated POST /api/discover), and deployments completes here, so
-  // graphs-planning is now the only deliberately split family and is named so
-  // no later slice can read it as fully migrated in the ledger.
-  // - graphs-planning: its three read routes, including the SSE stream, are
-  //   migrated; its three POST routes stay on the fallback.
-  // - azure-discovery, environments and deployments: fully migrated, so each
-  //   residual is asserted as empty rather than by naming a remaining key.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, azure-discovery, environments, and deployments families and the graphs-planning reads, and leaves 3 routes on the legacy fallback", () => {
+  // family owns all three of its routes. azure-discovery, graphs-planning and
+  // environments each completed on the base, and deployments completes here
+  // with POST /api/deploy — the last legacy route in the chain. The route table
+  // now owns every declared route, so the legacy fallback inventory is empty
+  // and every family's residual is asserted as empty rather than by naming a
+  // remaining key.
+  it("owns every declared route across all families and leaves no route on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -362,27 +400,34 @@ describe("server route ownership boundary", () => {
       "POST /api/delete-environment",
       "GET /api/list-environments",
       "GET /api/verify-status",
+      "POST /api/load-graph",
+      "POST /api/plan-graph",
+      "POST /api/diff-branches",
       "POST /api/create-environment",
       "POST /api/discover"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(3);
-    // The pinned families, so a later slice cannot quietly assume any one is
-    // done. azure-discovery, environments and deployments are now fully
-    // migrated, so each residual is asserted as empty rather than by naming a
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(0);
+    // Every family is pinned explicitly, so a later slice cannot quietly
+    // re-legacy a route that the table now owns. The whole chain has migrated,
+    // so each residual is asserted as empty by owner rather than by naming a
     // remaining key.
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/azure-auto-setup");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/discover");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/load-graph");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/plan-graph");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/diff-branches");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain(
       "POST /api/create-environment"
     );
     for (const family of [
       "azure-discovery",
+      "graphs-planning",
       "environments",
       "deployments"
     ] as const) {
@@ -395,13 +440,6 @@ describe("server route ownership boundary", () => {
         family
       ).toEqual([]);
     }
-    expect(LEGACY_ROUTE_INVENTORY).toEqual(
-      expect.arrayContaining([
-        "POST /api/load-graph",
-        "POST /api/plan-graph",
-        "POST /api/diff-branches"
-      ])
-    );
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)
@@ -422,12 +460,9 @@ describe("server route ownership boundary", () => {
 
   // Independently hardcoded, in declaration order, so the derived complement
   // above cannot be the only source of truth. A slice that migrates or drops a
-  // route has to update this list deliberately.
-  const RESIDUAL_ROUTE_PIN = [
-    "POST /api/load-graph",
-    "POST /api/plan-graph",
-    "POST /api/diff-branches"
-  ];
+  // route has to update this list deliberately. The chain is now fully
+  // migrated, so the pin is empty.
+  const RESIDUAL_ROUTE_PIN: string[] = [];
 
   it("moves exactly POST /api/deploy out of the residual inventory", () => {
     // The pre-deploy migrated ledger, written out by hand rather than derived,
@@ -466,6 +501,9 @@ describe("server route ownership boundary", () => {
       "POST /api/delete-environment",
       "GET /api/list-environments",
       "GET /api/verify-status",
+      "POST /api/load-graph",
+      "POST /api/plan-graph",
+      "POST /api/diff-branches",
       "POST /api/create-environment",
       "POST /api/discover"
     ];
@@ -495,15 +533,17 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 3 of 38
-    // after this slice. The regex counts only `pathname ===` and
+    // Cross-checked against the inventory, and independently pinned: 0 of 38
+    // after this slice, which retires the legacy chain entirely. The regex
+    // counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(3);
+    expect(residualLegacyCount).toBe(0);
     // The remaining method-aware matchers in `server.ts` must be exactly the
-    // residual inventory, keyed independently of the derived complement.
+    // residual inventory, keyed independently of the derived complement. Both
+    // are now empty, which is what retiring the chain means.
     expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(
       [...RESIDUAL_ROUTE_PIN].sort()
     );
@@ -629,7 +669,16 @@ describe("server route ownership boundary", () => {
   });
 
   it("fails on duplicate, unowned, or handlerless routes", () => {
-    const legacyRoute = table.find((route) => route.migration === "legacy")!;
+    // The legacy chain is fully retired, so no production route is legacy any
+    // more. `assertRouteTable` must still reject a legacy route that carries a
+    // handler, so the invalid shape is synthesized from a real declaration
+    // rather than found in the table.
+    const legacyRoute = {
+      ...table[0],
+      migration: "legacy" as const,
+      handler: null
+    };
+    expect(table.some((route) => route.migration === "legacy")).toBe(false);
     expect(() => assertRouteTable([...table, table[0]])).toThrow(
       "Duplicate server route: ANY /api/ping"
     );

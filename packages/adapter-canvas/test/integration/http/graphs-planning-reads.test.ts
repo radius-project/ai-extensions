@@ -6,7 +6,10 @@ import {
   createGraphsPlanningReadsRoutes,
   type DeployedGraphReaderOptions
 } from "../../../src/server/routes/graphs-planning-reads.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { DeployProgress } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -315,11 +318,12 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       application: null
     });
 
-    // Unmigrated routes in this split family still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/plan-graph`, {
-      method: "POST",
-      body: "{}"
-    });
+    // Unmigrated requests still reach the fallback. The probe target is
+    // resolved by the shared helper rather than named: a named probe inherits
+    // the migration expiry of the route it names, and silently stops testing
+    // the fallback once that route migrates. The helper follows whatever the
+    // fallback still owns and fails loudly when its target becomes declared.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
   });
 });
