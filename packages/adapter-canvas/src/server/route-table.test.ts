@@ -23,6 +23,9 @@ import {
   createGraphsPlanningStreamRoutes
 } from "./routes/graphs-planning-reads.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
+import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
+import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 
 interface CompatibilityRoute {
@@ -162,6 +165,43 @@ const productionHandlers = {
     record: () => ({}),
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false
+  }),
+  ...createGraphsPlanningWritesRoutes({
+    workflows: createGraphPlanningWorkflows({
+      readInstanceEntry: () => undefined,
+      pipeline: createGraphPipeline({
+        fetchBicepSelection: () =>
+          Promise.resolve({
+            content: null,
+            fromWorkspace: false,
+            branch: "",
+            bicepPath: ""
+          }),
+        resolveRadArtifactsDir: () =>
+          Promise.resolve({ dir: "", remote: false }),
+        buildGraphViaRad: () => Promise.resolve([]),
+        canvasGraphResources: () => [],
+        workspaceGraphJsonPath: () => "",
+        graphDefinitionHash: () => "",
+        radArtifactsFingerprint: () => "",
+        removeDirectory: () => {}
+      }),
+      triggerAppBicepHandoff: () => {},
+      prepareSourceRefResources: () => ({ view: "graph", token: "" }),
+      setSourceRefResources: () => false,
+      isCurrentSourceRefToken: () => false,
+      defaultBranchForState: () => "main",
+      canReuseModeledGraph: () => false,
+      addGraphProgress: () => false,
+      beginPlannedGraphRequest: () => 1,
+      isCurrentPlannedGraphRequest: () => false,
+      fetchRecipePack: () => Promise.resolve([]),
+      resolveRecipeOutputs: () => Promise.resolve([]),
+      computeGraphDiff: () => [],
+      record: () => ({}),
+      optionalString: () => "",
+      errorMessage: (error) => String(error)
+    })
   }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
@@ -314,10 +354,10 @@ describe("server route ownership boundary", () => {
   //   larger and stays on the fallback for its own slice.
   // - deployments: everything but POST /api/deploy has migrated; that route is
   //   deferred because it needs its own multi-slice treatment.
-  // - graphs-planning: its three read routes, including the SSE stream, are
-  //   migrated; its three POST routes stay on the fallback.
+  // - graphs-planning: the whole family is migrated — its two reads, the SSE
+  //   stream, and its three writes.
   // - environments: the whole family has migrated; its residual is now zero.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, and environments families, the azure-discovery reads and discover write, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 5 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, graphs-planning, and environments families, the azure-discovery reads and discover write, and every deployments route but POST /api/deploy, and leaves 2 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -350,13 +390,16 @@ describe("server route ownership boundary", () => {
       "POST /api/delete-environment",
       "GET /api/list-environments",
       "GET /api/verify-status",
+      "POST /api/load-graph",
+      "POST /api/plan-graph",
+      "POST /api/diff-branches",
       "POST /api/create-environment",
       "POST /api/discover"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(5);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(2);
     // The now-completed operations-status family, pinned explicitly so a later
     // slice cannot quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
@@ -379,12 +422,20 @@ describe("server route ownership boundary", () => {
       )
     ).toEqual([]);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
-      expect.arrayContaining([
+      expect.not.arrayContaining([
+        "GET /api/load-graph-stream",
         "POST /api/load-graph",
         "POST /api/plan-graph",
         "POST /api/diff-branches"
       ])
     );
+    // The three writes this slice migrated must be gone from the inventory,
+    // together with the SSE read main migrated alongside them: graphs-planning
+    // is now fully owned by the route table, so no route of it may reappear
+    // on the fallback.
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/load-graph");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/plan-graph");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/diff-branches");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)
@@ -407,13 +458,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 5 of 38
+    // Cross-checked against the inventory, and independently pinned: 2 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(5);
+    expect(residualLegacyCount).toBe(2);
 
     for (const route of table) {
       const matcher =
