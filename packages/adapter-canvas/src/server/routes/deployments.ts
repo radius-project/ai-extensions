@@ -332,8 +332,8 @@ export async function handleListDeployments(
   // without showing stale state for long. `?fresh=1` bypasses the cache read so
   // active status pollers (a running deploy/delete) always see live status
   // rather than a value cached before the transition. Only the literal "1"
-  // bypasses; the cache is not written on the bypass path either, so a poller
-  // never re-primes it.
+  // bypasses; the recomputed response is still written back to the cache after
+  // the request completes.
   const freshDeploys = context.url.searchParams.get("fresh") === "1";
   // The `null` is only a "no cached entry" marker for the guard below, so
   // `undefined` would be an equivalent substitute.
