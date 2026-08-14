@@ -1643,22 +1643,32 @@ describe("environment creation boundaries", () => {
   // kind" — which is exactly what the slice means and cannot be invalidated by
   // any one route migrating. The pattern matches `pathname.startsWith` arms as
   // well, so a prefix-matched neighbour still bounds the slice.
+  //
+  // The last legacy route in the chain has no following route to bound it, so
+  // it is bounded by the chain's own terminator instead: the default page-HTML
+  // fallthrough that every legacy arm precedes. That keeps the final slice
+  // bounded without reintroducing a neighbour-named delimiter that the next
+  // migration would kill.
+  const legacyChainEnd = "// Default: serve the page HTML based on state";
+
   function nextLegacyRouteIndex(start: number, marker: string): number {
     const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
     legacyRoute.lastIndex = start + marker.length;
     const match = legacyRoute.exec(SERVER_SRC);
-    if (!match) {
+    const end = match ? match.index : SERVER_SRC.indexOf(legacyChainEnd, start);
+    if (end < 0) {
       throw new Error(
-        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
-          "re-scope the raw-text slice that uses this delimiter."
+        `No legacy route or chain terminator remains after \`${marker}\` in ` +
+          "server.ts; remove or re-scope the raw-text slice that uses this " +
+          "delimiter."
       );
     }
-    if (match.index <= start) {
+    if (end <= start) {
       throw new Error(
         `The next legacy route after \`${marker}\` did not produce a bounded slice.`
       );
     }
-    return match.index;
+    return end;
   }
 
   const deployMarker = 'pathname === "/api/deploy"';
