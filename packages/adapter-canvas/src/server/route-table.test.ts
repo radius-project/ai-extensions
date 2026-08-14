@@ -13,6 +13,7 @@ import {
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
+import { createRepositoriesRoutes } from "./routes/repositories.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -42,6 +43,11 @@ const productionHandlers = {
     latestAny: () => null,
     get: () => null,
     toClientView: () => null
+  }),
+  ...createRepositoriesRoutes({
+    cliExec: () => {},
+    readInstanceState: () => undefined,
+    repoMatchesWorkspace: () => false
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -66,17 +72,20 @@ describe("server route ownership boundary", () => {
   // after the GETs migrated, so the family owns two migrated routes and one
   // that is still on the legacy fallback. Naming the split here keeps the
   // family from reading as fully migrated in the ledger.
-  it("owns the liveness-source family and the operations-status GETs and leaves 34 routes on the legacy fallback", () => {
+  it("owns the liveness-source and repositories families and the operations-status GETs and leaves 31 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
       "GET /api/operations/",
-      "POST /api/open-source"
+      "POST /api/open-source",
+      "GET /api/user-repos",
+      "POST /api/repo-branches",
+      "POST /api/discover-branches"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(34);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(31);
     // The split family, pinned explicitly so a later slice cannot quietly
     // assume operations-status is done.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
