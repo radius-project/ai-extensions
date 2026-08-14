@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 // Several server responses carry non-ASCII bytes that the user actually sees:
@@ -17,7 +18,7 @@ import { describe, expect, it } from "vitest";
 // as ASCII silently transliterates every non-ASCII character to "?", which
 // leaves no BOM, no U+FFFD and no mojibake for the scans above to find.
 
-const ROOT = join(__dirname, "..", "..");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCANNED_DIRS = ["src", "test", "plugins"];
 
 function collectSourceFiles(dir: string): string[] {
