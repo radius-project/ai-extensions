@@ -3,16 +3,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
-  createDeploymentsReadsRoutes,
+  createDeploymentsRoutes,
+  handleDeleteDeployment,
   handleDeployReset,
   handleDeployStatus,
   handleListApplications,
   handleListDeployments,
   type DeployListCacheEntry,
   type DeploymentsInstanceEntry,
-  type DeploymentsReadsDependencies,
+  type DeploymentsDependencies,
   type DeploymentRow
-} from "./deployments-reads.js";
+} from "./deployments.js";
 import type { CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
 
@@ -69,8 +70,8 @@ function context(method: string, url: string, body = "") {
 // a dependency it should not need fails loudly rather than silently getting a
 // benign default.
 function dependencies(
-  overrides: Partial<DeploymentsReadsDependencies> = {}
-): DeploymentsReadsDependencies {
+  overrides: Partial<DeploymentsDependencies> = {}
+): DeploymentsDependencies {
   return {
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
@@ -99,12 +100,79 @@ function dependencies(
       },
       set: () => {
         throw new Error("deployListCache.set not stubbed");
+      },
+      delete: () => {
+        throw new Error("deployListCache.delete not stubbed");
       }
     },
     deployListTtlMs: 15000,
+    activeDeploymentMutation: () => {
+      throw new Error("activeDeploymentMutation not stubbed");
+    },
+    reserveDeploymentMutation: () => {
+      throw new Error("reserveDeploymentMutation not stubbed");
+    },
+    releaseDeploymentMutation: () => {
+      throw new Error("releaseDeploymentMutation not stubbed");
+    },
+    deploymentStatusBlocksMutation: () => {
+      throw new Error("deploymentStatusBlocksMutation not stubbed");
+    },
+    localDeploymentBlocksMutation: () => {
+      throw new Error("localDeploymentBlocksMutation not stubbed");
+    },
+    ensureWorkflowsCurrent: () => {
+      throw new Error("ensureWorkflowsCurrent not stubbed");
+    },
+    findWorkflowRun: () => {
+      throw new Error("findWorkflowRun not stubbed");
+    },
+    runGh: () => {
+      throw new Error("runGh not stubbed");
+    },
+    readProcessEnv: () => ({}),
+    // Timers run inline so the dispatch retry delays cost nothing; the lease
+    // callback is captured rather than fired, matching a real pending timer.
+    setTimer: (callback, ms) => {
+      if (ms === 0) callback();
+      return {};
+    },
     ...overrides
   };
 }
+
+// The delete route needs far more collaborators than the read routes, so its
+// happy path is assembled once here and narrowed per test.
+function deleteDependencies(
+  overrides: Partial<DeploymentsDependencies> = {}
+): DeploymentsDependencies {
+  return dependencies({
+    readInstanceEntry: () => ({ state: {} }),
+    activeDeploymentMutation: () => undefined,
+    localDeploymentBlocksMutation: () => false,
+    reserveDeploymentMutation: () => LEASE,
+    releaseDeploymentMutation: () => {},
+    deploymentStatusBlocksMutation: () => false,
+    resolveEnvDeployment: () => Promise.resolve(null),
+    ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    findWorkflowRun: () => Promise.resolve(null),
+    deployListCache: {
+      get: () => undefined,
+      set: () => undefined,
+      delete: () => undefined
+    },
+    setTimer: () => ({}),
+    ...overrides
+  });
+}
+
+const LEASE = {
+  repo: "octo/todolist",
+  environment: "dev",
+  kind: "delete" as const,
+  expiresAt: 0
+};
 
 const IDLE_HANDOFF = {
   state: "idle",
@@ -115,8 +183,8 @@ const IDLE_HANDOFF = {
 
 function statusDependencies(
   state: CanvasState | undefined,
-  overrides: Partial<DeploymentsReadsDependencies> = {}
-): DeploymentsReadsDependencies {
+  overrides: Partial<DeploymentsDependencies> = {}
+): DeploymentsDependencies {
   return dependencies({
     readInstanceEntry: () => (state ? { state } : undefined),
     triggerDeployRepairHandoff: () => false,
@@ -125,12 +193,12 @@ function statusDependencies(
   });
 }
 
-function row(environment: string): DeploymentRow {
+function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todolist",
     environment,
     provider: "azure",
-    status: "deployed",
+    status,
     deploymentId: `dep-${environment}`,
     runUrl: `https://example.test/${environment}`
   };
@@ -141,20 +209,21 @@ const JSON_HEADERS = {
   "Cache-Control": "no-store"
 };
 
-describe("deployments read routes (SU-06)", () => {
-  it("declares exactly the four non-mutating routes it owns", () => {
-    const routes = createDeploymentsReadsRoutes(dependencies());
+describe("deployments routes (SU-06)", () => {
+  it("declares exactly the five routes it owns", () => {
+    const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
       "GET /api/list-applications",
       "GET /api/list-deployments",
-      "POST /api/deploy-reset"
+      "POST /api/deploy-reset",
+      "POST /api/delete-deployment"
     ]);
   });
 
   it("dispatches each declared key to its own handler", async () => {
     const state: CanvasState = {};
-    const routes = createDeploymentsReadsRoutes(
+    const routes = createDeploymentsRoutes(
       dependencies({
         readInstanceEntry: () => ({ state }),
         triggerDeployRepairHandoff: () => false,
@@ -162,7 +231,8 @@ describe("deployments read routes (SU-06)", () => {
         resolveRepoAppName: () => Promise.resolve("todolist"),
         deployListCache: {
           get: () => undefined,
-          set: () => undefined
+          set: () => undefined,
+          delete: () => undefined
         },
         ghOrThrow: () => Promise.resolve(""),
         resetDeploymentViewState: () => {}
@@ -194,6 +264,12 @@ describe("deployments read routes (SU-06)", () => {
     const reset = context("POST", "/api/deploy-reset", "{}");
     await routes["POST /api/deploy-reset"](reset.context);
     expect(JSON.parse(reset.recording.body)).toEqual({ ok: true });
+
+    const remove = context("POST", "/api/delete-deployment", "{}");
+    await routes["POST /api/delete-deployment"](remove.context);
+    expect(JSON.parse(remove.recording.body)).toEqual({
+      error: "repo, environment, and application are required."
+    });
   });
 
   describe("GET /api/deploy-status", () => {
@@ -625,7 +701,8 @@ describe("deployments read routes (SU-06)", () => {
             },
             set: () => {
               throw new Error("a cache hit must not rewrite the cache");
-            }
+            },
+            delete: () => undefined
           }
         })
       );
@@ -651,7 +728,8 @@ describe("deployments read routes (SU-06)", () => {
               at: Date.now() - 15001,
               payload: { deployments: [row("stale")] }
             }),
-            set: (_repo, entry) => written.push(entry)
+            set: (_repo, entry) => written.push(entry),
+            delete: () => undefined
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
@@ -678,7 +756,7 @@ describe("deployments read routes (SU-06)", () => {
     it("round-trips a real Map and misses again after an external delete", async () => {
       const cache = new Map<string, DeployListCacheEntry>();
       let ghCalls = 0;
-      const shared: Partial<DeploymentsReadsDependencies> = {
+      const shared: Partial<DeploymentsDependencies> = {
         deployListCache: cache,
         readInstanceEntry: () => undefined,
         ghOrThrow: () => {
@@ -727,7 +805,8 @@ describe("deployments read routes (SU-06)", () => {
             get: () => {
               throw new Error("?fresh=1 must not read the cache");
             },
-            set: () => undefined
+            set: () => undefined,
+            delete: () => undefined
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
@@ -752,7 +831,8 @@ describe("deployments read routes (SU-06)", () => {
               at: Date.now(),
               payload: { deployments: [row("cached")] }
             }),
-            set: () => undefined
+            set: () => undefined,
+            delete: () => undefined
           }
         })
       );
@@ -769,7 +849,11 @@ describe("deployments read routes (SU-06)", () => {
       await handleListDeployments(
         ctx,
         dependencies({
-          deployListCache: { get: () => undefined, set: () => undefined },
+          deployListCache: {
+            get: () => undefined,
+            set: () => undefined,
+            delete: () => undefined
+          },
           readInstanceEntry: () => ({ state: { plannedBranch: "feature/x" } }),
           ghOrThrow: (args) => {
             ghCalls.push(args);
@@ -813,7 +897,11 @@ describe("deployments read routes (SU-06)", () => {
       await handleListDeployments(
         ctx,
         dependencies({
-          deployListCache: { get: () => undefined, set: () => undefined },
+          deployListCache: {
+            get: () => undefined,
+            set: () => undefined,
+            delete: () => undefined
+          },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve(""),
           resolveRepoAppName: () => Promise.resolve("todolist"),
@@ -837,7 +925,8 @@ describe("deployments read routes (SU-06)", () => {
             get: () => undefined,
             set: () => {
               throw new Error("a failed listing must not be cached");
-            }
+            },
+            delete: () => undefined
           },
           ghOrThrow: () => Promise.reject(new Error("HTTP 502")),
           readInstanceEntry: () => undefined
@@ -860,7 +949,11 @@ describe("deployments read routes (SU-06)", () => {
       await handleListDeployments(
         ctx,
         dependencies({
-          deployListCache: { get: () => undefined, set: () => undefined },
+          deployListCache: {
+            get: () => undefined,
+            set: () => undefined,
+            delete: () => undefined
+          },
           ghOrThrow: () => Promise.reject("gh vanished"),
           readInstanceEntry: () => undefined
         })
@@ -978,6 +1071,622 @@ describe("deployments read routes (SU-06)", () => {
 
       expect(recording.status).toBe(200);
       expect(recording.body).toBe('{"ok":true}');
+    });
+  });
+
+  // This is the only destructive route in the family, so the refusal paths are
+  // the point: each one must keep its exact status, and must not leave a
+  // reservation behind that would deadlock the next attempt.
+  describe("POST /api/delete-deployment", () => {
+    const BODY = JSON.stringify({
+      repo: "octo/todolist",
+      environment: "dev",
+      application: "todolist"
+    });
+
+    function deleteContext(body = BODY) {
+      return context("POST", "/api/delete-deployment", body);
+    }
+
+    it("refuses a request missing any of repo, environment or application", async () => {
+      for (const body of [
+        // An absent body is not a parse error: it means "{}", which then fails
+        // the required-fields check rather than the JSON check.
+        "",
+        "{}",
+        '{"repo":"octo/todolist"}',
+        '{"repo":"octo/todolist","environment":"dev"}',
+        '{"environment":"dev","application":"todolist"}',
+        // Present but empty is the same refusal: the handler coerces with `||`.
+        '{"repo":"","environment":"dev","application":"todolist"}'
+      ]) {
+        const { recording, context: ctx } = deleteContext(body);
+        await handleDeleteDeployment(
+          ctx,
+          dependencies({
+            readInstanceEntry: () => {
+              throw new Error("must refuse before reading the instance");
+            }
+          })
+        );
+        expect(recording.status).toBe(400);
+        expect(JSON.parse(recording.body)).toEqual({
+          error: "repo, environment, and application are required."
+        });
+      }
+    });
+
+    it("answers 503 when the canvas has no instance entry", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ readInstanceEntry: () => undefined })
+      );
+
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Canvas server state is unavailable."
+      });
+    });
+
+    it("refuses with 409 while a local deploy is still running", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readInstanceEntry: () => ({
+            state: { deployingRepo: "octo/other", envName: "staging" }
+          }),
+          localDeploymentBlocksMutation: () => true,
+          reserveDeploymentMutation: () => {
+            throw new Error("must not reserve while blocked");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body).error).toBe(
+        "A deploy operation for octo/other in environment staging is already in progress. Wait for it to finish before starting another operation."
+      );
+    });
+
+    // The conflict message prefers the active attempt over the loose state
+    // fields, and only falls back to the request's own values.
+    it("names the reserved operation and its target in the conflict message", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readInstanceEntry: () => ({
+            state: {
+              deployAttempt: {
+                id: "attempt-1",
+                targetRepo: "octo/attempt",
+                environment: "prod"
+              }
+            }
+          }),
+          localDeploymentBlocksMutation: () => false,
+          activeDeploymentMutation: () => ({
+            repo: "octo/reserved",
+            environment: "reserved-env",
+            kind: "delete",
+            expiresAt: 0
+          }),
+          reserveDeploymentMutation: () => {
+            throw new Error("must not reserve while reserved");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body).error).toBe(
+        "A delete operation for octo/reserved in environment reserved-env is already in progress. Wait for it to finish before starting another operation."
+      );
+    });
+
+    it("falls back to the request's own repo and environment when nothing else is known", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readInstanceEntry: () => ({ state: {} }),
+          localDeploymentBlocksMutation: () => true
+        })
+      );
+
+      expect(JSON.parse(recording.body).error).toBe(
+        "A deploy operation for octo/todolist in environment dev is already in progress. Wait for it to finish before starting another operation."
+      );
+    });
+
+    it("answers 409 when the reservation is lost in a race", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let call = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          reserveDeploymentMutation: () => null,
+          activeDeploymentMutation: () => {
+            call += 1;
+            return call === 1 ? undefined : (
+                {
+                  repo: "octo/winner",
+                  environment: "dev",
+                  kind: "deploy",
+                  expiresAt: 0
+                }
+              );
+          }
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body).error).toBe(
+        "A deploy operation for octo/winner in environment dev is already starting."
+      );
+    });
+
+    it("answers the generic message when the race leaves no conflict to name", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          reserveDeploymentMutation: () => null,
+          activeDeploymentMutation: () => undefined
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body).error).toBe(
+        "Another deployment operation is already starting."
+      );
+    });
+
+    it("releases the reservation and answers 503 when GitHub state cannot be read", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const released: unknown[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          resolveEnvDeployment: () => Promise.reject(new Error("offline")),
+          releaseDeploymentMutation: (_state, lease) => released.push(lease)
+        })
+      );
+
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body).error).toBe(
+        "Could not verify the current deployment state. Check your GitHub connection and try again."
+      );
+      expect(released).toEqual([LEASE]);
+    });
+
+    it("refuses and releases when GitHub says the deployment is already busy", async () => {
+      for (const [status, error] of [
+        ["deleting", "This deployment is already being deleted."],
+        [
+          "in_progress",
+          "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
+        ]
+      ]) {
+        const { recording, context: ctx } = deleteContext();
+        const released: unknown[] = [];
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            resolveEnvDeployment: () => Promise.resolve(row("dev", status)),
+            deploymentStatusBlocksMutation: () => true,
+            releaseDeploymentMutation: (_state, lease) => released.push(lease)
+          })
+        );
+
+        expect(recording.status).toBe(409);
+        expect(JSON.parse(recording.body).error).toBe(error);
+        expect(released).toEqual([LEASE]);
+      }
+    });
+
+    it("releases and answers 400 when the delete workflow cannot be committed", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const released: unknown[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [],
+              failed: [
+                {
+                  path: ".github/workflows/delete-application.yml",
+                  branch: "main"
+                }
+              ]
+            }),
+          releaseDeploymentMutation: (_state, lease) => released.push(lease),
+          runGh: () => {
+            throw new Error("must not dispatch without a committed workflow");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body).error).toContain(
+        'to the "main" branch of octo/todolist'
+      );
+      expect(released).toEqual([LEASE]);
+    });
+
+    // A failure committing some *other* workflow file is not this route's
+    // problem, so it must not short-circuit the dispatch.
+    it("ignores a commit failure for an unrelated workflow file", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [],
+              failed: [{ path: ".github/workflows/deploy.yml", branch: "main" }]
+            })
+        })
+      );
+
+      expect(recording.status).toBe(200);
+    });
+
+    it("dispatches, evicts the cached listing and reports the run URL", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const cache = new Map<string, DeployListCacheEntry>();
+      cache.set("octo/todolist", { at: Date.now(), payload: {} });
+      const dispatched: string[][] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          deployListCache: cache,
+          runGh: (args) => {
+            dispatched.push(args);
+            return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+          },
+          findWorkflowRun: () => Promise.resolve(42)
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(recording.headers).toEqual({
+        "Content-Type": "application/json"
+      });
+      expect(JSON.parse(recording.body)).toEqual({
+        success: true,
+        runUrl: "https://github.com/octo/todolist/actions/runs/42"
+      });
+      expect(dispatched).toEqual([
+        [
+          "workflow",
+          "run",
+          "delete-application.yml",
+          "-f",
+          "environment=dev",
+          "-f",
+          "application=todolist",
+          "--repo",
+          "octo/todolist"
+        ]
+      ]);
+      // The eviction the injection exists for: the reader must miss next time.
+      expect(cache.has("octo/todolist")).toBe(false);
+    });
+
+    it("reports an empty run URL when the run cannot be resolved", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ findWorkflowRun: () => Promise.resolve(null) })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        success: true,
+        runUrl: ""
+      });
+    });
+
+    it("holds the reservation open for twice the listing TTL", async () => {
+      const { context: ctx } = deleteContext();
+      const timers: number[] = [];
+      let unrefs = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          deployListTtlMs: 15000,
+          setTimer: (_callback, ms) => {
+            timers.push(ms);
+            return {
+              unref: () => {
+                unrefs += 1;
+              }
+            };
+          }
+        })
+      );
+
+      expect(timers).toEqual([30000]);
+      expect(unrefs).toBe(1);
+    });
+
+    it("survives a timer handle with no unref", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ setTimer: () => ({}) })
+      );
+
+      expect(recording.status).toBe(200);
+    });
+
+    it("retries the dispatch without the injected token when the first attempt fails", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const envs: (NodeJS.ProcessEnv | undefined)[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "t", PATH: "/usr/bin" }),
+          runGh: (_args, _timeout, extraEnv) => {
+            envs.push(extraEnv);
+            return Promise.resolve(
+              envs.length === 1 ?
+                { code: 1, stdout: "", stderr: "missing workflow scope" }
+              : { code: 0, stdout: "", stderr: "" }
+            );
+          }
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(envs).toHaveLength(2);
+      expect(envs[0]).toBeUndefined();
+      expect(envs[1]).toEqual({ PATH: "/usr/bin" });
+    });
+
+    it("does not retry when there is no injected token to strip", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({}),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "workflow scope missing"
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body).error).toContain(
+        'missing the "workflow" scope'
+      );
+    });
+
+    it("still retries when GH_TOKEN is empty but GITHUB_TOKEN is set", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "", GITHUB_TOKEN: "t" }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: calls === 1 ? 1 : 0,
+              stdout: "",
+              stderr: calls === 1 ? "workflow scope missing" : ""
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(2);
+      expect(recording.status).toBe(200);
+    });
+
+    it("keeps the first failure when the retry also fails", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GITHUB_TOKEN: "t" }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: calls === 1 ? "first failure" : "second failure"
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(2);
+      expect(JSON.parse(recording.body).error).toContain("first failure");
+    });
+
+    it("retries a not-found race only when the workflow was just created", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      const delays: number[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/delete-application.yml"],
+              failed: []
+            }),
+          setTimer: (callback, ms) => {
+            delays.push(ms);
+            callback();
+            return {};
+          },
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve(
+              calls < 3 ?
+                { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+              : { code: 0, stdout: "", stderr: "" }
+            );
+          }
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(calls).toBe(3);
+      // The 3s registration wait, then the 2s and 5s retry backoffs. The lease
+      // timer is the trailing entry.
+      expect(delays.slice(0, 3)).toEqual([3000, 2000, 5000]);
+    });
+
+    it("stops retrying a failure that is not the registration race", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/delete-application.yml"],
+              failed: []
+            }),
+          setTimer: (callback, ms) => {
+            if (ms < 30000) callback();
+            return {};
+          },
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "Actions is disabled"
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body).error).toContain(
+        "GitHub Actions is disabled for octo/todolist"
+      );
+    });
+
+    it("uses the generic message when the dispatch fails with no stderr", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const released: unknown[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({}),
+          runGh: () => Promise.resolve({ code: 1, stdout: "", stderr: "" }),
+          releaseDeploymentMutation: (_state, lease) => released.push(lease)
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body).error).toContain(
+        "The dispatch request failed."
+      );
+      expect(released).toEqual([LEASE]);
+    });
+
+    // A spawn failure surfaces a string errno, which must still read as a
+    // failure rather than accidentally comparing equal to 0.
+    it("treats a string exit code as a dispatch failure", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({}),
+          runGh: () =>
+            Promise.resolve({ code: "ENOENT", stdout: "", stderr: "" })
+        })
+      );
+
+      expect(recording.status).toBe(400);
+    });
+
+    it("answers 400 and releases the reservation when the body is not JSON", async () => {
+      const { recording, context: ctx } = deleteContext("{oops");
+      await handleDeleteDeployment(ctx, deleteDependencies());
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toHaveProperty("error");
+    });
+
+    it("releases a held reservation when a later step throws", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const released: unknown[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          releaseDeploymentMutation: (_state, lease) => released.push(lease),
+          ensureWorkflowsCurrent: () =>
+            Promise.reject(new Error("sync blew up"))
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({ error: "sync blew up" });
+      expect(released).toEqual([LEASE]);
+    });
+
+    // Nothing is reserved yet at this point, so the catch must not try to
+    // release a null lease.
+    it("does not release anything when it fails before reserving", async () => {
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          activeDeploymentMutation: () => {
+            throw new Error("state read blew up");
+          },
+          releaseDeploymentMutation: () => {
+            throw new Error("there is no reservation to release");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "state read blew up"
+      });
+    });
+
+    // The lease timer fires long after the response; releasing twice must stay
+    // harmless.
+    it("is idempotent when the lease timer fires after an early release", async () => {
+      const { context: ctx } = deleteContext();
+      const released: unknown[] = [];
+      let fire = (): void => {};
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          releaseDeploymentMutation: (_state, lease) => released.push(lease),
+          setTimer: (callback) => {
+            fire = callback;
+            return {};
+          }
+        })
+      );
+
+      expect(released).toEqual([]);
+      fire();
+      expect(released).toEqual([LEASE]);
+      fire();
+      expect(released).toEqual([LEASE]);
     });
   });
 });

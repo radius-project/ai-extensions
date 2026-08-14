@@ -164,9 +164,7 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
-  DELETE_AZURE_FILE
+  DEPLOY_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -204,7 +202,7 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
-import { createDeploymentsReadsRoutes } from "./server/routes/deployments-reads.js";
+import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -523,17 +521,17 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
-// Composition root for the migrated `deployments` read routes (the four whose
-// body policy is `none`). The mutating members of the family — POST
-// /api/delete-deployment and POST /api/deploy — are still on the legacy
-// fallback and are deliberately out of scope for this slice.
+// Composition root for the migrated `deployments` family: the four read routes
+// whose body policy is `none`, plus the destructive POST /api/delete-deployment.
+// Only POST /api/deploy is still on the legacy fallback, and it is deliberately
+// out of scope for this slice.
 //
 // The listing cache and its TTL are read through getters because both are
 // declared further down the module and would otherwise be in the temporal dead
 // zone when this object is built at import time. Injecting the cache rather
-// than moving it keeps invalidation where it already lives: `server.ts` deletes
-// from the same map when a deploy or delete is dispatched.
-const deploymentsReadsRoutes = createDeploymentsReadsRoutes({
+// than moving it keeps the other invalidator where it already lives: `server.ts`
+// deletes from the same map when a deploy is dispatched.
+const deploymentsRoutes = createDeploymentsRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
   deployHandoffStatus,
@@ -548,7 +546,31 @@ const deploymentsReadsRoutes = createDeploymentsReadsRoutes({
   },
   get deployListTtlMs() {
     return DEPLOY_LIST_TTL_MS;
-  }
+  },
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  ensureWorkflowsCurrent: (repo, environment, provider, only) =>
+    ensureWorkflowsCurrent(repo, environment, provider, only),
+  findWorkflowRun,
+  runGh: (args, timeout = 20000, extraEnv) =>
+    new Promise((resolve) => {
+      const opts: CliOptions = { timeout };
+      if (extraEnv) opts.env = extraEnv;
+      cliExec("gh", args, opts, (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: (stdout || "").trim(),
+          stderr: stderr || ""
+        });
+      });
+    }),
+  readProcessEnv: () => process.env,
+  setTimer: (callback, ms) => setTimeout(callback, ms)
 });
 
 // Built once at module initialization so table validation runs a single time
@@ -557,7 +579,7 @@ const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
   ...repositoriesRoutes,
-  ...deploymentsReadsRoutes
+  ...deploymentsRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -790,7 +812,8 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched (see /api/deploy and /api/delete-deployment).
+// dispatched: /api/deploy is still legacy and evicts below, while the migrated
+// deployments family is handed this same map and evicts from there.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
@@ -7313,251 +7336,6 @@ function createLegacyRequestHandler(
         kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
       } catch (e) {
         respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/delete-deployment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      const respond = (code: number, payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(code);
-        res.end(JSON.stringify(payload));
-      };
-      let deleteReservation: DeploymentDispatchReservation | null = null;
-      let deleteReservationOwner: CanvasState | null = null;
-      const releaseDeleteReservation = (): void => {
-        if (deleteReservation && deleteReservationOwner)
-          releaseDeploymentMutation(deleteReservationOwner, deleteReservation);
-        deleteReservation = null;
-        deleteReservationOwner = null;
-      };
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = data.repo || "";
-        const environment = data.environment || "";
-        const application = data.application || "";
-        if (!repo || !environment || !application) {
-          respond(400, {
-            error: "repo, environment, and application are required."
-          });
-          return;
-        }
-
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          respond(503, { error: "Canvas server state is unavailable." });
-          return;
-        }
-        const attempt = entry.state.deployAttempt;
-        const activeRepo =
-          attempt?.targetRepo || entry.state.deployingRepo || "";
-        const activeEnvironment =
-          attempt?.environment || entry.state.envName || "";
-        const reserved = activeDeploymentMutation(entry.state);
-        if (localDeploymentBlocksMutation(entry.state) || reserved) {
-          const operation = reserved?.kind || "deploy";
-          const conflictRepo = reserved?.repo || activeRepo || repo;
-          const conflictEnvironment =
-            reserved?.environment || activeEnvironment || environment;
-          respond(409, {
-            error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
-          });
-          return;
-        }
-
-        deleteReservationOwner = entry.state;
-        deleteReservation = reserveDeploymentMutation(entry.state, {
-          repo,
-          environment,
-          kind: "delete"
-        });
-        if (!deleteReservation) {
-          const conflict = activeDeploymentMutation(entry.state);
-          respond(409, {
-            error:
-              conflict ?
-                `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
-              : "Another deployment operation is already starting."
-          });
-          return;
-        }
-
-        // Backstop the UI with GitHub's persisted state too. This covers a
-        // deployment started from another canvas instance or browser session.
-        let current: DeploymentRow | null;
-        try {
-          current = await resolveEnvDeployment(repo, environment, application);
-        } catch {
-          releaseDeleteReservation();
-          respond(503, {
-            error:
-              "Could not verify the current deployment state. Check your GitHub connection and try again."
-          });
-          return;
-        }
-        if (current && deploymentStatusBlocksMutation(current.status)) {
-          releaseDeleteReservation();
-          respond(409, {
-            error:
-              current.status === "deleting" ?
-                "This deployment is already being deleted."
-              : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
-          });
-          return;
-        }
-
-        const gh = (
-          args: string[],
-          timeout = 20000,
-          extraEnv?: NodeJS.ProcessEnv
-        ): Promise<CommandResult> =>
-          new Promise<CommandResult>((resolve) => {
-            const opts: CliOptions = { timeout };
-            if (extraEnv) opts.env = extraEnv;
-            cliExec("gh", args, opts, (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: (stdout || "").trim(),
-                stderr: stderr || ""
-              });
-            });
-          });
-        // Dispatching a workflow requires the `workflow` scope, which an
-        // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
-        // back to the keyring credential.
-        const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-          const first = await gh(args);
-          if (first.code === 0) return first;
-          if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await gh(args, 20000, fallbackEnv);
-          return retry.code === 0 ? retry : first;
-        };
-
-        // Deleting a deployment now runs `rad app delete` via the committed
-        // delete-application.yml workflow. This tears down the Radius
-        // application on the ephemeral control plane while leaving the
-        // GitHub Environment (and its credentials) intact.
-        //
-        // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy — and author
-        // them if they're missing (the #273 case). Delete workflow content is
-        // provider-agnostic, and workflow_dispatch runs from the default
-        // branch, so provider/workingBranch aren't needed.
-        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
-          DELETE_APP_DISPATCHER_FILE,
-          DELETE_AZURE_FILE
-        ]);
-        // If the sync couldn't commit the dispatcher to the default branch
-        // (e.g. it's protected, or the token lacks write access), the dispatch
-        // below will 404 on a genuinely-absent workflow. Fail fast with a
-        // specific message naming the branch instead of the generic hint.
-        const commitFail = sync.failed.find(
-          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        if (commitFail) {
-          releaseDeleteReservation();
-          respond(400, {
-            error:
-              "Couldn't commit the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ') to the "' +
-              commitFail.branch +
-              '" branch of ' +
-              repo +
-              ", so there's nothing to dispatch. The branch may be protected" +
-              " or your GitHub token may lack write access to " +
-              repo +
-              "."
-          });
-          return;
-        }
-        // A just-authored workflow isn't registered by GitHub synchronously, so
-        // an immediate workflow_dispatch would 404. When we created it, wait
-        // briefly and retry the not-found race a few times (mirroring the
-        // create-environment verify dispatch); when it was already present, the
-        // single [0]-delay attempt keeps the common path fast.
-        const justCreated = sync.created.some(
-          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        const dispatchedAt = Date.now();
-        const dispatchArgs = [
-          "workflow",
-          "run",
-          DELETE_APP_DISPATCHER_FILE,
-          "-f",
-          "environment=" + environment,
-          "-f",
-          "application=" + application,
-          "--repo",
-          repo
-        ];
-        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
-        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
-        for (const delay of dispatchDelays) {
-          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-          dispatch = await ghWorkflow(dispatchArgs);
-          if (dispatch.code === 0) break;
-          // Only the not-found registration race self-resolves; any other
-          // failure (scope, Actions disabled, …) won't, so stop retrying.
-          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
-        }
-        if (dispatch.code !== 0) {
-          releaseDeleteReservation();
-          const de = (dispatch.stderr || "").trim();
-          const hint =
-            /workflow.{0,20}scope/i.test(de) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " The delete workflow is committed to the default branch" +
-              " automatically before dispatch, so a persistent failure usually" +
-              " means GitHub Actions is disabled for " +
-              repo +
-              " or the default branch is protected — check both and retry.";
-          respond(400, {
-            error:
-              "Failed to start the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ") on " +
-              repo +
-              ". " +
-              (de || "The dispatch request failed.") +
-              hint
-          });
-          return;
-        }
-
-        // Best-effort: resolve the dispatched run's URL so the client can
-        // link to it in GitHub.
-        let runUrl = "";
-        const runId = await findWorkflowRun(
-          repo,
-          DELETE_APP_DISPATCHER_FILE,
-          dispatchedAt,
-          null
-        );
-        if (runId)
-          runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        // A workflow run can become discoverable before it creates its GitHub
-        // deployment record. Retain a short lease in either case to close that
-        // publication gap; after it expires, resolveEnvDeployment is the
-        // durable cross-instance guard.
-        const reservationTimer = setTimeout(
-          releaseDeleteReservation,
-          DEPLOY_LIST_TTL_MS * 2
-        );
-        reservationTimer.unref?.();
-        // A delete is now in flight, so the cached listing is stale — drop
-        // it so the next poll reflects the "Deleting…" state immediately.
-        deployListCache.delete(repo);
-        respond(200, { success: true, runUrl });
-      } catch (e) {
-        releaseDeleteReservation();
-        respond(400, { error: errorMessage(e) });
       }
       return;
     }

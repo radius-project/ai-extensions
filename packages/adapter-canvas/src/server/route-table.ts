@@ -165,7 +165,8 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/deploy-status",
   "GET /api/list-applications",
   "GET /api/list-deployments",
-  "POST /api/deploy-reset"
+  "POST /api/deploy-reset",
+  "POST /api/delete-deployment"
 ];
 
 export function routeKey(

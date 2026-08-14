@@ -3,13 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
-import { createDeploymentsReadsRoutes } from "../../../src/server/routes/deployments-reads.js";
+import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
   DeployListCacheEntry,
   DeploymentRow
-} from "../../../src/server/routes/deployments-reads.js";
+} from "../../../src/server/routes/deployments.js";
 import type { CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
@@ -24,6 +24,7 @@ interface Harness {
   cache: Map<string, DeployListCacheEntry>;
   environments: string[];
   resets: unknown[];
+  dispatches: string[][];
   setEntryMissing(missing: boolean): void;
 }
 
@@ -43,10 +44,11 @@ function start(): Harness {
   const cache = new Map<string, DeployListCacheEntry>();
   const environments: string[] = [];
   const resets: unknown[] = [];
+  const dispatches: string[][] = [];
   let entryMissing = false;
 
   const routes = createTestRouteTable(
-    createDeploymentsReadsRoutes({
+    createDeploymentsRoutes({
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
       deployHandoffStatus: (current) => ({
@@ -64,7 +66,27 @@ function start(): Harness {
         resets.push(attemptId);
       },
       deployListCache: cache,
-      deployListTtlMs: 15000
+      deployListTtlMs: 15000,
+      // The destructive route's collaborators, wired to a permissive happy path
+      // so the HIT exercises real HTTP rather than re-proving refusal logic the
+      // unit tests already cover.
+      activeDeploymentMutation: () => undefined,
+      reserveDeploymentMutation: (_target, reservation) => ({
+        ...reservation,
+        expiresAt: 0
+      }),
+      releaseDeploymentMutation: () => {},
+      deploymentStatusBlocksMutation: () => false,
+      localDeploymentBlocksMutation: () => false,
+      ensureWorkflowsCurrent: () =>
+        Promise.resolve({ created: [], failed: [] }),
+      findWorkflowRun: () => Promise.resolve(7),
+      runGh: (args) => {
+        dispatches.push(args);
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+      readProcessEnv: () => ({}),
+      setTimer: () => ({})
     })
   );
 
@@ -93,6 +115,7 @@ function start(): Harness {
     cache,
     environments,
     resets,
+    dispatches,
     setEntryMissing(missing) {
       entryMissing = missing;
     }
@@ -103,7 +126,7 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
   return fetch(`${baseUrl}${path}`, { method: "POST", body });
 }
 
-describe("deployments read routes real-loopback HIT (RF-05)", () => {
+describe("deployments routes real-loopback HIT (RF-05)", () => {
   it("serves the deploy status poll and its incremental log form over a real socket", async () => {
     const harness = start();
     harness.state.deployLogs = ["a", "b", "c"];
@@ -216,13 +239,73 @@ describe("deployments read routes real-loopback HIT (RF-05)", () => {
     expect(harness.resets).toEqual([]);
   });
 
+  it("dispatches the delete workflow and evicts the cached listing over a real socket", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    const entry = await container!.getOrCreate("panel-a");
+
+    // Populate the cache through the reader, so the eviction is observed on the
+    // same map the listing route reads from.
+    await fetch(`${entry.baseUrl}/api/list-deployments?repo=octo/todo`);
+    expect(harness.cache.has("octo/todo")).toBe(true);
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      success: true,
+      runUrl: "https://github.com/octo/todo/actions/runs/7"
+    });
+    expect(harness.dispatches).toEqual([
+      [
+        "workflow",
+        "run",
+        "delete-application.yml",
+        "-f",
+        "environment=dev",
+        "-f",
+        "application=todo-app",
+        "--repo",
+        "octo/todo"
+      ]
+    ]);
+    // The within-slice invalidation: the reader and the invalidator now live in
+    // the same module, so this is proven rather than assumed.
+    expect(harness.cache.has("octo/todo")).toBe(false);
+  });
+
+  it("refuses an incomplete delete over a real socket", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({ repo: "octo/todo" })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "repo, environment, and application are required."
+    });
+  });
+
   it("leaves a method the migrated declarations do not claim on the legacy fallback", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
 
-    // The three listings are declared GET-only and the reset POST-only, so the
-    // opposite verb on the same path must still reach the fallback rather than
-    // being swallowed by the migrated declaration.
+    // The three listings are declared GET-only and the two POSTs POST-only, so
+    // the opposite verb on the same path must still reach the fallback rather
+    // than being swallowed by the migrated declaration.
     for (const path of [
       "/api/deploy-status",
       "/api/list-applications",
@@ -231,15 +314,17 @@ describe("deployments read routes real-loopback HIT (RF-05)", () => {
       const posted = await post(entry.baseUrl, path, "");
       expect(posted.status, path).toBe(418);
     }
-    const got = await fetch(`${entry.baseUrl}/api/deploy-reset`);
-    expect(got.status).toBe(418);
+    for (const path of ["/api/deploy-reset", "/api/delete-deployment"]) {
+      const got = await fetch(`${entry.baseUrl}${path}`);
+      expect(got.status, path).toBe(418);
+    }
   });
 
-  it("leaves the mutating deployments routes deferred to a later slice", () => {
+  it("leaves POST /api/deploy deferred to a later slice", () => {
     // Written out by hand so the two sides come from different sources: this
-    // fires meaningfully when a later slice migrates either route, rather than
+    // fires meaningfully when a later slice migrates the route, rather than
     // restating whatever the ledger happens to say.
-    for (const key of ["POST /api/delete-deployment", "POST /api/deploy"]) {
+    for (const key of ["POST /api/deploy"]) {
       expect(LEGACY_ROUTE_INVENTORY).toContain(key);
     }
   });
