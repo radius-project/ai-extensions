@@ -1,0 +1,603 @@
+import {
+  buildAppCreateArgs,
+  buildAppOwnerAddArgs,
+  buildAppOwnerListArgs,
+  buildAppTagPatchArgs,
+  buildAppTagShowArgs,
+  buildRadiusAppProvenanceTags,
+  decideAppSelection,
+  decideExistingClientId,
+  decideRadiusAppOwnership,
+  isAppOwnerAlreadyAssignedError,
+  isAzResourceNotFound,
+  isServiceManagementReferenceError,
+  isUuid,
+  missingRequiredAppTags,
+  parseAppTags,
+  parseDirectoryObjectIds,
+  parseServedReposFromSubjects,
+  validateAppRegistrationName
+} from "../../azure-oidc.js";
+import type {
+  AzureAutoSetupApplicationInput,
+  AzureAutoSetupApplicationResult,
+  AzureAutoSetupOperation,
+  AzureAutoSetupOperationPort,
+  AzureAutoSetupWorkflow,
+  RadiusAppProvenanceInput
+} from "./azure-auto-setup-types.js";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function persistReusedApplication(
+  operation: AzureAutoSetupOperation,
+  workflow: AzureAutoSetupWorkflow,
+  operations: AzureAutoSetupOperationPort
+): Promise<boolean> {
+  try {
+    await operations.persist();
+    return true;
+  } catch (error) {
+    operations.report({
+      code: "operation-store-write-failed",
+      message: `Could not persist setup operation ${operation.operationId}: ${errorMessage(error)}`
+    });
+    operations.finish(operation, "failed", {
+      failure: {
+        code: "operation-persistence-failed",
+        stage: operation.currentStage,
+        stepSeq: null,
+        message:
+          "Radius changed no cloud resources because it could not save the setup recovery record.",
+        classification: "unknown"
+      }
+    });
+    workflow.respond(500, {
+      error:
+        "Radius changed no cloud resources because it could not save the setup recovery record.",
+      code: "operation-persistence-failed",
+      operationId: operation.operationId
+    });
+    return false;
+  }
+}
+
+export async function resolveAzureAutoSetupApplication({
+  workflow,
+  dependencies,
+  oidc,
+  environment,
+  explicitAppId,
+  createNewApp,
+  appNameProvided,
+  requestedAppName,
+  requestedClientId,
+  serviceManagementReference
+}: AzureAutoSetupApplicationInput): Promise<AzureAutoSetupApplicationResult | null> {
+  const { operation, steps, runAz, runGitHubJson, fail, checkpoint } = workflow;
+  const { operations } = dependencies;
+
+  let appName = `radius-deploy-${oidc.fullName.replace("/", "-")}`;
+  if (!explicitAppId) {
+    if (appNameProvided) {
+      const nameCheck = validateAppRegistrationName(requestedAppName);
+      if (!nameCheck.ok) {
+        await fail(400, nameCheck.reason, "invalid-app-name", { steps });
+        return null;
+      }
+      appName = nameCheck.name;
+    } else {
+      const nameCheck = validateAppRegistrationName(appName);
+      if (!nameCheck.ok) {
+        await fail(
+          400,
+          "The derived App Registration name is invalid: " +
+            nameCheck.reason +
+            " Supply a shorter appName.",
+          "invalid-app-name",
+          { steps }
+        );
+        return null;
+      }
+      appName = nameCheck.name;
+    }
+  }
+
+  let existingClientId = requestedClientId;
+  if (!existingClientId) {
+    const variable = await runGitHubJson(
+      `/repos/${oidc.fullName}/environments/${encodeURIComponent(
+        environment
+      )}/variables/AZURE_CLIENT_ID`
+    );
+    if (
+      variable?.ok &&
+      variable.json &&
+      typeof variable.json.value === "string"
+    ) {
+      existingClientId = variable.json.value.trim();
+    }
+  }
+
+  let signedInUserId: string | null = null;
+  const getSignedInUserId = async (): Promise<
+    { ok: true; id: string } | { ok: false; stderr: string }
+  > => {
+    if (signedInUserId !== null) return { ok: true, id: signedInUserId };
+    const result = await runAz([
+      "ad",
+      "signed-in-user",
+      "show",
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+    if (result.code !== 0) return { ok: false, stderr: result.stderr };
+    signedInUserId = result.stdout.trim().toLowerCase();
+    return { ok: true, id: signedInUserId };
+  };
+  const isOwnedBySignedInUser = async (appId: string) => {
+    const signedIn = await getSignedInUserId();
+    if (!signedIn.ok) return { ok: false as const, stderr: signedIn.stderr };
+    const result = await runAz(buildAppOwnerListArgs({ appId }));
+    if (result.code !== 0) {
+      return { ok: false as const, stderr: result.stderr };
+    }
+    return {
+      ok: true as const,
+      owned: parseDirectoryObjectIds(result.stdout).includes(signedIn.id)
+    };
+  };
+  const readRadiusProvenance = async (
+    appId: string
+  ): Promise<RadiusAppProvenanceInput | undefined> => {
+    const result = await runAz(buildAppTagShowArgs({ appId }));
+    if (result.code !== 0) return undefined;
+    return {
+      tags: parseAppTags(result.stdout) || [],
+      repo: oidc.fullName,
+      environment
+    };
+  };
+
+  let clientId = "";
+  const rollbackCreatedAppAndFail = (
+    error: string,
+    code: string,
+    azError: string
+  ) =>
+    fail(400, error, code, {
+      steps,
+      azError,
+      clientId,
+      appName
+    });
+
+  if (existingClientId) {
+    steps.push(
+      `Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`
+    );
+    const showResult = await runAz([
+      "ad",
+      "app",
+      "show",
+      "--id",
+      existingClientId,
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+    const showStatus =
+      showResult.code === 0 && showResult.stdout.trim() ? "found"
+      : isAzResourceNotFound(showResult.stderr) ? "not-found"
+      : "lookup-failed";
+    let owned = false;
+    let radiusProvenance: RadiusAppProvenanceInput | undefined;
+    if (showStatus === "found") {
+      const ownership = await isOwnedBySignedInUser(existingClientId);
+      if (!ownership.ok) {
+        await fail(
+          400,
+          `Could not read owners of the existing AZURE_CLIENT_ID app ${existingClientId}: ` +
+            ownership.stderr,
+          "app-owner-lookup-failed",
+          { steps, azError: ownership.stderr }
+        );
+        return null;
+      }
+      owned = ownership.owned;
+      if (!owned) {
+        radiusProvenance = await readRadiusProvenance(existingClientId);
+      }
+    }
+    const decision = decideExistingClientId({
+      clientId: existingClientId,
+      showStatus,
+      owned,
+      radiusProvenance
+    });
+    if (decision.action === "fatal") {
+      await fail(
+        400,
+        `Could not verify the repository's AZURE_CLIENT_ID (${existingClientId}): ` +
+          showResult.stderr,
+        decision.code || "existing-client-id-failed",
+        { steps, azError: showResult.stderr }
+      );
+      return null;
+    }
+    if (decision.action === "error") {
+      await fail(
+        400,
+        decision.reason ||
+          `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration the current signed-in user does not own. Verify or clear the variable and retry.`,
+        decision.code || "existing-client-id-not-owned",
+        { steps }
+      );
+      return null;
+    }
+    if (decision.action === "reuse") {
+      clientId = existingClientId;
+      steps.push(
+        `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${clientId}`
+      );
+      operations.recordAzureApp(operation, {
+        state: "reused",
+        appId: clientId,
+        displayName: null
+      });
+      if (!(await persistReusedApplication(operation, workflow, operations))) {
+        return null;
+      }
+    }
+  }
+
+  if (!clientId) {
+    const listServesRepos = async (appId: string) => {
+      const result = await runAz([
+        "ad",
+        "app",
+        "federated-credential",
+        "list",
+        "--id",
+        appId,
+        "--query",
+        "[].subject",
+        "-o",
+        "json"
+      ]);
+      if (result.code !== 0) return undefined;
+      try {
+        return parseServedReposFromSubjects(JSON.parse(result.stdout));
+      } catch {
+        return undefined;
+      }
+    };
+
+    if (explicitAppId) {
+      if (!isUuid(explicitAppId)) {
+        await fail(
+          400,
+          "The selected App Registration id is not a valid GUID.",
+          "invalid-app-id",
+          { steps }
+        );
+        return null;
+      }
+      const ownership = await isOwnedBySignedInUser(explicitAppId);
+      if (!ownership.ok) {
+        await fail(
+          400,
+          `Could not read owners of App Registration ${explicitAppId}: ` +
+            ownership.stderr,
+          "app-owner-lookup-failed",
+          { steps, azError: ownership.stderr }
+        );
+        return null;
+      }
+      if (!ownership.owned) {
+        const decision = decideRadiusAppOwnership({
+          ownedBySignedInUser: false,
+          radiusProvenance: await readRadiusProvenance(explicitAppId)
+        });
+        await fail(
+          400,
+          decision.reason ||
+            "The selected App Registration is not owned by the current signed-in user. Choose one you own or create a new application.",
+          decision.code || "app-registration-not-owned",
+          { steps, appName }
+        );
+        return null;
+      }
+      clientId = explicitAppId;
+      steps.push(`✅ Using the selected App Registration: ${clientId}`);
+      operations.recordAzureApp(operation, {
+        state: "reused",
+        appId: clientId,
+        displayName: null
+      });
+    }
+
+    if (!clientId) {
+      steps.push(`Looking up existing App Registration: ${appName}...`);
+      const listResult = await runAz([
+        "ad",
+        "app",
+        "list",
+        "--filter",
+        `displayName eq '${appName}'`,
+        "--query",
+        "[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime,tags:tags}",
+        "-o",
+        "json"
+      ]);
+      if (listResult.code !== 0) {
+        await fail(
+          400,
+          "Failed to look up existing App Registrations: " + listResult.stderr,
+          "app-lookup-failed",
+          { steps, azError: listResult.stderr }
+        );
+        return null;
+      }
+      let matches;
+      try {
+        const parsed = JSON.parse(listResult.stdout);
+        if (!Array.isArray(parsed)) {
+          await fail(
+            400,
+            "The App Registration lookup returned an unexpected (non-array) result.",
+            "app-lookup-parse",
+            { steps }
+          );
+          return null;
+        }
+        matches = parsed;
+      } catch {
+        await fail(
+          400,
+          "Could not parse the App Registration lookup result.",
+          "app-lookup-parse",
+          { steps }
+        );
+        return null;
+      }
+
+      const ownedMatches = [];
+      let unownedRadiusProvenance: RadiusAppProvenanceInput | undefined;
+      for (const match of matches) {
+        if (!match || !match.appId) continue;
+        const ownership = await isOwnedBySignedInUser(match.appId);
+        if (!ownership.ok) {
+          await fail(
+            400,
+            `Could not read owners of App Registration ${match.appId}: ` +
+              ownership.stderr,
+            "app-owner-lookup-failed",
+            { steps, azError: ownership.stderr }
+          );
+          return null;
+        }
+        if (ownership.owned) ownedMatches.push(match);
+        else if (!unownedRadiusProvenance) {
+          unownedRadiusProvenance = {
+            tags: Array.isArray(match.tags) ? match.tags : [],
+            repo: oidc.fullName,
+            environment
+          };
+        }
+      }
+
+      const selection = decideAppSelection({
+        ownedMatches,
+        hasUnownedMatch: matches.length > ownedMatches.length,
+        radiusProvenance: unownedRadiusProvenance,
+        existingClientId,
+        createNew: createNewApp
+      });
+      if (selection.action === "error") {
+        await fail(
+          400,
+          selection.reason || "Could not select an App Registration.",
+          selection.code || "app-selection-failed",
+          { steps, appName }
+        );
+        return null;
+      }
+      if (selection.action === "needs-selection") {
+        const candidates = [];
+        for (const candidate of selection.candidates || []) {
+          const servesRepos = await listServesRepos(candidate.appId);
+          candidates.push({
+            appId: candidate.appId,
+            displayName: candidate.displayName,
+            createdDateTime: candidate.createdDateTime,
+            ...(servesRepos ? { servesRepos } : {})
+          });
+        }
+        await fail(
+          400,
+          "Multiple owned App Registrations found — choose which identity to use.",
+          "app-selection-required",
+          {
+            steps,
+            appName,
+            candidates,
+            defaultAppId: selection.defaultAppId
+          }
+        );
+        return null;
+      }
+      if (selection.action === "reuse") {
+        clientId = selection.appId || "";
+        steps.push(`✅ Reusing existing App Registration: ${clientId}`);
+        operations.recordAzureApp(operation, {
+          state: "reused",
+          appId: clientId,
+          displayName: appName
+        });
+        if (
+          !(await persistReusedApplication(operation, workflow, operations))
+        ) {
+          return null;
+        }
+      } else {
+        steps.push(`Creating App Registration: ${appName}...`);
+        const createResult = await runAz(
+          buildAppCreateArgs({
+            appName,
+            serviceManagementReference
+          }).filter((arg): arg is string => typeof arg === "string")
+        );
+        if (createResult.code !== 0) {
+          if (
+            !serviceManagementReference &&
+            isServiceManagementReferenceError(createResult.stderr)
+          ) {
+            await fail(
+              400,
+              "This Entra tenant requires a Service Management Reference on new App Registrations. " +
+                "Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.",
+              "service-management-reference-required",
+              { steps, azError: createResult.stderr }
+            );
+            return null;
+          }
+          await fail(
+            400,
+            "Failed to create App Registration: " + createResult.stderr,
+            "app-create-failed",
+            { steps, azError: createResult.stderr }
+          );
+          return null;
+        }
+        clientId = createResult.stdout.trim();
+        steps.push(`✅ App Registration created: ${clientId}`);
+        operations.recordAzureApp(operation, {
+          state: "created",
+          appId: clientId,
+          displayName: appName,
+          serviceManagementReference: serviceManagementReference || null
+        });
+        if (!(await checkpoint())) return null;
+
+        const signedIn = await getSignedInUserId();
+        if (!signedIn.ok) {
+          await rollbackCreatedAppAndFail(
+            "Failed to read the signed-in Entra user after creating the App Registration: " +
+              signedIn.stderr,
+            "app-owner-lookup-failed",
+            signedIn.stderr
+          );
+          return null;
+        }
+        steps.push(
+          "Assigning the signed-in user as an owner of the new App Registration..."
+        );
+        const ownerAdd = await runAz(
+          buildAppOwnerAddArgs({
+            appId: clientId,
+            ownerObjectId: signedIn.id
+          })
+        );
+        if (
+          ownerAdd.code !== 0 &&
+          !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
+        ) {
+          await rollbackCreatedAppAndFail(
+            "Failed to assign the signed-in user as an owner of the new App Registration: " +
+              ownerAdd.stderr,
+            "app-owner-add-failed",
+            ownerAdd.stderr
+          );
+          return null;
+        }
+
+        steps.push(
+          "Verifying the signed-in user owns the new App Registration..."
+        );
+        const ownerList = await runAz(
+          buildAppOwnerListArgs({ appId: clientId })
+        );
+        if (ownerList.code !== 0) {
+          await rollbackCreatedAppAndFail(
+            "Failed to verify owners of the new App Registration: " +
+              ownerList.stderr,
+            "app-owner-lookup-failed",
+            ownerList.stderr
+          );
+          return null;
+        }
+        const ownerIds = parseDirectoryObjectIds(ownerList.stdout);
+        if (!ownerIds.includes(signedIn.id.toLowerCase())) {
+          await rollbackCreatedAppAndFail(
+            "The signed-in user was not present in the App Registration owners after creation.",
+            "app-owner-verify-failed",
+            ownerList.stdout
+          );
+          return null;
+        }
+        steps.push("✅ Signed-in user verified as App Registration owner");
+
+        const provenanceTags = buildRadiusAppProvenanceTags({
+          repo: oidc.fullName,
+          environment,
+          operationId: operation.operationId
+        });
+        steps.push(
+          "Applying Radius provenance tags to the new App Registration..."
+        );
+        const tagPatch = await runAz(
+          buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
+        );
+        if (tagPatch.code !== 0) {
+          await rollbackCreatedAppAndFail(
+            "Failed to apply Radius provenance tags to the new App Registration: " +
+              tagPatch.stderr,
+            "app-tag-update-failed",
+            tagPatch.stderr
+          );
+          return null;
+        }
+        steps.push("Verifying Radius provenance tags...");
+        const tagShow = await runAz(buildAppTagShowArgs({ appId: clientId }));
+        if (tagShow.code !== 0) {
+          await rollbackCreatedAppAndFail(
+            "Failed to read the App Registration tags after update: " +
+              tagShow.stderr,
+            "app-tag-read-failed",
+            tagShow.stderr
+          );
+          return null;
+        }
+        const actualTags = parseAppTags(tagShow.stdout);
+        if (!actualTags) {
+          await rollbackCreatedAppAndFail(
+            "Could not parse the App Registration tags after update.",
+            "app-tag-parse-failed",
+            tagShow.stdout
+          );
+          return null;
+        }
+        const missingTags = missingRequiredAppTags(actualTags, provenanceTags);
+        if (missingTags.length > 0) {
+          await rollbackCreatedAppAndFail(
+            `The new App Registration is missing required Radius provenance tags: ${missingTags.join(
+              ", "
+            )}.`,
+            "app-tag-verify-failed",
+            JSON.stringify(actualTags)
+          );
+          return null;
+        }
+        steps.push("✅ Radius provenance tags verified");
+      }
+    }
+  }
+
+  return { clientId, appName };
+}
