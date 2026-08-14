@@ -28,7 +28,7 @@ const ARGV = {
 };
 
 interface AzResult {
-  code?: number;
+  code?: string | number;
   stdout?: string;
   stderr?: string;
 }
