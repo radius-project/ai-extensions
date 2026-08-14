@@ -209,6 +209,11 @@ ${confirmDialogMarkup()}
 .env-progress__step--warning { color:var(--rad-text); }
 .env-progress__step--failed { color:var(--rad-danger); }
 .env-progress__actions { display:flex; gap:8px; margin-top:12px; }
+.env-progress__commands { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+.env-progress__command-buttons { display:flex; gap:8px; flex-wrap:wrap; }
+.env-progress__command-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-progress__command-status { font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__command-error { font-size:12px; color:var(--rad-danger); line-height:1.5; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }

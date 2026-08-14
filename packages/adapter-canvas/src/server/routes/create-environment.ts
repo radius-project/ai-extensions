@@ -81,6 +81,17 @@ export interface CreateEnvironmentDependencies
     persist: () => Promise<void>;
     report: (diagnostic: { code: string; message: string }) => void;
   }): Promise<boolean>;
+  // Honors a recorded stop between remote mutations. Returns false once it has
+  // closed the operation and answered the request, so the caller must return
+  // without touching Azure or GitHub again. Never called while a command is in
+  // flight: Radius lets the current write finish and stops before the next one.
+  guardStopBoundary(input: {
+    operation: CreateEnvironmentOperation | null;
+    boundary: string;
+    persist: () => Promise<void>;
+    report: (diagnostic: { code: string; message: string }) => void;
+    respond: (status: number, body: Record<string, unknown>) => void;
+  }): Promise<boolean>;
   runAzCommand(
     args: string[]
   ): Promise<Partial<CreateEnvironmentCommandResult>>;
@@ -393,14 +404,29 @@ export async function handleCreateEnvironment(
       });
       respond(failure.status, failure.body);
     };
-    const checkpoint = () =>
-      dependencies.persistMutationCheckpoint({
+    const stopBoundary = (boundary: string) =>
+      dependencies.guardStopBoundary({
+        operation,
+        boundary,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic),
+        respond
+      });
+    // Both gates in one call: the checkpoint saves the provenance of the write
+    // that just finished, and the boundary then decides whether a stop recorded
+    // while it ran should be honored before the next write starts.
+    const checkpoint = async (boundary = "environment-mutation") => {
+      const saved = await dependencies.persistMutationCheckpoint({
         operation,
         persist: () => dependencies.persistOperations(),
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic),
         fail
       });
+      if (!saved) return false;
+      return stopBoundary(boundary);
+    };
 
     dependencies.recordGitHubEnvironment(operation, {
       state: ensuredEnvironment.state,
@@ -505,6 +531,11 @@ export async function handleCreateEnvironment(
     // /api/verify-status, which would otherwise spin until the timeout.
     let verifySkipReason = "";
 
+    // This is the commit point. After it, a stop keeps the resources in place
+    // rather than removing them, because the workflow files may already be
+    // visible to the repository.
+    if (!(await stopBoundary("before-workflow-commit"))) return;
+
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
     // the same points they did inline; the publisher never finalizes or
@@ -528,7 +559,7 @@ export async function handleCreateEnvironment(
         pushStep: (message) => {
           steps.push(message);
         },
-        gate: checkpoint
+        gate: () => checkpoint("after-workflow-commit")
       },
       { operation, targetRepo, envName, provider, defaultBranch }
     );
@@ -638,6 +669,7 @@ export async function handleCreateEnvironment(
           `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
         );
       steps.push("Dispatching verify-credentials workflow...");
+      if (!(await stopBoundary("before-verification-dispatch"))) return;
       // Wait briefly for GitHub to index the workflow, then dispatch with a few
       // retries to ride out indexing/propagation races.
       await dependencies.sleep(3000);
@@ -725,7 +757,20 @@ export async function handleCreateEnvironment(
       };
       if (verifyPlan.shouldDispatch)
         dependencies.enterStage(operation, dependencies.stageVerify);
-      if (!(await checkpoint())) return;
+      // Record the commit identity, including any pull request, before the
+      // safe-boundary check. A stop honored here must still be able to tell the
+      // customer that the workflows were committed and where.
+      dependencies.recordCommitState(operation, {
+        mode:
+          verifyPlan.shouldDispatch ?
+            prState ? "pull_request"
+            : "default_branch"
+          : "pull_request",
+        branch: prState?.branch || defaultBranch,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
+        pullRequestUrl: pullRequestUrl || null
+      });
+      if (!(await checkpoint("after-verification-dispatch"))) return;
       const entry = dependencies.readInstanceEntry(context.instanceId);
       if (entry) {
         entry.state.deployDispatchedAt = dispatchedAt;
@@ -737,12 +782,6 @@ export async function handleCreateEnvironment(
     const actionRequired = !verifyPlan.shouldDispatch;
     dependencies.recordCleanupState(operation, { state: "not_needed" });
     if (actionRequired) {
-      dependencies.recordCommitState(operation, {
-        mode: "pull_request",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
       // The third terminal state, and the one the product kept getting wrong.
       // Verification was never dispatched, so there is nothing to wait for and
       // nothing failed — the operation is finished and the remaining work is the
@@ -807,14 +846,8 @@ export async function handleCreateEnvironment(
           dependencies.reportOperationDiagnostic(diagnostic)
       });
     } else {
-      dependencies.recordCommitState(operation, {
-        mode: prState ? "pull_request" : "default_branch",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
-      // Verification is dispatched but still running; stage and exact dispatch
-      // identity were persisted together above.
+      // Verification is dispatched but still running; stage, commit identity,
+      // and exact dispatch identity were persisted together above.
     }
 
     respond(200, {

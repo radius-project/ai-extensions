@@ -58,6 +58,7 @@ export interface AdmissionPorts {
   isValidRepoSlug(repo: string): boolean;
   getOperation(operationId: string): CreateEnvironmentOperation | null;
   isStale(operation: CreateEnvironmentOperation): boolean;
+  isTerminalState(state: unknown): boolean;
   createOperation(input: {
     provider: string;
     repo: string;
@@ -162,6 +163,10 @@ export async function admitCreateEnvironmentRequest(
     if (
       !existing ||
       ports.isStale(existing) ||
+      // A record settled by stale reconciliation, a stop, or a failure is
+      // closed, not resumable: continuing it would write new provenance into a
+      // terminal record the customer has already been given a verdict for.
+      ports.isTerminalState(existing.state) ||
       existing.repo !== targetRepo ||
       existing.environment !== operationEnvironment ||
       existing.provider !== provider ||

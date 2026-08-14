@@ -327,6 +327,11 @@ export class FakeDocument extends FakeEventTarget implements DomDocument {
     return element;
   }
 
+  /** Drop an element from the document, as a host page re-render would. */
+  remove(elementId: string): void {
+    this.elements.delete(elementId);
+  }
+
   getElementById(elementId: string): unknown {
     return this.elements.get(elementId) ?? null;
   }

@@ -45,8 +45,8 @@ function resumeUrl(operationId: string, code: string): string {
   return `${operationUrl(operationId)}/resume/${encodeURIComponent(code)}`;
 }
 
-function abandonUrl(operationId: string): string {
-  return `${operationUrl(operationId)}/abandon`;
+function stopUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/stop`;
 }
 
 function verifyUrl(
@@ -260,7 +260,12 @@ describe("parseOperationResponse", () => {
       retry: { startsCleanly: false, guidance: "" },
       removed: [],
       retained: [],
-      warnings: []
+      warnings: [],
+      created: [],
+      retainedArtifacts: [],
+      reused: [],
+      cleaned: [],
+      manualActionRequired: []
     });
   });
 
@@ -291,7 +296,17 @@ describe("parseOperationResponse", () => {
             "not-an-entry"
           ],
           retained: [{ target: "kv-dev" }],
-          warnings: ["partial cleanup", "", 7, null]
+          warnings: ["partial cleanup", "", 7, null],
+          created: [{ target: "app-radius-dev" }, { target: "" }],
+          retainedArtifacts: [{ target: "ghcr package" }],
+          reused: [{ target: "existing-sp" }],
+          cleaned: [{ target: "federated credential" }],
+          manualActionRequired: [
+            { target: "role assignment", action: "Remove it in the portal" },
+            { target: "orphan app" },
+            { action: "no target" },
+            "not-an-entry"
+          ]
         }
       })
     );
@@ -301,7 +316,15 @@ describe("parseOperationResponse", () => {
       retry: { startsCleanly: true, guidance: "Retry any time." },
       removed: [{ target: "rg-dev" }],
       retained: [{ target: "kv-dev" }],
-      warnings: ["partial cleanup"]
+      warnings: ["partial cleanup"],
+      created: [{ target: "app-radius-dev" }],
+      retainedArtifacts: [{ target: "ghcr package" }],
+      reused: [{ target: "existing-sp" }],
+      cleaned: [{ target: "federated credential" }],
+      manualActionRequired: [
+        { target: "role assignment", action: "Remove it in the portal" },
+        { target: "orphan app", action: "" }
+      ]
     });
   });
 
@@ -1099,6 +1122,586 @@ describe("failure card rendering", () => {
     });
     controller?.renderProgress(record({ terminalState: "succeeded" }));
     expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
+  });
+});
+
+describe("partial-state inventory", () => {
+  function controllerFor(browser: ReturnType<typeof setup>) {
+    return initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+  }
+
+  it("names each surviving resource group in its own block", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        terminalState: "failed_partial",
+        cleanup: {
+          created: [{ target: "app radius-dev" }],
+          retainedArtifacts: [{ target: "ghcr package" }],
+          reused: [{ target: "existing service principal" }],
+          cleaned: [{ target: "federated credential" }],
+          manualActionRequired: [
+            { target: "role assignment", action: "Remove it in the portal" },
+            { target: "orphaned app" }
+          ]
+        }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+    const listed = (id: string): string[] =>
+      browser.els[id].children.map((child) => child.textContent ?? "");
+    expect(listed(PROGRESS_IDS.stateCreatedList)).toEqual(["app radius-dev"]);
+    expect(listed(PROGRESS_IDS.stateRetainedList)).toEqual(["ghcr package"]);
+    expect(listed(PROGRESS_IDS.stateReusedList)).toEqual([
+      "existing service principal"
+    ]);
+    expect(listed(PROGRESS_IDS.stateCleanedList)).toEqual([
+      "federated credential"
+    ]);
+    // A manual entry keeps its instruction attached to its resource, and one
+    // without an instruction is still named rather than dropped.
+    expect(listed(PROGRESS_IDS.stateManualList)).toEqual([
+      "role assignment — Remove it in the portal",
+      "orphaned app"
+    ]);
+    for (const id of [
+      PROGRESS_IDS.stateCreatedBlock,
+      PROGRESS_IDS.stateRetainedBlock,
+      PROGRESS_IDS.stateReusedBlock,
+      PROGRESS_IDS.stateCleanedBlock,
+      PROGRESS_IDS.stateManualBlock
+    ]) {
+      expect(browser.els[id].style.display).toBe("");
+    }
+  });
+
+  it("hides an empty group and the panel when nothing survives", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({ terminalState: "failed", cleanup: { created: [] } })
+    );
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.stateCreatedBlock].style.display).toBe(
+      "none"
+    );
+  });
+
+  it("keeps only the populated groups visible", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        terminalState: "failed",
+        cleanup: { reused: [{ target: "existing app" }] }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.stateReusedBlock].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.stateCreatedBlock].style.display).toBe(
+      "none"
+    );
+  });
+
+  it("clears the inventory when the panel is cleared", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({
+        terminalState: "failed",
+        cleanup: { created: [{ target: "app radius-dev" }] }
+      })
+    );
+    controller?.renderProgress(null);
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+  });
+
+  it("inserts a customer-influenced label as text, never as markup", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        terminalState: "failed",
+        cleanup: { created: [{ target: "<img src=x onerror=alert(1)>" }] }
+      })
+    );
+
+    const list = browser.els[PROGRESS_IDS.stateCreatedList];
+    expect(list.innerHTML).toBe("");
+    expect(list.children[0].textContent).toBe("<img src=x onerror=alert(1)>");
+  });
+});
+
+describe("operation commands", () => {
+  const stopAction = {
+    id: "stop",
+    kind: "stop",
+    label: "Stop setup",
+    description: "Radius finishes the current step and stops.",
+    path: "/api/operations/op-1/stop",
+    pending: false
+  };
+
+  function commandsController(browser: ReturnType<typeof setup>) {
+    return initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      mutationNonce: "browser-nonce",
+      deps: createDeps().deps
+    });
+  }
+
+  function buttons(browser: ReturnType<typeof setup>) {
+    return browser.els[PROGRESS_IDS.commandButtons].children;
+  }
+
+  it("renders exactly the actions the server projected", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({
+        actions: [
+          stopAction,
+          {
+            id: "retry-setup",
+            kind: "retry_setup",
+            label: "",
+            description: "",
+            path: "/api/operations/op-1/retry/setup",
+            pending: true
+          }
+        ]
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("");
+    const rendered = buttons(browser);
+    expect(rendered).toHaveLength(2);
+    expect(rendered[0].id).toBe("env-progress-command-stop");
+    expect(rendered[0].textContent).toBe("Stop setup");
+    expect(rendered[0].getAttribute("type")).toBe("button");
+    expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
+    // A label the server did not name still gets an honest default rather
+    // than an empty button, and a pending action cannot be pressed twice.
+    expect(rendered[1].textContent).toBe("Continue");
+    expect(Reflect.get(rendered[1], "disabled")).toBe(true);
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
+      "Radius finishes the current step and stops."
+    );
+  });
+
+  it("drops an action with no path rather than rendering a button that can only fail", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({ actions: [{ ...stopAction, path: "" }] })
+    );
+
+    expect(buttons(browser)).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
+  });
+
+  it("states the automatic next move when there is nothing to press", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({
+        actions: [],
+        nextTransition: { code: "stopping", message: "Stopping soon…" }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
+      "Stopping soon…"
+    );
+  });
+
+  it("leads the note with the automatic next move when actions are offered", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({
+        actions: [stopAction],
+        nextTransition: { code: "stopping", message: "Stopping soon…" }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
+      "Stopping soon… Radius finishes the current step and stops."
+    );
+  });
+
+  it("announces a stop that the server has already accepted", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({ actions: [{ ...stopAction, pending: true }] })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "Stopping after the current step…"
+    );
+  });
+
+  it("clears a stale status and error when a different operation takes over", () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    controller?.renderProgress(
+      record({ actions: [{ ...stopAction, pending: true }] })
+    );
+    browser.els[PROGRESS_IDS.commandError].textContent = "old refusal";
+
+    controller?.renderProgress(
+      record({ operationId: "op-2", actions: [stopAction] })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe("");
+  });
+
+  it("submits the projected path and follows the reopened operation", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse(op({ state: "stopping" }))
+    );
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    const submitted = browser.net.calls.find(
+      (call) => call.url === stopAction.path
+    );
+    expect(submitted?.init?.method).toBe("POST");
+    expect(submitted?.init?.body).toBe("{}");
+    // Every control is a POST the server treats as nonce-required, so the
+    // browser's mutation nonce rides along or the command is refused as
+    // untrusted before the handler ever sees it.
+    expect(submitted?.init?.headers).toEqual({
+      "Content-Type": "application/json",
+      "X-Radius-Mutation-Nonce": "browser-nonce"
+    });
+    // Following the same operation is what keeps the panel live after a
+    // command reopens the record.
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("reports a terminal result instead of rejoining the poller", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse(op({ terminalState: "cancelled", state: "cancelled" }))
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Environment setup cancelled."
+    );
+    expect(browser.clock.intervals).toBe(0);
+    expect(deps.reloadCount).toBe(1);
+  });
+
+  it("re-reads the operation directly when there is no repository to track", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: "",
+      deps: createDeps().deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationUrl("op-1"), () =>
+      jsonResponse(op({ summary: "Stopping dev…" }))
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Stopping dev…");
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("says nothing about a direct re-read the server refused", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: "",
+      deps: createDeps().deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationUrl("op-1"), () =>
+      jsonResponse({ error: "gone" }, false, 404)
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+  });
+
+  it("keeps a rejected re-read out of the panel", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: "",
+      deps: createDeps().deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationUrl("op-1"), () =>
+      Promise.reject(new Error("offline"))
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+  });
+
+  it("drops a malformed action entry rather than rendering a broken control", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({ actions: ["not-an-action", null, stopAction] })
+    );
+
+    expect(buttons(browser)).toHaveLength(1);
+    expect(buttons(browser)[0].id).toBe("env-progress-command-stop");
+  });
+
+  it("still submits when the status and error regions are absent", async () => {
+    const browser = setupWithout([
+      PROGRESS_IDS.commandStatus,
+      PROGRESS_IDS.commandError
+    ]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse({ operation: null })
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
+      true
+    );
+  });
+
+  it("still submits when the command container itself is absent", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse({ operation: null })
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+    const button = browser.els[PROGRESS_IDS.commandButtons].children[0];
+    // The container can disappear between render and click when the host page
+    // re-renders around the panel; the command must still reach the server.
+    browser.document.remove(PROGRESS_IDS.commands);
+
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
+      true
+    );
+  });
+
+  it("surfaces the server's own refusal and returns focus to the panel", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    browser.net.handle(stopAction.path, () =>
+      jsonResponse(
+        { error: "operation-already-terminal", ...op({ state: "failed" }) },
+        false,
+        409
+      )
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "operation-already-terminal"
+    );
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
+  });
+
+  it("never invents a cause for a refusal the server did not explain", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    browser.net.handle(stopAction.path, () => jsonResponse({}, false, 500));
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius could not accept that request."
+    );
+  });
+
+  it("treats an unreadable refusal body as an unexplained refusal", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    browser.net.handle(stopAction.path, () => textResponse("<html>", false));
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius could not accept that request."
+    );
+  });
+
+  it("reports an unreachable setup service without closing the panel", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    browser.net.handle(stopAction.path, () =>
+      Promise.reject(new Error("offline"))
+    );
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius could not reach the setup service. Try again."
+    );
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("disables the controls while a command is in flight and ignores a second press", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    const pending = createDeferred<HttpResponse>();
+    let submissions = 0;
+    browser.net.handle(stopAction.path, () => {
+      submissions += 1;
+      return pending.promise;
+    });
+    controller?.renderProgress(record({ actions: [stopAction] }));
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commands].getAttribute("aria-busy")).toBe(
+      "true"
+    );
+    expect(Reflect.get(buttons(browser)[0], "disabled")).toBe(true);
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "Stopping after the current step…"
+    );
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+    expect(submissions).toBe(1);
+
+    pending.resolve(jsonResponse({ operation: null }));
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.commands].getAttribute("aria-busy")).toBe(
+      "false"
+    );
+  });
+
+  it("announces a non-stop command without borrowing the stop wording", async () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/operations/op-1/retry/setup",
+      () => pending.promise
+    );
+    controller?.renderProgress(
+      record({
+        actions: [
+          {
+            ...stopAction,
+            id: "retry-setup",
+            kind: "retry_setup",
+            label: "Retry setup",
+            path: "/api/operations/op-1/retry/setup"
+          }
+        ]
+      })
+    );
+
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "Radius accepted the request…"
+    );
+    pending.resolve(jsonResponse({ operation: null }));
+    await flushPromises();
+  });
+
+  it("degrades quietly when the command region is not on the page", () => {
+    const browser = setupWithout([
+      PROGRESS_IDS.commands,
+      PROGRESS_IDS.commandButtons,
+      PROGRESS_IDS.commandNote,
+      PROGRESS_IDS.partialState
+    ]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    expect(() =>
+      controller?.renderProgress(record({ actions: [stopAction] }))
+    ).not.toThrow();
+  });
+
+  it("skips a partial-state group whose block is missing", () => {
+    const browser = setupWithout([PROGRESS_IDS.stateCreatedBlock]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        terminalState: "failed",
+        cleanup: { created: [{ target: "app radius-dev" }] }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+  });
+
+  it("releases command button listeners on teardown", () => {
+    const browser = setup();
+    const controller = commandsController(browser);
+    controller?.renderProgress(record({ actions: [stopAction] }));
+    const button = buttons(browser)[0];
+    controller?.teardown();
+
+    button.dispatch("click");
+
+    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
+      false
+    );
   });
 });
 
@@ -1964,7 +2567,7 @@ describe("resume flow", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
-  it("abandons the operation when the prompt rejects with abandonOperation", async () => {
+  it("stops the operation when the prompt rejects with abandonOperation", async () => {
     const browser = setup();
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () => {
@@ -1978,8 +2581,8 @@ describe("resume flow", () => {
       mutationNonce: "browser-nonce",
       deps: deps.deps
     });
-    let abandonCalled = false;
-    let abandonHeaders: unknown;
+    let stopCalled = false;
+    let stopHeaders: unknown;
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(
         op({
@@ -1992,9 +2595,9 @@ describe("resume flow", () => {
         })
       )
     );
-    browser.net.handle(abandonUrl("op-1"), (init) => {
-      abandonCalled = true;
-      abandonHeaders = init?.headers;
+    browser.net.handle(stopUrl("op-1"), (init) => {
+      stopCalled = true;
+      stopHeaders = init?.headers;
       return jsonResponse({ ok: true });
     });
 
@@ -2002,13 +2605,14 @@ describe("resume flow", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(abandonCalled).toBe(true);
-    expect(abandonHeaders).toEqual({
+    expect(stopCalled).toBe(true);
+    expect(stopHeaders).toEqual({
+      "Content-Type": "application/json",
       "X-Radius-Mutation-Nonce": "browser-nonce"
     });
   });
 
-  it("retries after the abandon request itself fails", async () => {
+  it("retries after the stop request itself fails", async () => {
     const browser = setup();
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () => {
@@ -2033,7 +2637,7 @@ describe("resume flow", () => {
         })
       )
     );
-    browser.net.handle(abandonUrl("op-1"), () => jsonResponse({}, false, 500));
+    browser.net.handle(stopUrl("op-1"), () => jsonResponse({}, false, 500));
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -2042,7 +2646,7 @@ describe("resume flow", () => {
     expect(browser.clock.timeouts).toBe(1);
   });
 
-  it("retries after the abandon request rejects outright", async () => {
+  it("retries after the stop request rejects outright", async () => {
     const browser = setup();
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () => {
@@ -2067,7 +2671,7 @@ describe("resume flow", () => {
         })
       )
     );
-    browser.net.handle(abandonUrl("op-1"), () =>
+    browser.net.handle(stopUrl("op-1"), () =>
       Promise.reject(new Error("offline"))
     );
 
@@ -2078,7 +2682,7 @@ describe("resume flow", () => {
     expect(browser.clock.timeouts).toBe(1);
   });
 
-  it("is a no-op when the abandon request settles for a session that has since been superseded", async () => {
+  it("is a no-op when the stop request settles for a session that has since been superseded", async () => {
     const browser = setup();
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () => {
@@ -2103,13 +2707,13 @@ describe("resume flow", () => {
         })
       )
     );
-    const abandonResponse = createDeferred<HttpResponse>();
-    browser.net.handle(abandonUrl("op-1"), () => abandonResponse.promise);
+    const stopResponse = createDeferred<HttpResponse>();
+    browser.net.handle(stopUrl("op-1"), () => stopResponse.promise);
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
     await flushPromises();
-    // The abandon POST is now in flight but unresolved. Superseding the
+    // The stop POST is now in flight but unresolved. Superseding the
     // session before it settles means scheduleTick's own staleness guard
     // (not this handler) must suppress the reschedule it would otherwise
     // trigger.
@@ -2120,12 +2724,12 @@ describe("resume flow", () => {
     await flushPromises();
     const timeoutsBeforeSettle = browser.clock.timeouts;
 
-    abandonResponse.resolve(jsonResponse({ ok: true }));
+    stopResponse.resolve(jsonResponse({ ok: true }));
     await flushPromises();
     await flushPromises();
 
     // Only the current ("prod") session's own timer exists; the stale
-    // abandon-flow continuation scheduled nothing extra.
+    // stop-flow continuation scheduled nothing extra.
     expect(browser.clock.timeouts).toBe(timeoutsBeforeSettle);
   });
 
@@ -2205,6 +2809,48 @@ describe("resumeProgress", () => {
     controller?.resumeProgress();
     await flushPromises();
 
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("rebuilds a closed record's panel and controls after a reload", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          terminalState: "failed_partial",
+          state: "failed_partial",
+          summary: "dev setup stopped",
+          failure: { message: "role assignment failed" },
+          cleanup: { created: [{ target: "app radius-dev" }] },
+          actions: [
+            {
+              id: "retry-setup",
+              kind: "retry_setup",
+              label: "Retry setup",
+              description: "Radius continues from the first unfinished step.",
+              path: "/api/operations/op-1/retry/setup",
+              pending: false
+            }
+          ]
+        })
+      )
+    );
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    // The saved record still offers its retry and still names what exists, so
+    // a reload after a failure is not a dead end.
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+    expect(
+      browser.els[PROGRESS_IDS.commandButtons].children[0].textContent
+    ).toBe("Retry setup");
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+    // A closed record is rendered, not re-polled.
     expect(browser.clock.intervals).toBe(0);
   });
 
