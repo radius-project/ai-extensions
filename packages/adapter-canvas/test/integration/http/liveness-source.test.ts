@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type { OpenSourceRequest } from "../../../src/server/routes/liveness-source.js";
@@ -146,12 +149,9 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
       '{"ok":false,"error":"editor canvas unavailable"}'
     );
 
-    // Unmigrated routes still reach the fallback. `POST /api/create-environment` is
-    // a residual `environments` route on the merged tree (main migrated
-    // `/api/list-applications`, so it can no longer prove fallthrough here).
-    const residual = await fetch(`${entry.baseUrl}/api/create-environment`, {
-      method: "POST"
-    });
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
   });
 

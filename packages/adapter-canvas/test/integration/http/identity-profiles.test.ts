@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createIdentityProfilesRoutes } from "../../../src/server/routes/identity-profiles.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { GitHubIdentity } from "../../../src/gh.js";
 import type { CredentialProfile } from "../../../src/shared.js";
@@ -310,15 +313,9 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(malformed.status).toBe(400);
 
-    // Unmigrated routes still reach the fallback. Routes from other families are
-    // used rather than one from this file's family, so a later migration of an
-    // `identity-credentials` path can't silently stop exercising the fallback.
-    // `/api/load-graph-stream` is a residual `graphs-planning` route and
-    // `/api/create-environment` is the residual `environments` route (main
-    // migrated `/api/list-applications`, so it can no longer prove this).
-    const residual = await fetch(`${entry.baseUrl}/api/load-graph-stream`);
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
-    const deferred = await post(entry.baseUrl, "/api/create-environment", "{}");
-    expect(deferred.status).toBe(418);
   });
 });
