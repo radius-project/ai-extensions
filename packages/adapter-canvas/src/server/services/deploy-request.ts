@@ -203,7 +203,8 @@ export function createDeployRequestService(
           data = JSON.parse(body) as DeployRequestData;
         } catch (e) {
           throw new Error(
-            "Invalid JSON body: " + dependencies.errorMessage(e)
+            "Invalid JSON body: " + dependencies.errorMessage(e),
+            { cause: e }
           );
         }
         const entry = dependencies.readInstanceEntry(instanceId);

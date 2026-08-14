@@ -39,7 +39,7 @@ export interface AzureAutoSetupFailureInput {
     ((args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>) | null;
 }
 
-export interface AzureAutoSetupOperationPort {
+export interface AzureAutoSetupOperationLifecyclePort {
   get(operationId: string): AzureAutoSetupOperation | undefined;
   isStale(operation: AzureAutoSetupOperation): boolean;
   create(input: Record<string, unknown>): AzureAutoSetupOperation;
@@ -54,6 +54,9 @@ export interface AzureAutoSetupOperationPort {
     state: string,
     options: Record<string, unknown>
   ): void;
+}
+
+export interface AzureAutoSetupOperationProgressPort {
   enterStage(operation: AzureAutoSetupOperation, stage: string): void;
   setStageState(
     operation: AzureAutoSetupOperation,
@@ -76,6 +79,9 @@ export interface AzureAutoSetupOperationPort {
     input: Record<string, unknown>
   ): void;
   resumeAfterInput(operation: AzureAutoSetupOperation): void;
+}
+
+export interface AzureAutoSetupOperationArtifactPort {
   recordAzureApp(
     operation: AzureAutoSetupOperation,
     patch: Record<string, unknown>
@@ -97,6 +103,10 @@ export interface AzureAutoSetupOperationPort {
     }
   ): void;
 }
+
+export type AzureAutoSetupOperationPort = AzureAutoSetupOperationLifecyclePort &
+  AzureAutoSetupOperationProgressPort &
+  AzureAutoSetupOperationArtifactPort;
 
 export interface AzureAutoSetupExternalPort {
   getGitHubIdentity(): Promise<{
@@ -161,7 +171,13 @@ export interface AzureAutoSetupWorkflow {
 
 export interface AzureAutoSetupApplicationInput {
   workflow: AzureAutoSetupWorkflow;
-  dependencies: Pick<AzureAutoSetupDependencies, "operations">;
+  dependencies: {
+    operations: Pick<
+      AzureAutoSetupOperationLifecyclePort,
+      "persist" | "report" | "finish"
+    > &
+      Pick<AzureAutoSetupOperationArtifactPort, "recordAzureApp">;
+  };
   oidc: ResolveOidcSubjectResult;
   environment: string;
   explicitAppId: string;
@@ -181,8 +197,15 @@ export interface AzureAutoSetupCredentialInput {
   workflow: AzureAutoSetupWorkflow;
   dependencies: Pick<
     AzureAutoSetupDependencies,
-    "ensureServicePrincipal" | "operations" | "sleep" | "tempFile"
-  >;
+    "ensureServicePrincipal" | "sleep" | "tempFile"
+  > & {
+    operations: Pick<
+      AzureAutoSetupOperationArtifactPort,
+      | "recordServicePrincipal"
+      | "recordCreatedFederatedCredential"
+      | "recordCreatedRoleAssignment"
+    >;
+  };
   oidc: ResolveOidcSubjectResult;
   oidcSuffix: string;
   clientId: string;

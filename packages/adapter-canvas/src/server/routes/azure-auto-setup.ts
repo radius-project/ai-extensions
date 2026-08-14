@@ -298,8 +298,7 @@ export async function handleAzureAutoSetup(
         existing.repo !== targetRepo ||
         existing.environment !== environment ||
         existing.provider !== "azure" ||
-        existing.currentStage !== dependencies.stageAuthorizeIdentity ||
-        (!isServerOwned && !existing.inputRequired)
+        existing.currentStage !== dependencies.stageAuthorizeIdentity
       ) {
         await fail(
           409,

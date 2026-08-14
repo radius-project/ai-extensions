@@ -191,12 +191,7 @@ import { createOperationsStatusRoutes } from "./server/routes/operations-status.
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
-export {
-  buildRoleAssignmentArgs,
-  findFederatedCredentialNameCollision,
-  isReplicationLagError,
-  pickAksResourceGroup
-} from "./server/routes/azure-auto-setup-credentials.js";
+import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import {
@@ -571,98 +566,107 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
 
-const azureAutoSetupRoutes = createAzureAutoSetupRoutes({
-  isServerOwnedRequest: (instanceId, request) =>
-    legacyHandlers.get(instanceId)?.isServerOwned(request) ?? false,
-  operations: {
-    get: (operationId) => operations.get(operationId),
-    isStale: (operation) => isStale(operation),
-    create: (input) => createOperation(input),
-    buildStages: () => buildStages(),
-    start: (operation) => operations.start(operation),
-    persist: () => operations.persist(),
-    report: (diagnostic) => operations.report?.(diagnostic),
-    finish: (operation, state, options) => {
-      finish(operation, state, options);
+const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
+  composeAzureAutoSetupDependencies({
+    isServerOwnedRequest: (instanceId, request) =>
+      legacyHandlers.get(instanceId)?.isServerOwned(request) ?? false,
+    lifecycle: {
+      get: (operationId) => operations.get(operationId),
+      isStale: (operation) => isStale(operation),
+      create: (input) => createOperation(input),
+      buildStages: () => buildStages(),
+      start: (operation) => operations.start(operation),
+      persist: () => operations.persist(),
+      report: (diagnostic) => operations.report?.(diagnostic),
+      finish: (operation, state, options) => {
+        finish(operation, state, options);
+      }
     },
-    enterStage: (operation, stage) => {
-      enterStage(operation, stage);
+    progress: {
+      enterStage: (operation, stage) => {
+        enterStage(operation, stage);
+      },
+      setStageState: (operation, stage, state) => {
+        setStageState(operation, stage, state);
+      },
+      hasWarnings: (operation) => hasWarnings(operation),
+      addLegacyStep: (operation, text) => {
+        addLegacyStep(operation, text);
+      },
+      setContext: (operation, patch) => {
+        setContext(operation, patch);
+      },
+      setCloudContext: (operation, provider, patch) => {
+        setCloudContext(operation, provider, patch);
+      },
+      requireInput: (operation, input) => {
+        requireInput(operation, input);
+      },
+      resumeAfterInput: (operation) => {
+        resumeAfterInput(operation);
+      }
     },
-    setStageState: (operation, stage, state) => {
-      setStageState(operation, stage, state);
+    artifacts: {
+      recordAzureApp: (operation, patch) => {
+        recordAzureApp(operation, patch);
+      },
+      recordServicePrincipal: (operation, patch) => {
+        recordServicePrincipal(operation, patch);
+      },
+      recordCreatedFederatedCredential: (operation, entry) => {
+        recordCreatedFederatedCredential(operation, entry);
+      },
+      recordCreatedRoleAssignment: (operation, entry) => {
+        recordCreatedRoleAssignment(operation, entry);
+      }
     },
-    hasWarnings: (operation) => hasWarnings(operation),
-    addLegacyStep: (operation, text) => {
-      addLegacyStep(operation, text);
+    external: {
+      getGitHubIdentity,
+      preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
+      preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
+      runGitHubJson: async (apiPath) => {
+        const result = await ghApiJson(apiPath, {
+          headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+        });
+        return {
+          ok: result.ok,
+          status: result.status,
+          json:
+            (
+              result.json !== null &&
+              typeof result.json === "object" &&
+              !Array.isArray(result.json)
+            ) ?
+              record(result.json)
+            : null,
+          stderr: result.stderr
+        };
+      },
+      runAz: (args) => runCliCommand("az", args)
     },
-    setContext: (operation, patch) => {
-      setContext(operation, patch);
+    tempFile: {
+      createPath: () =>
+        join(
+          tmpdir(),
+          `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
+        ),
+      write: (path, contents) => {
+        writeFileSync(path, contents, { mode: 0o600 });
+      },
+      remove: (path) => {
+        try {
+          unlinkSync(path);
+        } catch {}
+      }
     },
-    setCloudContext: (operation, provider, patch) => {
-      setCloudContext(operation, provider, patch);
-    },
-    requireInput: (operation, input) => {
-      requireInput(operation, input);
-    },
-    resumeAfterInput: (operation) => {
-      resumeAfterInput(operation);
-    },
-    recordAzureApp: (operation, patch) => {
-      recordAzureApp(operation, patch);
-    },
-    recordServicePrincipal: (operation, patch) => {
-      recordServicePrincipal(operation, patch);
-    },
-    recordCreatedFederatedCredential: (operation, entry) => {
-      recordCreatedFederatedCredential(operation, entry);
-    },
-    recordCreatedRoleAssignment: (operation, entry) => {
-      recordCreatedRoleAssignment(operation, entry);
-    }
-  },
-  external: {
-    getGitHubIdentity,
-    preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
-    preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
-    runGitHubJson: async (apiPath) => {
-      const result = await ghApiJson(apiPath, {
-        headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-      });
-      return {
-        ok: result.ok,
-        status: result.status,
-        json:
-          (
-            result.json !== null &&
-            typeof result.json === "object" &&
-            !Array.isArray(result.json)
-          ) ?
-            record(result.json)
-          : null,
-        stderr: result.stderr
-      };
-    },
-    runAz: (args) => runCliCommand("az", args)
-  },
-  tempFile: {
-    createPath: () =>
-      join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`),
-    write: (path, contents) => {
-      writeFileSync(path, contents, { mode: 0o600 });
-    },
-    remove: (path) => {
-      try {
-        unlinkSync(path);
-      } catch {}
-    }
-  },
-  ensureServicePrincipal,
-  finalizeSetupFailure,
-  persistMutationCheckpoint,
-  sleep: (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
-});
+    ensureServicePrincipal,
+    finalizeSetupFailure,
+    persistMutationCheckpoint,
+    sleep: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+  })
+);
 
 // Composition root for the credential-profile and GitHub-identity half of the
 // `identity-credentials` family. Ten narrow function seams: the three profile
