@@ -19,7 +19,10 @@ import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
-import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
+import {
+  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./routes/graphs-planning-reads.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
@@ -172,6 +175,26 @@ const productionHandlers = {
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false
   }),
+  ...createGraphsPlanningStreamRoutes({
+    readInstanceEntry: () => undefined,
+    defaultBranchForState: () => "main",
+    prepareSourceRef: () => ({ token: "" }),
+    commitSourceRef: () => true,
+    triggerAppBicepHandoff: () => {},
+    fetchBicepSelection: () =>
+      Promise.resolve({
+        content: null,
+        fromWorkspace: false,
+        branch: "main",
+        bicepPath: ""
+      }),
+    workspaceGraphJsonPath: () => "",
+    radArtifactsDirForSelection: () =>
+      Promise.resolve({ dir: "", remote: false }),
+    buildGraphViaRad: () => Promise.resolve([]),
+    canvasGraphResources: () => [],
+    errorMessage: (error) => String(error)
+  }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false,
@@ -300,11 +323,11 @@ describe("server route ownership boundary", () => {
   // the ledger.
   // - azure-discovery: its two read routes and POST /api/azure-auto-setup are
   //   migrated; POST /api/discover stays on the fallback for its own slice.
-  // - graphs-planning: only its two read-only routes are migrated; its four
-  //   remaining routes stay on the fallback.
+  // - graphs-planning: its three read routes are migrated; its three POST routes
+  //   remain on the fallback.
   // - environments and deployments: both families have fully migrated, so each
   //   residual is asserted as empty rather than by naming a remaining key.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, environments, and deployments families, Azure auto-setup and the azure-discovery reads, and the graphs-planning reads, and leaves 5 routes on the legacy fallback", () => {
+  it("owns the complete non-graph families except discover, plus all graph reads, and leaves 4 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -325,6 +348,7 @@ describe("server route ownership boundary", () => {
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
+      "GET /api/load-graph-stream",
       "POST /api/operations",
       "GET /api/deploy-status",
       "GET /api/list-applications",
@@ -343,7 +367,7 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(5);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(4);
     // The split families, pinned explicitly so a later slice cannot quietly
     // assume any one is done. environments and deployments are now fully
     // migrated, so each residual is asserted as empty rather than by naming a
@@ -368,7 +392,6 @@ describe("server route ownership boundary", () => {
     }
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
-        "GET /api/load-graph-stream",
         "POST /api/load-graph",
         "POST /api/plan-graph",
         "POST /api/diff-branches"
@@ -396,14 +419,13 @@ describe("server route ownership boundary", () => {
   // above cannot be the only source of truth. A slice that migrates or drops a
   // route has to update this list deliberately.
   const RESIDUAL_ROUTE_PIN = [
-    "GET /api/load-graph-stream",
     "POST /api/load-graph",
     "POST /api/plan-graph",
     "POST /api/diff-branches",
     "POST /api/discover"
   ];
 
-  it("moves exactly POST /api/deploy out of the residual inventory", () => {
+  it("retains the base routes and adds deploy plus graph streaming", () => {
     // The pre-deploy migrated ledger, written out by hand rather than derived,
     // so "base + one key" is proven against an independent transcript instead
     // of against whatever the ledger currently says.
@@ -450,9 +472,9 @@ describe("server route ownership boundary", () => {
       MIGRATED_ROUTE_KEYS.filter(
         (key) => !BASE_MIGRATED_ROUTE_KEYS.includes(key)
       )
-    ).toEqual(["POST /api/deploy"]);
+    ).toEqual(["GET /api/load-graph-stream", "POST /api/deploy"]);
     expect(MIGRATED_ROUTE_KEYS).toHaveLength(
-      BASE_MIGRATED_ROUTE_KEYS.length + 1
+      BASE_MIGRATED_ROUTE_KEYS.length + 2
     );
 
     // The derived complement and the independent residual pin must agree, in
@@ -467,13 +489,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 5 of 38
+    // Cross-checked against the inventory, and independently pinned: 4 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(5);
+    expect(residualLegacyCount).toBe(4);
     // The remaining method-aware matchers in `server.ts` must be exactly the
     // residual inventory, keyed independently of the derived complement.
     expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(
