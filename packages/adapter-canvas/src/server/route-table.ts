@@ -159,9 +159,20 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/operations",
   "GET /api/operations/",
   "POST /api/open-source",
+  "GET /api/credential-profiles",
+  "GET /api/github-identity",
+  "POST /api/github-account",
+  "POST /api/save-credential-profile",
+  "POST /api/delete-credential-profile",
+  "POST /api/oidc",
+  "POST /api/verify-azure-login",
+  "POST /api/azure-cli-assist",
+  "POST /api/verify-aws-login",
   "GET /api/user-repos",
   "POST /api/repo-branches",
-  "POST /api/discover-branches"
+  "POST /api/discover-branches",
+  "GET /api/progress",
+  "GET /api/deployed-graph"
 ];
 
 export function routeKey(
