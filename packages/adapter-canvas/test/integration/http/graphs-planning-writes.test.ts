@@ -9,7 +9,6 @@ import type {
   GraphPipeline
 } from "../../../src/server/routes/graph-pipeline.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
-import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -330,19 +329,4 @@ describe("graphs-planning writes real-loopback HIT", () => {
     }
   );
 
-  it("still routes an unmigrated path to the legacy fallback", async () => {
-    // Resolved from the inventory rather than named, so this probe cannot
-    // silently start asserting against a migrated handler when the route it
-    // names is migrated in a later slice.
-    const residualKey = "POST /api/discover";
-    expect(LEGACY_ROUTE_INVENTORY).toContain(residualKey);
-
-    start();
-    const entry = await container!.getOrCreate("panel-a");
-    const response = await fetch(`${entry.baseUrl}/api/discover`, {
-      method: "POST"
-    });
-    expect(response.status).toBe(418);
-    expect(await response.text()).toBe("legacy");
-  });
 });

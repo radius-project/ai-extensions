@@ -119,6 +119,7 @@ const productionHandlers = {
   }),
   ...createAzureDiscoveryRoutes({
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    runCli: () => Promise.resolve(""),
     isUuid: () => false,
     parseServedReposFromSubjects: () => []
   }),
@@ -354,15 +355,12 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and the base slice moved it onto the route table too, so the
-  // family owns all three of its routes. Two families remain deliberately split,
-  // and each is named here so no later slice can read one as fully migrated in
-  // the ledger.
-  // - azure-discovery: its two read routes and POST /api/azure-auto-setup are
-  //   migrated; POST /api/discover stays on the fallback for its own slice.
+  // family owns all three of its routes.
+  // - azure-discovery: its two reads and two writes are migrated.
   // - graphs-planning: its three read routes and three write routes are migrated.
   // - environments and deployments: both families have fully migrated, so each
   //   residual is asserted as empty rather than by naming a remaining key.
-  it("owns all routes except discover and leaves one route on the legacy fallback", () => {
+  it("owns all 38 routes and leaves no route on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -400,21 +398,18 @@ describe("server route ownership boundary", () => {
       "POST /api/create-environment",
       "POST /api/load-graph",
       "POST /api/plan-graph",
-      "POST /api/diff-branches"
+      "POST /api/diff-branches",
+      "POST /api/discover"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(1);
-    // The split families, pinned explicitly so a later slice cannot quietly
-    // assume any one is done. environments and deployments are now fully
-    // migrated, so each residual is asserted as empty rather than by naming a
-    // remaining key.
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(0);
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/azure-auto-setup");
-    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain(
       "POST /api/create-environment"
     );
@@ -452,11 +447,9 @@ describe("server route ownership boundary", () => {
   // Independently hardcoded, in declaration order, so the derived complement
   // above cannot be the only source of truth. A slice that migrates or drops a
   // route has to update this list deliberately.
-  const RESIDUAL_ROUTE_PIN = [
-    "POST /api/discover"
-  ];
+  const RESIDUAL_ROUTE_PIN: string[] = [];
 
-  it("retains the base routes and adds deploy plus all graph routes", () => {
+  it("retains the base routes and adds deploy, graph, and discover routes", () => {
     // The pre-deploy migrated ledger, written out by hand rather than derived,
     // so "base + one key" is proven against an independent transcript instead
     // of against whatever the ledger currently says.
@@ -508,10 +501,11 @@ describe("server route ownership boundary", () => {
       "POST /api/deploy",
       "POST /api/load-graph",
       "POST /api/plan-graph",
-      "POST /api/diff-branches"
+      "POST /api/diff-branches",
+      "POST /api/discover"
     ]);
     expect(MIGRATED_ROUTE_KEYS).toHaveLength(
-      BASE_MIGRATED_ROUTE_KEYS.length + 5
+      BASE_MIGRATED_ROUTE_KEYS.length + 6
     );
 
     // The derived complement and the independent residual pin must agree, in
@@ -522,17 +516,17 @@ describe("server route ownership boundary", () => {
     expect(RESIDUAL_ROUTE_PIN).not.toContain("POST /api/deploy");
   });
 
-  it("keeps the residual legacy dispatcher exactly equal to the inventory", () => {
+  it("proves the legacy dispatcher has zero API arms", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 1 of 38
+    // Cross-checked against the inventory, and independently pinned: 0 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(1);
+    expect(residualLegacyCount).toBe(0);
     // The remaining method-aware matchers in `server.ts` must be exactly the
     // residual inventory, keyed independently of the derived complement.
     expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(
@@ -660,7 +654,11 @@ describe("server route ownership boundary", () => {
   });
 
   it("fails on duplicate, unowned, or handlerless routes", () => {
-    const legacyRoute = table.find((route) => route.migration === "legacy")!;
+    const legacyRoute = {
+      ...table[0],
+      migration: "legacy",
+      handler: () => {}
+    } as unknown as ServerRoute;
     expect(() => assertRouteTable([...table, table[0]])).toThrow(
       "Duplicate server route: ANY /api/ping"
     );
