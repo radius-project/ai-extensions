@@ -71,7 +71,7 @@ function errorMessage(error: unknown): string {
 // Pure projection of an `az`/`aws` JSON array into the picker's item shape.
 // Kept module-internal rather than injected: it touches nothing but its
 // argument, so a test double for it could only diverge from production.
-export function discoveryItems(value: unknown): DiscoveryItem[] {
+function discoveryItems(value: unknown): DiscoveryItem[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => {
     const fields = record(item);
