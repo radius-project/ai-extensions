@@ -171,6 +171,14 @@ describe("deploy request service construction", () => {
       "createDeployRequestService is missing required dependencies: repairAttemptCap"
     );
   });
+
+  it("refuses to construct without the unconfirmed-run marking", () => {
+    expect(() =>
+      createDeployRequestService(without("unconfirmedRunKind"))
+    ).toThrow(
+      "createDeployRequestService is missing required dependencies: unconfirmedRunKind"
+    );
+  });
 });
 
 describe("deploy request admission", () => {

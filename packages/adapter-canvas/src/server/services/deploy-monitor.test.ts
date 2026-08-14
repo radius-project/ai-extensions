@@ -156,6 +156,28 @@ describe("deploy monitor construction", () => {
       );
     }
   );
+
+  it.each(["deployRadCommandsStep", "unconfirmedRunKind"] as const)(
+    "refuses to construct without the %s value seam",
+    (name) => {
+      const incomplete = dependencies();
+      delete incomplete[name];
+      expect(() => createDeployMonitorService(incomplete)).toThrow(
+        `createDeployMonitorService is missing required dependencies: ${name}`
+      );
+    }
+  );
+
+  it.each(["deployRadCommandsStep", "unconfirmedRunKind"] as const)(
+    "refuses to construct when %s is present but empty",
+    (name) => {
+      const empty = dependencies();
+      empty[name] = "" as never;
+      expect(() => createDeployMonitorService(empty)).toThrow(
+        `createDeployMonitorService is missing required dependencies: ${name}`
+      );
+    }
+  );
 });
 
 describe("deploy monitor stage sequencing", () => {

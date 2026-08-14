@@ -139,7 +139,17 @@ export function createDeployMonitorService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-  for (const name of ["plannedGraph", "dispatch", "outcome"] as const) {
+  // Neither of the two value seams below is function-typed, so the shared assert
+  // cannot reach them. `unconfirmedRunKind` is the load-bearing one: it marks a
+  // run whose real outcome is unknown, and an absent marking would let an
+  // attempt-bound repair redeploy race an in-flight run instead of refusing.
+  for (const name of [
+    "plannedGraph",
+    "dispatch",
+    "outcome",
+    "deployRadCommandsStep",
+    "unconfirmedRunKind"
+  ] as const) {
     if (!dependencies[name]) {
       throw new Error(
         `createDeployMonitorService is missing required dependencies: ${name}`

@@ -176,6 +176,15 @@ export function createDeployRequestService(
       "createDeployRequestService is missing required dependencies: repairAttemptCap"
     );
   }
+  // Not function-typed, so the shared assert cannot reach it. The monitor-crash
+  // path below marks the run unconfirmed precisely so a repair redeploy refuses
+  // rather than racing a run whose outcome is unknown; an absent marking would
+  // turn that fail-closed guarantee into a fail-open one.
+  if (!dependencies.unconfirmedRunKind) {
+    throw new Error(
+      "createDeployRequestService is missing required dependencies: unconfirmedRunKind"
+    );
+  }
 
   return {
     async deploy({ instanceId, body }) {
