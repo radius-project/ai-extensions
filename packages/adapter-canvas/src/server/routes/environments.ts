@@ -426,7 +426,8 @@ export async function handleListEnvironments(
     );
 
     const managedEnvironments = environments.filter(
-      (environment) => environment !== null
+      (environment): environment is NonNullable<typeof environment> =>
+        environment !== null
     );
     respond({ environments: managedEnvironments });
     dependencies.envListCacheSet(repo, {
