@@ -5,9 +5,20 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
 import {
   createTestRouteTable,
-  residualRoutePathForProbe
+  fetchResidualRoute
 } from "../../support/server/route-table.js";
-import { toClientView } from "../../../src/operations.js";
+import {
+  buildStages,
+  createOperation,
+  finish,
+  toClientView
+} from "../../../src/operations.js";
+import {
+  isAksClusterName,
+  isResourceGroupName,
+  isUuid,
+  isValidRepoSlug
+} from "../../../src/azure-oidc.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
 let container: CanvasServerContainer | undefined;
@@ -21,6 +32,10 @@ interface Harness {
   records: Map<string, unknown>;
   setLatest(record: unknown): void;
   latestCalls: string[];
+  running: Map<string, { operationId: string }>;
+  persistError: { value: Error | null };
+  persistCalls: string[];
+  scheduled: Array<{ instanceId: string; operationId: string }>;
 }
 
 const RUNNING = {
@@ -52,19 +67,61 @@ function start(): Harness {
   const latestCalls: string[] = [];
   let latest: unknown = null;
 
+  // In-memory stand-ins for the registry writes and the per-instance scheduler.
+  // Everything else in the create-deps is the REAL production function: the
+  // validators and `createOperation`/`buildStages` are pure, and `finish` is
+  // pure state mutation, so faking them would only let the test diverge from
+  // production. `persistOperations` (disk I/O) and `scheduleEnvironmentOperation`
+  // (spawns background work) are the two seams a test must control, so only
+  // those are doubles — composed exactly as the server's composition root does.
+  const running = new Map<string, { operationId: string }>();
+  const persistError: { value: Error | null } = { value: null };
+  const persistCalls: string[] = [];
+  const scheduled: Array<{ instanceId: string; operationId: string }> = [];
+
   const routes = createTestRouteTable(
-    createOperationsStatusRoutes({
-      latest: (repo) => {
-        latestCalls.push(repo);
-        return latest;
+    createOperationsStatusRoutes(
+      {
+        latest: (repo) => {
+          latestCalls.push(repo);
+          return latest;
+        },
+        latestAny: () => {
+          latestCalls.push("<any>");
+          return latest;
+        },
+        get: (operationId) => records.get(operationId) ?? null,
+        toClientView
       },
-      latestAny: () => {
-        latestCalls.push("<any>");
-        return latest;
-      },
-      get: (operationId) => records.get(operationId) ?? null,
-      toClientView
-    })
+      {
+        isValidRepoSlug,
+        isResourceGroupName,
+        isAksClusterName,
+        isUuid,
+        buildStages,
+        createOperation,
+        startOperation: (op) => {
+          const existing = running.get(op.repo as string);
+          if (existing) return { ok: false, conflict: existing };
+          running.set(op.repo as string, { operationId: op.operationId });
+          records.set(op.operationId, op);
+          return { ok: true, operation: op };
+        },
+        persistOperations: () => {
+          persistCalls.push("persist");
+          return persistError.value ?
+              Promise.reject(persistError.value)
+            : Promise.resolve();
+        },
+        finish,
+        scheduleEnvironmentOperation: (instanceId, op) => {
+          scheduled.push({ instanceId, operationId: op.operationId });
+          return true;
+        },
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      }
+    )
   );
 
   container = createCanvasServer({
@@ -90,11 +147,26 @@ function start(): Harness {
   return {
     records,
     latestCalls,
+    running,
+    persistError,
+    persistCalls,
+    scheduled,
     setLatest(record) {
       latest = record;
     }
   };
 }
+
+// A valid azure setup body that clears every real guard, so the loopback tests
+// reach the registration path rather than a 400.
+const VALID_AZURE_BODY = {
+  repo: "octo/app",
+  clientId: "existing-client",
+  resourceGroup: "my-rg",
+  cluster: "my-aks",
+  tenantId: "11111111-1111-1111-1111-111111111111",
+  subscriptionId: "22222222-2222-2222-2222-222222222222"
+};
 
 describe("operations-status real-loopback HIT (RF-08)", () => {
   it("serves latest and by-id operation status over a real socket", async () => {
@@ -138,24 +210,106 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
 
-    // Only the GET routes are migrated. `POST /api/operations` is a declared
-    // route owned by this family but still served by the legacy fallback, so a
-    // POST must not reach the migrated handler.
-    const posted = await fetch(`${entry.baseUrl}/api/operations`, {
-      method: "POST"
-    });
-    expect(posted.status).toBe(418);
-
-    // Unmigrated routes still reach the fallback. The path is derived from the
-    // residual inventory rather than named: a named probe inherits that route's
-    // migration expiry and turns into a dispatch to a throwing stub the moment
-    // the route migrates, which is exactly what `POST /api/create-environment`
-    // did here.
-    const residual = await fetch(
-      `${entry.baseUrl}${residualRoutePathForProbe("POST")}`,
-      { method: "POST" }
-    );
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
+  });
+
+  it("registers a POST /api/operations over the socket, returns 202, and schedules setup", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID_AZURE_BODY)
+    });
+    expect(response.status).toBe(202);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    const body = (await response.json()) as {
+      operationId: string;
+      statusUrl: string;
+    };
+    expect(body.operationId).toBeTruthy();
+    expect(body.statusUrl).toBe(
+      `/api/operations/${encodeURIComponent(body.operationId)}`
+    );
+    // The Location header points at the same status URL the panel then polls.
+    expect(response.headers.get("location")).toBe(body.statusUrl);
+    // Registration persisted before the response, and scheduling ran after it
+    // with the instance that received the request.
+    expect(harness.persistCalls).toEqual(["persist"]);
+    expect(harness.scheduled).toEqual([
+      { instanceId: "panel-a", operationId: body.operationId }
+    ]);
+
+    // The record is now resumable by id over the same socket.
+    const byId = await fetch(`${entry.baseUrl}${body.statusUrl}`);
+    expect(byId.status).toBe(200);
+    expect(
+      ((await byId.json()) as { operation: { operationId: string } }).operation
+        .operationId
+    ).toBe(body.operationId);
+  });
+
+  it("answers 400 invalid-json for a malformed POST body without scheduling", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: "{not json"
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Invalid JSON body.",
+      code: "invalid-json"
+    });
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
+  });
+
+  it("answers 409 when a setup for the repo is already running", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const first = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: JSON.stringify(VALID_AZURE_BODY)
+    });
+    const firstBody = (await first.json()) as { operationId: string };
+
+    const second = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: JSON.stringify(VALID_AZURE_BODY)
+    });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({
+      error: "Setup is already running for octo/app.",
+      code: "operation-in-progress",
+      operationId: firstBody.operationId
+    });
+    // Only the first request scheduled work.
+    expect(harness.scheduled).toHaveLength(1);
+  });
+
+  it("answers 500 and never schedules when durable registration fails", async () => {
+    const harness = start();
+    harness.persistError.value = new Error("disk gone");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: JSON.stringify(VALID_AZURE_BODY)
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error:
+        "Radius could not durably register the environment operation. No setup work was started.",
+      code: "operation-registration-persist-failed"
+    });
+    expect(harness.scheduled).toEqual([]);
   });
 
   it("leaves main's undeclared POST sub-routes to the legacy fallback", async () => {

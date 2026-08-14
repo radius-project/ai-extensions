@@ -4,11 +4,25 @@ import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsStatusRoutes,
+  handleCreateOperation,
   handleLatestOperation,
   handleOperationById,
+  type CreateOperationDependencies,
+  type OperationRecord,
   type OperationsStatusDependencies
 } from "./operations-status.js";
-import { toClientView } from "../../operations.js";
+import {
+  buildStages,
+  createOperation,
+  finish,
+  toClientView
+} from "../../operations.js";
+import {
+  isAksClusterName,
+  isResourceGroupName,
+  isUuid,
+  isValidRepoSlug
+} from "../../azure-oidc.js";
 import type { CanvasServerEntry } from "../types.js";
 
 interface Recording {
@@ -82,6 +96,136 @@ type Handler = (
   deps: OperationsStatusDependencies
 ) => void;
 
+// POST request harness. The body is streamed exactly as Node delivers it so the
+// handler's own `for await` read (via `context.readTextBody`) is exercised, and
+// `instanceId` is threaded through so the scheduling seam receives it.
+function postRequest(url: string, body: string): IncomingMessage {
+  return Object.assign(Readable.from([body]), {
+    url,
+    method: "POST",
+    headers: {}
+  }) as unknown as IncomingMessage;
+}
+
+function postContext(
+  url: string,
+  body: string,
+  response: ServerResponse<IncomingMessage>,
+  instanceId = "panel-a"
+): ReturnType<typeof createRequestContext> {
+  return createRequestContext(
+    postRequest(url, body),
+    response,
+    instanceId,
+    new Map<string, CanvasServerEntry>()
+  );
+}
+
+// A minimal operation record the create fakes hand back; individual tests widen
+// it via `createOperation` overrides when they need to inspect what the handler
+// wrote onto it.
+function newOperationRecord(
+  overrides: Partial<OperationRecord> = {}
+): OperationRecord {
+  return { operationId: "op-new", currentStage: "authorize", ...overrides };
+}
+
+// Every create seam throws unless a test stubs it, so an accidental extra call
+// or a widened dependency surface fails loudly rather than passing vacuously.
+function createDependencies(
+  overrides: Partial<CreateOperationDependencies> = {}
+): CreateOperationDependencies {
+  return {
+    isValidRepoSlug: () => {
+      throw new Error("isValidRepoSlug not stubbed");
+    },
+    isResourceGroupName: () => {
+      throw new Error("isResourceGroupName not stubbed");
+    },
+    isAksClusterName: () => {
+      throw new Error("isAksClusterName not stubbed");
+    },
+    isUuid: () => {
+      throw new Error("isUuid not stubbed");
+    },
+    buildStages: () => {
+      throw new Error("buildStages not stubbed");
+    },
+    createOperation: () => {
+      throw new Error("createOperation not stubbed");
+    },
+    startOperation: () => {
+      throw new Error("startOperation not stubbed");
+    },
+    persistOperations: () => {
+      throw new Error("persistOperations not stubbed");
+    },
+    finish: () => {
+      throw new Error("finish not stubbed");
+    },
+    scheduleEnvironmentOperation: () => {
+      throw new Error("scheduleEnvironmentOperation not stubbed");
+    },
+    errorMessage: () => {
+      throw new Error("errorMessage not stubbed");
+    },
+    ...overrides
+  };
+}
+
+// A create-deps preset that reaches the happy path: repo/azure guards pass, the
+// factory records what it was asked to build, and start/persist/schedule are
+// captured so a test can assert on them. Guards a test wants to fail are
+// overridden individually.
+interface HappyPathCapture {
+  built: unknown[];
+  started: OperationRecord[];
+  persistCalls: number;
+  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  finished: unknown[];
+}
+
+function happyPathCreate(
+  capture: HappyPathCapture,
+  op: OperationRecord,
+  overrides: Partial<CreateOperationDependencies> = {}
+): CreateOperationDependencies {
+  return createDependencies({
+    isValidRepoSlug: () => true,
+    isResourceGroupName: () => true,
+    isAksClusterName: () => true,
+    isUuid: () => true,
+    buildStages: (options) => {
+      capture.built.push(options);
+      return [{ id: "authorize" }];
+    },
+    createOperation: () => op,
+    startOperation: (started) => {
+      capture.started.push(started);
+      return { ok: true, operation: started };
+    },
+    persistOperations: () => {
+      capture.persistCalls += 1;
+      return Promise.resolve();
+    },
+    scheduleEnvironmentOperation: (instanceId, scheduledOp) => {
+      capture.scheduled.push({ instanceId, op: scheduledOp });
+      return true;
+    },
+    ...overrides
+  });
+}
+
+function emptyCapture(): HappyPathCapture {
+  return {
+    built: [],
+    started: [],
+    persistCalls: 0,
+    scheduled: [],
+    finished: []
+  };
+}
+
 function context(
   url: string,
   response: ServerResponse<IncomingMessage>
@@ -113,11 +257,15 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the two routes it owns, exact before prefix", () => {
-    const routes = createOperationsStatusRoutes(dependencies());
+  it("declares exactly the three routes it owns, exact before prefix", () => {
+    const routes = createOperationsStatusRoutes(
+      dependencies(),
+      createDependencies()
+    );
     expect(Object.keys(routes)).toEqual([
       "GET /api/operations",
-      "GET /api/operations/"
+      "GET /api/operations/",
+      "POST /api/operations"
     ]);
   });
 
@@ -350,6 +498,496 @@ describe("operations-status routes (SU-16)", () => {
   });
 });
 
+// A recorder response paired with the migrated create handler over a streamed
+// POST body. Async because the handler reads the body with `for await`.
+async function runCreate(
+  body: string,
+  deps: CreateOperationDependencies,
+  instanceId = "panel-a"
+): Promise<Recording> {
+  const { recording, response } = recorder();
+  await handleCreateOperation(
+    postContext("/api/operations", body, response, instanceId),
+    deps
+  );
+  return recording;
+}
+
+describe("handleCreateOperation (POST /api/operations)", () => {
+  it("rejects a malformed JSON body with 400 invalid-json and never touches a guard", () => {
+    return runCreate("{not json", createDependencies()).then((recording) => {
+      expect(recording.status).toBe(400);
+      expect(recording.headerOrder).toEqual(["Content-Type"]);
+      expect(recording.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Invalid JSON body.",
+        code: "invalid-json"
+      });
+    });
+  });
+
+  it("rejects an invalid repo slug with 400 invalid-repo, echoing the offending value", async () => {
+    const seen: unknown[] = [];
+    const recording = await runCreate(
+      JSON.stringify({ repo: "not-a-slug", provider: "aws" }),
+      createDependencies({
+        isValidRepoSlug: (value) => {
+          seen.push(value);
+          return false;
+        }
+      })
+    );
+    expect(seen).toEqual(["not-a-slug"]);
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: 'Invalid repository "not-a-slug". Expected "owner/repo".',
+      code: "invalid-repo"
+    });
+  });
+
+  it("defaults a missing repo to the empty string before validating it", async () => {
+    const seen: unknown[] = [];
+    await runCreate(
+      JSON.stringify({ provider: "aws" }),
+      createDependencies({
+        isValidRepoSlug: (value) => {
+          seen.push(value);
+          return false;
+        }
+      })
+    );
+    // `|| ""` not `??`: a missing repo becomes "" and is validated, never
+    // reaching the guard as undefined.
+    expect(seen).toEqual([""]);
+  });
+
+  it("requires a non-blank environment, defaulting name→environment→'dev'", async () => {
+    // `environment` is whitespace, `name` absent: the trimmed value is empty and
+    // the request is refused before any provider validation runs.
+    const recording = await runCreate(
+      JSON.stringify({ repo: "octo/app", environment: "   " }),
+      createDependencies({ isValidRepoSlug: () => true })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Environment name is required.",
+      code: "environment-required"
+    });
+  });
+
+  it.each([
+    ["resourceGroup", { isResourceGroupName: () => false }],
+    ["cluster", { isAksClusterName: () => false }],
+    ["tenantId or subscriptionId", { isUuid: () => false }]
+  ])(
+    "rejects azure setup with 400 when %s fails validation",
+    async (_label, override) => {
+      const recording = await runCreate(
+        JSON.stringify({
+          repo: "octo/app",
+          resourceGroup: "rg",
+          cluster: "aks",
+          tenantId: "t",
+          subscriptionId: "s"
+        }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          isResourceGroupName: () => true,
+          isAksClusterName: () => true,
+          isUuid: () => true,
+          ...override
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+        code: "invalid-azure-operation-input"
+      });
+    }
+  );
+
+  it.each([
+    ["roleArn", { roleArn: "", accountId: "a", region: "r", cluster: "c" }],
+    ["accountId", { roleArn: "arn", accountId: "", region: "r", cluster: "c" }],
+    ["region", { roleArn: "arn", accountId: "a", region: "", cluster: "c" }],
+    ["cluster", { roleArn: "arn", accountId: "a", region: "r", cluster: "" }]
+  ])(
+    "rejects aws setup with 400 when %s is missing",
+    async (_label, fields) => {
+      const recording = await runCreate(
+        JSON.stringify({ repo: "octo/app", provider: "aws", ...fields }),
+        createDependencies({ isValidRepoSlug: () => true })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "AWS setup requires roleArn, accountId, region, and cluster.",
+        code: "invalid-aws-operation-input"
+      });
+    }
+  );
+
+  it("registers, persists, answers 202, then schedules — in that order", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "op-42" });
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, op),
+      "panel-z"
+    );
+    expect(recording.status).toBe(202);
+    // Header ORDER is observable: Content-Type then Location.
+    expect(recording.headerOrder).toEqual(["Content-Type", "Location"]);
+    expect(recording.headers).toEqual({
+      "Content-Type": "application/json",
+      Location: "/api/operations/op-42"
+    });
+    expect(JSON.parse(recording.body)).toEqual({
+      operationId: "op-42",
+      statusUrl: "/api/operations/op-42"
+    });
+    expect(capture.started).toEqual([op]);
+    expect(capture.persistCalls).toBe(1);
+    // Scheduling happens after the response is written and carries the request's
+    // instance id and the same record.
+    expect(capture.scheduled).toEqual([{ instanceId: "panel-z", op }]);
+  });
+
+  it("percent-encodes the operation id in the status URL", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "octo/app:setup" });
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(recording.headers.Location).toBe(
+      "/api/operations/octo%2Fapp%3Asetup"
+    );
+    expect(JSON.parse(recording.body).statusUrl).toBe(
+      "/api/operations/octo%2Fapp%3Asetup"
+    );
+  });
+
+  it("builds identity stages and attaches a resumeRequest when azure credentials are needed", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t-1",
+        subscriptionId: "s-1"
+        // no clientId → needsAzureCredentials true
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(capture.built).toEqual([{ includeIdentity: true }]);
+    const request = op.request as { needsAzureCredentials: boolean };
+    expect(request.needsAzureCredentials).toBe(true);
+    const resume = op.resumeRequest as {
+      needsAzureCredentials: boolean;
+      azure: { tenantId: string };
+      environment: { tenantId: string; provider: string };
+    };
+    // The azure block is deep-cloned, not shared, so a later mutation of one
+    // cannot leak into the other.
+    expect(resume.azure).not.toBe((op.request as { azure: unknown }).azure);
+    expect(resume.azure.tenantId).toBe("t-1");
+    expect(resume.environment.provider).toBe("azure");
+  });
+
+  it("carries every supplied optional field into the azure resumeRequest environment", async () => {
+    // Exercises the truthy side of each `|| ""` / `|| null` default in the
+    // resumeRequest environment so a later `??`-vs-`||` regression on any one of
+    // them is caught rather than passing on the empty-value branch alone.
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "11111111-1111-1111-1111-111111111111",
+        subscriptionId: "22222222-2222-2222-2222-222222222222",
+        namespace: "ns",
+        profileName: "prof",
+        branch: "feature/x",
+        origin: { page: "graph" },
+        resumeTarget: { page: "planned" },
+        resumeBranch: "resume/y"
+      }),
+      happyPathCreate(capture, op)
+    );
+    const env = (op.resumeRequest as { environment: Record<string, unknown> })
+      .environment;
+    expect(env).toMatchObject({
+      cluster: "aks",
+      namespace: "ns",
+      profileName: "prof",
+      branch: "feature/x",
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      subscriptionId: "22222222-2222-2222-2222-222222222222",
+      resourceGroup: "rg",
+      origin: { page: "graph" },
+      resumeTarget: { page: "planned" },
+      resumeBranch: "resume/y"
+    });
+  });
+
+  it("skips identity stages when a clientId is supplied", async () => {
+    const capture = emptyCapture();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "existing",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, newOperationRecord())
+    );
+    expect(capture.built).toEqual([{ includeIdentity: false }]);
+  });
+
+  it("does not attach a resumeRequest on the aws path", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(op.resumeRequest).toBeUndefined();
+    // AWS still needs no azure credentials, and identity stages are only for
+    // azure credential acquisition.
+    expect(capture.built).toEqual([{ includeIdentity: false }]);
+    expect(
+      (op.request as { environment: { provider: string } }).environment.provider
+    ).toBe("aws");
+  });
+
+  it("answers 409 with the conflicting operation id and never persists or schedules", async () => {
+    const capture = emptyCapture();
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, newOperationRecord(), {
+        startOperation: () => ({
+          ok: false,
+          conflict: { operationId: "op-existing" }
+        })
+      })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Setup is already running for octo/app.",
+      code: "operation-in-progress",
+      operationId: "op-existing"
+    });
+    expect(capture.persistCalls).toBe(0);
+    expect(capture.scheduled).toEqual([]);
+  });
+
+  it("finishes the record failed and answers 500 when persistence fails, without scheduling", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ currentStage: "authorize" });
+    const finished: Array<{ state: string; failure: unknown }> = [];
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op, {
+        persistOperations: () => {
+          capture.persistCalls += 1;
+          return Promise.reject(new Error("disk gone"));
+        },
+        finish: (finishedOp, state, options) => {
+          expect(finishedOp).toBe(op);
+          finished.push({ state, failure: options.failure });
+        },
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "Radius could not durably register the environment operation. No setup work was started.",
+      code: "operation-registration-persist-failed"
+    });
+    expect(finished).toEqual([
+      {
+        state: "failed",
+        failure: {
+          code: "operation-registration-persist-failed",
+          stage: "authorize",
+          stepSeq: null,
+          message:
+            "Radius could not durably register the environment operation.",
+          classification: "unknown",
+          evidence: "disk gone"
+        }
+      }
+    ]);
+    expect(capture.scheduled).toEqual([]);
+  });
+
+  it("finishes the record failed and persists it when scheduling finds no runner", async () => {
+    // The request is dispatched by the instance whose runner is looked up, so a
+    // miss is a should-never-happen. When it does happen the 202 is already on
+    // the wire, but the record must not be left durably `running` with no work
+    // behind it: the handler moves it to a terminal state and persists again so
+    // the failure surfaces through the same status endpoint the client polls.
+    const capture = emptyCapture();
+    const op = newOperationRecord({
+      operationId: "op-orphan",
+      currentStage: "authorize"
+    });
+    const finished: Array<{ state: string; failure: Record<string, unknown> }> =
+      [];
+    const persistCalls: string[] = [];
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op, {
+        persistOperations: () => {
+          persistCalls.push("persist");
+          return Promise.resolve();
+        },
+        scheduleEnvironmentOperation: () => false,
+        finish: (finishedOp, state, options) => {
+          expect(finishedOp).toBe(op);
+          finished.push({ state, failure: options.failure });
+        }
+      }),
+      "panel-missing"
+    );
+    // The client still saw the 202 — repair is a post-response correction, not a
+    // change to the observable response.
+    expect(recording.status).toBe(202);
+    expect(finished).toEqual([
+      {
+        state: "failed",
+        failure: {
+          code: "operation-scheduling-failed",
+          stage: "authorize",
+          stepSeq: null,
+          message:
+            "Radius accepted the environment operation but could not start any setup work for it.",
+          classification: "unknown",
+          evidence:
+            "No server-owned task runner was available for instance panel-missing."
+        }
+      }
+    ]);
+    // Two persists: the registration write before the 202, then the terminal
+    // write after scheduling failed.
+    expect(persistCalls).toEqual(["persist", "persist"]);
+  });
+
+  it("tolerates a failed terminal persist after scheduling finds no runner", async () => {
+    // The in-memory record is already terminal, so a failed durable write on the
+    // repair path is swallowed rather than thrown: polling reflects the failure
+    // even if the write does not land, and there is no response left to affect.
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "op-orphan-2" });
+    let persistCalls = 0;
+    const seenErrors: string[] = [];
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op, {
+        persistOperations: () => {
+          persistCalls += 1;
+          return persistCalls === 1 ?
+              Promise.resolve()
+            : Promise.reject(new Error("disk gone on repair"));
+        },
+        scheduleEnvironmentOperation: () => false,
+        finish: () => {},
+        errorMessage: (error) => {
+          seenErrors.push((error as Error).message);
+          return (error as Error).message;
+        }
+      }),
+      "panel-missing"
+    );
+    expect(recording.status).toBe(202);
+    expect(persistCalls).toBe(2);
+    expect(seenErrors).toEqual(["disk gone on repair"]);
+  });
+
+  it("wires the POST route in the registry to the create handler", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "op-wired" });
+    const routes = createOperationsStatusRoutes(
+      dependencies(),
+      happyPathCreate(capture, op)
+    );
+    const { recording, response } = recorder();
+    await routes["POST /api/operations"](
+      postContext(
+        "/api/operations",
+        JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          roleArn: "arn",
+          accountId: "a",
+          region: "r",
+          cluster: "c"
+        }),
+        response
+      )
+    );
+    expect(recording.status).toBe(202);
+    expect(capture.scheduled).toEqual([{ instanceId: "panel-a", op }]);
+  });
+});
+
 // Verbatim transcription of the two branches removed from the legacy
 // `createLegacyRequestHandler` if-chain (`/api/operations` at ~2387 and
 // `/api/operations/` at ~2398 before the migration). The differential cases
@@ -559,5 +1197,507 @@ describe("operations-status legacy/migrated differential contract", () => {
     expect(migratedRecorder.recording).toEqual(legacyRecorder.recording);
     expect(legacyRecorder.recording.status).toBe(0);
     expect(legacyRecorder.recording.headerOrder).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/operations legacy-vs-migrated differential contract.
+//
+// The GET differentials above transcribe two tiny legacy read arms. The POST is
+// the substantive migration, so its differential drives the SAME request and
+// the SAME shared registry through an independent verbatim transcription of the
+// deleted legacy arm and through the migrated handler, then compares everything
+// observable: the HTTP response, the operation and resume records the arm wrote,
+// the registry/persistence side effects, the failure metadata, and an ordered
+// event log (`start -> persist -> response.end -> schedule`). Comparing the
+// event order — not just the final call lists — is what stops a transcription
+// that answered before persisting, or scheduled before answering, from passing.
+//
+// Per the "use the real thing when it is pure" rule, both worlds run the real
+// guards, `createOperation`, `buildStages`, `finish`, and `toClientView`; only
+// the impure registry writes (`start`, `persist`) and the scheduling seam are
+// doubled, and both worlds are handed the identical doubles so any divergence is
+// the handler's, never the data's.
+
+interface CreateWorld {
+  start(op: OperationRecord): StartOperationResultReal;
+  persist(): Promise<void>;
+  schedule(op: OperationRecord): boolean;
+  events: string[];
+}
+
+type StartOperationResultReal =
+  | { ok: true; operation: OperationRecord }
+  | { ok: false; conflict: { operationId: string } };
+
+// A shared registry double both worlds drive. `start` refuses a repo already in
+// flight exactly as the real registry does; every mutating call appends to the
+// event log so ordering is observable.
+function createWorld(
+  options: {
+    inFlight?: string;
+    persistError?: Error;
+    scheduleResult?: boolean;
+  } = {}
+): CreateWorld {
+  const events: string[] = [];
+  return {
+    events,
+    start(op) {
+      events.push("start");
+      if (options.inFlight) {
+        return { ok: false, conflict: { operationId: options.inFlight } };
+      }
+      return { ok: true, operation: op };
+    },
+    persist() {
+      events.push("persist");
+      return options.persistError ?
+          Promise.reject(options.persistError)
+        : Promise.resolve();
+    },
+    schedule(op) {
+      events.push(`schedule:${op.operationId}`);
+      return options.scheduleResult ?? true;
+    }
+  };
+}
+
+// Verbatim transcription of the legacy `POST /api/operations` arm removed from
+// `createLegacyRequestHandler` (server.ts ~2966 at merge-base 59b5238). Kept in
+// lockstep with the migrated handler so the differential proves equivalence, and
+// deleted with the rest of the fallback in the removal slice. `res.end` records
+// the response event so the ordering assertion sees exactly one interleaving.
+async function legacyCreate(
+  req: IncomingMessage,
+  res: ServerResponse<IncomingMessage>,
+  world: CreateWorld
+): Promise<void> {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  let data: any;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
+    );
+    return;
+  }
+  const repo = String(data.repo || "");
+  const environment = String(data.environment || data.name || "dev").trim();
+  const provider = data.provider === "aws" ? "aws" : "azure";
+  if (!isValidRepoSlug(repo)) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: `Invalid repository "${repo}". Expected "owner/repo".`,
+        code: "invalid-repo"
+      })
+    );
+    return;
+  }
+  if (!environment.trim()) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Environment name is required.",
+        code: "environment-required"
+      })
+    );
+    return;
+  }
+  if (provider === "azure") {
+    if (
+      !isResourceGroupName(String(data.resourceGroup || "")) ||
+      !isAksClusterName(String(data.cluster || "")) ||
+      !isUuid(String(data.tenantId || "")) ||
+      !isUuid(String(data.subscriptionId || ""))
+    ) {
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(400);
+      res.end(
+        JSON.stringify({
+          error:
+            "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+          code: "invalid-azure-operation-input"
+        })
+      );
+      return;
+    }
+  } else if (
+    !String(data.roleArn || "").trim() ||
+    !String(data.accountId || "").trim() ||
+    !String(data.region || "").trim() ||
+    !String(data.cluster || "").trim()
+  ) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "AWS setup requires roleArn, accountId, region, and cluster.",
+        code: "invalid-aws-operation-input"
+      })
+    );
+    return;
+  }
+  const needsAzureCredentials =
+    provider === "azure" && !String(data.clientId || "").trim();
+  const op = createOperation({
+    provider,
+    repo,
+    environment,
+    stages: buildStages({ includeIdentity: needsAzureCredentials }),
+    journey: {
+      origin: data.origin || null,
+      resumeTarget: data.resumeTarget || null,
+      resumeBranch: data.resumeBranch || data.branch || null,
+      resumeReason: data.resumeReason || null
+    }
+  }) as OperationRecord;
+  op.request = {
+    needsAzureCredentials,
+    azure: {
+      resourceGroup: data.resourceGroup || "",
+      cluster: data.cluster || "",
+      clusterResourceGroup: data.clusterResourceGroup || "",
+      subscriptionId: data.subscriptionId || "",
+      tenantId: data.tenantId || "",
+      appName: data.appName,
+      appId: data.appId || "",
+      createNew: data.createNew === true,
+      serviceManagementReference: data.serviceManagementReference || ""
+    },
+    environment: { ...data, environment, provider }
+  };
+  if (provider === "azure") {
+    op.resumeRequest = {
+      needsAzureCredentials,
+      azure: structuredClone((op.request as { azure: unknown }).azure),
+      environment: {
+        repo,
+        environment,
+        provider,
+        cluster: data.cluster || "",
+        namespace: data.namespace || "",
+        profileName: data.profileName || "",
+        branch: data.branch || "",
+        tenantId: data.tenantId || "",
+        subscriptionId: data.subscriptionId || "",
+        resourceGroup: data.resourceGroup || "",
+        origin: data.origin || null,
+        resumeTarget: data.resumeTarget || null,
+        resumeBranch: data.resumeBranch || null,
+        resumeReason: data.resumeReason || null
+      }
+    };
+  }
+  const started = world.start(op);
+  if (!started.ok) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(409);
+    res.end(
+      JSON.stringify({
+        error: `Setup is already running for ${repo}.`,
+        code: "operation-in-progress",
+        operationId: started.conflict.operationId
+      })
+    );
+    return;
+  }
+  try {
+    await world.persist();
+  } catch (error) {
+    finish(op, "failed", {
+      failure: {
+        code: "operation-registration-persist-failed",
+        stage: op.currentStage,
+        stepSeq: null,
+        message: "Radius could not durably register the environment operation.",
+        classification: "unknown",
+        evidence: errorMessageReal(error)
+      }
+    });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(500);
+    res.end(
+      JSON.stringify({
+        error:
+          "Radius could not durably register the environment operation. No setup work was started.",
+        code: "operation-registration-persist-failed"
+      })
+    );
+    return;
+  }
+  const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Location", statusUrl);
+  res.writeHead(202);
+  res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
+  world.schedule(op);
+}
+
+// The migrated handler routes `res.end` through the recorder, which does not
+// touch the event log, so the differential wraps the recorder response to push
+// `response.end` at the same point the legacy arm records it.
+function recorderWithEvents(events: string[]) {
+  const base = recorder();
+  const originalEnd = base.response.end.bind(base.response);
+  base.response.end = ((value?: string) => {
+    events.push("response.end");
+    return originalEnd(value ?? "");
+  }) as typeof base.response.end;
+  return base;
+}
+
+const errorMessageReal = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+// Drives one request body through both worlds and returns everything observable
+// on each side for comparison. Each world gets its own registry double seeded
+// identically, and its own captured operation record.
+async function differentialCreate(
+  body: string,
+  options: {
+    inFlight?: string;
+    persistError?: Error;
+    scheduleResult?: boolean;
+  } = {},
+  instanceId = "panel-a"
+): Promise<{
+  legacy: {
+    recording: Recording;
+    op: OperationRecord | null;
+    events: string[];
+  };
+  migrated: {
+    recording: Recording;
+    op: OperationRecord | null;
+    events: string[];
+  };
+}> {
+  const legacyWorld = createWorld(options);
+  let legacyOp: OperationRecord | null = null;
+  const legacyRec = recorderWithEvents(legacyWorld.events);
+  await legacyCreate(postRequest("/api/operations", body), legacyRec.response, {
+    ...legacyWorld,
+    start(op) {
+      legacyOp = op;
+      return legacyWorld.start(op);
+    }
+  });
+
+  const migratedWorld = createWorld(options);
+  let migratedOp: OperationRecord | null = null;
+  const migratedRec = recorderWithEvents(migratedWorld.events);
+  await handleCreateOperation(
+    createRequestContext(
+      postRequest("/api/operations", body),
+      migratedRec.response,
+      instanceId,
+      new Map<string, CanvasServerEntry>()
+    ),
+    {
+      isValidRepoSlug,
+      isResourceGroupName,
+      isAksClusterName,
+      isUuid,
+      buildStages,
+      createOperation: (input) => createOperation(input) as OperationRecord,
+      startOperation: (op) => {
+        migratedOp = op;
+        return migratedWorld.start(op);
+      },
+      persistOperations: () => migratedWorld.persist(),
+      finish,
+      scheduleEnvironmentOperation: (_instanceId, op) =>
+        migratedWorld.schedule(op),
+      errorMessage: errorMessageReal
+    }
+  );
+
+  return {
+    legacy: {
+      recording: legacyRec.recording,
+      op: legacyOp,
+      events: legacyWorld.events
+    },
+    migrated: {
+      recording: migratedRec.recording,
+      op: migratedOp,
+      events: migratedWorld.events
+    }
+  };
+}
+
+// `createOperation` stamps a fresh operationId and timestamps, so the two worlds
+// produce records that differ only in those non-deterministic fields. Normalize
+// them out before comparing the records structurally.
+function normalizeOp(op: OperationRecord | null): unknown {
+  if (!op) return op;
+  const clone = structuredClone(op) as Record<string, unknown>;
+  for (const key of ["operationId", "startedAt", "lastActivityAt", "endedAt"]) {
+    delete clone[key];
+  }
+  return clone;
+}
+
+function normalizeBody(recording: Recording): unknown {
+  if (!recording.body) return recording.body;
+  const parsed = JSON.parse(recording.body) as Record<string, unknown>;
+  // The 202 body and Location carry the generated id; strip it so the structural
+  // comparison does not fail on the one field that is expected to differ.
+  delete parsed.operationId;
+  delete parsed.statusUrl;
+  return parsed;
+}
+
+describe("POST /api/operations legacy/migrated differential contract", () => {
+  const AZURE_BODY = JSON.stringify({
+    repo: "octo/app",
+    resourceGroup: "rg",
+    cluster: "aks-cluster",
+    tenantId: "11111111-1111-1111-1111-111111111111",
+    subscriptionId: "22222222-2222-2222-2222-222222222222",
+    namespace: "ns",
+    branch: "feature/x"
+  });
+  const AWS_BODY = JSON.stringify({
+    repo: "octo/app",
+    provider: "aws",
+    roleArn: "arn:aws:iam::1:role/x",
+    accountId: "111111111111",
+    region: "us-east-1",
+    cluster: "aws-cluster"
+  });
+
+  it.each([
+    ["azure happy path", AZURE_BODY, {} as const],
+    ["aws happy path", AWS_BODY, {} as const]
+  ])(
+    "accepts an identical 202 and record on the %s",
+    async (_label, body, options) => {
+      const { legacy, migrated } = await differentialCreate(body, options);
+      expect(migrated.recording.status).toBe(legacy.recording.status);
+      expect(legacy.recording.status).toBe(202);
+      expect(migrated.recording.headerOrder).toEqual(
+        legacy.recording.headerOrder
+      );
+      expect(migrated.recording.headerOrder).toEqual([
+        "Content-Type",
+        "Location"
+      ]);
+      expect(normalizeBody(migrated.recording)).toEqual(
+        normalizeBody(legacy.recording)
+      );
+      // The operation and resume records are byte-identical modulo the generated
+      // id and timestamps.
+      expect(normalizeOp(migrated.op)).toEqual(normalizeOp(legacy.op));
+      // Ordered event log: register, persist, answer, then schedule. Comparing
+      // the sequence catches a reordering the final call lists would miss — in
+      // particular a handler that scheduled before answering, or persisted after
+      // responding, would fail here while still producing the same call totals.
+      expect(migrated.events).toEqual([
+        "start",
+        "persist",
+        "response.end",
+        `schedule:${migrated.op?.operationId}`
+      ]);
+      expect(legacy.events).toEqual([
+        "start",
+        "persist",
+        "response.end",
+        `schedule:${legacy.op?.operationId}`
+      ]);
+    }
+  );
+
+  it.each([
+    ["malformed json", "{not json", 400],
+    [
+      "invalid repo",
+      JSON.stringify({ repo: "bad slug", provider: "aws" }),
+      400
+    ],
+    [
+      "blank environment",
+      JSON.stringify({ repo: "octo/app", environment: "   " }),
+      400
+    ],
+    [
+      "invalid azure input",
+      JSON.stringify({ repo: "octo/app", resourceGroup: "", cluster: "" }),
+      400
+    ],
+    [
+      "invalid aws input",
+      JSON.stringify({ repo: "octo/app", provider: "aws", roleArn: "" }),
+      400
+    ]
+  ])(
+    "rejects the %s case identically without side effects",
+    async (_label, body, status) => {
+      const { legacy, migrated } = await differentialCreate(body);
+      expect(migrated.recording.status).toBe(legacy.recording.status);
+      expect(legacy.recording.status).toBe(status);
+      expect(migrated.recording.headerOrder).toEqual(
+        legacy.recording.headerOrder
+      );
+      expect(JSON.parse(migrated.recording.body)).toEqual(
+        JSON.parse(legacy.recording.body)
+      );
+      // A rejection ends the response but performs no registration, persistence,
+      // or scheduling — the only event either world records is the response.
+      const sideEffects = (events: string[]) =>
+        events.filter((event) => event !== "response.end");
+      expect(sideEffects(migrated.events)).toEqual([]);
+      expect(migrated.events).toEqual(legacy.events);
+    }
+  );
+
+  it("answers 409 identically when the repo is already in flight", async () => {
+    const { legacy, migrated } = await differentialCreate(AWS_BODY, {
+      inFlight: "op-existing"
+    });
+    expect(migrated.recording.status).toBe(409);
+    expect(legacy.recording.status).toBe(409);
+    expect(JSON.parse(migrated.recording.body)).toEqual(
+      JSON.parse(legacy.recording.body)
+    );
+    expect(JSON.parse(migrated.recording.body)).toEqual({
+      error: "Setup is already running for octo/app.",
+      code: "operation-in-progress",
+      operationId: "op-existing"
+    });
+    // Both attempt the start, reject, and answer — no persist, no schedule.
+    expect(migrated.events).toEqual(["start", "response.end"]);
+    expect(legacy.events).toEqual(["start", "response.end"]);
+  });
+
+  it("finishes failed and answers 500 identically when persistence fails", async () => {
+    const { legacy, migrated } = await differentialCreate(AWS_BODY, {
+      persistError: new Error("disk gone")
+    });
+    expect(migrated.recording.status).toBe(500);
+    expect(legacy.recording.status).toBe(500);
+    expect(JSON.parse(migrated.recording.body)).toEqual(
+      JSON.parse(legacy.recording.body)
+    );
+    // Both mark the record terminal with identical failure metadata.
+    expect((migrated.op as unknown as { state: string }).state).toBe("failed");
+    expect((legacy.op as unknown as { state: string }).state).toBe("failed");
+    expect((migrated.op as unknown as { failure: unknown }).failure).toEqual(
+      (legacy.op as unknown as { failure: unknown }).failure
+    );
+    expect(
+      (migrated.op as unknown as { failure: { code: string } }).failure.code
+    ).toBe("operation-registration-persist-failed");
+    // start, persist (fails), then the 500 response — no schedule.
+    expect(migrated.events).toEqual(["start", "persist", "response.end"]);
+    expect(legacy.events).toEqual(["start", "persist", "response.end"]);
   });
 });

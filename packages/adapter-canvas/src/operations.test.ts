@@ -1515,7 +1515,6 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-
   // This suite reads `server.ts` as raw text and slices route bodies out of the
   // legacy if-chain by their `pathname === ...` markers, so it carries an
   // undeclared textual coupling to that chain: every slice that migrates a route
@@ -1547,40 +1546,55 @@ describe("environment creation boundaries", () => {
 
   // A named end delimiter inherits the migration expiry of whichever route it
   // names: when that neighbour migrates, the marker dies and the slice widens.
-  // That has now happened twice on this stack, so the end of the azure slice is
-  // resolved structurally instead — as "the next legacy branch of any kind" —
-  // which is exactly what the slice means and cannot be invalidated by any one
-  // route migrating.
-  function nextLegacyBranchAfter(name: string, start: number): number {
-    const pattern = /pathname === "\/api\//g;
-    pattern.lastIndex = start + 1;
-    const match = pattern.exec(SERVER_SRC);
+  // That has now happened repeatedly on this stack, so the end of the azure
+  // slice is resolved structurally instead — as "the next legacy route of any
+  // kind" — which is exactly what the slice means and cannot be invalidated by
+  // any one route migrating. The pattern matches `pathname.startsWith` arms as
+  // well, so a prefix-matched neighbour still bounds the slice.
+  function nextLegacyRouteIndex(start: number, marker: string): number {
+    const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
+    legacyRoute.lastIndex = start + marker.length;
+    const match = legacyRoute.exec(SERVER_SRC);
     if (!match) {
       throw new Error(
-        `No legacy branch remains after the \`${name}\` branch in server.ts. ` +
-          "The legacy if-chain has drained past this slice; delete this " +
-          "structural slice rather than letting it widen to the end of the file."
+        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
+          "re-scope the raw-text slice that uses this delimiter."
       );
     }
-    const end = match.index;
-    if (end <= start) {
+    if (match.index <= start) {
       throw new Error(
-        `Resolved a non-advancing end delimiter for the \`${name}\` slice in ` +
-          `server.ts (end ${end} <= start ${start}). Refusing to slice, because ` +
-          "a collapsed or inverted range makes every assertion below vacuous."
+        `The next legacy route after \`${marker}\` did not produce a bounded slice.`
       );
     }
-    return end;
+    return match.index;
   }
 
-  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
-  const azureEnd = nextLegacyBranchAfter("azure-auto-setup", azureStart);
-  const operationStart = markerIndex(
-    'pathname === "/api/operations" && req.method === "POST"'
-  );
+  const azureMarker = 'pathname === "/api/azure-auto-setup"';
+  const azureStart = markerIndex(azureMarker);
+  const azureEnd = nextLegacyRouteIndex(azureStart, azureMarker);
   const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
+
+  it("no longer answers POST /api/operations from the legacy chain", () => {
+    // The registration/scheduling arm moved to the operations-status route
+    // module (its own unit and loopback tests cover the 202-then-schedule
+    // ordering). The legacy `if` for it must be gone entirely, and its old
+    // `operationStart` marker with it — hence no marker slice here.
+    expect(SERVER_SRC).not.toContain(
+      'pathname === "/api/operations" && req.method === "POST"'
+    );
+  });
+
+  it("no longer answers POST /api/create-environment from the legacy chain", () => {
+    // The ~1,000-line setup arm moved onto the route table as its own use case
+    // and four supporting seams, each with focused unit tests, plus a real
+    // loopback suite in `test/integration/http/create-environment.test.ts` that
+    // exercises both sides of the server-owned gate. The legacy `if` must be
+    // gone entirely, and the `createStart`/`createEnd` markers with it — hence
+    // no marker slice here.
+    expect(SERVER_SRC).not.toContain('pathname === "/api/create-environment"');
+  });
 
   it("bounds every sliced route body on markers that still exist", () => {
     // Pins the coupling itself rather than leaving it to whichever ordering
@@ -1594,20 +1608,8 @@ describe("environment creation boundaries", () => {
       expect(start, name).toBeGreaterThan(-1);
       expect(end, name).toBeGreaterThan(start);
     }
-    expect(operationStart).toBeGreaterThan(-1);
     expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
     expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
-  });
-
-  it("registers and accepts a server-owned operation before scheduling setup", () => {
-    const route = SERVER_SRC.slice(operationStart, azureStart);
-    expect(operationStart).toBeGreaterThan(-1);
-    expect(route).toContain("operations.start(op)");
-    expect(route).toContain("res.writeHead(202)");
-    expect(route).toContain("scheduleServerOwnedTask");
-    expect(route.indexOf("res.end(")).toBeLessThan(
-      route.indexOf("scheduleServerOwnedTask")
-    );
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {

@@ -498,15 +498,48 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
-// Composition root for the migrated `operations-status` family. It receives the
-// four narrow lookup and projection functions it calls; the registry
-// implementation and the client projection stay in `operations.ts`.
-const operationsStatusRoutes = createOperationsStatusRoutes({
-  latest: (repo) => operations.latest(repo),
-  latestAny: () => operations.latestAny(),
-  get: (operationId) => operations.get(operationId),
-  toClientView
-});
+// Composition root for the migrated `operations-status` family. The read routes
+// receive the four narrow lookup and projection functions they call; the POST
+// that registers an environment operation receives its own seams. The registry
+// implementation and the client projection stay in `operations.ts`, and the
+// pure guards and factories stay in their modules and are injected rather than
+// imported by the route so the route spawns nothing and touches no disk.
+//
+// `scheduleEnvironmentOperation` bridges the module-level route back to the
+// per-instance server-owned task runner: the migrated table is built once, but
+// scheduling is closure state on the legacy handler for the instance that
+// received the request, so the instance id is passed through and resolved here.
+const operationsStatusRoutes = createOperationsStatusRoutes(
+  {
+    latest: (repo) => operations.latest(repo),
+    latestAny: () => operations.latestAny(),
+    get: (operationId) => operations.get(operationId),
+    toClientView
+  },
+  {
+    isValidRepoSlug,
+    isResourceGroupName,
+    isAksClusterName,
+    isUuid,
+    buildStages,
+    createOperation,
+    startOperation: (op) => operations.start(op),
+    persistOperations: () => operations.persist(),
+    finish,
+    scheduleEnvironmentOperation: (instanceId, op) => {
+      const legacy = legacyHandlers.get(instanceId);
+      if (!legacy) {
+        console.error(
+          `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
+        );
+        return false;
+      }
+      legacy.scheduleEnvironmentOperation(op);
+      return true;
+    },
+    errorMessage
+  }
+);
 
 // Composition root for the migrated `repositories` family. Three seams: the
 // subprocess runner, a reader for the live instance state the branch cache is
@@ -3306,179 +3339,6 @@ function createLegacyRequestHandler(
       req.headers["x-radius-server-owned"] === serverOwnedToken;
     const requestedPage = url.searchParams.get("page");
 
-    if (pathname === "/api/operations" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
-        );
-        return;
-      }
-      const repo = String(data.repo || "");
-      const environment = String(data.environment || data.name || "dev").trim();
-      const provider = data.provider === "aws" ? "aws" : "azure";
-      if (!isValidRepoSlug(repo)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: `Invalid repository "${repo}". Expected "owner/repo".`,
-            code: "invalid-repo"
-          })
-        );
-        return;
-      }
-      if (!environment.trim()) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Environment name is required.",
-            code: "environment-required"
-          })
-        );
-        return;
-      }
-      if (provider === "azure") {
-        if (
-          !isResourceGroupName(String(data.resourceGroup || "")) ||
-          !isAksClusterName(String(data.cluster || "")) ||
-          !isUuid(String(data.tenantId || "")) ||
-          !isUuid(String(data.subscriptionId || ""))
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error:
-                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
-              code: "invalid-azure-operation-input"
-            })
-          );
-          return;
-        }
-      } else if (
-        !String(data.roleArn || "").trim() ||
-        !String(data.accountId || "").trim() ||
-        !String(data.region || "").trim() ||
-        !String(data.cluster || "").trim()
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error:
-              "AWS setup requires roleArn, accountId, region, and cluster.",
-            code: "invalid-aws-operation-input"
-          })
-        );
-        return;
-      }
-      const needsAzureCredentials =
-        provider === "azure" && !String(data.clientId || "").trim();
-      const op = createOperation({
-        provider,
-        repo,
-        environment,
-        stages: buildStages({ includeIdentity: needsAzureCredentials }),
-        journey: {
-          origin: data.origin || null,
-          resumeTarget: data.resumeTarget || null,
-          resumeBranch: data.resumeBranch || data.branch || null,
-          resumeReason: data.resumeReason || null
-        }
-      });
-      op.request = {
-        needsAzureCredentials,
-        azure: {
-          resourceGroup: data.resourceGroup || "",
-          cluster: data.cluster || "",
-          clusterResourceGroup: data.clusterResourceGroup || "",
-          subscriptionId: data.subscriptionId || "",
-          tenantId: data.tenantId || "",
-          appName: data.appName,
-          appId: data.appId || "",
-          createNew: data.createNew === true,
-          serviceManagementReference: data.serviceManagementReference || ""
-        },
-        environment: { ...data, environment, provider }
-      };
-      if (provider === "azure") {
-        op.resumeRequest = {
-          needsAzureCredentials,
-          azure: structuredClone(op.request.azure),
-          environment: {
-            repo,
-            environment,
-            provider,
-            cluster: data.cluster || "",
-            namespace: data.namespace || "",
-            profileName: data.profileName || "",
-            branch: data.branch || "",
-            tenantId: data.tenantId || "",
-            subscriptionId: data.subscriptionId || "",
-            resourceGroup: data.resourceGroup || "",
-            origin: data.origin || null,
-            resumeTarget: data.resumeTarget || null,
-            resumeBranch: data.resumeBranch || null,
-            resumeReason: data.resumeReason || null
-          }
-        };
-      }
-      const started = operations.start(op);
-      if (!started.ok) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: `Setup is already running for ${repo}.`,
-            code: "operation-in-progress",
-            operationId: started.conflict.operationId
-          })
-        );
-        return;
-      }
-      try {
-        await operations.persist();
-      } catch (error) {
-        finish(op, "failed", {
-          failure: {
-            code: "operation-registration-persist-failed",
-            stage: op.currentStage,
-            stepSeq: null,
-            message:
-              "Radius could not durably register the environment operation.",
-            classification: "unknown",
-            evidence: errorMessage(error)
-          }
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not durably register the environment operation. No setup work was started.",
-            code: "operation-registration-persist-failed"
-          })
-        );
-        return;
-      }
-      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Location", statusUrl);
-      res.writeHead(202);
-      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
-      scheduleServerOwnedTask(op.operationId, () =>
-        runEnvironmentOperation(op.operationId)
-      );
-      return;
-    }
     const resumeMatch = pathname.match(
       /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
     );
@@ -7342,7 +7202,21 @@ function createLegacyRequestHandler(
   // must not count as user activity or the idle-respawn timer never fires.
   const isServerOwned = (req: IncomingMessage): boolean =>
     req.headers["x-radius-server-owned"] === serverOwnedToken;
-  return { handler, startRecoveredVerificationTasks, isServerOwned };
+  // Exposed so the migrated `POST /api/operations` route, which is composed once
+  // at module init, can reach this instance's server-owned task runner. The
+  // route registers and persists the operation itself and then hands the record
+  // back here to schedule exactly as the legacy arm did.
+  const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
+    scheduleServerOwnedTask(op.operationId, () =>
+      runEnvironmentOperation(op.operationId)
+    );
+  };
+  return {
+    handler,
+    startRecoveredVerificationTasks,
+    isServerOwned,
+    scheduleEnvironmentOperation
+  };
 }
 
 const PAGE_RENDERERS = {
