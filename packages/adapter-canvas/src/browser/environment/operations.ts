@@ -24,9 +24,16 @@ import type {
   AbortHandle,
   BrowserContext,
   DomElement,
+  DomEventListener,
+  DomInputElement,
   HttpRequestInit,
   HttpResponse
 } from "../ports.js";
+
+interface CommandButton {
+  readonly element: DomInputElement;
+  readonly listener: DomEventListener;
+}
 
 export const ENVIRONMENT_OPERATIONS_ENTRY_KEY = "environment-operations";
 export const OPERATIONS_PATH = "/api/operations";
@@ -55,8 +62,57 @@ export const PROGRESS_IDS = {
   cleanupRetainedList: "env-progress-cleanup-retained",
   cleanupRetainedBlock: "env-progress-cleanup-retained-block",
   cleanupWarningsList: "env-progress-cleanup-warnings",
-  cleanupWarningsBlock: "env-progress-cleanup-warnings-block"
+  cleanupWarningsBlock: "env-progress-cleanup-warnings-block",
+  partialState: "env-progress-state",
+  stateCreatedList: "env-progress-state-created",
+  stateCreatedBlock: "env-progress-state-created-block",
+  stateRetainedList: "env-progress-state-retained",
+  stateRetainedBlock: "env-progress-state-retained-block",
+  stateReusedList: "env-progress-state-reused",
+  stateReusedBlock: "env-progress-state-reused-block",
+  stateCleanedList: "env-progress-state-cleaned",
+  stateCleanedBlock: "env-progress-state-cleaned-block",
+  stateManualList: "env-progress-state-manual",
+  stateManualBlock: "env-progress-state-manual-block",
+  commands: "env-progress-commands",
+  commandButtons: "env-progress-command-buttons",
+  commandNote: "env-progress-command-note",
+  commandStatus: "env-progress-command-status",
+  commandError: "env-progress-command-error"
 } as const;
+
+// Partial-state groups stay separate rather than merging into one list: a
+// customer cannot act on "some resources exist" and can act on "Radius created
+// this and kept it so a retry can reuse it".
+const PARTIAL_STATE_GROUPS = [
+  {
+    group: "created",
+    list: PROGRESS_IDS.stateCreatedList,
+    block: PROGRESS_IDS.stateCreatedBlock
+  },
+  {
+    group: "retainedArtifacts",
+    list: PROGRESS_IDS.stateRetainedList,
+    block: PROGRESS_IDS.stateRetainedBlock
+  },
+  {
+    group: "reused",
+    list: PROGRESS_IDS.stateReusedList,
+    block: PROGRESS_IDS.stateReusedBlock
+  },
+  {
+    group: "cleaned",
+    list: PROGRESS_IDS.stateCleanedList,
+    block: PROGRESS_IDS.stateCleanedBlock
+  }
+] as const;
+
+const COMMAND_BUTTON_CLASS = "rad-btn rad-btn--secondary";
+const COMMAND_REFUSED_MESSAGE = "Radius could not accept that request.";
+const COMMAND_UNREACHABLE_MESSAGE =
+  "Radius could not reach the setup service. Try again.";
+const STOPPING_MESSAGE = "Stopping after the current step…";
+const COMMAND_ACCEPTED_MESSAGE = "Radius accepted the request…";
 
 const STAGE_GLYPH: Readonly<Record<string, string>> = {
   pending: "○",
@@ -101,6 +157,11 @@ export interface OperationCleanupEntry {
   readonly target: string;
 }
 
+export interface OperationManualAction {
+  readonly target: string;
+  readonly action: string;
+}
+
 export interface OperationCleanupRetry {
   readonly startsCleanly: boolean;
   readonly guidance: string;
@@ -113,6 +174,31 @@ export interface OperationCleanup {
   readonly removed: readonly OperationCleanupEntry[];
   readonly retained: readonly OperationCleanupEntry[];
   readonly warnings: readonly string[];
+  readonly created: readonly OperationCleanupEntry[];
+  readonly retainedArtifacts: readonly OperationCleanupEntry[];
+  readonly reused: readonly OperationCleanupEntry[];
+  readonly cleaned: readonly OperationCleanupEntry[];
+  readonly manualActionRequired: readonly OperationManualAction[];
+}
+
+/**
+ * One control the server says is allowed right now. Eligibility is never
+ * re-derived in the browser: a button the server then refuses is worse than no
+ * button at all.
+ */
+export interface OperationAction {
+  readonly id: string;
+  readonly kind: string;
+  readonly label: string;
+  readonly description: string;
+  readonly path: string;
+  readonly pending: boolean;
+}
+
+/** The automatic move a non-terminal record is waiting on. */
+export interface OperationNextTransition {
+  readonly code: string;
+  readonly message: string;
 }
 
 export interface OperationResumeTarget {
@@ -168,6 +254,8 @@ export interface OperationRecord {
   readonly steps: readonly OperationStageOrStep[];
   readonly failure: OperationFailure | null;
   readonly cleanup: OperationCleanup;
+  readonly actions: readonly OperationAction[];
+  readonly nextTransition: OperationNextTransition | null;
   readonly journey: OperationJourney | null;
   readonly verification: { readonly dispatchedAt: number | null } | null;
   readonly inputRequired: OperationInputPrompt | null;
@@ -273,8 +361,25 @@ const EMPTY_CLEANUP: OperationCleanup = {
   retry: { startsCleanly: false, guidance: "" },
   removed: [],
   retained: [],
-  warnings: []
+  warnings: [],
+  created: [],
+  retainedArtifacts: [],
+  reused: [],
+  cleaned: [],
+  manualActionRequired: []
 };
+
+function parseManualActions(value: unknown): OperationManualAction[] {
+  if (!Array.isArray(value)) return [];
+  const entries: OperationManualAction[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const target = readString(entry, "target");
+    if (target === "") continue;
+    entries.push({ target, action: readString(entry, "action") });
+  }
+  return entries;
+}
 
 function parseCleanup(value: unknown): OperationCleanup {
   if (!isRecord(value)) return EMPTY_CLEANUP;
@@ -284,7 +389,43 @@ function parseCleanup(value: unknown): OperationCleanup {
     retry: parseCleanupRetry(value["retry"]),
     removed: parseCleanupEntries(value["removed"]),
     retained: parseCleanupEntries(value["retained"]),
-    warnings: readStringArray(value, "warnings").filter((entry) => entry !== "")
+    warnings: readStringArray(value, "warnings").filter(
+      (entry) => entry !== ""
+    ),
+    created: parseCleanupEntries(value["created"]),
+    retainedArtifacts: parseCleanupEntries(value["retainedArtifacts"]),
+    reused: parseCleanupEntries(value["reused"]),
+    cleaned: parseCleanupEntries(value["cleaned"]),
+    manualActionRequired: parseManualActions(value["manualActionRequired"])
+  };
+}
+
+function parseActions(value: unknown): OperationAction[] {
+  if (!Array.isArray(value)) return [];
+  const actions: OperationAction[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const path = readString(entry, "path");
+    // A control with no path has nothing to submit, so it is dropped rather
+    // than rendered as a button that can only fail.
+    if (path === "") continue;
+    actions.push({
+      id: readString(entry, "id"),
+      kind: readString(entry, "kind"),
+      label: readString(entry, "label"),
+      description: readString(entry, "description"),
+      path,
+      pending: readBoolean(entry, "pending")
+    });
+  }
+  return actions;
+}
+
+function parseNextTransition(value: unknown): OperationNextTransition | null {
+  if (!isRecord(value)) return null;
+  return {
+    code: readString(value, "code"),
+    message: readString(value, "message")
   };
 }
 
@@ -367,6 +508,8 @@ function parseOperationRecord(
     steps: parseStageList(raw["steps"]),
     failure: parseFailure(raw["failure"]),
     cleanup: parseCleanup(raw["cleanup"]),
+    actions: parseActions(raw["actions"]),
+    nextTransition: parseNextTransition(raw["nextTransition"]),
     journey: parseJourney(raw["journey"]),
     verification: parseVerification(raw["verification"]),
     inputRequired: parseInputPrompt(raw["inputRequired"]),
@@ -489,8 +632,13 @@ function resumeUrl(operationId: string, code: string): string {
   return `${operationUrl(operationId)}/resume/${encodeURIComponent(code)}`;
 }
 
-function abandonUrl(operationId: string): string {
-  return `${operationUrl(operationId)}/abandon`;
+/**
+ * Cancel an operation through the durable stop command. Stop is recorded
+ * before the server answers, so a canvas reload cannot lose the cancellation
+ * the way the fire-and-forget abandon route could.
+ */
+function stopUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/stop`;
 }
 
 function verifyStatusUrl(
@@ -649,10 +797,209 @@ export function initializeEnvironmentOperations(
     card.style.display = "";
   }
 
+  // ---------------- Partial state and operation commands ----------------
+
+  let commandInFlight = false;
+  let commandOperationId = "";
+  // Command buttons are rebuilt on every render, so their listeners are
+  // tracked separately from the entry scope and released before each rebuild.
+  // Registering them on the scope would grow its registry once per poll.
+  let commandButtons: CommandButton[] = [];
+
+  function releaseCommandButtons(): void {
+    for (const entry of commandButtons.splice(0)) {
+      entry.element.removeEventListener("click", entry.listener);
+    }
+  }
+
+  scope.onTeardown(releaseCommandButtons);
+
+  function setStateList(
+    items: readonly string[],
+    listId: string,
+    blockId: string
+  ): boolean {
+    const listEl = dom.byId(listId);
+    const blockEl = dom.byId(blockId);
+    if (!listEl || !blockEl) return false;
+    if (items.length === 0) {
+      setChildren(dom, listEl, []);
+      blockEl.style.display = "none";
+      return false;
+    }
+    // Server-built safe labels, but still built as text nodes: a display name
+    // is customer data and is never ours to trust as markup.
+    setChildren(
+      dom,
+      listEl,
+      items.map((item) => ({ tag: "li", text: item }))
+    );
+    blockEl.style.display = "";
+    return true;
+  }
+
+  function renderPartialState(op: OperationRecord | null): void {
+    const statePanel = dom.byId(PROGRESS_IDS.partialState);
+    if (!statePanel) return;
+    if (op === null) {
+      statePanel.style.display = "none";
+      return;
+    }
+    const cleanup = op.cleanup;
+    const shown = [
+      ...PARTIAL_STATE_GROUPS.map((entry) =>
+        setStateList(
+          cleanup[entry.group].map((item) => item.target),
+          entry.list,
+          entry.block
+        )
+      ),
+      setStateList(
+        cleanup.manualActionRequired.map((entry) =>
+          entry.action === "" ?
+            entry.target
+          : `${entry.target} — ${entry.action}`
+        ),
+        PROGRESS_IDS.stateManualList,
+        PROGRESS_IDS.stateManualBlock
+      )
+    ].some(Boolean);
+    statePanel.style.display = shown ? "" : "none";
+  }
+
+  function setCommandBusy(busy: boolean): void {
+    commandInFlight = busy;
+    const container = dom.byId(PROGRESS_IDS.commands);
+    if (container) container.setAttribute("aria-busy", busy ? "true" : "false");
+    for (const entry of commandButtons) entry.element.disabled = busy;
+  }
+
+  function setCommandStatus(message: string): void {
+    const el = dom.byId(PROGRESS_IDS.commandStatus);
+    if (el) el.textContent = message;
+  }
+
+  function setCommandError(message: string): void {
+    const el = dom.byId(PROGRESS_IDS.commandError);
+    if (el) el.textContent = message;
+  }
+
+  function pollOperation(operationId: string): void {
+    void fetchTracked(operationUrl(operationId), { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        const op = parseOperationResponse(payload);
+        if (op) renderProgress(op);
+      })
+      .catch(() => {
+        /* the poller keeps the panel current */
+      });
+  }
+
+  function submitCommand(action: OperationAction, op: OperationRecord): void {
+    if (commandInFlight) return;
+    setCommandError("");
+    setCommandBusy(true);
+    setCommandStatus(
+      action.kind === "stop" ? STOPPING_MESSAGE : COMMAND_ACCEPTED_MESSAGE
+    );
+    void fetchTracked(action.path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+      },
+      body: "{}"
+    })
+      .then((response) =>
+        response
+          .json()
+          .catch(() => ({}))
+          .then((payload) => ({ ok: response.ok, payload }))
+      )
+      .then((result) => {
+        setCommandBusy(false);
+        const updated = parseOperationResponse(result.payload);
+        if (!result.ok) {
+          setCommandStatus("");
+          setCommandError(
+            readString(result.payload, "error") || COMMAND_REFUSED_MESSAGE
+          );
+          if (updated) renderProgress(updated);
+          focusPanel();
+          return;
+        }
+        if (updated) renderProgress(updated);
+        // Keep following the same operation. A command that reopened the
+        // record rejoins the poller; one that closed it reports its terminal
+        // result.
+        if (updated && updated.terminalState !== null) {
+          stopProgress();
+          applyTerminal(updated);
+          return;
+        }
+        if (repo !== "") {
+          trackProgress(op.environment, op.provider, applyTerminal);
+          return;
+        }
+        pollOperation(op.operationId);
+      })
+      .catch(() => {
+        setCommandBusy(false);
+        setCommandStatus("");
+        setCommandError(COMMAND_UNREACHABLE_MESSAGE);
+      });
+  }
+
+  function renderCommands(op: OperationRecord | null): void {
+    const container = dom.byId(PROGRESS_IDS.commands);
+    const buttons = dom.byId(PROGRESS_IDS.commandButtons);
+    const note = dom.byId(PROGRESS_IDS.commandNote);
+    if (!container || !buttons || !note) return;
+    const actions = op?.actions ?? [];
+    if (op !== null && op.operationId !== commandOperationId) {
+      commandOperationId = op.operationId;
+      setCommandError("");
+      setCommandStatus("");
+    }
+    releaseCommandButtons();
+    buttons.replaceChildren();
+    if (op === null || actions.length === 0) {
+      container.style.display = "none";
+      note.textContent = op?.nextTransition?.message ?? "";
+      return;
+    }
+    const record = op;
+    for (const action of actions) {
+      const element = dom.createElement("button") as DomInputElement;
+      element.setAttribute("type", "button");
+      element.id = `env-progress-command-${action.id}`;
+      element.className = COMMAND_BUTTON_CLASS;
+      element.textContent = action.label === "" ? "Continue" : action.label;
+      element.disabled = commandInFlight || action.pending;
+      const listener = (): void => submitCommand(action, record);
+      element.addEventListener("click", listener);
+      commandButtons.push({ element, listener });
+      buttons.appendChild(element);
+    }
+    const descriptions = actions
+      .map((action) => action.description)
+      .filter((description) => description !== "");
+    const transition = record.nextTransition?.message ?? "";
+    if (transition !== "") descriptions.unshift(transition);
+    note.textContent = descriptions.join(" ");
+    if (actions.some((action) => action.kind === "stop" && action.pending)) {
+      setCommandStatus(STOPPING_MESSAGE);
+    }
+    container.style.display = "";
+  }
+
   function renderProgress(op: OperationRecord | null): void {
     if (op === null) {
       panel.style.display = "none";
       renderFailureCard(null);
+      renderPartialState(null);
+      renderCommands(null);
       return;
     }
     panel.style.display = "";
@@ -697,6 +1044,8 @@ export function initializeEnvironmentOperations(
     if (stepsEl) setChildren(dom, stepsEl, op.steps.map(stepSpec));
 
     renderFailureCard(op);
+    renderPartialState(op);
+    renderCommands(op);
 
     const detailsEl = dom.byId(PROGRESS_IDS.details);
     if (detailsEl) {
@@ -954,17 +1303,20 @@ export function initializeEnvironmentOperations(
           (error: unknown) => {
             if (!active()) return;
             if (isAbandonError(error)) {
-              void fetchTracked(abandonUrl(operationId), {
+              void fetchTracked(stopUrl(operationId), {
                 method: "POST",
                 headers: {
+                  "Content-Type": "application/json",
                   "X-Radius-Mutation-Nonce": options.mutationNonce || ""
-                }
+                },
+                body: "{}"
               })
                 .then((response) => {
                   if (!response.ok) {
                     promptingRequestedAt = "";
                     throw new Error("Unable to cancel environment setup.");
                   }
+                  focusPanel();
                   scheduleTick(0);
                 })
                 .catch(() => {
@@ -1081,8 +1433,12 @@ export function initializeEnvironmentOperations(
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
         const op = parseOperationResponse(payload);
-        if (!op || op.terminalState !== null) return;
+        if (!op) return;
+        // A closed record is rebuilt too: its stop, retry, and partial-state
+        // controls come from the saved operation, so a reload after a failure
+        // still offers the same actions.
         renderProgress(op);
+        if (op.terminalState !== null) return;
         trackProgress(op.environment, op.provider, applyTerminal);
       })
       .catch(() => {

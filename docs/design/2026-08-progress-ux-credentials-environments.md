@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop remains modeled but unwired.
+- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop and the setup, verification, and cleanup retries are now wired end to end.
 
 ## Overview
 
@@ -594,7 +594,11 @@ Returns the latest non-stale operation for a repository. This route is implement
 
 #### `POST /api/operations/{operationId}/stop` — cooperative stop
 
-Sets a stop flag. The server checks the flag between cloud or GitHub commands, finishes the current command, and then records `cancelled`. This route is not implemented.
+Records the stop request durably before answering, so a canvas reload cannot lose it. The server checks the request between cloud or GitHub commands, finishes the command already running, records what it changed, and then records `cancelled`. An operation parked on a prompt has nothing in flight and cancels immediately: `200` with the closed record. Anything else answers `202` and reports the stop as pending until the executor reaches its next safe boundary. A finished operation answers `409 operation-already-terminal`. This route is implemented.
+
+#### `POST /api/operations/{operationId}/retry/{setup|verification|cleanup}` — retry
+
+Reopens a closed operation for one allowed continuation, decided from the saved record alone. A **setup** retry continues from the first step the artifact ledger does not already prove finished, and is refused when ownership of a recorded artifact cannot be proven. A **verification** retry repeats the exact workflow identity Radius saved; when the record is waiting on a setup pull request it is refused with `409 verification-retry-pull-request-open` until that pull request has merged. A **cleanup** retry deletes only the resources Radius proved it created and could not remove on the previous attempt. Each accepted retry records a derived command id first, so a double click, a lost response, or a reload all resolve to the same command. These routes are implemented.
 
 #### `GET /api/verify-status` — keyed by operation
 
@@ -744,9 +748,7 @@ Multi-cloud rules:
 
 **Not implemented:**
 
-- `POST /api/operations` and server-owned background execution.
 - Operation-keyed `/api/verify-status`; it still uses canvas-instance verification fields.
-- Cooperative stop.
 - A bare-page redirect to the running environment operation.
 
 **Implemented in the page renderers and the browser modules under `src/browser/`:**
@@ -909,8 +911,8 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 | **Record**       | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes                     | Built                             |
 | **Panel**        | Inline progress panel, retained failure context, pull-request `action_required`, verification activity                      | Built                             |
 | **Return**       | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                                         | Built                             |
-| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Not built                         |
-| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Not built                         |
+| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Built                             |
+| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Built                             |
 | **Diagnosis**    | User-initiated **Ask Copilot** explanation for unfamiliar failures with fenced evidence and propose-only constraints        | Not built                         |
 | **Conversation** | Optional kickoff orientation, sparse phase-boundary narration, input escalation, PR handoff, and optional success close-out | Not built                         |
 

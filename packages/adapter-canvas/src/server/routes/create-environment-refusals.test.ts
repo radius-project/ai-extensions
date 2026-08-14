@@ -68,6 +68,17 @@ function ports(script: Script = {}): Recorder {
         return script.existing ?? null;
       },
       isStale: () => script.stale ?? false,
+      // The real predicate: a closed record is never resumable, whatever else
+      // about the continuation matches.
+      isTerminalState: (state) =>
+        [
+          "succeeded",
+          "succeeded_with_warnings",
+          "action_required",
+          "failed",
+          "failed_partial",
+          "cancelled"
+        ].includes(String(state ?? "")),
       createOperation: (input) =>
         script.created ??
         operation({

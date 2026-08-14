@@ -1,0 +1,605 @@
+import { createServer } from "node:http";
+import { afterEach, describe, expect, it } from "vitest";
+import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
+import { createRequestHandler } from "../../../src/server/create-request-handler.js";
+import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
+import { createOperationsControlRoutes } from "../../../src/server/routes/operations-control.js";
+import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  acceptCommand,
+  applySetupResumePoint,
+  applyStopRequest,
+  announceOperationTerminal,
+  beginRetryAttempt,
+  buildStages,
+  canRetryCleanup,
+  canRetrySetup,
+  canRetryVerification,
+  createOperation,
+  enterStage,
+  finish,
+  isTerminalState,
+  recordAzureApp,
+  recordCleanupState,
+  recordCommitState,
+  recordCommittedWorkflowFile,
+  recordServicePrincipal,
+  requireInput,
+  rollbackRetryAttempt,
+  setCommandState,
+  setStageState,
+  snapshotRetryState,
+  toClientView,
+  INPUT_REQUIRED_STATE,
+  STAGE_VERIFY
+} from "../../../src/operations.js";
+import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
+import type {
+  OperationActionRecord,
+  OperationRecord
+} from "../../../src/server/routes/operations-status.js";
+
+// Cooperative controls over a real loopback socket. Every external seam is an
+// in-memory double — including the pull-request merge proof, so this suite never
+// reaches GitHub — while the eligibility rules, command identity, and retry
+// snapshot are the real production functions.
+
+let container: CanvasServerContainer | undefined;
+
+const BROWSER_NONCE = "browser-nonce";
+
+afterEach(async () => {
+  await container?.stopAll();
+  container = undefined;
+});
+
+interface Harness {
+  records: Map<string, OperationRecord>;
+  lock: { conflict: { operationId: string } | null };
+  merged: { value: boolean };
+  persistError: { value: Error | null };
+  persistCalls: string[];
+  scheduled: Array<{ kind: string; instanceId: string; commandId?: string }>;
+  schedulerAccepts: { value: boolean };
+}
+
+function start(): Harness {
+  const records = new Map<string, OperationRecord>();
+  const lock: Harness["lock"] = { conflict: null };
+  const merged = { value: false };
+  const persistError: { value: Error | null } = { value: null };
+  const persistCalls: string[] = [];
+  const scheduled: Harness["scheduled"] = [];
+  const schedulerAccepts = { value: true };
+
+  const persistOperations = () => {
+    persistCalls.push("persist");
+    return persistError.value ?
+        Promise.reject(persistError.value)
+      : Promise.resolve();
+  };
+
+  const routes = createTestRouteTable({
+    ...createOperationsControlRoutes({
+      get: (operationId) => records.get(operationId) ?? null,
+      acquireForRetry: () =>
+        lock.conflict ? { ok: false, conflict: lock.conflict } : { ok: true },
+      persistOperations,
+      toClientView,
+      applyStopRequest,
+      announceOperationTerminal,
+      snapshotRetryState,
+      rollbackRetryAttempt,
+      beginRetryAttempt,
+      acceptCommand,
+      setCommandState,
+      canRetrySetup,
+      canRetryVerification,
+      canRetryCleanup,
+      applySetupResumePoint,
+      setStageState,
+      enterStage,
+      finish,
+      stageVerify: STAGE_VERIFY,
+      isPullRequestMerged: () => Promise.resolve(merged.value),
+      scheduleSetupContinuation: (instanceId) => {
+        if (!schedulerAccepts.value) return false;
+        scheduled.push({ kind: "setup", instanceId });
+        return true;
+      },
+      scheduleVerificationRetry: (instanceId, _operation, commandId) => {
+        if (!schedulerAccepts.value) return false;
+        scheduled.push({ kind: "verification", instanceId, commandId });
+        return true;
+      },
+      scheduleCleanupRetry: (instanceId, _operation, commandId) => {
+        if (!schedulerAccepts.value) return false;
+        scheduled.push({ kind: "cleanup", instanceId, commandId });
+        return true;
+      },
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error)
+    }),
+    // The by-id read is composed too: a client that just issued a command polls
+    // this route next, so the two must agree over the same socket.
+    ...createOperationsStatusRoutes(
+      {
+        latest: () => null,
+        latestAny: () => null,
+        get: (operationId) => records.get(operationId) ?? null,
+        toClientView
+      },
+      {
+        isValidRepoSlug: () => false,
+        isResourceGroupName: () => false,
+        isAksClusterName: () => false,
+        isUuid: () => false,
+        buildStages: () => [],
+        createOperation: () => ({ operationId: "", currentStage: null }),
+        // The create arm is never exercised here — this suite drives the control
+        // routes and the by-id read — so the account-selection claim is a stub
+        // that refuses rather than a working handle store.
+        claimSelectionHandle: () => ({ ok: false, error: "missing" }),
+        startOperation: () => ({
+          ok: true,
+          operation: { operationId: "", currentStage: null }
+        }),
+        persistOperations,
+        finish,
+        scheduleEnvironmentOperation: () => true,
+        errorMessage: (error) => String(error)
+      },
+      // The resume and abandon actions round out the family. They are declared
+      // next to the controls and must keep answering for themselves, so they get
+      // real handlers here rather than the throwing stub.
+      {
+        // The seeded fixtures are real records; the action port declares a
+        // narrower request shape than the control port, so the read is asserted
+        // rather than widening the fixture type for one dependency.
+        getOperation: (operationId) =>
+          (records.get(operationId) ?? null) as OperationActionRecord | null,
+        canResumeInput: () => false,
+        resumeAfterInput: () => {},
+        requireInput: () => {},
+        finish,
+        isTerminalState,
+        persistOperations,
+        toClientView,
+        scheduleEnvironmentOperation: () => true,
+        errorMessage: (error) => String(error),
+        inputRequiredState: INPUT_REQUIRED_STATE
+      }
+    )
+  });
+
+  container = createCanvasServer({
+    createHttpServer: (handler) => createServer(handler),
+    createRequestHandler: ({ instanceId, instances, markActivity }) =>
+      createRequestHandler({
+        instanceId,
+        instances,
+        routes,
+        markActivity,
+        validateBrowserMutation: (context) =>
+          validateBrowserMutationRequest({
+            request: context.request,
+            baseUrl: `http://${context.request.headers.host || ""}`,
+            nonce: BROWSER_NONCE
+          }),
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
+        }
+      }),
+    createState: () => ({}),
+    defaultPage: "graph",
+    now: () => Date.now(),
+    preferredPort: async () => 0,
+    prepareIdentity: () => {}
+  });
+
+  return {
+    records,
+    lock,
+    merged,
+    persistError,
+    persistCalls,
+    scheduled,
+    schedulerAccepts
+  };
+}
+
+function seed(harness: Harness, repo = "contoso/store"): OperationRecord {
+  const op = createOperation({
+    provider: "azure",
+    repo,
+    environment: "dev",
+    stages: buildStages({ includeIdentity: true })
+  }) as OperationRecord;
+  harness.records.set(op.operationId, op);
+  return op;
+}
+
+function retryableSetup(harness: Harness): OperationRecord {
+  const op = seed(harness);
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure"
+    }
+  };
+  recordAzureApp(op, { state: "created", appId: "app-1" });
+  finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+  return op;
+}
+
+function mergeHandoff(harness: Harness): OperationRecord {
+  const op = seed(harness);
+  recordAzureApp(op, { state: "created", appId: "app-1" });
+  recordServicePrincipal(op, { state: "created", appId: "app-1" });
+  recordCommittedWorkflowFile(op, {
+    path: ".github/workflows/radius-verify-credentials.yml",
+    mode: "pull_request",
+    branch: "radius-setup"
+  });
+  recordCommitState(op, {
+    mode: "pull_request",
+    branch: "radius-setup",
+    baseBranch: "main",
+    pullRequestUrl: "https://github.com/contoso/store/pull/7"
+  });
+  enterStage(op, STAGE_VERIFY);
+  op.verification = {
+    dispatchedAt: Date.now(),
+    workflow: "radius-verify-credentials.yml",
+    ref: "main",
+    environment: "dev",
+    runId: null,
+    runUrl: null
+  };
+  finish(op, "action_required", {
+    terminal: {
+      reason: "pr-merge-required",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    }
+  });
+  return op;
+}
+
+function post(
+  baseUrl: string,
+  path: string,
+  headers: Readonly<Record<string, string>> = browserHeaders(baseUrl)
+): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: "{}"
+  });
+}
+
+// The controls are declared `nonce-required`, so a real browser request carries
+// the same-origin proof and the instance nonce. Sending them here keeps the
+// suite on the production path rather than around it.
+function browserHeaders(baseUrl: string): Readonly<Record<string, string>> {
+  return {
+    Origin: new URL(baseUrl).origin,
+    "Sec-Fetch-Site": "same-origin",
+    "X-Radius-Mutation-Nonce": BROWSER_NONCE
+  };
+}
+
+describe("operation controls real-loopback HIT", () => {
+  it("accepts a stop over the socket and shows it on the status route", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/stop`
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = (await response.json()) as {
+      code: string;
+      statusUrl: string;
+      operation: { stop: { requested: boolean } };
+    };
+    expect(body.code).toBe("operation-stop-pending");
+    expect(body.operation.stop.requested).toBe(true);
+    expect(harness.persistCalls).toEqual(["persist"]);
+
+    // The status URL the response hands back reports the same pending stop.
+    const polled = await fetch(`${entry.baseUrl}${body.statusUrl}`);
+    expect(polled.status).toBe(200);
+    const polledBody = (await polled.json()) as {
+      operation: {
+        stop: { requested: boolean };
+        nextTransition: { code: string };
+      };
+    };
+    expect(polledBody.operation.stop.requested).toBe(true);
+    expect(polledBody.operation.nextTransition.code).toBe("stopping");
+  });
+
+  it("cancels an operation parked on a prompt and releases nothing else", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+    requireInput(op, {
+      code: "app-selection-required",
+      message: "Choose an identity."
+    });
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/stop`
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      code: string;
+      operation: { terminalState: string; stop: { boundary: string } };
+    };
+    expect(body.code).toBe("operation-stopped");
+    expect(body.operation.terminalState).toBe("cancelled");
+    expect(body.operation.stop.boundary).toBe("input_prompt");
+  });
+
+  it("answers 404 for an unknown operation on both control routes", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    for (const path of [
+      "/api/operations/op_missing/stop",
+      "/api/operations/op_missing/retry/setup"
+    ]) {
+      const response = await post(entry.baseUrl, path);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: "Unknown operation.",
+        code: "unknown-operation"
+      });
+    }
+  });
+
+  it("continues an interrupted setup and schedules it on the receiving instance", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-b");
+    const op = retryableSetup(harness);
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/setup`
+    );
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as {
+      attempt: number;
+      commandId: string;
+      operation: { state: string };
+    };
+    expect(body.attempt).toBe(2);
+    expect(body.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
+    expect(body.operation.state).toBe("running");
+    expect(harness.scheduled).toEqual([
+      { kind: "setup", instanceId: "panel-b" }
+    ]);
+  });
+
+  it("refuses a verification retry while the setup pull request is open", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = mergeHandoff(harness);
+    harness.merged.value = false;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/verification`
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "verification-retry-pull-request-open",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+    // Refusing neither reopens the record nor starts any work.
+    expect(op.state).toBe("action_required");
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("repeats verification once the pull request has merged", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = mergeHandoff(harness);
+    harness.merged.value = true;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/verification`
+    );
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as {
+      commandId: string;
+      operation: { currentStage: string };
+    };
+    expect(body.commandId).toBe(
+      `${op.operationId}:retry_verification:1:verification`
+    );
+    expect(body.operation.currentStage).toBe(STAGE_VERIFY);
+    expect(harness.scheduled).toEqual([
+      {
+        kind: "verification",
+        instanceId: "panel-a",
+        commandId: body.commandId
+      }
+    ]);
+  });
+
+  it("retries cleanup for a proven-owned unresolved resource", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/cleanup`
+    );
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { commandId: string };
+    expect(body.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
+    expect(harness.scheduled).toEqual([
+      { kind: "cleanup", instanceId: "panel-a", commandId: body.commandId }
+    ]);
+  });
+
+  it("refuses a retry while another operation owns the repository", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = retryableSetup(harness);
+    harness.lock.conflict = { operationId: "op_live" };
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/setup`
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Another setup is already running for contoso/store.",
+      code: "operation-in-progress",
+      operationId: "op_live"
+    });
+    expect(op.state).toBe("failed_partial");
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("answers 500 and starts nothing when the retry cannot be saved", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = retryableSetup(harness);
+    harness.persistError.value = new Error("disk gone");
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/setup`
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      code: "operation-retry-persist-failed"
+    });
+    expect(op.state).toBe("failed_partial");
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("closes a reopened operation when no runner accepts it", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = retryableSetup(harness);
+    harness.schedulerAccepts.value = false;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/setup`
+    );
+    const body = (await response.json()) as { statusUrl: string };
+    expect(response.status).toBe(202);
+
+    // The failure is observable through the status route the client polls.
+    const polled = await fetch(`${entry.baseUrl}${body.statusUrl}`);
+    const polledBody = (await polled.json()) as {
+      operation: { terminalState: string; failure: { code: string } };
+    };
+    expect(polledBody.operation.terminalState).toBe("failed");
+    expect(polledBody.operation.failure.code).toBe(
+      "operation-scheduling-failed"
+    );
+  });
+
+  it("leaves the family's other sub-routes to their own handlers", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+
+    // Abandon and resume sit one segment away from stop and retry. They must
+    // reach the operations-status handlers — which refuse this record on their
+    // own terms — rather than being claimed by a control template.
+    const abandon = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/abandon`
+    );
+    expect(abandon.status).toBe(409);
+    expect(((await abandon.json()) as { code: string }).code).toBe(
+      "operation-abandon-mismatch"
+    );
+
+    const resume = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/resume/app-selection-required`
+    );
+    expect(resume.status).toBe(409);
+    expect(((await resume.json()) as { code: string }).code).toBe(
+      "operation-resume-mismatch"
+    );
+
+    // A path this family never declared still falls through to the unmatched
+    // handler instead of being swallowed by a neighbouring template.
+    const unknown = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/pause`
+    );
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toBe("unmatched");
+  });
+
+  it("refuses a control request that cannot prove it came from the panel", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+
+    for (const path of [
+      `/api/operations/${op.operationId}/stop`,
+      `/api/operations/${op.operationId}/retry/setup`
+    ]) {
+      const response = await post(entry.baseUrl, path, {
+        Origin: new URL(entry.baseUrl).origin,
+        "Sec-Fetch-Site": "same-origin"
+      });
+
+      expect(response.status).toBe(403);
+      expect(((await response.json()) as { code: string }).code).toBe(
+        "browser-mutation-validation-failed"
+      );
+    }
+    // The refusal lands before the handler, so nothing was recorded on the
+    // operation and no runner was asked to pick it up.
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
+  });
+});

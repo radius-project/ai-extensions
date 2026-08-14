@@ -9,6 +9,7 @@ import {
   planCredentialVerification
 } from "../../../src/verification-plan.js";
 import {
+  guardStopBoundary,
   persistBestEffort,
   persistMutationCheckpoint,
   resolveGitHubEnvironmentCreateState
@@ -65,6 +66,7 @@ interface Script {
 interface Harness {
   baseUrl: string;
   journal: string[];
+  setJournalHook(hook: ((entry: string) => void) | null): void;
   ghCalls: string[];
   steps: string[];
   operation: CreateEnvironmentOperation;
@@ -116,6 +118,18 @@ const DEFAULT_GH_RULES: GhRule[] = [
 
 function start(script: Script = {}): Harness {
   const journal: string[] = [];
+  // Lets a test act at an exact point in the run — recording a stop while the
+  // request is mid-flight, which is the only way that race happens for real.
+  let journalHook: ((entry: string) => void) | null = null;
+  const appendJournal = journal.push.bind(journal);
+  // Defined non-enumerably so the journal still compares as a plain array.
+  Object.defineProperty(journal, "push", {
+    value: (...entries: string[]) => {
+      const length = appendJournal(...entries);
+      for (const entry of entries) journalHook?.(entry);
+      return length;
+    }
+  });
   const ghCalls: string[] = [];
   const steps: string[] = [];
   const state: CanvasState = {};
@@ -125,14 +139,18 @@ function start(script: Script = {}): Harness {
   const failures: Array<Record<string, unknown>> = [];
   let persistCalls = 0;
 
+  // `stages` and `steps` are present because the real stop guard closes the
+  // record through the production `finish`, which walks both.
   const operation: CreateEnvironmentOperation = {
     operationId: "op-http",
     repo: "octo/app",
     environment: "dev",
     provider: "azure",
     currentStage: STAGE_CONFIGURE,
-    inputRequired: null
-  };
+    inputRequired: null,
+    stages: [{ id: STAGE_CONFIGURE, label: "Configure", state: "running" }],
+    steps: []
+  } as CreateEnvironmentOperation;
 
   const rules = [...(script.gh ?? []), ...DEFAULT_GH_RULES];
 
@@ -176,6 +194,7 @@ function start(script: Script = {}): Harness {
     isValidRepoSlug,
     getOperation: () => null,
     isStale: () => false,
+    isTerminalState: (state) => state === "failed" || state === "cancelled",
     createOperation: () => operation,
     buildStages: () => [],
     startOperation: () => ({ ok: true }),
@@ -250,6 +269,13 @@ function start(script: Script = {}): Harness {
     persistBestEffort: (input) => {
       journal.push("persistBestEffort");
       return persistBestEffort(input);
+    },
+    // Also the real helper: whether a stop is honored, and what the record and
+    // the response look like when it is, is production behavior this suite
+    // exercises over the socket rather than restates.
+    guardStopBoundary: (input) => {
+      journal.push(`stopBoundary:${input.boundary}`);
+      return guardStopBoundary(input);
     },
     runAzCommand: () => {
       throw new Error("unscripted az call");
@@ -405,6 +431,9 @@ function start(script: Script = {}): Harness {
   return {
     baseUrl: "",
     journal,
+    setJournalHook: (hook) => {
+      journalHook = hook;
+    },
     ghCalls,
     steps,
     operation,
@@ -1127,5 +1156,116 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(
       harness.journal.filter((entry) => entry === "checkpoint")
     ).toHaveLength(5);
+  });
+
+  it("passes every safe boundary in order when no stop is recorded", async () => {
+    const harness = start();
+
+    await post({ repo: "octo/app" });
+
+    expect(
+      harness.journal.filter((entry) => entry.startsWith("stopBoundary:"))
+    ).toEqual([
+      "stopBoundary:before-ghcr-bootstrap",
+      "stopBoundary:after-github-environment",
+      "stopBoundary:before-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:before-verification-dispatch",
+      "stopBoundary:after-verification-dispatch"
+    ]);
+  });
+
+  it("honors a recorded stop at the first boundary and touches GitHub no further", async () => {
+    const harness = start();
+    // Recorded while the request was in flight, exactly as the stop route
+    // records it: the executor observes it at its next safe boundary.
+    harness.operation.stopRequested = true;
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "before-ghcr-bootstrap",
+      operationId: "op-http"
+    });
+    expect(body.operation).toMatchObject({ terminalState: "cancelled" });
+    // Nothing after the boundary ran: no GHCR bootstrap, no environment PUT,
+    // no workflow commit, no verify dispatch.
+    expect(harness.ghCalls).toEqual([]);
+    expect(harness.journal).not.toContain("preflightGhcrPackageWriteAccess");
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  // The remaining boundaries, each driven by recording the stop just as the run
+  // reaches it. The property under test is the same every time: the write that
+  // was already running completes, and nothing after the boundary starts.
+  it.each([
+    { boundary: "before-workflow-commit", committed: false, dispatched: false },
+    {
+      boundary: "before-verification-dispatch",
+      committed: true,
+      dispatched: false
+    },
+    {
+      boundary: "after-verification-dispatch",
+      committed: true,
+      dispatched: true
+    }
+  ])(
+    "honors a stop that arrives as the run reaches the $boundary boundary",
+    async ({ boundary, committed, dispatched }) => {
+      const harness = start();
+      harness.setJournalHook((entry) => {
+        if (entry === `stopBoundary:${boundary}`)
+          harness.operation.stopRequested = true;
+      });
+
+      const response = await post({ repo: "octo/app" });
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({
+        cancelled: true,
+        code: "operation-stopped",
+        boundary
+      });
+      expect(harness.committedFiles.length > 0).toBe(committed);
+      expect(harness.journal.includes("dispatchVerifyWorkflow")).toBe(
+        dispatched
+      );
+      // A stopped run never reports success.
+      expect(body.success).toBeUndefined();
+    }
+  );
+
+  it("stops after the environment exists rather than abandoning it mid-write", async () => {
+    const harness = start();
+    // The stop lands while the GitHub environment is being created, so the
+    // first boundary after that write is where it must be honored.
+    harness.setJournalHook((entry) => {
+      if (entry === "bootstrapGHCRStatePackage") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-github-environment"
+    });
+    // The environment write finished and was recorded before the stop.
+    expect(harness.ghCalls).toContain(
+      "api --method PUT /repos/octo/app/environments/dev"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(harness.committedFiles).toEqual([]);
   });
 });

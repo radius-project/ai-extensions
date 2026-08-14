@@ -129,6 +129,36 @@ describe("environmentsPaneMarkup", () => {
     );
   });
 
+  it("renders an accessible operation command region with stable ids", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain('id="env-progress-commands"');
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="Environment setup controls"');
+    expect(html).toContain('id="env-progress-command-buttons"');
+    expect(html).toContain(
+      '<div id="env-progress-command-status" class="env-progress__command-status" role="status" aria-live="polite"></div>'
+    );
+    expect(html).toContain(
+      '<div id="env-progress-command-error" class="env-progress__command-error" role="alert"></div>'
+    );
+  });
+
+  it("renders the five partial-state groups as separate named blocks", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    for (const id of [
+      "env-progress-state-created",
+      "env-progress-state-retained",
+      "env-progress-state-reused",
+      "env-progress-state-cleaned",
+      "env-progress-state-manual"
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+      expect(html).toContain(`id="${id}-block"`);
+    }
+    expect(html).toContain("Reused — Radius does not own these");
+    expect(html).toContain("Needs an action from you");
+  });
+
   it("splits creation into a credentials step followed by an environment step", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('id="env-wizard-steps"');

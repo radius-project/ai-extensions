@@ -64,11 +64,21 @@ export interface CreateEnvironmentOperation {
   environment?: string;
   provider?: string;
   currentStage?: string;
+  // The terminal verdict, or the running/input state. Read by the continuation
+  // guard so a closed record cannot be adopted, and by the stop boundary.
+  state?: unknown;
+  // Walked by the operation model when a stop or a failure closes the record.
+  stages?: unknown;
+  steps?: unknown;
   // The real record stores a prompt object here (or `null`), not a flag; the
   // refusal only tests it for truthiness, so `unknown` keeps this declaration
   // from being narrower than what `operations.ts` actually writes.
   inputRequired?: unknown;
   verification?: unknown;
+  // Set by the stop route and read by `guardStopBoundary` at each safe
+  // checkpoint between remote mutations. Optional because a fixture that never
+  // exercises cancellation has no reason to set it.
+  stopRequested?: boolean;
 }
 
 export interface OperationStartConflict {

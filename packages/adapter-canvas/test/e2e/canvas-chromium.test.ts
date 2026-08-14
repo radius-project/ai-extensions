@@ -568,12 +568,15 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );
     // Resuming shows the durable server outcome, never a browser-cancellation
-    // story, even though the page that started it was torn down twice.
-    await expect(
-      page.getByRole("link", {
-        name: 'Creating environment "fixture-environment" failed.'
-      })
-    ).toBeVisible();
+    // story, even though the page that started it was torn down twice. The
+    // resumed panel is what narrates it: the top-nav chip defers to the inline
+    // panel whenever the panel is on screen, so asserting the chip here would
+    // be asserting that the panel failed to come back.
+    const resumedPanel = page.locator("#env-progress-panel");
+    await expect(resumedPanel).toBeVisible();
+    await expect(resumedPanel).toContainText(
+      'Creating environment "fixture-environment" failed.'
+    );
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({

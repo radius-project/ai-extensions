@@ -76,8 +76,15 @@ function optimisticOperation(
       retry: { startsCleanly: false, guidance: "" },
       removed: [],
       retained: [],
-      warnings: []
+      warnings: [],
+      created: [],
+      retainedArtifacts: [],
+      reused: [],
+      cleaned: [],
+      manualActionRequired: []
     },
+    actions: [],
+    nextTransition: null,
     journey: null,
     verification: null,
     inputRequired: null,

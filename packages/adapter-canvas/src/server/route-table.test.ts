@@ -12,6 +12,7 @@ import {
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./routes/deployments.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
+import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
@@ -79,6 +80,39 @@ const productionHandlers = {
       inputRequiredState: "input_required"
     }
   ),
+  // Construction-only, like the create-environment routes below: this suite
+  // asserts table shape and ownership, and the control behavior is covered by
+  // routes/operations-control.test.ts and the HTTP integration suite.
+  ...createOperationsControlRoutes({
+    get: () => null,
+    acquireForRetry: () => ({ ok: true }),
+    persistOperations: () => Promise.resolve(),
+    toClientView: () => null,
+    applyStopRequest: () => ({ outcome: "pending", duplicate: false }),
+    announceOperationTerminal: () => false,
+    snapshotRetryState: () => null,
+    rollbackRetryAttempt: () => {},
+    beginRetryAttempt: () => 1,
+    acceptCommand: () => ({
+      ok: true,
+      duplicate: false,
+      command: { commandId: "cmd" }
+    }),
+    setCommandState: () => null,
+    canRetrySetup: () => ({ ok: false, code: "" }),
+    canRetryVerification: () => ({ ok: false, code: "" }),
+    canRetryCleanup: () => ({ ok: false, code: "" }),
+    applySetupResumePoint: () => {},
+    setStageState: () => {},
+    enterStage: () => {},
+    finish: () => {},
+    stageVerify: "verify",
+    isPullRequestMerged: () => Promise.resolve(false),
+    scheduleSetupContinuation: () => true,
+    scheduleVerificationRetry: () => true,
+    scheduleCleanupRetry: () => true,
+    errorMessage: (error) => String(error)
+  }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
     readInstanceState: () => undefined,
@@ -311,6 +345,8 @@ const productionHandlers = {
       Promise.resolve({ status: 500, body: { error: "", code: "" } }),
     persistMutationCheckpoint: () => Promise.resolve(true),
     persistBestEffort: () => Promise.resolve(true),
+    isTerminalState: () => false,
+    guardStopBoundary: () => Promise.resolve(true),
     runAzCommand: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     preflightRepoAdmin: () => Promise.resolve(""),
     preflightGhcrPackageWriteAccess: () =>
@@ -386,7 +422,9 @@ describe("server route ownership boundary", () => {
       "POST /api/github-account",
       "POST /api/operations",
       "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon"
+      "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/stop",
+      "POST /api/operations/:operationId/retry/:retryKind"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });

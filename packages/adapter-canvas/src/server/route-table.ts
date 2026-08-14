@@ -211,6 +211,24 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "template",
     "none",
     "operations-status"
+  ),
+  // Cooperative controls in the same family: a durable stop request, and the
+  // three retries. Both carry the operation id mid-path, so they are template
+  // routes like the two above, and both stay method-disjoint from the family's
+  // `GET /api/operations/` prefix read.
+  declare(
+    "POST",
+    "/api/operations/:operationId/stop",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/retry/:retryKind",
+    "template",
+    "json",
+    "operations-status"
   )
 ];
 
@@ -268,22 +286,37 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
   // covers its path on an overlapping method, so reject the ordering at
   // construction instead of ranking exact over prefix at dispatch time.
   const precedingPrefixes: ServerRoute[] = [];
+  // Templates shadow by shape rather than by prefix: they match a fixed segment
+  // count, so only a later concrete path with the same shape can disappear
+  // behind one.
+  const precedingTemplates: ServerRoute[] = [];
   for (const route of routes) {
     const key = routeKey(route);
     if (seen.has(key)) throw new Error(`Duplicate server route: ${key}`);
     seen.add(key);
-    const shadow = precedingPrefixes.find(
-      (prefix) =>
-        methodsOverlap(prefix.method, route.method) &&
-        route.path.startsWith(prefix.path)
-    );
+    const shadow =
+      precedingPrefixes.find(
+        (prefix) =>
+          methodsOverlap(prefix.method, route.method) &&
+          route.path.startsWith(prefix.path)
+      ) ||
+      (route.match === "exact" ?
+        precedingTemplates.find(
+          (template) =>
+            methodsOverlap(template.method, route.method) &&
+            templatePathParameters(template.path, route.path) !== undefined
+        )
+      : undefined);
     if (shadow) {
       throw new Error(
         `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
-    if (route.match === "template") compileRouteTemplate(route.path);
+    if (route.match === "template") {
+      compileRouteTemplate(route.path);
+      precedingTemplates.push(route);
+    }
     if (route.method === "POST" && route.mutationPolicy === "none") {
       throw new Error(`POST server route has no mutation policy: ${key}`);
     }

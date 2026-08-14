@@ -10,6 +10,8 @@ import {
   azureCliAssistDisplayPrompt,
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
+  cleanupGitHubEnvironmentArtifact,
+  guardStopBoundary,
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
@@ -47,12 +49,16 @@ import {
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
+  finish,
   recordAzureApp,
   recordCommittedWorkflowFile,
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
-  recordServicePrincipal
+  recordServicePrincipal,
+  requestStop,
+  toClientView,
+  unresolvedCleanupTargets
 } from "./operations.js";
 import type { CanvasState } from "./shared.js";
 import type {
@@ -464,26 +470,89 @@ describe("cleanupAzureSetupArtifacts", () => {
     await cleanupAzureSetupArtifacts(op, {
       runAz: async () => ({ code: 0, stdout: "", stderr: "" })
     });
+    // Proof of removal moves ownership: both artifacts are recorded as gone, so
+    // a repeat attempt has nothing left it may act on and issues no `az` call.
+    expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
+    expect(op.setupArtifacts.azureApp.state).toBe("deleted");
+    const repeatedCalls: string[][] = [];
     const second = await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({
-        code: 1,
-        stdout: "",
-        stderr:
-          "Request_ResourceNotFound: Resource 'app-1' does not exist or one of its queried reference-property objects are not present."
-      })
+      runAz: async (args) => {
+        repeatedCalls.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
     });
 
-    expect(second.state).toBe("succeeded");
+    expect(repeatedCalls).toEqual([]);
+    expect(second.state).toBe("not_needed");
+    expect(second.results).toEqual([]);
     expect(op.setupArtifacts.cleanup).toMatchObject({
-      state: "succeeded",
+      state: "not_needed",
       attempts: 2
     });
+    // The first attempt's proof survives the second attempt untouched.
     expect(
-      op.setupArtifacts.cleanup.results.filter((r: any) => r.attempt === 2)
+      op.setupArtifacts.cleanup.results.filter((r: any) => r.attempt === 1)
     ).toMatchObject([
-      { artifactType: "service_principal", outcome: "not_found" },
-      { artifactType: "azure_app", outcome: "not_found" }
+      { artifactType: "service_principal", outcome: "deleted" },
+      { artifactType: "azure_app", outcome: "deleted" }
     ]);
+  });
+
+  it("retries only the named unresolved targets on a cleanup retry", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+
+    // First attempt: the Service Principal goes, the App Registration does not.
+    await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) =>
+        args.includes("app") && args.includes("delete") ?
+          { code: 1, stdout: "", stderr: "Azure CLI returned 429." }
+        : { code: 0, stdout: "", stderr: "" }
+    });
+    expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
+    expect(op.setupArtifacts.azureApp.state).toBe("created");
+
+    const retriedCalls: string[][] = [];
+    const retry = await cleanupAzureSetupArtifacts(op, {
+      only: new Set(["azure_app#app-1"]),
+      runAz: async (args) => {
+        retriedCalls.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    expect(retriedCalls).toEqual([["ad", "app", "delete", "--id", "app-1"]]);
+    expect(retry.state).toBe("succeeded");
+    expect([...retry.attemptedKeys]).toEqual(["azure_app#app-1"]);
+    expect(op.setupArtifacts.azureApp.state).toBe("deleted");
+    // The earlier attempt stays as history; only the latest attempt's results
+    // describe what is unresolved now.
+    expect(op.setupArtifacts.cleanup.results).toMatchObject([
+      { attempt: 1, artifactType: "service_principal", outcome: "deleted" },
+      { attempt: 1, artifactType: "azure_app", outcome: "warning" },
+      { attempt: 2, artifactType: "azure_app", outcome: "deleted" }
+    ]);
+    expect(unresolvedCleanupTargets(op)).toEqual([]);
+  });
+
+  it("touches nothing when a retry names no target the ledger still owns", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+
+    const calls: string[][] = [];
+    const result = await cleanupAzureSetupArtifacts(op, {
+      only: new Set(["azure_app#some-other-app"]),
+      runAz: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.state).toBe("not_needed");
+    expect([...result.attemptedKeys]).toEqual([]);
+    expect(op.setupArtifacts.azureApp.state).toBe("created");
   });
 
   it("records warnings and continues when a delete fails", async () => {
@@ -554,6 +623,259 @@ describe("cleanupAzureSetupArtifacts", () => {
       state: "succeeded_with_warnings",
       attempts: 1
     });
+  });
+});
+
+describe("cleanupGitHubEnvironmentArtifact", () => {
+  it("deletes an environment this attempt proved it created and records it as gone", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    const calls: string[][] = [];
+    const steps: string[] = [];
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async (args) => {
+        calls.push(args);
+      },
+      steps
+    });
+
+    expect(calls).toEqual([
+      ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"]
+    ]);
+    expect(result).toMatchObject({ attempted: true, warnings: [] });
+    expect(result.results).toMatchObject([
+      {
+        attempt: 1,
+        artifactType: "github_environment",
+        target: "octo/app:dev",
+        identity: "octo/app:dev",
+        outcome: "deleted"
+      }
+    ]);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+    expect(steps).toEqual(['✅ Deleted GitHub environment "dev"']);
+  });
+
+  it("leaves an unprovable environment in place and says so", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 2,
+      runDeleteEnvironment: async () => {
+        throw new Error("must not delete an environment it cannot claim");
+      }
+    });
+
+    expect(result.attempted).toBe(true);
+    expect(result.results).toMatchObject([
+      { attempt: 2, outcome: "skipped", artifactType: "github_environment" }
+    ]);
+    expect(result.warnings[0]).toContain(
+      "cannot prove this request created it"
+    );
+    // Ownership never moves without proof of removal.
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
+  it("keeps claiming the environment when the delete fails", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        throw new Error("GitHub API request failed.");
+      }
+    });
+
+    expect(result.results).toMatchObject([
+      { outcome: "warning", detail: "GitHub API request failed." }
+    ]);
+    expect(result.warnings).toEqual([
+      'Failed to delete GitHub environment "dev": GitHub API request failed.'
+    ]);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+  });
+
+  it("reports the missing delete helper rather than claiming a rollback", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: null
+    });
+
+    expect(result.results).toMatchObject([{ outcome: "warning" }]);
+    expect(result.warnings[0]).toContain("Missing the GitHub delete helper");
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+  });
+
+  it("does nothing for an environment it never created", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "octo/app",
+      name: "dev"
+    });
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        throw new Error("must not delete a reused environment");
+      }
+    });
+
+    expect(result).toEqual({ results: [], warnings: [], attempted: false });
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("reused");
+  });
+
+  it("does nothing for a record with no artifact ledger", async () => {
+    const result = await cleanupGitHubEnvironmentArtifact(null, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        throw new Error("must not run");
+      }
+    });
+
+    expect(result).toEqual({ results: [], warnings: [], attempted: false });
+  });
+});
+
+describe("guardStopBoundary", () => {
+  function stopHarness() {
+    const responses: Array<{ status: number; body: Record<string, unknown> }> =
+      [];
+    const diagnostics: Array<{ code: string; message: string }> = [];
+    return {
+      responses,
+      diagnostics,
+      respond: (status: number, body: Record<string, unknown>) => {
+        responses.push({ status, body });
+      },
+      report: (diagnostic: { code: string; message: string }) => {
+        diagnostics.push(diagnostic);
+      }
+    };
+  }
+
+  it("lets an operation with no recorded stop continue and writes nothing", async () => {
+    const op = newAzureOp();
+    const harness = stopHarness();
+    let persisted = 0;
+
+    const proceed = await guardStopBoundary({
+      operation: op,
+      boundary: "after-app-registration",
+      persist: async () => {
+        persisted += 1;
+      },
+      report: harness.report,
+      respond: harness.respond
+    });
+
+    expect(proceed).toBe(true);
+    expect(persisted).toBe(0);
+    expect(harness.responses).toEqual([]);
+    expect(op.state).toBe("running");
+  });
+
+  it("closes the operation at the named boundary and answers the caller once", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    requestStop(op);
+    const harness = stopHarness();
+
+    const proceed = await guardStopBoundary({
+      operation: op,
+      boundary: "after-app-registration",
+      persist: async () => {},
+      report: harness.report,
+      respond: harness.respond
+    });
+
+    expect(proceed).toBe(false);
+    expect(op.state).toBe("cancelled");
+    expect(op.control.stop.boundary).toBe("after-app-registration");
+    expect(harness.responses).toHaveLength(1);
+    const [answer] = harness.responses;
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "after-app-registration",
+      operationId: op.operationId
+    });
+    // The customer is told what the stopped attempt left behind.
+    expect(toClientView(op).cleanup.created).toMatchObject([
+      { kind: "azure_app" }
+    ]);
+  });
+
+  it("still answers when the durable write fails, and reports the write failure", async () => {
+    const op = newAzureOp();
+    requestStop(op);
+    const harness = stopHarness();
+
+    const proceed = await guardStopBoundary({
+      operation: op,
+      boundary: "before-workflow-commit",
+      persist: async () => {
+        throw new Error("disk gone");
+      },
+      report: harness.report,
+      respond: harness.respond
+    });
+
+    expect(proceed).toBe(false);
+    expect(op.state).toBe("cancelled");
+    expect(harness.diagnostics).toMatchObject([
+      { code: "operation-store-write-failed" }
+    ]);
+    expect(harness.responses[0].status).toBe(200);
+    // The announcement is withheld: an unsaved cancellation must not be
+    // reported as a finished setup.
+    expect(op.journey.notifiedAt).toBeNull();
+  });
+
+  it("lets a finished operation through rather than closing it twice", async () => {
+    const op = newAzureOp();
+    requestStop(op);
+    finish(op, "failed", { failure: { code: "setup-failed" } });
+    const harness = stopHarness();
+
+    const proceed = await guardStopBoundary({
+      operation: op,
+      boundary: "after-workflow-commit",
+      persist: async () => {
+        throw new Error("must not persist");
+      },
+      report: harness.report,
+      respond: harness.respond
+    });
+
+    expect(proceed).toBe(true);
+    expect(op.state).toBe("failed");
+    expect(harness.responses).toEqual([]);
   });
 });
 

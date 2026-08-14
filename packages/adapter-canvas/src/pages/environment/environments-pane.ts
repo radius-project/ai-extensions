@@ -85,6 +85,40 @@ export function environmentsPaneMarkup(
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
       </div>
     </div>
+    <!-- Partial-state inventory. Named groups rather than one merged list: a
+         customer cannot act on "some resources exist" and can act on "Radius
+         created this and kept it so a retry can reuse it". -->
+    <div id="env-progress-state" class="env-progress__failure" style="display:none;">
+      <div class="env-progress__failure-title">What exists right now</div>
+      <div id="env-progress-state-created-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Created by Radius and still present</div>
+        <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Retained for a retry</div>
+        <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Reused — Radius does not own these</div>
+        <ul id="env-progress-state-reused" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-state-cleaned-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Removed or already absent</div>
+        <ul id="env-progress-state-cleaned" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-progress-state-manual-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Needs an action from you</div>
+        <ul id="env-progress-state-manual" class="env-progress__failure-list"></ul>
+      </div>
+    </div>
+    <!-- Server-projected commands. The page renders whatever the operation
+         record says is allowed; it never re-derives eligibility itself. -->
+    <div id="env-progress-commands" class="env-progress__commands" role="group" aria-label="Environment setup controls" style="display:none;">
+      <div id="env-progress-command-buttons" class="env-progress__command-buttons"></div>
+      <div id="env-progress-command-note" class="env-progress__command-note"></div>
+      <div id="env-progress-command-status" class="env-progress__command-status" role="status" aria-live="polite"></div>
+      <div id="env-progress-command-error" class="env-progress__command-error" role="alert"></div>
+    </div>
     <details id="env-progress-details" class="env-progress__details">
       <summary>Show details</summary>
       <ol id="env-progress-steps" class="env-progress__steps"></ol>

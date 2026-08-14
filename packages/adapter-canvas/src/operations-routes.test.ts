@@ -886,19 +886,30 @@ describe("POST /api/operations/{id}/retry/*", () => {
     operations.clear();
   });
 
-  it("refuses verification retry while the setup pull request is still open", async () => {
+  // The merge-handoff refusal itself is covered deterministically in
+  // `test/integration/http/operations-control.test.ts`, where the pull-request
+  // merge proof is an injected double. Exercising it here would drive the
+  // composed production port, which asks GitHub about the pull request, and no
+  // pull-request test may reach the network. What this suite can prove without
+  // one is the half that reaches the panel: the record projects the retry the
+  // customer is offered, with the pull request it depends on.
+  it("offers the merge-handoff retry with the pull request it waits on", async () => {
     operations.clear();
-    setEnvironmentOperationTestRunner(async () => {});
     const op = seedMergeHandoff("contoso/store");
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/retry/verification`,
-      {}
-    );
-    expect(status).toBe(409);
-    expect(body.code).toBe("verification-retry-pull-request-open");
-    expect(body.pullRequestUrl).toBe("https://github.com/contoso/store/pull/7");
-    // Refusing must not reopen the record or start a deployment.
-    expect(op.state).toBe("action_required");
+    const { status, body } = await getJson(`/api/operations/${op.operationId}`);
+    expect(status).toBe(200);
+    expect(body.operation.terminalState).toBe("action_required");
+    expect(body.operation.actions).toEqual([
+      expect.objectContaining({
+        id: "retry-verification",
+        kind: "retry_verification",
+        method: "POST",
+        path: `/api/operations/${op.operationId}/retry/verification`,
+        classification: "workflow-installation-pending",
+        requiresMergedPullRequest: true,
+        pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      })
+    ]);
     operations.clear();
   });
 
