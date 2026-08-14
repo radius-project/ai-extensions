@@ -741,6 +741,31 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     expect(test.events).toContain("resume");
   });
 
+  it("adopts the scheduler's existing operation before input is required", async () => {
+    const existing: AzureAutoSetupOperation = {
+      operationId: "op-scheduled",
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      currentStage: "authorize_identity"
+    };
+    const test = orchestrationHarness({
+      operation: existing,
+      getOperation: () => existing
+    });
+    const response = await invoke(
+      JSON.stringify({
+        ...VALID_SETUP,
+        operationId: existing.operationId,
+        clientId: APP_ID
+      }),
+      test.dependencies
+    );
+
+    expect(response.status).toBe(200);
+    expect(test.events).not.toContain("resume");
+  });
+
   it.each([
     ["stale", { state: "running" }, true],
     ["repository", { repo: "octo/other" }, false],

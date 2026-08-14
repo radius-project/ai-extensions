@@ -22,7 +22,6 @@ import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupApplicationResult,
   AzureAutoSetupOperation,
-  AzureAutoSetupOperationPort,
   AzureAutoSetupWorkflow,
   RadiusAppProvenanceInput
 } from "./azure-auto-setup-types.js";
@@ -34,7 +33,7 @@ function errorMessage(error: unknown): string {
 async function persistReusedApplication(
   operation: AzureAutoSetupOperation,
   workflow: AzureAutoSetupWorkflow,
-  operations: AzureAutoSetupOperationPort
+  operations: AzureAutoSetupApplicationInput["dependencies"]["operations"]
 ): Promise<boolean> {
   try {
     await operations.persist();

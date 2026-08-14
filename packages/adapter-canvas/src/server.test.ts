@@ -7,7 +7,6 @@ import {
   beginDeployAttempt,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
-  buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
   azureCliAssistDisplayPrompt,
   azureCliAssistMessage,
@@ -23,16 +22,13 @@ import {
   endChildInput,
   ensureServicePrincipal,
   finalizeSetupFailure,
-  findFederatedCredentialNameCollision,
   graphDefinitionHash,
   isCrossSiteMutation,
   isCliCommandMissing,
   isCurrentSourceRefToken,
   isCurrentPlannedGraphRequest,
-  isReplicationLagError,
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
-  pickAksResourceGroup,
   preflightGhcrPackageWriteAccess,
   resetDeploymentViewState,
   resolveGitHubEnvironmentCreateState,
@@ -47,6 +43,12 @@ import {
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
+import {
+  buildRoleAssignmentArgs,
+  findFederatedCredentialNameCollision,
+  isReplicationLagError,
+  pickAksResourceGroup
+} from "./server/routes/azure-auto-setup-credentials.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
