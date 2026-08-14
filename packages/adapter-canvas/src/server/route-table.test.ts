@@ -100,5 +100,81 @@ describe("server route ownership boundary", () => {
         } as unknown as ServerRoute
       ])
     ).toThrow("Migrated server route has no handler: ANY /api/ping");
+
+    expect(() =>
+      assertRouteTable([
+        {
+          ...SERVER_ROUTE_TABLE[0],
+          migration: "legacy",
+          handler: () => undefined
+        } as unknown as ServerRoute
+      ])
+    ).toThrow("Legacy server route unexpectedly has a handler: ANY /api/ping");
+  });
+
+  it("fails when a prefix route makes a later route unreachable", () => {
+    const prefix = SERVER_ROUTE_TABLE.find(
+      (route) => route.path === "/api/operations/"
+    );
+    expect(prefix?.method).toBe("GET");
+
+    expect(() =>
+      assertRouteTable([
+        prefix as ServerRoute,
+        {
+          ...(prefix as ServerRoute),
+          path: "/api/operations/summary",
+          match: "exact"
+        } as ServerRoute
+      ])
+    ).toThrow(
+      "Server route GET /api/operations/summary is unreachable behind earlier prefix route GET /api/operations/"
+    );
+
+    expect(() =>
+      assertRouteTable([
+        prefix as ServerRoute,
+        {
+          ...(prefix as ServerRoute),
+          path: "/api/operations/logs/",
+          method: "ANY"
+        } as ServerRoute
+      ])
+    ).toThrow(
+      "Server route ANY /api/operations/logs/ is unreachable behind earlier prefix route GET /api/operations/"
+    );
+  });
+
+  it("allows routes an earlier prefix route cannot claim", () => {
+    const prefix = SERVER_ROUTE_TABLE.find(
+      (route) => route.path === "/api/operations/"
+    ) as ServerRoute;
+
+    // Disjoint method: the prefix cannot claim a POST sub-route.
+    expect(() =>
+      assertRouteTable([
+        prefix,
+        {
+          ...prefix,
+          path: "/api/operations/abandon",
+          match: "exact",
+          method: "POST"
+        } as ServerRoute
+      ])
+    ).not.toThrow();
+
+    // Outside the prefix, and the exact sibling that legitimately precedes it.
+    expect(() =>
+      assertRouteTable([
+        prefix,
+        { ...prefix, path: "/api/operation", match: "exact" } as ServerRoute
+      ])
+    ).not.toThrow();
+    expect(() =>
+      assertRouteTable([
+        { ...prefix, path: "/api/operations", match: "exact" } as ServerRoute,
+        prefix
+      ])
+    ).not.toThrow();
   });
 });

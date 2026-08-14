@@ -173,12 +173,32 @@ export function matchRoute(
   );
 }
 
+function methodsOverlap(a: RouteMethod, b: RouteMethod): boolean {
+  return a === "ANY" || b === "ANY" || a === b;
+}
+
 export function assertRouteTable(routes: readonly ServerRoute[]): void {
   const seen = new Set<string>();
+  // `matchRoute` takes the first declaration that matches, mirroring the legacy
+  // if-chain. That makes a route unreachable when an earlier prefix route
+  // covers its path on an overlapping method, so reject the ordering at
+  // construction instead of ranking exact over prefix at dispatch time.
+  const precedingPrefixes: ServerRoute[] = [];
   for (const route of routes) {
     const key = routeKey(route);
     if (seen.has(key)) throw new Error(`Duplicate server route: ${key}`);
     seen.add(key);
+    const shadow = precedingPrefixes.find(
+      (prefix) =>
+        methodsOverlap(prefix.method, route.method) &&
+        route.path.startsWith(prefix.path)
+    );
+    if (shadow) {
+      throw new Error(
+        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
+      );
+    }
+    if (route.match === "prefix") precedingPrefixes.push(route);
     if (!route.owner) throw new Error(`Unowned server route: ${key}`);
     if (route.migration === "migrated" && !route.handler) {
       throw new Error(`Migrated server route has no handler: ${key}`);
