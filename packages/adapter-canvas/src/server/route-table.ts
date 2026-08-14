@@ -186,6 +186,7 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/delete-environment",
   "GET /api/list-environments",
   "GET /api/verify-status",
+  "POST /api/create-environment",
   "POST /api/discover"
 ];
 
