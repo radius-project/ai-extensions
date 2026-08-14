@@ -188,7 +188,8 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/verify-status",
   "POST /api/load-graph",
   "POST /api/plan-graph",
-  "POST /api/diff-branches"
+  "POST /api/diff-branches",
+  "POST /api/create-environment"
 ];
 
 export function routeKey(
