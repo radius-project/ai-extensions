@@ -1498,34 +1498,47 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  const azureStart = SERVER_SRC.indexOf('pathname === "/api/azure-auto-setup"');
-  const azureEnd = SERVER_SRC.indexOf(
+  // Every marker below resolves through this helper so a marker that a future
+  // slice deletes fails LOUDLY at collection time, naming itself, instead of
+  // returning -1. `indexOf` returning -1 does not throw: `slice(-1, end)` reads
+  // as `length - 1`, silently yielding a wrong (often empty or 3x-large) region
+  // that makes some assertions pass vacuously while one fails uninformatively.
+  // If you removed a route this names, re-point the marker at whatever legacy
+  // arm now correctly bounds the region rather than patching the assertions.
+  function markerIndex(marker: string, from = 0): number {
+    const index = SERVER_SRC.indexOf(marker, from);
+    if (index < 0) {
+      throw new Error(
+        `Boundary marker not found in server.ts: ${JSON.stringify(marker)}. ` +
+          "A route slice deleted it; re-point this marker at the legacy arm " +
+          "that now bounds the region."
+      );
+    }
+    return index;
+  }
+
+  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
+  const azureEnd = markerIndex(
     'pathname === "/api/list-azure-app-registrations"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
-  const createStart = SERVER_SRC.indexOf(
-    'pathname === "/api/create-environment"'
-  );
-  const operationStart = SERVER_SRC.indexOf(
-    'pathname === "/api/operations" && req.method === "POST"'
-  );
-  const createEnd = SERVER_SRC.indexOf(
+  const createStart = markerIndex('pathname === "/api/create-environment"');
+  const createEnd = markerIndex(
     'pathname === "/api/load-graph-stream"',
     createStart + 'pathname === "/api/create-environment"'.length
   );
-  const deployStart = SERVER_SRC.indexOf('pathname === "/api/deploy"');
+  const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
 
-  it("registers and accepts a server-owned operation before scheduling setup", () => {
-    const route = SERVER_SRC.slice(operationStart, azureStart);
-    expect(operationStart).toBeGreaterThan(-1);
-    expect(route).toContain("operations.start(op)");
-    expect(route).toContain("res.writeHead(202)");
-    expect(route).toContain("scheduleServerOwnedTask");
-    expect(route.indexOf("res.end(")).toBeLessThan(
-      route.indexOf("scheduleServerOwnedTask")
+  it("no longer answers POST /api/operations from the legacy chain", () => {
+    // The registration/scheduling arm moved to the operations-status route
+    // module (its own unit and loopback tests cover the 202-then-schedule
+    // ordering). The legacy `if` for it must be gone entirely, and its old
+    // `operationStart` marker with it — hence no marker slice here.
+    expect(SERVER_SRC).not.toContain(
+      'pathname === "/api/operations" && req.method === "POST"'
     );
   });
 

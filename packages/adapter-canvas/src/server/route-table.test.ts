@@ -40,12 +40,30 @@ const productionHandlers = {
     readInstanceState: () => undefined,
     toSafeRepoRelPath: (input) => String(input)
   }),
-  ...createOperationsStatusRoutes({
-    latest: () => null,
-    latestAny: () => null,
-    get: () => null,
-    toClientView: () => null
-  }),
+  ...createOperationsStatusRoutes(
+    {
+      latest: () => null,
+      latestAny: () => null,
+      get: () => null,
+      toClientView: () => null
+    },
+    {
+      isValidRepoSlug: () => false,
+      isResourceGroupName: () => false,
+      isAksClusterName: () => false,
+      isUuid: () => false,
+      buildStages: () => [],
+      createOperation: () => ({ operationId: "", currentStage: null }),
+      startOperation: () => ({
+        ok: true,
+        operation: { operationId: "", currentStage: null }
+      }),
+      persistOperations: () => Promise.resolve(),
+      finish: () => {},
+      scheduleEnvironmentOperation: () => {},
+      errorMessage: (error) => String(error)
+    }
+  ),
   ...createRepositoriesRoutes({
     cliExec: () => {},
     readInstanceState: () => undefined,
@@ -108,11 +126,11 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  // operations-status is deliberately split: main added POST /api/operations
-  // after the GETs migrated, so the family owns two migrated routes and one
-  // that is still on the legacy fallback. Naming the split here keeps the
-  // family from reading as fully migrated in the ledger.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families and the operations-status GETs and leaves 22 routes on the legacy fallback", () => {
+  // operations-status is now fully migrated: main added POST /api/operations
+  // after the GETs, and this slice moved it onto the route table too, so the
+  // family owns all three of its routes. The explicit membership assertion below
+  // keeps a later slice from mistaking that completeness for a route it can drop.
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, and operations-status families and leaves 21 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -129,15 +147,17 @@ describe("server route ownership boundary", () => {
       "POST /api/verify-aws-login",
       "GET /api/user-repos",
       "POST /api/repo-branches",
-      "POST /api/discover-branches"
+      "POST /api/discover-branches",
+      "POST /api/operations"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(22);
-    // The split family, pinned explicitly so a later slice cannot quietly
-    // assume operations-status is done.
-    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(21);
+    // The now-completed family, pinned explicitly so a later slice cannot
+    // quietly re-legacy POST /api/operations.
+    expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)
@@ -160,13 +180,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 22 of 38
+    // Cross-checked against the inventory, and independently pinned: 21 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(22);
+    expect(residualLegacyCount).toBe(21);
 
     for (const route of table) {
       const matcher =
@@ -234,13 +254,15 @@ describe("server route ownership boundary", () => {
         (route) => routeKey(route) === "GET /api/operations/"
       )
     );
-    // POST /api/operations is declared but still legacy, so it must resolve to
-    // its own declaration rather than being swallowed by the GET rule, and it
-    // must carry no handler so it keeps falling through to the legacy chain.
+    // POST /api/operations is now migrated, so it must resolve to its own
+    // declaration rather than being swallowed by the GET rule, carry a handler,
+    // and land on a handler distinct from the two GET routes.
     const created = matchRoute(table, "POST", "/api/operations");
     expect(routeKey(created!)).toBe("POST /api/operations");
-    expect(created?.migration).toBe("legacy");
-    expect(created?.handler).toBeNull();
+    expect(created?.migration).toBe("migrated");
+    expect(created?.handler).not.toBeNull();
+    expect(created?.handler).not.toBe(latest?.handler);
+    expect(created?.handler).not.toBe(byId?.handler);
     // A method with no declaration at all still falls through.
     expect(matchRoute(table, "DELETE", "/api/operations")).toBeUndefined();
   });

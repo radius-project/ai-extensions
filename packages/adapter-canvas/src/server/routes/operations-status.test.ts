@@ -4,8 +4,11 @@ import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsStatusRoutes,
+  handleCreateOperation,
   handleLatestOperation,
   handleOperationById,
+  type CreateOperationDependencies,
+  type OperationRecord,
   type OperationsStatusDependencies
 } from "./operations-status.js";
 import { toClientView } from "../../operations.js";
@@ -82,6 +85,135 @@ type Handler = (
   deps: OperationsStatusDependencies
 ) => void;
 
+// POST request harness. The body is streamed exactly as Node delivers it so the
+// handler's own `for await` read (via `context.readTextBody`) is exercised, and
+// `instanceId` is threaded through so the scheduling seam receives it.
+function postRequest(url: string, body: string): IncomingMessage {
+  return Object.assign(Readable.from([body]), {
+    url,
+    method: "POST",
+    headers: {}
+  }) as unknown as IncomingMessage;
+}
+
+function postContext(
+  url: string,
+  body: string,
+  response: ServerResponse<IncomingMessage>,
+  instanceId = "panel-a"
+): ReturnType<typeof createRequestContext> {
+  return createRequestContext(
+    postRequest(url, body),
+    response,
+    instanceId,
+    new Map<string, CanvasServerEntry>()
+  );
+}
+
+// A minimal operation record the create fakes hand back; individual tests widen
+// it via `createOperation` overrides when they need to inspect what the handler
+// wrote onto it.
+function newOperationRecord(
+  overrides: Partial<OperationRecord> = {}
+): OperationRecord {
+  return { operationId: "op-new", currentStage: "authorize", ...overrides };
+}
+
+// Every create seam throws unless a test stubs it, so an accidental extra call
+// or a widened dependency surface fails loudly rather than passing vacuously.
+function createDependencies(
+  overrides: Partial<CreateOperationDependencies> = {}
+): CreateOperationDependencies {
+  return {
+    isValidRepoSlug: () => {
+      throw new Error("isValidRepoSlug not stubbed");
+    },
+    isResourceGroupName: () => {
+      throw new Error("isResourceGroupName not stubbed");
+    },
+    isAksClusterName: () => {
+      throw new Error("isAksClusterName not stubbed");
+    },
+    isUuid: () => {
+      throw new Error("isUuid not stubbed");
+    },
+    buildStages: () => {
+      throw new Error("buildStages not stubbed");
+    },
+    createOperation: () => {
+      throw new Error("createOperation not stubbed");
+    },
+    startOperation: () => {
+      throw new Error("startOperation not stubbed");
+    },
+    persistOperations: () => {
+      throw new Error("persistOperations not stubbed");
+    },
+    finish: () => {
+      throw new Error("finish not stubbed");
+    },
+    scheduleEnvironmentOperation: () => {
+      throw new Error("scheduleEnvironmentOperation not stubbed");
+    },
+    errorMessage: () => {
+      throw new Error("errorMessage not stubbed");
+    },
+    ...overrides
+  };
+}
+
+// A create-deps preset that reaches the happy path: repo/azure guards pass, the
+// factory records what it was asked to build, and start/persist/schedule are
+// captured so a test can assert on them. Guards a test wants to fail are
+// overridden individually.
+interface HappyPathCapture {
+  built: unknown[];
+  started: OperationRecord[];
+  persistCalls: number;
+  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  finished: unknown[];
+}
+
+function happyPathCreate(
+  capture: HappyPathCapture,
+  op: OperationRecord,
+  overrides: Partial<CreateOperationDependencies> = {}
+): CreateOperationDependencies {
+  return createDependencies({
+    isValidRepoSlug: () => true,
+    isResourceGroupName: () => true,
+    isAksClusterName: () => true,
+    isUuid: () => true,
+    buildStages: (options) => {
+      capture.built.push(options);
+      return [{ id: "authorize" }];
+    },
+    createOperation: () => op,
+    startOperation: (started) => {
+      capture.started.push(started);
+      return { ok: true, operation: started };
+    },
+    persistOperations: () => {
+      capture.persistCalls += 1;
+      return Promise.resolve();
+    },
+    scheduleEnvironmentOperation: (instanceId, scheduledOp) => {
+      capture.scheduled.push({ instanceId, op: scheduledOp });
+    },
+    ...overrides
+  });
+}
+
+function emptyCapture(): HappyPathCapture {
+  return {
+    built: [],
+    started: [],
+    persistCalls: 0,
+    scheduled: [],
+    finished: []
+  };
+}
+
 function context(
   url: string,
   response: ServerResponse<IncomingMessage>
@@ -113,11 +245,15 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the two routes it owns, exact before prefix", () => {
-    const routes = createOperationsStatusRoutes(dependencies());
+  it("declares exactly the three routes it owns, exact before prefix", () => {
+    const routes = createOperationsStatusRoutes(
+      dependencies(),
+      createDependencies()
+    );
     expect(Object.keys(routes)).toEqual([
       "GET /api/operations",
-      "GET /api/operations/"
+      "GET /api/operations/",
+      "POST /api/operations"
     ]);
   });
 
@@ -347,6 +483,399 @@ describe("operations-status routes (SU-16)", () => {
     expect(latestOperation.operationId).toBe("op-running");
     expect(byIdOperation).toEqual(latestOperation);
     expect(byId.status).toBe(200);
+  });
+});
+
+// A recorder response paired with the migrated create handler over a streamed
+// POST body. Async because the handler reads the body with `for await`.
+async function runCreate(
+  body: string,
+  deps: CreateOperationDependencies,
+  instanceId = "panel-a"
+): Promise<Recording> {
+  const { recording, response } = recorder();
+  await handleCreateOperation(
+    postContext("/api/operations", body, response, instanceId),
+    deps
+  );
+  return recording;
+}
+
+describe("handleCreateOperation (POST /api/operations)", () => {
+  it("rejects a malformed JSON body with 400 invalid-json and never touches a guard", () => {
+    return runCreate("{not json", createDependencies()).then((recording) => {
+      expect(recording.status).toBe(400);
+      expect(recording.headerOrder).toEqual(["Content-Type"]);
+      expect(recording.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Invalid JSON body.",
+        code: "invalid-json"
+      });
+    });
+  });
+
+  it("rejects an invalid repo slug with 400 invalid-repo, echoing the offending value", async () => {
+    const seen: unknown[] = [];
+    const recording = await runCreate(
+      JSON.stringify({ repo: "not-a-slug", provider: "aws" }),
+      createDependencies({
+        isValidRepoSlug: (value) => {
+          seen.push(value);
+          return false;
+        }
+      })
+    );
+    expect(seen).toEqual(["not-a-slug"]);
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: 'Invalid repository "not-a-slug". Expected "owner/repo".',
+      code: "invalid-repo"
+    });
+  });
+
+  it("defaults a missing repo to the empty string before validating it", async () => {
+    const seen: unknown[] = [];
+    await runCreate(
+      JSON.stringify({ provider: "aws" }),
+      createDependencies({
+        isValidRepoSlug: (value) => {
+          seen.push(value);
+          return false;
+        }
+      })
+    );
+    // `|| ""` not `??`: a missing repo becomes "" and is validated, never
+    // reaching the guard as undefined.
+    expect(seen).toEqual([""]);
+  });
+
+  it("requires a non-blank environment, defaulting name→environment→'dev'", async () => {
+    // `environment` is whitespace, `name` absent: the trimmed value is empty and
+    // the request is refused before any provider validation runs.
+    const recording = await runCreate(
+      JSON.stringify({ repo: "octo/app", environment: "   " }),
+      createDependencies({ isValidRepoSlug: () => true })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Environment name is required.",
+      code: "environment-required"
+    });
+  });
+
+  it.each([
+    ["resourceGroup", { isResourceGroupName: () => false }],
+    ["cluster", { isAksClusterName: () => false }],
+    ["tenantId or subscriptionId", { isUuid: () => false }]
+  ])(
+    "rejects azure setup with 400 when %s fails validation",
+    async (_label, override) => {
+      const recording = await runCreate(
+        JSON.stringify({
+          repo: "octo/app",
+          resourceGroup: "rg",
+          cluster: "aks",
+          tenantId: "t",
+          subscriptionId: "s"
+        }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          isResourceGroupName: () => true,
+          isAksClusterName: () => true,
+          isUuid: () => true,
+          ...override
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
+        code: "invalid-azure-operation-input"
+      });
+    }
+  );
+
+  it.each([
+    ["roleArn", { roleArn: "", accountId: "a", region: "r", cluster: "c" }],
+    ["accountId", { roleArn: "arn", accountId: "", region: "r", cluster: "c" }],
+    ["region", { roleArn: "arn", accountId: "a", region: "", cluster: "c" }],
+    ["cluster", { roleArn: "arn", accountId: "a", region: "r", cluster: "" }]
+  ])(
+    "rejects aws setup with 400 when %s is missing",
+    async (_label, fields) => {
+      const recording = await runCreate(
+        JSON.stringify({ repo: "octo/app", provider: "aws", ...fields }),
+        createDependencies({ isValidRepoSlug: () => true })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "AWS setup requires roleArn, accountId, region, and cluster.",
+        code: "invalid-aws-operation-input"
+      });
+    }
+  );
+
+  it("registers, persists, answers 202, then schedules — in that order", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "op-42" });
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, op),
+      "panel-z"
+    );
+    expect(recording.status).toBe(202);
+    // Header ORDER is observable: Content-Type then Location.
+    expect(recording.headerOrder).toEqual(["Content-Type", "Location"]);
+    expect(recording.headers).toEqual({
+      "Content-Type": "application/json",
+      Location: "/api/operations/op-42"
+    });
+    expect(JSON.parse(recording.body)).toEqual({
+      operationId: "op-42",
+      statusUrl: "/api/operations/op-42"
+    });
+    expect(capture.started).toEqual([op]);
+    expect(capture.persistCalls).toBe(1);
+    // Scheduling happens after the response is written and carries the request's
+    // instance id and the same record.
+    expect(capture.scheduled).toEqual([{ instanceId: "panel-z", op }]);
+  });
+
+  it("percent-encodes the operation id in the status URL", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "octo/app:setup" });
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(recording.headers.Location).toBe(
+      "/api/operations/octo%2Fapp%3Asetup"
+    );
+    expect(JSON.parse(recording.body).statusUrl).toBe(
+      "/api/operations/octo%2Fapp%3Asetup"
+    );
+  });
+
+  it("builds identity stages and attaches a resumeRequest when azure credentials are needed", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t-1",
+        subscriptionId: "s-1"
+        // no clientId → needsAzureCredentials true
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(capture.built).toEqual([{ includeIdentity: true }]);
+    const request = op.request as { needsAzureCredentials: boolean };
+    expect(request.needsAzureCredentials).toBe(true);
+    const resume = op.resumeRequest as {
+      needsAzureCredentials: boolean;
+      azure: { tenantId: string };
+      environment: { tenantId: string; provider: string };
+    };
+    // The azure block is deep-cloned, not shared, so a later mutation of one
+    // cannot leak into the other.
+    expect(resume.azure).not.toBe((op.request as { azure: unknown }).azure);
+    expect(resume.azure.tenantId).toBe("t-1");
+    expect(resume.environment.provider).toBe("azure");
+  });
+
+  it("carries every supplied optional field into the azure resumeRequest environment", async () => {
+    // Exercises the truthy side of each `|| ""` / `|| null` default in the
+    // resumeRequest environment so a later `??`-vs-`||` regression on any one of
+    // them is caught rather than passing on the empty-value branch alone.
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "11111111-1111-1111-1111-111111111111",
+        subscriptionId: "22222222-2222-2222-2222-222222222222",
+        namespace: "ns",
+        profileName: "prof",
+        branch: "feature/x",
+        origin: { page: "graph" },
+        resumeTarget: { page: "planned" },
+        resumeBranch: "resume/y"
+      }),
+      happyPathCreate(capture, op)
+    );
+    const env = (op.resumeRequest as { environment: Record<string, unknown> })
+      .environment;
+    expect(env).toMatchObject({
+      cluster: "aks",
+      namespace: "ns",
+      profileName: "prof",
+      branch: "feature/x",
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      subscriptionId: "22222222-2222-2222-2222-222222222222",
+      resourceGroup: "rg",
+      origin: { page: "graph" },
+      resumeTarget: { page: "planned" },
+      resumeBranch: "resume/y"
+    });
+  });
+
+  it("skips identity stages when a clientId is supplied", async () => {
+    const capture = emptyCapture();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "existing",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      happyPathCreate(capture, newOperationRecord())
+    );
+    expect(capture.built).toEqual([{ includeIdentity: false }]);
+  });
+
+  it("does not attach a resumeRequest on the aws path", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op)
+    );
+    expect(op.resumeRequest).toBeUndefined();
+    // AWS still needs no azure credentials, and identity stages are only for
+    // azure credential acquisition.
+    expect(capture.built).toEqual([{ includeIdentity: false }]);
+    expect(
+      (op.request as { environment: { provider: string } }).environment.provider
+    ).toBe("aws");
+  });
+
+  it("answers 409 with the conflicting operation id and never persists or schedules", async () => {
+    const capture = emptyCapture();
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, newOperationRecord(), {
+        startOperation: () => ({
+          ok: false,
+          conflict: { operationId: "op-existing" }
+        })
+      })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Setup is already running for octo/app.",
+      code: "operation-in-progress",
+      operationId: "op-existing"
+    });
+    expect(capture.persistCalls).toBe(0);
+    expect(capture.scheduled).toEqual([]);
+  });
+
+  it("finishes the record failed and answers 500 when persistence fails, without scheduling", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ currentStage: "authorize" });
+    const finished: Array<{ state: string; failure: unknown }> = [];
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, op, {
+        persistOperations: () => {
+          capture.persistCalls += 1;
+          return Promise.reject(new Error("disk gone"));
+        },
+        finish: (finishedOp, state, options) => {
+          expect(finishedOp).toBe(op);
+          finished.push({ state, failure: options.failure });
+        },
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "Radius could not durably register the environment operation. No setup work was started.",
+      code: "operation-registration-persist-failed"
+    });
+    expect(finished).toEqual([
+      {
+        state: "failed",
+        failure: {
+          code: "operation-registration-persist-failed",
+          stage: "authorize",
+          stepSeq: null,
+          message:
+            "Radius could not durably register the environment operation.",
+          classification: "unknown",
+          evidence: "disk gone"
+        }
+      }
+    ]);
+    expect(capture.scheduled).toEqual([]);
+  });
+
+  it("wires the POST route in the registry to the create handler", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord({ operationId: "op-wired" });
+    const routes = createOperationsStatusRoutes(
+      dependencies(),
+      happyPathCreate(capture, op)
+    );
+    const { recording, response } = recorder();
+    await routes["POST /api/operations"](
+      postContext(
+        "/api/operations",
+        JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          roleArn: "arn",
+          accountId: "a",
+          region: "r",
+          cluster: "c"
+        }),
+        response
+      )
+    );
+    expect(recording.status).toBe(202);
+    expect(capture.scheduled).toEqual([{ instanceId: "panel-a", op }]);
   });
 });
 
