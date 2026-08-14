@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  isUuid,
+  parseServedReposFromSubjects
+} from "../../../src/azure-oidc.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
@@ -32,6 +36,11 @@ interface AzResult {
 function start(): Map<string, AzResult> {
   const script = new Map<string, AzResult>();
 
+  // `runAz` is faked because it is the one seam with real I/O to isolate: a
+  // scripted map keyed on the full command line, throwing on anything else.
+  // The two predicates are the real `azure-oidc` exports, injected exactly as
+  // the production composition root injects them, because they are pure — a
+  // double there would control nothing and could only diverge from production.
   const routes = createTestRouteTable(
     createAzureDiscoveryRoutes({
       runAz: (command, args) => {
@@ -44,13 +53,9 @@ function start(): Map<string, AzResult> {
           stderr: scripted.stderr ?? ""
         });
       },
-      isUuid: (value) =>
-        typeof value === "string" &&
-        /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value),
+      isUuid,
       parseServedReposFromSubjects: (subjects) =>
-        Array.isArray(subjects) ?
-          subjects.filter((s): s is string => typeof s === "string")
-        : []
+        parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
   );
 
@@ -107,7 +112,12 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
 
   it("computes the serves-repos label and rejects a malformed appId", async () => {
     const script = start();
-    script.set(ARGV.fic(APP_ID), { stdout: '["octo/app"]' });
+    // A realistic federated-credential subject, so the assertion below pins the
+    // real `repo:owner/name:ref:…` -> `owner/name` normalization end to end
+    // rather than a passthrough double echoing its own input.
+    script.set(ARGV.fic(APP_ID), {
+      stdout: '["repo:octo/app:ref:refs/heads/main"]'
+    });
     const entry = await container!.getOrCreate("panel-a");
 
     const labelled = await fetch(
