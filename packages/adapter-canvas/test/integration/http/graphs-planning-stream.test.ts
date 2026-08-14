@@ -36,12 +36,10 @@ interface Harness {
   setEntryMissing(missing: boolean): void;
 }
 
-// The pure source-ref helpers are the real ones, so the wire behavior is
-// production's: token derivation, first-wins supersession and the state
-// mutations it performs all run for real. Only the seams that would otherwise
-// spawn a subprocess or hit the network are scripted — `fetchBicepSelection`
-// (GitHub/workspace read), `radArtifactsDirForSelection` (staging) and
-// `buildGraphViaRad` (the `rad` CLI).
+// This is a wire-level route test with controlled source-ref fakes. The fakes
+// model token preparation and stale-commit rejection but deliberately do not
+// claim to reproduce the source-ref helpers' wider invalidation and queueing
+// behavior. Network, staging, and subprocess seams are scripted as well.
 function start(): Harness {
   const state: CanvasState = {};
   const script: Script = {};

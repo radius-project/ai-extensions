@@ -1498,7 +1498,6 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-
   // This suite reads `server.ts` as raw text and slices route bodies out of the
   // legacy if-chain by their `pathname === ...` markers, so it carries an
   // undeclared textual coupling to that chain: every slice that migrates a route
@@ -1538,9 +1537,6 @@ describe("environment creation boundaries", () => {
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
   const createStart = markerIndex('pathname === "/api/create-environment"');
-  const operationStart = markerIndex(
-    'pathname === "/api/operations" && req.method === "POST"'
-  );
   // Resolve the end structurally as the next remaining legacy arm. A named
   // neighbor inherits that route's migration expiry; a missing END marker is
   // especially dangerous because slice(start, -1) widens almost to EOF and can
@@ -1565,6 +1561,16 @@ describe("environment creation boundaries", () => {
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
 
+  it("no longer answers POST /api/operations from the legacy chain", () => {
+    // The registration/scheduling arm moved to the operations-status route
+    // module (its own unit and loopback tests cover the 202-then-schedule
+    // ordering). The legacy `if` for it must be gone entirely, and its old
+    // `operationStart` marker with it — hence no marker slice here.
+    expect(SERVER_SRC).not.toContain(
+      'pathname === "/api/operations" && req.method === "POST"'
+    );
+  });
+
   it("bounds every sliced route body on markers that still exist", () => {
     // Pins the coupling itself rather than leaving it to whichever ordering
     // assertion happens to notice. Each slice must be non-empty and strictly
@@ -1578,21 +1584,9 @@ describe("environment creation boundaries", () => {
       expect(start, name).toBeGreaterThan(-1);
       expect(end, name).toBeGreaterThan(start);
     }
-    expect(operationStart).toBeGreaterThan(-1);
     expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
     expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
     expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
-  });
-
-  it("registers and accepts a server-owned operation before scheduling setup", () => {
-    const route = SERVER_SRC.slice(operationStart, azureStart);
-    expect(operationStart).toBeGreaterThan(-1);
-    expect(route).toContain("operations.start(op)");
-    expect(route).toContain("res.writeHead(202)");
-    expect(route).toContain("scheduleServerOwnedTask");
-    expect(route.indexOf("res.end(")).toBeLessThan(
-      route.indexOf("scheduleServerOwnedTask")
-    );
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
