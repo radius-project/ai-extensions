@@ -1,5 +1,10 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import {
+  discoverResources,
+  type DiscoveryDependencies,
+  type DiscoveryRequest
+} from "../services/discovery.js";
 
 // Shaped exactly like the `runCliCommand` result in `server.ts`. Reproduced
 // structurally rather than imported because that interface is module-local to
@@ -19,14 +24,16 @@ export interface AzureAppRegistration {
   createdDateTime: unknown;
 }
 
-// Only three seams. `runAz` is the sole I/O: it is `runCliCommand` bound at the
+// Four seams, two of them I/O. `runAz` is `runCliCommand` bound at the
 // composition root, which is what carries the agent-session-stripped `cliExec`
-// environment these Azure routes must keep running under. The other two are the
-// pure `azure-oidc.ts` predicates, injected rather than imported so the handler
-// stays free of module-level coupling and the tests can drive each branch.
-export interface AzureDiscoveryDependencies {
+// environment these Azure routes must keep running under; `runCli` is the
+// separate `gh.ts` `runCommand` runner that resolves trimmed stdout and rejects
+// on a non-zero exit, which is the shape `/api/discover` branches on. The other
+// two are the pure `azure-oidc.ts` predicates, injected rather than imported so
+// the handler stays free of module-level coupling and the tests can drive each
+// branch.
+export interface AzureDiscoveryDependencies extends DiscoveryDependencies {
   runAz(command: string, args: string[]): Promise<AzureCommandResult>;
-  isUuid(value: unknown): boolean;
   parseServedReposFromSubjects(subjects: unknown): string[];
 }
 
@@ -151,6 +158,34 @@ export async function handleAzureAppServesRepos(
   context.json(200, { servesRepos });
 }
 
+// HTTP adapter for cloud-resource discovery. Manual stream reading and the
+// top-level error envelope stay here; provider orchestration lives in the
+// discovery service.
+export async function handleDiscover(
+  context: CanvasRequestContext,
+  dependencies: AzureDiscoveryDependencies
+): Promise<void> {
+  // Read outside the try, exactly as the legacy arm did: a stream failure
+  // propagates to the dispatcher instead of becoming the 200 error payload.
+  const body = await context.readTextBody();
+  try {
+    // Deliberately not normalized through a `record()` guard: `null` throws
+    // when the service reads a property, while bare numbers and strings permit
+    // property reads and fall through to AWS discovery, matching the legacy arm.
+    const data = JSON.parse(body) as DiscoveryRequest;
+    context.json(200, await discoverResources(data, dependencies));
+  } catch (e) {
+    context.json(200, {
+      error: errorMessage(e),
+      clusters: [],
+      resourceGroups: [],
+      namespaces: ["default"],
+      vpcs: [],
+      subnets: []
+    });
+  }
+}
+
 export function createAzureDiscoveryRoutes(
   dependencies: AzureDiscoveryDependencies
 ): RouteHandlerRegistry {
@@ -158,6 +193,7 @@ export function createAzureDiscoveryRoutes(
     "GET /api/list-azure-app-registrations": (context) =>
       handleListAzureAppRegistrations(context, dependencies),
     "GET /api/azure-app-serves-repos": (context) =>
-      handleAzureAppServesRepos(context, dependencies)
+      handleAzureAppServesRepos(context, dependencies),
+    "POST /api/discover": (context) => handleDiscover(context, dependencies)
   };
 }
