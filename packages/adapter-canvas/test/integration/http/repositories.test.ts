@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createRepositoriesRoutes } from "../../../src/server/routes/repositories.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  residualRoutePathForProbe
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 
@@ -255,10 +258,16 @@ describe("repositories real-loopback HIT (RF-04)", () => {
       '{"error":"Canvas server state is unavailable."}'
     );
 
-    // Unmigrated routes still reach the fallback. `/api/create-environment` is
-    // a residual `environments` route on the merged tree (main migrated
-    // `/api/list-applications`, so it can no longer prove fallthrough here).
-    const residual = await fetch(`${entry.baseUrl}/api/create-environment`);
+    // Unmigrated routes still reach the fallback. The path is derived from the
+    // residual inventory rather than named: a named probe inherits that route's
+    // migration expiry and turns into a dispatch to a throwing stub the moment
+    // the route migrates, which is exactly what `POST /api/create-environment`
+    // did here.
+    const residual = await post(
+      entry.baseUrl,
+      residualRoutePathForProbe("POST"),
+      "{}"
+    );
     expect(residual.status).toBe(418);
   });
 });
