@@ -1773,6 +1773,13 @@ function radiusNavTo(e, pageId) {
     e.preventDefault();
     var contentEl = document.getElementById('graph-page-content');
     if (!contentEl) { window.location.href = '?page=' + pageId; return; }
+    // Cancel work the outgoing page scheduled before anything can fire: the
+    // document stays loaded across the swap, so a pending debounced diff would
+    // otherwise still run — and run against a detached DOM.
+    if (window.__radiusDiffTimeout) {
+        clearTimeout(window.__radiusDiffTimeout);
+        window.__radiusDiffTimeout = null;
+    }
     // Fetch the new page HTML
     fetch('/?page=' + pageId)
         .then(function(r) { return r.text(); })
