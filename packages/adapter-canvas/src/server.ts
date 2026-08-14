@@ -1207,8 +1207,9 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched: /api/deploy is still legacy and evicts below, while the migrated
-// deployments family is handed this same map and evicts from there.
+// dispatched: the migrated deployments family is handed this same map and evicts
+// from there, while the deploy dispatch service evicts through the
+// `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
