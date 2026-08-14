@@ -107,7 +107,7 @@ function start(): {
   return { az: script, cli: cliScript };
 }
 
-describe("azure-discovery real-loopback HIT (RF-05)", () => {
+describe("azure-discovery real-loopback HIT (RF-03)", () => {
   it("serves the App Registration picker payload over a real socket", async () => {
     const script = start().az;
     script.set(ARGV.list, {
