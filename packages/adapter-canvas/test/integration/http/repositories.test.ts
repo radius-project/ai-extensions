@@ -5,7 +5,7 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createRepositoriesRoutes } from "../../../src/server/routes/repositories.js";
 import {
   createTestRouteTable,
-  residualRoutePathForProbe
+  fetchResidualRoute
 } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
@@ -258,16 +258,9 @@ describe("repositories real-loopback HIT (RF-04)", () => {
       '{"error":"Canvas server state is unavailable."}'
     );
 
-    // Unmigrated routes still reach the fallback. The path is derived from the
-    // residual inventory rather than named: a named probe inherits that route's
-    // migration expiry and turns into a dispatch to a throwing stub the moment
-    // the route migrates, which is exactly what `POST /api/create-environment`
-    // did here.
-    const residual = await post(
-      entry.baseUrl,
-      residualRoutePathForProbe("POST"),
-      "{}"
-    );
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
   });
 });

@@ -175,15 +175,15 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
     expect(await served.text()).toBe('{"servesRepos":null}');
   });
 
-  // Hardcoded on purpose. The two writes in this family are explicitly deferred
-  // to their own slices, and hand-writing the keys keeps the two sides of the
+  // Hardcoded on purpose. The remaining write in this family is explicitly
+  // deferred to its own slice, and hand-writing the key keeps the two sides of the
   // assertion on different sources: a probe derived from the route table would
   // silently follow a future migration and stop being a tripwire.
   it("leaves the deferred azure-discovery writes on the legacy fallback", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
 
-    for (const path of ["/api/azure-auto-setup", "/api/discover"]) {
+    for (const path of ["/api/discover"]) {
       const response = await fetch(`${entry.baseUrl}${path}`, {
         method: "POST",
         body: "{}"
