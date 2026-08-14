@@ -12,6 +12,7 @@ import {
   type ServerRoute
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
+import { createDeploymentsReadsRoutes } from "./routes/deployments-reads.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 
@@ -48,6 +49,22 @@ const productionHandlers = {
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
+  }),
+  ...createDeploymentsReadsRoutes({
+    readInstanceEntry: () => undefined,
+    triggerDeployRepairHandoff: () => false,
+    deployHandoffStatus: () => ({
+      state: "idle",
+      attempts: 0,
+      maxAttempts: 3,
+      pending: false
+    }),
+    resolveRepoAppName: () => Promise.resolve(""),
+    resolveEnvDeployment: () => Promise.resolve(null),
+    ghOrThrow: () => Promise.resolve(""),
+    resetDeploymentViewState: () => {},
+    deployListCache: new Map(),
+    deployListTtlMs: 0
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -70,9 +87,12 @@ describe("server route ownership boundary", () => {
 
   // operations-status is deliberately split: main added POST /api/operations
   // after the GETs migrated, so the family owns two migrated routes and one
-  // that is still on the legacy fallback. Naming the split here keeps the
-  // family from reading as fully migrated in the ledger.
-  it("owns the liveness-source and repositories families and the operations-status GETs and leaves 31 routes on the legacy fallback", () => {
+  // that is still on the legacy fallback. `deployments` is split too, and for a
+  // different reason: only its four non-mutating routes have migrated, while
+  // POST /api/delete-deployment and POST /api/deploy are deferred to later
+  // slices. Naming both splits here keeps either family from reading as fully
+  // migrated in the ledger.
+  it("owns the liveness-source and repositories families, the operations-status GETs, and the deployments read routes, and leaves 27 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -80,15 +100,21 @@ describe("server route ownership boundary", () => {
       "POST /api/open-source",
       "GET /api/user-repos",
       "POST /api/repo-branches",
-      "POST /api/discover-branches"
+      "POST /api/discover-branches",
+      "GET /api/deploy-status",
+      "GET /api/list-applications",
+      "GET /api/list-deployments",
+      "POST /api/deploy-reset"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(31);
-    // The split family, pinned explicitly so a later slice cannot quietly
-    // assume operations-status is done.
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(27);
+    // The split families, pinned explicitly so a later slice cannot quietly
+    // assume either is done.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/delete-deployment");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)

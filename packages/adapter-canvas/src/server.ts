@@ -204,6 +204,7 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createDeploymentsReadsRoutes } from "./server/routes/deployments-reads.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -522,12 +523,41 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
+// Composition root for the migrated `deployments` read routes (the four whose
+// body policy is `none`). The mutating members of the family — POST
+// /api/delete-deployment and POST /api/deploy — are still on the legacy
+// fallback and are deliberately out of scope for this slice.
+//
+// The listing cache and its TTL are read through getters because both are
+// declared further down the module and would otherwise be in the temporal dead
+// zone when this object is built at import time. Injecting the cache rather
+// than moving it keeps invalidation where it already lives: `server.ts` deletes
+// from the same map when a deploy or delete is dispatched.
+const deploymentsReadsRoutes = createDeploymentsReadsRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  triggerDeployRepairHandoff,
+  deployHandoffStatus,
+  resolveRepoAppName,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  resetDeploymentViewState: (state, attemptId) => {
+    resetDeploymentViewState(state, attemptId);
+  },
+  get deployListCache() {
+    return deployListCache;
+  },
+  get deployListTtlMs() {
+    return DEPLOY_LIST_TTL_MS;
+  }
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
-  ...repositoriesRoutes
+  ...repositoriesRoutes,
+  ...deploymentsReadsRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -6888,89 +6918,6 @@ function createLegacyRequestHandler(
       return;
     }
 
-    if (pathname === "/api/deploy-status" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const resources =
-        entry?.state?.deployingResources ||
-        entry?.state?.plannedResources ||
-        [];
-      const logs = entry?.state?.deployLogs || [];
-      const logBase = entry?.state?.deployLogBase || 0;
-      const logTotal = logBase + logs.length;
-      const status = entry?.state?.deployStatus || "pending";
-      const error = entry?.state?.deployError || null;
-      const errorKind = entry?.state?.deployErrorKind || null;
-      const errorBranch = entry?.state?.deployErrorBranch || null;
-      const startedAt = entry?.state?.deployStartedAt || null;
-      const finishedAt = entry?.state?.deployFinishedAt || null;
-      const deployedGraph = entry?.state?.deployedGraph || null;
-      const deployRunUrl = entry?.state?.deployRunUrl || null;
-      const attempt = entry?.state?.deployAttempt || null;
-      const active = status === "in_progress";
-      // Every failure path converges on this poll, so it is where a failed
-      // deploy is handed to the agent to repair (once per repair loop).
-      const repairing =
-        triggerDeployRepairHandoff(entry, instanceId) ||
-        entry?.state?.deployRepairing ||
-        false;
-      const handoff = deployHandoffStatus(entry?.state || {});
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      // Incremental log delivery: when the client passes ?since=<absolute
-      // line index>, send only the new lines instead of re-serializing the
-      // entire (bounded) buffer on every 1.5s poll. Callers that omit it
-      // (e.g. the deployed-graph poller, which only reads resources) get the
-      // bounded buffer for backward compatibility.
-      const sinceRaw = url.searchParams.get("since");
-      const since = sinceRaw === null ? NaN : parseInt(sinceRaw, 10);
-      if (Number.isFinite(since)) {
-        const startIdx = Math.max(0, since - logBase);
-        const logsNew = logs.slice(startIdx);
-        res.end(
-          JSON.stringify({
-            resources,
-            logsNew,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      } else {
-        res.end(
-          JSON.stringify({
-            resources,
-            logs,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      }
-      return;
-    }
-
     if (pathname === "/api/load-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -7366,105 +7313,6 @@ function createLegacyRequestHandler(
         kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
       } catch (e) {
         respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-applications" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ applications: [] });
-        return;
-      }
-      try {
-        // The application name is defined in the repo's app.bicep (a repo
-        // hosts a single Radius application in this model). Shared with the
-        // deployments/env-deletion paths via resolveRepoAppName.
-        const entry = servers.get(instanceId);
-        const branch =
-          entry?.state?.contextBranch ||
-          entry?.state?.plannedBranch ||
-          entry?.state?.graphBranch ||
-          "main";
-        const appName = await resolveRepoAppName(repo, branch);
-        respond({ applications: [{ name: appName }] });
-      } catch (e) {
-        respond({
-          applications: [{ name: repo.split("/").pop() || repo }],
-          error: errorMessage(e)
-        });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-deployments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ deployments: [] });
-        return;
-      }
-
-      // (A) Serve a fresh cached listing when available. The fan-out below
-      // is expensive, so a short TTL keeps re-opens and the workflow poll
-      // snappy without showing stale state for long. `?fresh=1` bypasses the
-      // cache read so active status pollers (a running deploy/delete) always
-      // see live status rather than a value cached before the transition.
-      const freshDeploys = url.searchParams.get("fresh") === "1";
-      const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
-      if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) {
-        respond(cachedDeploys.payload);
-        return;
-      }
-
-      try {
-        // Resolve the current deployment per environment from each
-        // environment's OWN history (see resolveEnvDeployment). Querying
-        // per environment — rather than a single repo-wide, capped page —
-        // means a busy environment can never crowd another's latest
-        // deploy/delete record out of the results.
-        const envNamesRaw = await ghOrThrow([
-          "api",
-          "--paginate",
-          `/repos/${repo}/environments?per_page=100`,
-          "--jq",
-          ".environments[].name"
-        ]);
-        const envNames =
-          envNamesRaw ?
-            [...new Set(envNamesRaw.split("\n").filter(Boolean))]
-          : [];
-        // Resolve the real app name once (from app.bicep) so every row targets
-        // the app declared in the bicep, not the repo basename.
-        const listEntry = servers.get(instanceId);
-        const listBranch =
-          listEntry?.state?.contextBranch ||
-          listEntry?.state?.plannedBranch ||
-          listEntry?.state?.graphBranch ||
-          "main";
-        const listAppName = await resolveRepoAppName(repo, listBranch);
-        const resolved = await Promise.all(
-          envNames.map((name) => resolveEnvDeployment(repo, name, listAppName))
-        );
-        const payload = { deployments: resolved.filter(Boolean) };
-        deployListCache.set(repo, { at: Date.now(), payload });
-        respond(payload);
-      } catch (e) {
-        // A GitHub failure surfaces as an error (not a silently-empty list)
-        // so the client keeps its current view / keeps polling rather than
-        // treating an incomplete listing as the truth.
-        respond({ deployments: [], error: errorMessage(e) });
       }
       return;
     }
@@ -9328,28 +9176,6 @@ function createLegacyRequestHandler(
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
       }
-      return;
-    }
-
-    if (pathname === "/api/deploy-reset" && req.method === "POST") {
-      const entry = servers.get(instanceId);
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: Record<string, unknown>;
-      try {
-        data = body ? record(JSON.parse(body)) : {};
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(error) }));
-        return;
-      }
-      if (entry) {
-        resetDeploymentViewState(entry.state, data.attemptId);
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true }));
       return;
     }
 
