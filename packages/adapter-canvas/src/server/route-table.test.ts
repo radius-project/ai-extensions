@@ -263,4 +263,68 @@ describe("server route ownership boundary", () => {
       `Legacy server route unexpectedly has a handler: ${routeKey(legacyRoute)}`
     );
   });
+
+  it("fails when a prefix route makes a later route unreachable", () => {
+    const prefix = table.find((route) => route.path === "/api/operations/");
+    expect(prefix?.method).toBe("GET");
+
+    expect(() =>
+      assertRouteTable([
+        prefix as ServerRoute,
+        {
+          ...(prefix as ServerRoute),
+          path: "/api/operations/summary",
+          match: "exact"
+        } as ServerRoute
+      ])
+    ).toThrow(
+      "Server route GET /api/operations/summary is unreachable behind earlier prefix route GET /api/operations/"
+    );
+
+    expect(() =>
+      assertRouteTable([
+        prefix as ServerRoute,
+        {
+          ...(prefix as ServerRoute),
+          path: "/api/operations/logs/",
+          method: "ANY"
+        } as ServerRoute
+      ])
+    ).toThrow(
+      "Server route ANY /api/operations/logs/ is unreachable behind earlier prefix route GET /api/operations/"
+    );
+  });
+
+  it("allows routes an earlier prefix route cannot claim", () => {
+    const prefix = table.find(
+      (route) => route.path === "/api/operations/"
+    ) as ServerRoute;
+
+    // Disjoint method: the prefix cannot claim a POST sub-route.
+    expect(() =>
+      assertRouteTable([
+        prefix,
+        {
+          ...prefix,
+          path: "/api/operations/abandon",
+          match: "exact",
+          method: "POST"
+        } as ServerRoute
+      ])
+    ).not.toThrow();
+
+    // Outside the prefix, and the exact sibling that legitimately precedes it.
+    expect(() =>
+      assertRouteTable([
+        prefix,
+        { ...prefix, path: "/api/operation", match: "exact" } as ServerRoute
+      ])
+    ).not.toThrow();
+    expect(() =>
+      assertRouteTable([
+        { ...prefix, path: "/api/operations", match: "exact" } as ServerRoute,
+        prefix
+      ])
+    ).not.toThrow();
+  });
 });

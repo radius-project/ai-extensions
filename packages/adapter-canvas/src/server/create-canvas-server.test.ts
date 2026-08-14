@@ -240,3 +240,176 @@ describe("createCanvasServer (SU-02)", () => {
     expect(stopped).toEqual([]);
   });
 });
+
+// Fails its first `failures` listen attempts, then binds normally.
+class UnbindableServer extends FakeServer {
+  constructor(private failures: number) {
+    super();
+  }
+
+  override listen(port: number): this {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      queueMicrotask(() =>
+        this.emit("error", new Error(`bind failed: ${port}`))
+      );
+      return this;
+    }
+    return super.listen(port);
+  }
+}
+
+// `failures[n]` is how many listen attempts the nth created server rejects.
+// The preferred port is a fixed non-zero value so the preferred-port error and
+// the ephemeral-fallback error are distinguishable by message.
+function bindHarness(failures: readonly number[]) {
+  const fakeServers: UnbindableServer[] = [];
+  let created = 0;
+  const dependencies: CanvasServerDependencies = {
+    createHttpServer: () => {
+      const server = new UnbindableServer(failures[created++] ?? 0);
+      fakeServers.push(server);
+      return server as unknown as HttpServer;
+    },
+    createRequestHandler: () => () => {},
+    createState: () => ({}),
+    defaultPage: "graph",
+    now: () => 1,
+    preferredPort: async () => 45000,
+    prepareIdentity: vi.fn()
+  };
+  return {
+    container: createCanvasServer(dependencies),
+    dependencies,
+    fakeServers
+  };
+}
+
+describe("createCanvasServer bind failure (SU-02)", () => {
+  it("falls back to an ephemeral port when the preferred port is taken", async () => {
+    const { container, fakeServers } = bindHarness([1]);
+
+    const entry = await container.getOrCreate("panel-a");
+
+    // The advisory preferred port failing is not terminal, so the socket that
+    // eventually bound must be kept, not closed.
+    expect(entry.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(entry.baseUrl).not.toContain("45000");
+    expect(fakeServers[0].closeCalls).toBe(0);
+    expect(container.instances.size).toBe(1);
+  });
+
+  it("releases the socket when the ephemeral fallback also fails to bind", async () => {
+    const { container, fakeServers } = bindHarness([2]);
+
+    // The fallback error surfaces, not the preferred-port error it replaced.
+    await expect(container.getOrCreate("panel-a")).rejects.toThrow(
+      "bind failed: 0"
+    );
+
+    // A terminal bind failure never registers the instance, so this close is
+    // the only chance to release the handle.
+    expect(fakeServers[0].closeCalls).toBe(1);
+    expect(fakeServers[0].forceCalls).toBe(1);
+    expect(container.instances.size).toBe(0);
+  });
+
+  it("lets the same instance id start normally after a terminal bind failure", async () => {
+    const { container, fakeServers } = bindHarness([2]);
+    await expect(container.getOrCreate("panel-a")).rejects.toThrow(
+      "bind failed: 0"
+    );
+
+    const entry = await container.getOrCreate("panel-a");
+
+    expect(entry.page).toBe("graph");
+    expect(container.instances.get("panel-a")).toBe(entry);
+    expect(fakeServers).toHaveLength(2);
+    expect(fakeServers[1].closeCalls).toBe(0);
+  });
+});
+
+describe("createCanvasServer started-hook failure (SU-02)", () => {
+  function failingStart() {
+    const harness = setup();
+    const failure = new Error("started hook exploded");
+    const stopped: string[] = [];
+    harness.dependencies.onStarted = () => {
+      throw failure;
+    };
+    harness.dependencies.onStopped = (instanceId) => stopped.push(instanceId);
+    return { ...harness, failure, stopped };
+  }
+
+  it("withdraws the registration and closes the socket when the started hook throws", async () => {
+    const { container, fakeServers, stopped } = failingStart();
+
+    await expect(container.getOrCreate("panel-a")).rejects.toThrow(
+      "started hook exploded"
+    );
+
+    // Registration and the hook succeed or fail together: a live entry whose
+    // facade-side setup never ran would be handed to the next caller.
+    expect(container.instances.size).toBe(0);
+    expect(fakeServers[0].closeCalls).toBe(1);
+    expect(fakeServers[0].forceCalls).toBe(1);
+    // The facade releases its per-instance state through the stopped hook, so
+    // the unwind has to fire it exactly as a real stop would.
+    expect(stopped).toEqual(["panel-a"]);
+  });
+
+  it("lets the same instance id start successfully after a started-hook failure", async () => {
+    const { container, dependencies, fakeServers } = failingStart();
+    await expect(container.getOrCreate("panel-a")).rejects.toThrow(
+      "started hook exploded"
+    );
+
+    // Proves the starting bookkeeping was cleared: a retained pending promise
+    // would be re-awaited and would reject again instead of starting.
+    dependencies.onStarted = undefined;
+    const entry = await container.getOrCreate("panel-a");
+
+    expect(container.instances.get("panel-a")).toBe(entry);
+    expect(fakeServers).toHaveLength(2);
+    expect(fakeServers[1].closeCalls).toBe(0);
+  });
+
+  it("keeps the original hook error when the unwind itself fails", async () => {
+    const { container, dependencies } = failingStart();
+    dependencies.onStopped = () => {
+      throw new Error("cleanup exploded");
+    };
+
+    // The caller must learn why startup failed, not how the unwind failed.
+    await expect(container.getOrCreate("panel-a")).rejects.toThrow(
+      "started hook exploded"
+    );
+    expect(container.instances.size).toBe(0);
+  });
+
+  it("lets a stop racing a started-hook failure resolve without closing twice", async () => {
+    const { container, fakeServers, stopped } = failingStart();
+
+    const creating = container.getOrCreate("panel-a");
+    const stopping = container.stop("panel-a");
+
+    await expect(creating).rejects.toThrow("started hook exploded");
+    // stop() is cleanup, so it must not adopt the failed startup's rejection.
+    await expect(stopping).resolves.toBeUndefined();
+    expect(container.instances.size).toBe(0);
+    expect(fakeServers[0].closeCalls).toBe(1);
+    expect(stopped).toEqual(["panel-a"]);
+  });
+
+  it("lets a stop-all racing a started-hook failure settle", async () => {
+    const { container, fakeServers } = failingStart();
+
+    const creating = container.getOrCreate("panel-a");
+    const stoppingAll = container.stopAll();
+
+    await expect(creating).rejects.toThrow("started hook exploded");
+    await expect(stoppingAll).resolves.toBeUndefined();
+    expect(container.instances.size).toBe(0);
+    expect(fakeServers[0].closeCalls).toBe(1);
+  });
+});
