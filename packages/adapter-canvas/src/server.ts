@@ -163,9 +163,7 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
-  DELETE_AZURE_FILE
+  DEPLOY_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -203,6 +201,7 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
@@ -525,6 +524,58 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
+// Composition root for the migrated `deployments` family: the four read routes
+// whose body policy is `none`, plus the destructive POST /api/delete-deployment.
+// Only POST /api/deploy is still on the legacy fallback, and it is deliberately
+// out of scope for this slice.
+//
+// The listing cache and its TTL are read through getters because both are
+// declared further down the module and would otherwise be in the temporal dead
+// zone when this object is built at import time. Injecting the cache rather
+// than moving it keeps the other invalidator where it already lives: `server.ts`
+// deletes from the same map when a deploy is dispatched.
+const deploymentsRoutes = createDeploymentsRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  triggerDeployRepairHandoff,
+  deployHandoffStatus,
+  resolveRepoAppName,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  resetDeploymentViewState: (state, attemptId) => {
+    resetDeploymentViewState(state, attemptId);
+  },
+  get deployListCache() {
+    return deployListCache;
+  },
+  get deployListTtlMs() {
+    return DEPLOY_LIST_TTL_MS;
+  },
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  ensureWorkflowsCurrent: (repo, environment, provider, only) =>
+    ensureWorkflowsCurrent(repo, environment, provider, only),
+  findWorkflowRun,
+  runGh: (args, timeout = 20000, extraEnv) =>
+    new Promise((resolve) => {
+      const opts: CliOptions = { timeout };
+      if (extraEnv) opts.env = extraEnv;
+      cliExec("gh", args, opts, (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: (stdout || "").trim(),
+          stderr: stderr || ""
+        });
+      });
+    }),
+  readProcessEnv: () => process.env,
+  setTimer: (callback, ms) => setTimeout(callback, ms)
+});
+
 // Composition root for the two migrated `azure-discovery` read routes. Three
 // seams: the `az` runner (which carries the agent-session-stripped `cliExec`
 // environment the Azure setup routes run under) and the two pure `azure-oidc`
@@ -611,6 +662,7 @@ const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
   ...repositoriesRoutes,
+  ...deploymentsRoutes,
   ...azureDiscoveryRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
@@ -847,7 +899,8 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched (see /api/deploy and /api/delete-deployment).
+// dispatched: /api/deploy is still legacy and evicts below, while the migrated
+// deployments family is handed this same map and evicts from there.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
@@ -6264,89 +6317,6 @@ function createLegacyRequestHandler(
       return;
     }
 
-    if (pathname === "/api/deploy-status" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const resources =
-        entry?.state?.deployingResources ||
-        entry?.state?.plannedResources ||
-        [];
-      const logs = entry?.state?.deployLogs || [];
-      const logBase = entry?.state?.deployLogBase || 0;
-      const logTotal = logBase + logs.length;
-      const status = entry?.state?.deployStatus || "pending";
-      const error = entry?.state?.deployError || null;
-      const errorKind = entry?.state?.deployErrorKind || null;
-      const errorBranch = entry?.state?.deployErrorBranch || null;
-      const startedAt = entry?.state?.deployStartedAt || null;
-      const finishedAt = entry?.state?.deployFinishedAt || null;
-      const deployedGraph = entry?.state?.deployedGraph || null;
-      const deployRunUrl = entry?.state?.deployRunUrl || null;
-      const attempt = entry?.state?.deployAttempt || null;
-      const active = status === "in_progress";
-      // Every failure path converges on this poll, so it is where a failed
-      // deploy is handed to the agent to repair (once per repair loop).
-      const repairing =
-        triggerDeployRepairHandoff(entry, instanceId) ||
-        entry?.state?.deployRepairing ||
-        false;
-      const handoff = deployHandoffStatus(entry?.state || {});
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      // Incremental log delivery: when the client passes ?since=<absolute
-      // line index>, send only the new lines instead of re-serializing the
-      // entire (bounded) buffer on every 1.5s poll. Callers that omit it
-      // (e.g. the deployed-graph poller, which only reads resources) get the
-      // bounded buffer for backward compatibility.
-      const sinceRaw = url.searchParams.get("since");
-      const since = sinceRaw === null ? NaN : parseInt(sinceRaw, 10);
-      if (Number.isFinite(since)) {
-        const startIdx = Math.max(0, since - logBase);
-        const logsNew = logs.slice(startIdx);
-        res.end(
-          JSON.stringify({
-            resources,
-            logsNew,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      } else {
-        res.end(
-          JSON.stringify({
-            resources,
-            logs,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      }
-      return;
-    }
-
     if (pathname === "/api/load-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -6742,350 +6712,6 @@ function createLegacyRequestHandler(
         kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
       } catch (e) {
         respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-applications" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ applications: [] });
-        return;
-      }
-      try {
-        // The application name is defined in the repo's app.bicep (a repo
-        // hosts a single Radius application in this model). Shared with the
-        // deployments/env-deletion paths via resolveRepoAppName.
-        const entry = servers.get(instanceId);
-        const branch =
-          entry?.state?.contextBranch ||
-          entry?.state?.plannedBranch ||
-          entry?.state?.graphBranch ||
-          "main";
-        const appName = await resolveRepoAppName(repo, branch);
-        respond({ applications: [{ name: appName }] });
-      } catch (e) {
-        respond({
-          applications: [{ name: repo.split("/").pop() || repo }],
-          error: errorMessage(e)
-        });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-deployments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ deployments: [] });
-        return;
-      }
-
-      // (A) Serve a fresh cached listing when available. The fan-out below
-      // is expensive, so a short TTL keeps re-opens and the workflow poll
-      // snappy without showing stale state for long. `?fresh=1` bypasses the
-      // cache read so active status pollers (a running deploy/delete) always
-      // see live status rather than a value cached before the transition.
-      const freshDeploys = url.searchParams.get("fresh") === "1";
-      const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
-      if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) {
-        respond(cachedDeploys.payload);
-        return;
-      }
-
-      try {
-        // Resolve the current deployment per environment from each
-        // environment's OWN history (see resolveEnvDeployment). Querying
-        // per environment — rather than a single repo-wide, capped page —
-        // means a busy environment can never crowd another's latest
-        // deploy/delete record out of the results.
-        const envNamesRaw = await ghOrThrow([
-          "api",
-          "--paginate",
-          `/repos/${repo}/environments?per_page=100`,
-          "--jq",
-          ".environments[].name"
-        ]);
-        const envNames =
-          envNamesRaw ?
-            [...new Set(envNamesRaw.split("\n").filter(Boolean))]
-          : [];
-        // Resolve the real app name once (from app.bicep) so every row targets
-        // the app declared in the bicep, not the repo basename.
-        const listEntry = servers.get(instanceId);
-        const listBranch =
-          listEntry?.state?.contextBranch ||
-          listEntry?.state?.plannedBranch ||
-          listEntry?.state?.graphBranch ||
-          "main";
-        const listAppName = await resolveRepoAppName(repo, listBranch);
-        const resolved = await Promise.all(
-          envNames.map((name) => resolveEnvDeployment(repo, name, listAppName))
-        );
-        const payload = { deployments: resolved.filter(Boolean) };
-        deployListCache.set(repo, { at: Date.now(), payload });
-        respond(payload);
-      } catch (e) {
-        // A GitHub failure surfaces as an error (not a silently-empty list)
-        // so the client keeps its current view / keeps polling rather than
-        // treating an incomplete listing as the truth.
-        respond({ deployments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/delete-deployment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      const respond = (code: number, payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(code);
-        res.end(JSON.stringify(payload));
-      };
-      let deleteReservation: DeploymentDispatchReservation | null = null;
-      let deleteReservationOwner: CanvasState | null = null;
-      const releaseDeleteReservation = (): void => {
-        if (deleteReservation && deleteReservationOwner)
-          releaseDeploymentMutation(deleteReservationOwner, deleteReservation);
-        deleteReservation = null;
-        deleteReservationOwner = null;
-      };
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = data.repo || "";
-        const environment = data.environment || "";
-        const application = data.application || "";
-        if (!repo || !environment || !application) {
-          respond(400, {
-            error: "repo, environment, and application are required."
-          });
-          return;
-        }
-
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          respond(503, { error: "Canvas server state is unavailable." });
-          return;
-        }
-        const attempt = entry.state.deployAttempt;
-        const activeRepo =
-          attempt?.targetRepo || entry.state.deployingRepo || "";
-        const activeEnvironment =
-          attempt?.environment || entry.state.envName || "";
-        const reserved = activeDeploymentMutation(entry.state);
-        if (localDeploymentBlocksMutation(entry.state) || reserved) {
-          const operation = reserved?.kind || "deploy";
-          const conflictRepo = reserved?.repo || activeRepo || repo;
-          const conflictEnvironment =
-            reserved?.environment || activeEnvironment || environment;
-          respond(409, {
-            error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
-          });
-          return;
-        }
-
-        deleteReservationOwner = entry.state;
-        deleteReservation = reserveDeploymentMutation(entry.state, {
-          repo,
-          environment,
-          kind: "delete"
-        });
-        if (!deleteReservation) {
-          const conflict = activeDeploymentMutation(entry.state);
-          respond(409, {
-            error:
-              conflict ?
-                `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
-              : "Another deployment operation is already starting."
-          });
-          return;
-        }
-
-        // Backstop the UI with GitHub's persisted state too. This covers a
-        // deployment started from another canvas instance or browser session.
-        let current: DeploymentRow | null;
-        try {
-          current = await resolveEnvDeployment(repo, environment, application);
-        } catch {
-          releaseDeleteReservation();
-          respond(503, {
-            error:
-              "Could not verify the current deployment state. Check your GitHub connection and try again."
-          });
-          return;
-        }
-        if (current && deploymentStatusBlocksMutation(current.status)) {
-          releaseDeleteReservation();
-          respond(409, {
-            error:
-              current.status === "deleting" ?
-                "This deployment is already being deleted."
-              : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
-          });
-          return;
-        }
-
-        const gh = (
-          args: string[],
-          timeout = 20000,
-          extraEnv?: NodeJS.ProcessEnv
-        ): Promise<CommandResult> =>
-          new Promise<CommandResult>((resolve) => {
-            const opts: CliOptions = { timeout };
-            if (extraEnv) opts.env = extraEnv;
-            cliExec("gh", args, opts, (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: (stdout || "").trim(),
-                stderr: stderr || ""
-              });
-            });
-          });
-        // Dispatching a workflow requires the `workflow` scope, which an
-        // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
-        // back to the keyring credential.
-        const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-          const first = await gh(args);
-          if (first.code === 0) return first;
-          if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await gh(args, 20000, fallbackEnv);
-          return retry.code === 0 ? retry : first;
-        };
-
-        // Deleting a deployment now runs `rad app delete` via the committed
-        // delete-application.yml workflow. This tears down the Radius
-        // application on the ephemeral control plane while leaving the
-        // GitHub Environment (and its credentials) intact.
-        //
-        // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy — and author
-        // them if they're missing (the #273 case). Delete workflow content is
-        // provider-agnostic, and workflow_dispatch runs from the default
-        // branch, so provider/workingBranch aren't needed.
-        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
-          DELETE_APP_DISPATCHER_FILE,
-          DELETE_AZURE_FILE
-        ]);
-        // If the sync couldn't commit the dispatcher to the default branch
-        // (e.g. it's protected, or the token lacks write access), the dispatch
-        // below will 404 on a genuinely-absent workflow. Fail fast with a
-        // specific message naming the branch instead of the generic hint.
-        const commitFail = sync.failed.find(
-          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        if (commitFail) {
-          releaseDeleteReservation();
-          respond(400, {
-            error:
-              "Couldn't commit the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ') to the "' +
-              commitFail.branch +
-              '" branch of ' +
-              repo +
-              ", so there's nothing to dispatch. The branch may be protected" +
-              " or your GitHub token may lack write access to " +
-              repo +
-              "."
-          });
-          return;
-        }
-        // A just-authored workflow isn't registered by GitHub synchronously, so
-        // an immediate workflow_dispatch would 404. When we created it, wait
-        // briefly and retry the not-found race a few times (mirroring the
-        // create-environment verify dispatch); when it was already present, the
-        // single [0]-delay attempt keeps the common path fast.
-        const justCreated = sync.created.some(
-          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        const dispatchedAt = Date.now();
-        const dispatchArgs = [
-          "workflow",
-          "run",
-          DELETE_APP_DISPATCHER_FILE,
-          "-f",
-          "environment=" + environment,
-          "-f",
-          "application=" + application,
-          "--repo",
-          repo
-        ];
-        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
-        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
-        for (const delay of dispatchDelays) {
-          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-          dispatch = await ghWorkflow(dispatchArgs);
-          if (dispatch.code === 0) break;
-          // Only the not-found registration race self-resolves; any other
-          // failure (scope, Actions disabled, …) won't, so stop retrying.
-          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
-        }
-        if (dispatch.code !== 0) {
-          releaseDeleteReservation();
-          const de = (dispatch.stderr || "").trim();
-          const hint =
-            /workflow.{0,20}scope/i.test(de) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " The delete workflow is committed to the default branch" +
-              " automatically before dispatch, so a persistent failure usually" +
-              " means GitHub Actions is disabled for " +
-              repo +
-              " or the default branch is protected — check both and retry.";
-          respond(400, {
-            error:
-              "Failed to start the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ") on " +
-              repo +
-              ". " +
-              (de || "The dispatch request failed.") +
-              hint
-          });
-          return;
-        }
-
-        // Best-effort: resolve the dispatched run's URL so the client can
-        // link to it in GitHub.
-        let runUrl = "";
-        const runId = await findWorkflowRun(
-          repo,
-          DELETE_APP_DISPATCHER_FILE,
-          dispatchedAt,
-          null
-        );
-        if (runId)
-          runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        // A workflow run can become discoverable before it creates its GitHub
-        // deployment record. Retain a short lease in either case to close that
-        // publication gap; after it expires, resolveEnvDeployment is the
-        // durable cross-instance guard.
-        const reservationTimer = setTimeout(
-          releaseDeleteReservation,
-          DEPLOY_LIST_TTL_MS * 2
-        );
-        reservationTimer.unref?.();
-        // A delete is now in flight, so the cached listing is stale — drop
-        // it so the next poll reflects the "Deleting…" state immediately.
-        deployListCache.delete(repo);
-        respond(200, { success: true, runUrl });
-      } catch (e) {
-        releaseDeleteReservation();
-        respond(400, { error: errorMessage(e) });
       }
       return;
     }
@@ -8704,28 +8330,6 @@ function createLegacyRequestHandler(
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
       }
-      return;
-    }
-
-    if (pathname === "/api/deploy-reset" && req.method === "POST") {
-      const entry = servers.get(instanceId);
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: Record<string, unknown>;
-      try {
-        data = body ? record(JSON.parse(body)) : {};
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(error) }));
-        return;
-      }
-      if (entry) {
-        resetDeploymentViewState(entry.state, data.attemptId);
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true }));
       return;
     }
 
