@@ -7,6 +7,7 @@ import {
   type DeployedGraphReaderOptions
 } from "../../../src/server/routes/graphs-planning-reads.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { DeployProgress } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -315,11 +316,15 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       application: null
     });
 
-    // Unmigrated routes in this split family still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/plan-graph`, {
-      method: "POST",
-      body: "{}"
-    });
+    // Unmigrated routes still reach the fallback. `/api/list-environments` is
+    // used rather than a route from this family: this family's write routes
+    // migrated in the following slice and `GET /api/load-graph-stream` is
+    // migrating in its own, so probing either would silently stop testing the
+    // fallback and start asserting against a migrated handler. The inventory
+    // assertion turns that into a loud failure the next time it happens.
+    const residualKey = "GET /api/list-environments";
+    expect(LEGACY_ROUTE_INVENTORY).toContain(residualKey);
+    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
     expect(residual.status).toBe(418);
   });
 });
