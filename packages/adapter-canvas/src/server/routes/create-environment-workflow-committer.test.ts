@@ -124,13 +124,12 @@ describe("isProtectedBranchFailure", () => {
     ).toBe(false);
   });
 
-  it.each([
-    ["HTTP 500: internal error"],
-    [""],
-    [undefined]
-  ])("does not divert %s into the pull-request fallback", (stderr) => {
-    expect(isProtectedBranchFailure(stderr as string)).toBe(false);
-  });
+  it.each([["HTTP 500: internal error"], [""], [undefined]])(
+    "does not divert %s into the pull-request fallback",
+    (stderr) => {
+      expect(isProtectedBranchFailure(stderr as string)).toBe(false);
+    }
+  );
 });
 
 describe("committing a workflow file", () => {
@@ -216,10 +215,7 @@ describe("the protected-branch pull-request fallback", () => {
   it("creates a branch off the default branch head and re-commits there", async () => {
     const h = harness({
       runGh: [{ code: 1 }, { code: 1 }],
-      runGhWorkflow: [
-        { code: 1, stderr: "protected branch" },
-        { code: 0 }
-      ],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }, { code: 0 }],
       defaultBranch: "trunk",
       headSha: "sha-1",
       createBranch: { ok: true, stderr: "" }

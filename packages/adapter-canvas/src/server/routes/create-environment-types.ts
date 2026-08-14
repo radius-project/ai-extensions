@@ -81,8 +81,7 @@ export interface OperationStartAccepted {
 }
 
 export type OperationStartResult =
-  | OperationStartAccepted
-  | OperationStartConflict;
+  OperationStartAccepted | OperationStartConflict;
 
 // A refusal is a status plus the exact body the legacy arm serialized. Kept as
 // data rather than a write so the ladder can be asserted rung by rung without a

@@ -67,7 +67,10 @@ export interface AdmissionPorts {
   buildStages(input: { includeIdentity: boolean }): unknown;
   startOperation(operation: CreateEnvironmentOperation): OperationStartResult;
   persistOperations(): Promise<void>;
-  reportOperationDiagnostic(diagnostic: { code: string; message: string }): void;
+  reportOperationDiagnostic(diagnostic: {
+    code: string;
+    message: string;
+  }): void;
   finishFailed(
     operation: CreateEnvironmentOperation,
     failure: Record<string, unknown>
@@ -96,8 +99,7 @@ export interface RefusedCreateEnvironmentRequest {
 }
 
 export type CreateEnvironmentAdmission =
-  | AdmittedCreateEnvironmentRequest
-  | RefusedCreateEnvironmentRequest;
+  AdmittedCreateEnvironmentRequest | RefusedCreateEnvironmentRequest;
 
 // Rung 1. Split out because it is decided before the request body is read.
 export function refuseUnlessServerOwned(

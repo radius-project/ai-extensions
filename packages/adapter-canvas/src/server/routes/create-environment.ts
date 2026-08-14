@@ -10,10 +10,13 @@ import {
 } from "./create-environment-refusals.js";
 import {
   createWorkflowScopeGhRunner,
-  needsWorkflowScope,
   type WorkflowScopeGhRunnerPorts
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
+import {
+  applyProviderConfiguration,
+  publishWorkflowFiles
+} from "./create-environment-workflow-publisher.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -42,8 +45,7 @@ export interface CreateEnvironmentInstanceEntry {
 }
 
 export interface CreateEnvironmentDependencies
-  extends AdmissionPorts,
-    WorkflowScopeGhRunnerPorts {
+  extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
   // --- request scope ---
   // Evaluated per request against this instance's server-owned token. Never a
   // construction-time value: the token is a per-instance randomUUID().
@@ -69,7 +71,9 @@ export interface CreateEnvironmentDependencies
     persist: () => Promise<void>;
     report: (diagnostic: { code: string; message: string }) => void;
   }): Promise<boolean>;
-  runAzCommand(args: string[]): Promise<Partial<CreateEnvironmentCommandResult>>;
+  runAzCommand(
+    args: string[]
+  ): Promise<Partial<CreateEnvironmentCommandResult>>;
 
   // --- preflight ---
   preflightRepoAdmin(repo: string): Promise<string>;
@@ -112,7 +116,10 @@ export interface CreateEnvironmentDependencies
   optionalString(value: unknown): string;
 
   // --- workflow generation and commit ---
-  generateVerifyWorkflow(environment: string, provider: string): Promise<string>;
+  generateVerifyWorkflow(
+    environment: string,
+    provider: string
+  ): Promise<string>;
   generateDeployWorkflow(
     environment: string,
     appFile: string
@@ -182,11 +189,6 @@ export interface CreateEnvironmentDependencies
   now(): number;
 }
 
-const WORKFLOW_SCOPE_HINT =
-  ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.';
-const WRITE_ACCESS_HINT =
-  " Check that you have write access to the repository and that GitHub Actions is enabled.";
-
 export async function handleCreateEnvironment(
   context: CanvasRequestContext,
   dependencies: CreateEnvironmentDependencies
@@ -214,8 +216,7 @@ export async function handleCreateEnvironment(
   let op: CreateEnvironmentOperation | null = null;
   let steps: string[] = [];
   let deleteGitHubEnvironmentRunner:
-    | ((args: string[]) => Promise<unknown>)
-    | null = null;
+    ((args: string[]) => Promise<unknown>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
@@ -365,11 +366,8 @@ export async function handleCreateEnvironment(
       dependencies.resolveGitHubEnvironmentCreateState(environmentLookup);
     if (!environmentState) {
       const detail =
-        (
-          environmentLookup.stderr ||
-          environmentLookup.stdout ||
-          ""
-        ).trim() || "The GitHub API lookup failed.";
+        (environmentLookup.stderr || environmentLookup.stdout || "").trim() ||
+        "The GitHub API lookup failed.";
       throw new Error(
         `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
       );
@@ -415,211 +413,50 @@ export async function handleCreateEnvironment(
     }
 
     // Step 2: Set environment variables and secrets based on provider
-    steps.push("Setting environment variables and secrets...");
-    // Fall back to shared credentials for values not provided in the request
-    const azureCreds = dependencies.azureCredential();
-    const awsCreds = dependencies.awsCredential();
-
-    if (provider === "azure") {
-      const clientId =
-        data.clientId || dependencies.optionalString(azureCreds.clientId);
-      const tenantId =
-        data.tenantId || dependencies.optionalString(azureCreds.tenantId);
-      const subscriptionId =
-        data.subscriptionId ||
-        dependencies.optionalString(azureCreds.subscriptionId);
-      const rg = data.resourceGroup || "";
-      const k8s = data.cluster || "";
-
-      await setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
-      await setEnvironmentVariable("AZURE_TENANT_ID", tenantId);
-      await setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
-      await setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
-      await setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
-      await setEnvironmentVariable("AZURE_LOCATION", data.location);
-      await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-
-      const setCount = [
-        clientId,
-        tenantId,
-        subscriptionId,
-        rg,
-        k8s,
-        data.location,
-        data.namespace
-      ].filter(Boolean).length;
-      steps.push(`Set ${setCount} environment value(s) for Azure.`);
-      if (!clientId || !tenantId || !subscriptionId) {
-        steps.push(
-          "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
-        );
+    await applyProviderConfiguration(provider, data, {
+      azureCredential: () => dependencies.azureCredential(),
+      awsCredential: () => dependencies.awsCredential(),
+      optionalString: (value) => dependencies.optionalString(value),
+      setEnvironmentVariable,
+      pushStep: (message) => {
+        steps.push(message);
       }
-    } else {
-      const roleArn = data.roleArn || "";
-      const region =
-        data.region || dependencies.optionalString(awsCreds.region) ||
-        "us-east-1";
-      const accountId =
-        data.accountId || dependencies.optionalString(awsCreds.accountId);
-      const k8s = data.cluster || "";
-
-      await setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
-      await setEnvironmentVariable("AWS_REGION", region);
-      await setEnvironmentVariable("AWS_ACCOUNT_ID", accountId);
-      await setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
-      await setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
-      await setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-      await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-    }
-
-    // Step 3: Commit the verify-credentials workflow
-    steps.push("Committing verify-credentials workflow...");
-    const verifyWorkflow = await dependencies.generateVerifyWorkflow(
-      envName,
-      provider
-    );
-    const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
-    const verifyPath = ".github/workflows/radius-verify-credentials.yml";
-
-    const verifyCommit = await commitWorkflowFileSmart(
-      verifyPath,
-      verifyContent,
-      "Add Radius verify-credentials workflow for environment " + envName
-    );
-
-    if (!verifyCommit.ok) {
-      steps.push("❌ Failed to commit verify-credentials workflow.");
-      const scopeHint =
-        needsWorkflowScope(verifyCommit.stderr) ?
-          WORKFLOW_SCOPE_HINT
-        : WRITE_ACCESS_HINT;
-      await fail(
-        400,
-        "Failed to commit the verify-credentials workflow (" +
-          verifyPath +
-          ") to " +
-          targetRepo +
-          ". " +
-          ((verifyCommit.stderr || "").trim() ||
-            "The GitHub API request failed.") +
-          scopeHint,
-        "verify-workflow-commit-failed",
-        { steps, ghError: verifyCommit.stderr || "" }
-      );
-      return;
-    }
-    steps.push("✅ Verify workflow committed.");
-    dependencies.recordCommittedWorkflowFile(operation, {
-      path: verifyPath,
-      branch: verifyCommit.viaPr ? prBranch() : defaultBranch,
-      mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
     });
-    if (!(await checkpoint())) return;
 
-    // Step 4: Also commit the deploy workflows (dispatcher + both provider
-    // workflows). The dispatcher references both provider files by path, so all
-    // three must exist in the target repo.
-    steps.push("Committing deploy workflows...");
-    const deployWorkflows = await dependencies.generateDeployWorkflow(
-      envName,
-      ".radius/app.bicep"
+    // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
+    // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
+    // the same points they did inline; the publisher never finalizes or
+    // responds, so `fail` is still called from here alone.
+    const published = await publishWorkflowFiles(
+      {
+        generateVerifyWorkflow: (environment, workflowProvider) =>
+          dependencies.generateVerifyWorkflow(environment, workflowProvider),
+        generateDeployWorkflow: (environment, appFile) =>
+          dependencies.generateDeployWorkflow(environment, appFile),
+        generateDeleteWorkflow: (environment) =>
+          dependencies.generateDeleteWorkflow(environment),
+        commitWorkflowFileSmart,
+        recordCommittedWorkflowFile: (op, entry) =>
+          dependencies.recordCommittedWorkflowFile(op, entry),
+        deleteLegacyDeployWorkflow: (repo) =>
+          dependencies.deleteLegacyDeployWorkflow(repo),
+        usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
+        pullRequestBranch: prBranch,
+        errorMessage: (error) => dependencies.errorMessage(error),
+        pushStep: (message) => {
+          steps.push(message);
+        },
+        gate: checkpoint
+      },
+      { operation, targetRepo, envName, provider, defaultBranch }
     );
-
-    for (const [fileName, content] of Object.entries(deployWorkflows)) {
-      const deployContent = Buffer.from(content).toString("base64");
-      const deployPath = ".github/workflows/" + fileName;
-
-      const deployCommit = await commitWorkflowFileSmart(
-        deployPath,
-        deployContent,
-        "Add Radius deploy workflow (" +
-          fileName +
-          ") for environment " +
-          envName
-      );
-
-      if (!deployCommit.ok) {
-        steps.push("❌ Failed to commit deploy workflow " + fileName + ".");
-        const scopeHint2 =
-          needsWorkflowScope(deployCommit.stderr) ?
-            WORKFLOW_SCOPE_HINT
-          : WRITE_ACCESS_HINT;
-        await fail(
-          400,
-          "Failed to commit the deploy workflow (" +
-            deployPath +
-            ") to " +
-            targetRepo +
-            ". " +
-            ((deployCommit.stderr || "").trim() ||
-              "The GitHub API request failed.") +
-            scopeHint2,
-          "deploy-workflow-commit-failed",
-          { steps, ghError: deployCommit.stderr || "" }
-        );
-        return;
-      }
-      dependencies.recordCommittedWorkflowFile(operation, {
-        path: deployPath,
-        branch: deployCommit.viaPr ? prBranch() : defaultBranch,
-        mode: deployCommit.viaPr ? "pull_request" : "default_branch"
+    if (published.outcome === "cancelled") return;
+    if (published.outcome === "refused") {
+      await fail(published.status, published.error, published.code, {
+        steps,
+        ghError: published.ghError
       });
-      if (!(await checkpoint())) return;
-    }
-    // Best-effort: remove the legacy monolithic deploy workflow so it does not
-    // double-trigger alongside the new dispatcher. Skipped in PR-fallback mode
-    // since we can't push to the default branch.
-    if (!committer.pullRequestState())
-      await dependencies.deleteLegacyDeployWorkflow(targetRepo);
-    steps.push("✅ Deploy workflows committed.");
-
-    // Step 4b: Commit the application-delete workflows (dispatcher + Azure
-    // provider workflow) so the Delete Deployment button can dispatch `rad app
-    // delete`. Only Azure workflows are generated and committed; the AWS
-    // provider file is never produced.
-    steps.push("Committing delete workflows...");
-    try {
-      const deleteWorkflows = await dependencies.generateDeleteWorkflow(
-        envName
-      );
-      for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-        const delContent = Buffer.from(content).toString("base64");
-        const delPath = ".github/workflows/" + fileName;
-
-        const delCommit = await commitWorkflowFileSmart(
-          delPath,
-          delContent,
-          "Add Radius delete workflow (" +
-            fileName +
-            ") for environment " +
-            envName
-        );
-
-        if (!delCommit.ok) {
-          steps.push(
-            "⚠️ Could not commit delete workflow " +
-              fileName +
-              ": " +
-              ((delCommit.stderr || "").trim() || "GitHub API request failed.")
-          );
-        }
-        if (delCommit.ok) {
-          dependencies.recordCommittedWorkflowFile(operation, {
-            path: delPath,
-            branch: delCommit.viaPr ? prBranch() : defaultBranch,
-            mode: delCommit.viaPr ? "pull_request" : "default_branch"
-          });
-          if (!(await checkpoint())) return;
-        }
-      }
-      steps.push("✅ Delete workflows committed.");
-    } catch (delErr) {
-      // Delete workflows are non-critical to environment creation, so surface
-      // the failure but don't abort the whole flow.
-      steps.push(
-        "⚠️ Could not generate/commit delete workflows: " +
-          dependencies.errorMessage(delErr)
-      );
+      return;
     }
 
     // Step 4c: If any workflow commit fell back to a PR branch, open the pull
@@ -629,8 +466,7 @@ export async function handleCreateEnvironment(
     let pullRequestUrl = "";
     const prState = committer.pullRequestState();
     if (prState) {
-      const prTitle =
-        "Add Radius deploy workflows for environment " + envName;
+      const prTitle = "Add Radius deploy workflows for environment " + envName;
       const prBody = [
         "This PR adds the GitHub Actions workflows that power the Radius extension for the **" +
           envName +
@@ -818,7 +654,11 @@ export async function handleCreateEnvironment(
       // nothing failed — the operation is finished and the remaining work is the
       // user's. The client used to poll for a verify run that could not exist
       // and, eight minutes later, reported this as a timeout.
-      dependencies.setStageState(operation, dependencies.stageVerify, "skipped");
+      dependencies.setStageState(
+        operation,
+        dependencies.stageVerify,
+        "skipped"
+      );
       dependencies.finish(operation, "action_required", {
         terminal: {
           reason: "pr-merge-required",

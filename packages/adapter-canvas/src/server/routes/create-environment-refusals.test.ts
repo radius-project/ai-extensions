@@ -179,10 +179,7 @@ describe("the create-environment refusal ladder", () => {
   it.each([
     ["the operation does not exist", { existing: null }],
     ["the operation is stale", { existing: operation(), stale: true }],
-    [
-      "the repository differs",
-      { existing: operation({ repo: "other/repo" }) }
-    ],
+    ["the repository differs", { existing: operation({ repo: "other/repo" }) }],
     [
       "the environment differs",
       { existing: operation({ environment: "prod" }) }
@@ -372,7 +369,11 @@ describe("admitting a create-environment request", () => {
       { envName: "dev", provider: "azure" }
     ]
   ] as Array<
-    [string, CreateEnvironmentRequestData, { envName: string; provider: string }]
+    [
+      string,
+      CreateEnvironmentRequestData,
+      { envName: string; provider: string }
+    ]
   >)("defaults %s with `||`, not `??`", async (_case, data, expected) => {
     // `??` would keep "" here. The distinction is observable: an environment
     // named "" is not a valid GitHub environment.

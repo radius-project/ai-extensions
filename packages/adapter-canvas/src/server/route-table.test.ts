@@ -20,6 +20,7 @@ import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
+import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -172,6 +173,75 @@ const productionHandlers = {
     reportOperationDiagnostic: () => {},
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify"
+  }),
+  // Construction-only: this suite asserts table shape and ownership, so the
+  // handler is never invoked here. Its behavior is covered by the collocated
+  // seam tests and by test/integration/http/create-environment.test.ts.
+  ...createCreateEnvironmentRoutes({
+    isServerOwnedRequest: () => false,
+    readInstanceEntry: () => undefined,
+    cliExec: () => ({ stdin: null }),
+    readProcessEnv: () => ({}),
+    isValidRepoSlug: () => false,
+    getOperation: () => null,
+    isStale: () => false,
+    createOperation: () => ({ operationId: "op" }),
+    buildStages: () => [],
+    startOperation: () => ({ ok: true }),
+    persistOperations: () => Promise.resolve(),
+    reportOperationDiagnostic: () => {},
+    finishFailed: () => {},
+    enterStage: () => {},
+    errorMessage: (error) => String(error),
+    stageAuthorizeIdentity: "authorize-identity",
+    stageConfigureEnvironment: "configure-environment",
+    addLegacyStep: () => {},
+    finalizeSetupFailure: () =>
+      Promise.resolve({ status: 500, body: { error: "", code: "" } }),
+    persistMutationCheckpoint: () => Promise.resolve(true),
+    persistBestEffort: () => Promise.resolve(true),
+    runAzCommand: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    preflightRepoAdmin: () => Promise.resolve(""),
+    preflightGhcrPackageWriteAccess: () =>
+      Promise.resolve({ ok: true, credentials: null }),
+    bootstrapGHCRStatePackage: () => Promise.resolve({ visibility: undefined }),
+    stateRegistryForEnvironment: () => "",
+    getDefaultBranch: () => Promise.resolve("main"),
+    getBranchHeadSha: () => Promise.resolve(null),
+    createBranchRef: () => Promise.resolve({ ok: false, stderr: "" }),
+    tempFile: { write: () => "", remove: () => {} },
+    resolveGitHubEnvironmentCreateState: () => null,
+    recordGitHubEnvironment: () => {},
+    envListCacheDelete: () => {},
+    ociStateBackend: "oci",
+    defaultStateArchive: "latest",
+    azureCredential: () => ({}),
+    awsCredential: () => ({}),
+    optionalString: () => "",
+    generateVerifyWorkflow: () => Promise.resolve(""),
+    generateDeployWorkflow: () => Promise.resolve({}),
+    generateDeleteWorkflow: () => Promise.resolve({}),
+    recordCommittedWorkflowFile: () => {},
+    deleteLegacyDeployWorkflow: () => Promise.resolve(true),
+    createPullRequestApi: () => Promise.resolve({ ok: false, stderr: "" }),
+    planCredentialVerification: () =>
+      Promise.resolve({
+        shouldDispatch: false,
+        ref: "main",
+        defaultBranch: "main",
+        pullRequestUrl: "",
+        skipReason: ""
+      }),
+    fetchFileFromRepo: () => Promise.resolve(null),
+    buildVerifyWorkflowDispatchArgs: () => [],
+    verifyWorkflowFile: "radius-verify-credentials.yml",
+    stageVerify: "verify",
+    recordCleanupState: () => {},
+    recordCommitState: () => {},
+    setStageState: () => {},
+    finish: () => {},
+    sleep: () => Promise.resolve(),
+    now: () => 0
   })
 };
 const table = createServerRouteTable(productionHandlers);

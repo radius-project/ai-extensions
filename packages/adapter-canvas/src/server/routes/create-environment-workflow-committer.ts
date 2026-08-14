@@ -88,9 +88,7 @@ export function createWorkflowFileCommitter(
       baseSha
     );
     if (!created.ok)
-      throw new Error(
-        `could not create branch "${branch}": ${created.stderr}`
-      );
+      throw new Error(`could not create branch "${branch}": ${created.stderr}`);
     prState = { branch, base };
     ports.pushStep(
       `ℹ️ No permission to push to "${base}" directly — committing workflows to branch "${branch}" and opening a pull request.`

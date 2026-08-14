@@ -272,7 +272,8 @@ function start(script: Script = {}): Harness {
     // --- committer ports ---
     getDefaultBranch: async () => script.defaultBranch ?? "main",
     getBranchHeadSha: async () => {
-      if (!("headSha" in script)) throw new Error("unscripted getBranchHeadSha");
+      if (!("headSha" in script))
+        throw new Error("unscripted getBranchHeadSha");
       return script.headSha;
     },
     createBranchRef: async () => {
@@ -329,7 +330,8 @@ function start(script: Script = {}): Harness {
       return true;
     },
     createPullRequestApi: async () => {
-      if (!script.pullRequest) throw new Error("unscripted createPullRequestApi");
+      if (!script.pullRequest)
+        throw new Error("unscripted createPullRequestApi");
       journal.push("createPullRequestApi");
       return {
         ok: script.pullRequest.ok,
@@ -569,12 +571,12 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     await post({ repo: "octo/app" });
 
-    expect(harness.journal.indexOf("preflightGhcrPackageWriteAccess")).toBeLessThan(
+    expect(
+      harness.journal.indexOf("preflightGhcrPackageWriteAccess")
+    ).toBeLessThan(harness.journal.indexOf("bootstrapGHCRStatePackage"));
+    expect(
       harness.journal.indexOf("bootstrapGHCRStatePackage")
-    );
-    expect(harness.journal.indexOf("bootstrapGHCRStatePackage")).toBeGreaterThan(
-      -1
-    );
+    ).toBeGreaterThan(-1);
   });
 
   it("succeeds with no application model and no deploy parameters present", async () => {
@@ -695,7 +697,11 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("sets the AWS values, with a default region, for an AWS environment", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app", provider: "aws", roleArn: "arn:aws:iam::1" });
+    await post({
+      repo: "octo/app",
+      provider: "aws",
+      roleArn: "arn:aws:iam::1"
+    });
 
     expect(harness.ghCalls).toContain(
       "variable set AWS_REGION --body us-east-1 --env dev --repo octo/app"
@@ -810,7 +816,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(response.status).toBe(400);
     const payload = (await response.json()) as { error: string; code: string };
     expect(payload.code).toBe("verify-workflow-commit-failed");
-    expect(payload.error).toContain("gh auth refresh -h github.com -s workflow");
+    expect(payload.error).toContain(
+      "gh auth refresh -h github.com -s workflow"
+    );
     expect(harness.committedFiles).toEqual([]);
   });
 
@@ -863,13 +871,18 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
   const protectedScript: Script = {
     gh: [
       {
-        match: /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+        match:
+          /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
         result: { code: 1, stderr: "protected branch" }
       }
     ],
     headSha: "sha-base",
     createBranch: { ok: true, stderr: "" },
-    pullRequest: { ok: true, url: "https://github.com/octo/app/pull/7", number: 7 }
+    pullRequest: {
+      ok: true,
+      url: "https://github.com/octo/app/pull/7",
+      number: 7
+    }
   };
 
   it("opens a pull request and finishes action_required without dispatching", async () => {
@@ -1006,7 +1019,9 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         "Radius changed no further cloud resources because it could not save the setup recovery record.",
       code: "operation-persistence-failed"
     });
-    expect(harness.journal).toContain("diagnostic:operation-store-write-failed");
+    expect(harness.journal).toContain(
+      "diagnostic:operation-store-write-failed"
+    );
     expect(harness.ghCalls).toEqual([
       "api /repos/octo/app/environments/dev",
       "api --method PUT /repos/octo/app/environments/dev"
