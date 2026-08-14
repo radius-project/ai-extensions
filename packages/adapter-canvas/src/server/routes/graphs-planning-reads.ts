@@ -337,7 +337,7 @@ export interface LoadGraphStreamSourceRefContext {
   token: string;
 }
 
-// Thirteen narrow function seams for one route. Nothing is moved: the bicep
+// Eleven narrow function seams for one route. Nothing is moved: the bicep
 // fetch, the rad-artifacts resolver, the graph compiler, the source-ref
 // prepare/commit pair, the app.bicep handoff, the workspace-path deriver, the
 // branch defaulter, the canvas normalizer and the error formatter all stay where
