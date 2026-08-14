@@ -344,6 +344,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       overrides: { requestedClientId: APP_ID },
       runAz: async (args) => {
         const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({ code: 1, stderr: "tags unavailable" });
+        }
         if (line.startsWith("ad app show --id")) {
           return command({ stdout: "app-object" });
         }
@@ -352,9 +355,6 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         }
         if (line.startsWith("ad app owner list")) {
           return command({ stdout: "somebody-else" });
-        }
-        if (line.includes("--query tags")) {
-          return command({ code: 1, stderr: "tags unavailable" });
         }
         throw new Error(`unscripted az call: ${line}`);
       }

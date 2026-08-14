@@ -375,15 +375,6 @@ export async function configureAzureAutoSetupCredentials({
     }
     servicePrincipalObjectId = lookup.objectId;
   }
-  if (!servicePrincipalObjectId) {
-    await fail(
-      400,
-      "Could not resolve the Service Principal object id needed to assign Azure roles: missing object id",
-      "sp-objectid-failed",
-      { steps, clientId, appName, azError: "missing object id" }
-    );
-    return false;
-  }
   dependencies.operations.recordServicePrincipal(operation, {
     objectId: servicePrincipalObjectId
   });
