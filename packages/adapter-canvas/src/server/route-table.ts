@@ -174,6 +174,7 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/user-repos",
   "POST /api/repo-branches",
   "POST /api/discover-branches",
+  "GET /api/load-graph-stream",
   "POST /api/operations",
   "GET /api/deploy-status",
   "GET /api/list-applications",

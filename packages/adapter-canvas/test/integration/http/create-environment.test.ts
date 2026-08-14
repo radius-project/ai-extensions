@@ -145,6 +145,9 @@ function start(script: Script = {}): Harness {
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
       .join(" ");
     ghCalls.push(key);
+    if (key.startsWith("workflow run ")) {
+      journal.push("dispatchVerifyWorkflow");
+    }
     for (const rule of rules) {
       if (rule.match.test(key)) {
         return {
@@ -752,12 +755,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     await post({ repo: "octo/app" });
 
-    const dispatch = harness.ghCalls.findIndex((call) =>
-      call.startsWith("workflow run ")
-    );
+    const dispatch = harness.journal.indexOf("dispatchVerifyWorkflow");
     expect(dispatch).toBeGreaterThan(-1);
     expect(harness.journal.indexOf("recordCommitState")).toBeGreaterThan(
-      harness.journal.indexOf("recordCleanupState:not_needed") - 1
+      dispatch
     );
     expect(harness.commitStates).toEqual([
       {

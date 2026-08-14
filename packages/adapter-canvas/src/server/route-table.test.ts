@@ -19,7 +19,10 @@ import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
-import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
+import {
+  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./routes/graphs-planning-reads.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
@@ -263,6 +266,26 @@ const productionHandlers = {
     finish: () => {},
     sleep: () => Promise.resolve(),
     now: () => 0
+  }),
+  ...createGraphsPlanningStreamRoutes({
+    readInstanceEntry: () => undefined,
+    defaultBranchForState: () => "main",
+    prepareSourceRef: () => ({ token: "" }),
+    commitSourceRef: () => true,
+    triggerAppBicepHandoff: () => {},
+    fetchBicepSelection: () =>
+      Promise.resolve({
+        content: null,
+        fromWorkspace: false,
+        branch: "main",
+        bicepPath: ""
+      }),
+    workspaceGraphJsonPath: () => "",
+    radArtifactsDirForSelection: () =>
+      Promise.resolve({ dir: "", remote: false }),
+    buildGraphViaRad: () => Promise.resolve([]),
+    canvasGraphResources: () => [],
+    errorMessage: (error) => String(error)
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -292,10 +315,10 @@ describe("server route ownership boundary", () => {
   //   migrated; POST /api/discover stays on the fallback for its own slice.
   // - deployments: everything but POST /api/deploy has migrated; that route is
   //   deferred because it needs its own multi-slice treatment.
-  // - graphs-planning: only its two read-only routes are migrated; its four
-  //   remaining routes stay on the fallback.
+  // - graphs-planning: its three read routes, including the SSE stream, are
+  //   migrated; its three POST routes stay on the fallback.
   // - environments: the whole family has migrated; its residual is now zero.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, and environments families, Azure auto-setup and the azure-discovery reads, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 6 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, and environments families, Azure auto-setup and the azure-discovery reads, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 5 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -316,6 +339,7 @@ describe("server route ownership boundary", () => {
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
+      "GET /api/load-graph-stream",
       "POST /api/operations",
       "GET /api/deploy-status",
       "GET /api/list-applications",
@@ -333,7 +357,7 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(6);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(5);
     // The now-completed operations-status family, pinned explicitly so a later
     // slice cannot quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
@@ -357,7 +381,6 @@ describe("server route ownership boundary", () => {
     ).toEqual([]);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
-        "GET /api/load-graph-stream",
         "POST /api/load-graph",
         "POST /api/plan-graph",
         "POST /api/diff-branches"
@@ -391,7 +414,7 @@ describe("server route ownership boundary", () => {
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(6);
+    expect(residualLegacyCount).toBe(5);
 
     for (const route of table) {
       const matcher =
