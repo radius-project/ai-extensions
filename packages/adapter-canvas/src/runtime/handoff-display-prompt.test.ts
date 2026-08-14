@@ -25,7 +25,11 @@ const sources = {
     new URL("./create-radius-extension.ts", import.meta.url),
     "utf8"
   ),
-  "server.ts": readFileSync(new URL("../server.ts", import.meta.url), "utf8")
+  "server.ts": readFileSync(new URL("../server.ts", import.meta.url), "utf8"),
+  "server/routes/identity-auth.ts": readFileSync(
+    new URL("../server/routes/identity-auth.ts", import.meta.url),
+    "utf8"
+  )
 };
 
 // The agent-facing halves. Passing one of these directly to session.send (or to
@@ -62,6 +66,11 @@ describe("issue #209: automated turns never render as user-authored messages", (
     expect(sources["create-radius-extension.ts"]).toContain(
       "deployRepairHandoffMessage("
     );
-    expect(sources["server.ts"]).toContain("azureCliAssistMessage(");
+    expect(sources["server.ts"]).toContain(
+      "buildAzureCliAssistMessage: azureCliAssistMessage"
+    );
+    expect(sources["server/routes/identity-auth.ts"]).toContain(
+      "buildAzureCliAssistMessage("
+    );
   });
 });
