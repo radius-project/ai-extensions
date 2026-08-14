@@ -14,6 +14,8 @@ import {
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
+import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
+import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -48,6 +50,44 @@ const productionHandlers = {
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
+  }),
+  ...createIdentityProfilesRoutes({
+    listCredentialProfiles: () => [],
+    saveCredentialProfile: () => null,
+    deleteCredentialProfile: () => false,
+    getGitHubIdentity: () =>
+      Promise.resolve({
+        actingLogin: "",
+        displayLogin: "",
+        mismatch: false,
+        actingHasWorkflow: false,
+        actingHasPackages: false,
+        preferredLogin: null,
+        reason: "",
+        accounts: []
+      }),
+    resetGhIdentityCache: () => {},
+    switchGhAccount: () => Promise.resolve({ ok: true }),
+    setPreferredGitHubLogin: () => {},
+    preflightRepoAdmin: () => Promise.resolve(""),
+    isValidRepoSlug: () => false,
+    errorMessage: (error) => String(error)
+  }),
+  ...createIdentityAuthRoutes({
+    validateAzureCredentials: () => Promise.resolve({ success: false }),
+    generateAzureOIDC: () => ({ message: "", output: "" }),
+    generateAWSOIDC: () => ({ message: "", output: "" }),
+    readInstanceState: () => undefined,
+    setSharedAzureCredentials: () => {},
+    saveCredentials: () => {},
+    azureCredentialIdValidationError: () => "",
+    azureLoginRequiredResponse: () => ({ error: "", code: "", tenantId: "" }),
+    isCliCommandMissing: () => false,
+    isUuid: () => false,
+    buildAzureCliAssistMessage: () => ({ prompt: "", displayPrompt: "" }),
+    runSessionPrompt: () => Promise.resolve({ status: 200 }),
+    runCommand: () => Promise.resolve(""),
+    errorMessage: (error) => String(error)
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -72,12 +112,21 @@ describe("server route ownership boundary", () => {
   // after the GETs migrated, so the family owns two migrated routes and one
   // that is still on the legacy fallback. Naming the split here keeps the
   // family from reading as fully migrated in the ledger.
-  it("owns the liveness-source and repositories families and the operations-status GETs and leaves 31 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, and identity-auth families and the operations-status GETs and leaves 22 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
       "GET /api/operations/",
       "POST /api/open-source",
+      "GET /api/credential-profiles",
+      "GET /api/github-identity",
+      "POST /api/github-account",
+      "POST /api/save-credential-profile",
+      "POST /api/delete-credential-profile",
+      "POST /api/oidc",
+      "POST /api/verify-azure-login",
+      "POST /api/azure-cli-assist",
+      "POST /api/verify-aws-login",
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches"
@@ -85,7 +134,7 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(31);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(22);
     // The split family, pinned explicitly so a later slice cannot quietly
     // assume operations-status is done.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
@@ -111,7 +160,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
+    // Cross-checked against the inventory, and independently pinned: 22 of 38
+    // after this slice. The regex counts only `pathname ===` and
+    // `pathname.startsWith` matchers, so the two regex-matched routes main
+    // added under /api/operations/ (:id/resume/:code and the abandon route) are
+    // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
+    expect(residualLegacyCount).toBe(22);
 
     for (const route of table) {
       const matcher =

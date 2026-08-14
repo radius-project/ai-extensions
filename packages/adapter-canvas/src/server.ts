@@ -206,6 +206,8 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
+import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -522,12 +524,61 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
+// Composition root for the credential-profile and GitHub-identity half of the
+// `identity-credentials` family. Ten narrow function seams: the three profile
+// store operations, the four gh identity operations, the advisory repo
+// preflight, the repo-slug guard, and the error formatter. `preflightRepoAdmin`
+// and `errorMessage` stay defined here and are injected rather than moved, so
+// the route module spawns nothing and touches no disk.
+const identityProfilesRoutes = createIdentityProfilesRoutes({
+  listCredentialProfiles,
+  saveCredentialProfile,
+  deleteCredentialProfile,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  switchGhAccount,
+  setPreferredGitHubLogin,
+  preflightRepoAdmin,
+  isValidRepoSlug,
+  errorMessage
+});
+
+// Composition root for the auth/verify half of the `identity-credentials`
+// family. Fourteen narrow function seams: the two OIDC generators and the Azure
+// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
+// credential writer and its save, an instance-state reader, and the GUID,
+// Azure-message, prompt-builder and error helpers that stay defined here. The
+// session-prompt hook is bound here too so the route module never reads the
+// mutable module-level handler.
+const identityAuthRoutes = createIdentityAuthRoutes({
+  validateAzureCredentials,
+  generateAzureOIDC,
+  generateAWSOIDC,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  setSharedAzureCredentials: (credentials) => {
+    sharedCredentials.azure = credentials;
+  },
+  saveCredentials,
+  azureCredentialIdValidationError,
+  azureLoginRequiredResponse,
+  isCliCommandMissing,
+  isUuid,
+  buildAzureCliAssistMessage: azureCliAssistMessage,
+  runSessionPrompt: (prompt) =>
+    invokeSessionPrompt(sessionPromptHandler, prompt),
+  runCommand: (command, args, options) => runCommand(command, args, options),
+  errorMessage
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
-  ...repositoriesRoutes
+  ...repositoriesRoutes,
+  ...identityProfilesRoutes,
+  ...identityAuthRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -3236,422 +3287,6 @@ function createLegacyRequestHandler(
       res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
-    // JSON API: OIDC validation
-    if (pathname === "/api/oidc" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        if (data.provider === "azure") {
-          // Real Azure validation via az CLI
-          const validation = await validateAzureCredentials(data);
-          const entry = servers.get(instanceId);
-          if (validation.success) {
-            const result = {
-              message: `✅ Azure authentication confirmed — logged in as ${
-                validation.userName || "user"
-              }`,
-              validated: true,
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              output: generateAzureOIDC(data).output
-            };
-            if (entry) {
-              entry.state.oidcAzure = {
-                ...result,
-                clientId: data.clientId || "",
-                tenantName: "",
-                clientName: ""
-              };
-            }
-            // Persist credentials
-            sharedCredentials.azure = {
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              clientId: data.clientId || ""
-            };
-            saveCredentials();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(JSON.stringify(result));
-          } else {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(
-              JSON.stringify({
-                message: `❌ ${validation.error}`,
-                validated: false,
-                output: ""
-              })
-            );
-          }
-        } else {
-          const result = generateAWSOIDC(data);
-          const entry = servers.get(instanceId);
-          if (entry) {
-            entry.state.oidcAws = {
-              ...result,
-              accountId: data.accountId || "",
-              accountName: data.accountName || "",
-              region: data.region || ""
-            };
-          }
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify(result));
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify Azure CLI login with specified tenant/subscription
-    if (pathname === "/api/verify-azure-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const tenantId = (data.tenantId || "").trim();
-        const subscriptionId = (data.subscriptionId || "").trim();
-
-        // Reject non-GUID credential identifiers before using them in
-        // command guidance or passing the subscription to the az argv.
-        // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
-        // quotes args containing whitespace, so a value like "x&calc" would
-        // be parsed by cmd.exe as a command separator. An empty value is
-        // allowed (fall back to the ambient CLI context). Mirrors the guard
-        // already enforced in /api/azure-auto-setup.
-        const validationError = azureCredentialIdValidationError({
-          tenantId,
-          subscriptionId
-        });
-        if (validationError) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ error: validationError }));
-          return;
-        }
-
-        // NOTE: we intentionally do NOT run `az login` here. Interactive
-        // login opens a browser/device-code flow that blocks indefinitely
-        // and would hang this server. Instead we verify the user's existing
-        // Azure CLI session (and optionally switch subscription). If there
-        // is no session, the canvas can ask Copilot to start device-code login.
-        if (subscriptionId) {
-          try {
-            await runCommand(
-              "az",
-              ["account", "set", "--subscription", subscriptionId],
-              { timeout: 10000 }
-            );
-          } catch (e) {}
-        }
-
-        let acct;
-        try {
-          const acctJson = await runCommand(
-            "az",
-            ["account", "show", "-o", "json"],
-            { timeout: 10000 }
-          );
-          acct = JSON.parse(acctJson);
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : String(e || "");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          if (isCliCommandMissing(detail)) {
-            res.end(
-              JSON.stringify({
-                error: "Azure CLI is not installed.",
-                code: "az-cli-missing",
-                tenantId
-              })
-            );
-          } else {
-            res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId })));
-          }
-          return;
-        }
-
-        // If a tenant was specified and the active session is for a
-        // different tenant, surface a clear, actionable message.
-        if (
-          tenantId &&
-          acct.tenantId &&
-          acct.tenantId.toLowerCase() !== tenantId.toLowerCase()
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify(
-              azureLoginRequiredResponse({
-                tenantId,
-                activeTenantId: acct.tenantId
-              })
-            )
-          );
-          return;
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            user: acct.user?.name || "",
-            tenantId: acct.tenantId,
-            subscriptionId: acct.id,
-            subscriptionName: acct.name
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "Azure CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    if (pathname === "/api/azure-cli-assist" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const action = data.action === "install" ? "install" : "login";
-        const requestedTenantId =
-          typeof data.tenantId === "string" ? data.tenantId.trim() : "";
-        const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = azureCliAssistMessage({ action, tenantId });
-        const promptResult = await invokeSessionPrompt(
-          sessionPromptHandler,
-          prompt
-        );
-        if (promptResult.error) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(promptResult.status);
-          res.end(JSON.stringify({ error: promptResult.error }));
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            message:
-              action === "install" ?
-                "Asked Copilot to help install Azure CLI and start Azure login. Complete the steps it opens, then click Verify Credentials again."
-              : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again."
-          })
-        );
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify an AWS CLI session for a credential profile. Like the Azure
-    // verify, we do NOT log in interactively — we check the caller's existing
-    // `aws sts get-caller-identity` and (optionally) note the requested region.
-    if (pathname === "/api/verify-aws-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        let ident;
-        try {
-          const out = await runCommand(
-            "aws",
-            ["sts", "get-caller-identity", "--output", "json"],
-            { timeout: 15000 }
-          );
-          ident = JSON.parse(out);
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error:
-                'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.'
-            })
-          );
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            accountId: ident.Account || data.accountId || "",
-            arn: ident.Arn || "",
-            user:
-              ident.Arn ?
-                String(ident.Arn).split("/").pop()
-              : ident.Account || "",
-            region: data.region || ""
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "AWS CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    // List the saved credential profiles for a repo.
-    if (pathname === "/api/credential-profiles" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ profiles: repo ? listCredentialProfiles(repo) : [] })
-      );
-      return;
-    }
-
-    // Report the GitHub identity setup will act as, plus switchable accounts.
-    // Used by the Create Environment dialog to warn when the acting account
-    // differs from the one the host UI shows, or lacks the workflow scope.
-    if (pathname === "/api/github-identity" && req.method === "GET") {
-      res.setHeader("Content-Type", "application/json");
-      try {
-        // A re-check (?fresh=1) means the user just changed their gh auth
-        // out-of-band (e.g. ran `gh auth refresh` to add write:packages).
-        // The snapshot is memoized for the process, so drop it first and
-        // force `gh auth status` to be re-read; otherwise we'd return the
-        // stale pre-refresh scopes and the warning would never clear.
-        if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
-        // Resolve identity first — this primes the token strategy, so the
-        // repo preflight below (via ghApiJson→ghChildEnv) acts as the same
-        // account setup will. When the dialog passes its repo, fold in the
-        // admin/read preflight so a non-admin (write/maintain) account is
-        // surfaced HERE, at dialog open next to the account it concerns,
-        // instead of only after the user fills the form and submits. This
-        // mirrors the submit-time gates (which stay authoritative); a
-        // missing/invalid repo just skips the preflight — the identity
-        // response must still render.
-        const identity = await getGitHubIdentity();
-        const repoParam = (url.searchParams.get("repo") || "").trim();
-        if (repoParam && isValidRepoSlug(repoParam)) {
-          try {
-            const accessMsg = await preflightRepoAdmin(repoParam);
-            if (accessMsg) identity.repoAccess = accessMsg;
-          } catch {
-            /* preflight is advisory here; never fail identity on it */
-          }
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify(identity));
-      } catch (e) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), accounts: [] }));
-      }
-      return;
-    }
-
-    // Switch the active GitHub account setup acts as.
-    if (pathname === "/api/github-account" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      try {
-        const data = JSON.parse(body || "{}");
-        const login = (data.login || "").trim();
-        const result = await switchGhAccount(login);
-        if (!result.ok) {
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: result.error || "Failed to switch account."
-            })
-          );
-          return;
-        }
-        // Persist the explicit choice machine-wide so it survives a
-        // restart. Without this the in-memory preference dies with the
-        // process and the token strategy reverts to the injected token's
-        // account — the same wrong-identity failure this flow exists to
-        // prevent, deferred by one process lifetime.
-        setPreferredGitHubLogin(login);
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({ success: true, identity: await getGitHubIdentity() })
-        );
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Create / update a credential profile (already verified client-side).
-    if (pathname === "/api/save-credential-profile" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        if (!repo || !name) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "repo and name are required." }));
-          return;
-        }
-        const saved = saveCredentialProfile(repo, data);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, profile: saved }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Delete a credential profile.
-    if (
-      pathname === "/api/delete-credential-profile" &&
-      req.method === "POST"
-    ) {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        const removed = deleteCredentialProfile(repo, name);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, removed }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
     // Delete a GitHub environment (from the Environments table "Delete Env").
     if (pathname === "/api/delete-environment" && req.method === "POST") {
       let body = "";
