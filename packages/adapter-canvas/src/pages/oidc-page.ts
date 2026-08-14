@@ -100,6 +100,11 @@ document.getElementById('tab-aws').addEventListener('click', function() {
     document.getElementById('panel-aws').style.display = 'block';
     document.getElementById('panel-azure').style.display = 'none';
 });
+function escapeHtmlClient(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+}
 document.getElementById('btn-azure').addEventListener('click', function() {
     var data = {
         provider: 'azure',
