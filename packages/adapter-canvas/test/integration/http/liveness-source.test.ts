@@ -5,7 +5,7 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
 import {
   createTestRouteTable,
-  residualRoutePathForProbe
+  fetchResidualRoute
 } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
@@ -149,15 +149,9 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
       '{"ok":false,"error":"editor canvas unavailable"}'
     );
 
-    // Unmigrated routes still reach the fallback. The path is derived from the
-    // residual inventory rather than named: a named probe inherits that route's
-    // migration expiry and turns into a dispatch to a throwing stub the moment
-    // the route migrates, which is exactly what `POST /api/create-environment`
-    // did here.
-    const residual = await fetch(
-      `${entry.baseUrl}${residualRoutePathForProbe("POST")}`,
-      { method: "POST" }
-    );
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
   });
 

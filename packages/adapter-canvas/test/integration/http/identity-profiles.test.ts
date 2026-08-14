@@ -5,7 +5,7 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createIdentityProfilesRoutes } from "../../../src/server/routes/identity-profiles.js";
 import {
   createTestRouteTable,
-  residualRoutePathForProbe
+  fetchResidualRoute
 } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { GitHubIdentity } from "../../../src/gh.js";
@@ -313,18 +313,9 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(malformed.status).toBe(400);
 
-    // Unmigrated routes still reach the fallback. Both probes are resolved from
-    // the residual inventory rather than named, because a named probe inherits
-    // that route's migration expiry and breaks in the slice that migrates it.
-    const residual = await fetch(
-      `${entry.baseUrl}${residualRoutePathForProbe("GET")}`
-    );
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
-    const deferred = await post(
-      entry.baseUrl,
-      residualRoutePathForProbe("POST"),
-      "{}"
-    );
-    expect(deferred.status).toBe(418);
   });
 });

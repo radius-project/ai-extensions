@@ -8,7 +8,7 @@ Radius treats this as optional metadata that a developer would normally hand-add
 
 The reference surfaces on the graph node as `codeRef` and is sourced from the resource's `codeReference` value:
 
-- **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside a resource's `properties`. `rad app graph` preserves it and the canvas renders the link. When authoring or updating `app.bicep` (see the `radius-app-bicep` skill), populate `codeReference` for every non-application resource you can locate.
+- **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside a resource's `properties`. `rad app graph` preserves it and the canvas renders the link. When authoring or updating `app.bicep` (see the `radius-app-bicep` skill), populate `codeReference` for every non-application resource you can locate. Built-in types get the property from Radius's base resource schema; a generated `Radius.Resources/*` custom type is a closed object built from `custom-types.yaml` and accepts it only because that manifest declares it, so on a custom type generated before that rule, add the property to the manifest and republish the extension rather than authoring an unsupported property.
 - **At graph-build time** — the AI agent (this skill) discovers `codeReference` for any resource that is still missing one, using the heuristics below. Authoring it into `app.bicep` is preferred because it is durable and higher quality; the agent pass is the fallback.
 
 `applications` resources never get a source reference — skip them.
