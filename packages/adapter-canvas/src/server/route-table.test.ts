@@ -14,6 +14,7 @@ import {
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -48,6 +49,11 @@ const productionHandlers = {
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
+  }),
+  ...createAzureDiscoveryRoutes({
+    runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    isUuid: () => false,
+    parseServedReposFromSubjects: () => []
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -68,16 +74,21 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  // operations-status is deliberately split: main added POST /api/operations
-  // after the GETs migrated, so the family owns two migrated routes and one
-  // that is still on the legacy fallback. Naming the split here keeps the
-  // family from reading as fully migrated in the ledger.
-  it("owns the liveness-source and repositories families and the operations-status GETs and leaves 31 routes on the legacy fallback", () => {
+  // operations-status and azure-discovery are deliberately split. main added
+  // POST /api/operations after the GETs migrated, so that family owns two
+  // migrated routes and one still on the legacy fallback. azure-discovery owns
+  // its two read routes; its two writes (POST /api/azure-auto-setup, 1,649
+  // lines, and POST /api/discover, ~220 lines) are far larger and stay on the
+  // fallback for their own slices. Naming both splits here keeps either family
+  // from reading as fully migrated in the ledger.
+  it("owns the liveness-source and repositories families, the operations-status GETs, and the azure-discovery reads, and leaves 29 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
       "GET /api/operations/",
       "POST /api/open-source",
+      "GET /api/list-azure-app-registrations",
+      "GET /api/azure-app-serves-repos",
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches"
@@ -85,10 +96,12 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(31);
-    // The split family, pinned explicitly so a later slice cannot quietly
-    // assume operations-status is done.
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(29);
+    // The split families, pinned explicitly so a later slice cannot quietly
+    // assume either one is done.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)

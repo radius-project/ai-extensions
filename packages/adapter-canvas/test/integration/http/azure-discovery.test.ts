@@ -1,0 +1,148 @@
+import { createServer } from "node:http";
+import { afterEach, describe, expect, it } from "vitest";
+import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
+import { createRequestHandler } from "../../../src/server/create-request-handler.js";
+import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
+import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
+
+let container: CanvasServerContainer | undefined;
+
+afterEach(async () => {
+  await container?.stopAll();
+  container = undefined;
+});
+
+const APP_ID = "11111111-2222-3333-4444-555555555555";
+
+const ARGV = {
+  list:
+    "az ad app list --show-mine --query " +
+    "[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime} -o json",
+  fic: (appId: string) =>
+    `az ad app federated-credential list --id ${appId} --query [].subject -o json`
+};
+
+interface AzResult {
+  code?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+function start(): Map<string, AzResult> {
+  const script = new Map<string, AzResult>();
+
+  const routes = createTestRouteTable(
+    createAzureDiscoveryRoutes({
+      runAz: (command, args) => {
+        const line = [command, ...args].join(" ");
+        const scripted = script.get(line);
+        if (!scripted) throw new Error(`unscripted az call: ${line}`);
+        return Promise.resolve({
+          code: scripted.code ?? 0,
+          stdout: scripted.stdout ?? "",
+          stderr: scripted.stderr ?? ""
+        });
+      },
+      isUuid: (value) =>
+        typeof value === "string" &&
+        /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value),
+      parseServedReposFromSubjects: (subjects) =>
+        Array.isArray(subjects) ?
+          subjects.filter((s): s is string => typeof s === "string")
+        : []
+    })
+  );
+
+  container = createCanvasServer({
+    createHttpServer: (handler) => createServer(handler),
+    createRequestHandler: ({ instanceId, instances, markActivity }) =>
+      createRequestHandler({
+        instanceId,
+        instances,
+        routes,
+        markActivity,
+        legacyFallback: (_request, response) => {
+          response.writeHead(418);
+          response.end("legacy");
+        }
+      }),
+    createState: () => ({}),
+    defaultPage: "graph",
+    now: () => Date.now(),
+    preferredPort: async () => 0,
+    prepareIdentity: () => {}
+  });
+
+  return script;
+}
+
+describe("azure-discovery real-loopback HIT (RF-05)", () => {
+  it("serves the App Registration picker payload over a real socket", async () => {
+    const script = start();
+    script.set(ARGV.list, {
+      stdout: JSON.stringify([
+        { appId: "a1", displayName: "App One", createdDateTime: "2024-01-01" },
+        { displayName: "no app id" }
+      ])
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/list-azure-app-registrations`
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.text()).toBe(
+      '{"apps":[{"appId":"a1","displayName":"App One","createdDateTime":"2024-01-01"}]}'
+    );
+
+    // Only GET is declared, so other methods still fall through to legacy.
+    const posted = await fetch(
+      `${entry.baseUrl}/api/list-azure-app-registrations`,
+      { method: "POST", body: "" }
+    );
+    expect(posted.status).toBe(418);
+  });
+
+  it("computes the serves-repos label and rejects a malformed appId", async () => {
+    const script = start();
+    script.set(ARGV.fic(APP_ID), { stdout: '["octo/app"]' });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const labelled = await fetch(
+      `${entry.baseUrl}/api/azure-app-serves-repos?appId=${APP_ID}`
+    );
+    expect(labelled.status).toBe(200);
+    expect(labelled.headers.get("content-type")).toBe("application/json");
+    expect(await labelled.text()).toBe('{"servesRepos":["octo/app"]}');
+
+    // No `az` entry is scripted for a bad id, so reaching the runner would
+    // throw rather than answer 400.
+    const rejected = await fetch(
+      `${entry.baseUrl}/api/azure-app-serves-repos?appId=nope`
+    );
+    expect(rejected.status).toBe(400);
+    expect(await rejected.text()).toBe(
+      '{"error":"A valid appId is required.","code":"app-serves-bad-id"}'
+    );
+  });
+
+  // Hardcoded on purpose. The two writes in this family are explicitly deferred
+  // to their own slices, and hand-writing the keys keeps the two sides of the
+  // assertion on different sources: a probe derived from the route table would
+  // silently follow a future migration and stop being a tripwire.
+  it("leaves the deferred azure-discovery writes on the legacy fallback", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    for (const path of ["/api/azure-auto-setup", "/api/discover"]) {
+      const response = await fetch(`${entry.baseUrl}${path}`, {
+        method: "POST",
+        body: "{}"
+      });
+      expect(response.status, path).toBe(418);
+      expect(await response.text(), path).toBe("legacy");
+    }
+  });
+});

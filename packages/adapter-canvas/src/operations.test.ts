@@ -1499,8 +1499,10 @@ describe("environment creation boundaries", () => {
     "utf8"
   );
   const azureStart = SERVER_SRC.indexOf('pathname === "/api/azure-auto-setup"');
+  // The `azure-discovery` reads that used to bound this route migrated to the
+  // route table, so the next remaining legacy branch delimits the slice.
   const azureEnd = SERVER_SRC.indexOf(
-    'pathname === "/api/list-azure-app-registrations"',
+    'pathname === "/api/app-params"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
   const createStart = SERVER_SRC.indexOf(
