@@ -530,7 +530,14 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     persistOperations: () => operations.persist(),
     finish,
     scheduleEnvironmentOperation: (instanceId, op) => {
-      legacyHandlers.get(instanceId)?.scheduleEnvironmentOperation(op);
+      const legacy = legacyHandlers.get(instanceId);
+      if (!legacy) {
+        console.error(
+          `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
+        );
+        return;
+      }
+      legacy.scheduleEnvironmentOperation(op);
     },
     errorMessage
   }
