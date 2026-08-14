@@ -998,13 +998,34 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
+// Marks a deploy that failed before anything could have started running: the
+// branch it names is not on the remote, so GitHub refused the dispatch. The
+// fix is a git push, not a model repair.
+export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
+  "branch-not-pushed";
+
 // Marks a deploy that failed without proving that no workflow is running: the
 // dispatch outcome was never confirmed, or monitoring stopped before the run
 // reported one. Distinct from a confirmed failure — a workflow GitHub refused
 // to start, or one that ran and reported its own failure — which is the only
 // kind a repair redeploy may act on, because it is the only kind that cannot
 // leave a run in flight for a redeploy to race.
-export const DEPLOY_RUN_UNCONFIRMED_KIND = "run-unconfirmed";
+export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Split a failed `gh workflow run` by whether it proves no run was created.
+// GitHub naming the branch as unresolvable is proof: it rejected the request.
+// Anything else is not — the request can be accepted and the answer lost (the
+// CLI timing out, for one), and the token-scope retry can dispatch twice — so
+// it has to be treated as a run that may exist.
+export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
+  return (
+    /no ref found|could not resolve|no commit found for the ref/i.test(
+      stderr || ""
+    )
+  ) ?
+      DEPLOY_BRANCH_NOT_PUSHED_KIND
+    : DEPLOY_RUN_UNCONFIRMED_KIND;
+}
 
 // Decide, server-side, whether an incoming deploy continues an existing repair
 // loop, and whether that loop still has budget. The tool validates the attempt
@@ -1078,9 +1099,9 @@ export function resolveDeployRepairLoop(
   const repairAttempt = (state.deployRepairAttempts || 0) + 1;
   if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
     return {
-      repairLoop: true,
-      attemptId: requested,
-      repairAttempt,
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
       error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
     };
   }
@@ -1150,7 +1171,14 @@ export function triggerDeployRepairHandoff(
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
     if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind === "branch-not-pushed") return false;
+    if (
+      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // An attempt whose run may still be in flight can never be repaired: the
+      // resolver refuses its redeploy. Opening a loop only to refuse its first
+      // call would spend a cycle and tell the agent two different things.
+      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
+    )
+      return false;
     if (state.deployRepairing) return false;
     if (
       state.deployHandoffState === "pending" ||
@@ -8437,7 +8465,7 @@ function createRequestHandler(
                     repo +
                     " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                     pushCmd;
-                  entry.state.deployErrorKind = "branch-not-pushed";
+                  entry.state.deployErrorKind = DEPLOY_BRANCH_NOT_PUSHED_KIND;
                   entry.state.deployErrorBranch = deployRef;
                   entry.state.deployStatus = "failed";
                   return;
@@ -8733,12 +8761,11 @@ function createRequestHandler(
               );
               // A "No ref found" (or unresolved ref) dispatch error
               // means the branch isn't on the remote — surface the same
-              // clean, actionable "push the branch" guidance/UI.
-              if (
-                /no ref found|could not resolve|no commit found for the ref/i.test(
-                  de
-                )
-              ) {
+              // clean, actionable "push the branch" guidance/UI. Every other
+              // dispatch failure is a run of unknown outcome, so the split is
+              // made once, where it can be tested.
+              const dispatchKind = classifyDeployDispatchFailure(de);
+              if (dispatchKind === DEPLOY_BRANCH_NOT_PUSHED_KIND) {
                 const pushCmd = "git push -u origin " + deployRef;
                 addLog("   Push it and redeploy:  " + pushCmd);
                 entry.state.deployError =
@@ -8748,7 +8775,7 @@ function createRequestHandler(
                   repo +
                   " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                   pushCmd;
-                entry.state.deployErrorKind = "branch-not-pushed";
+                entry.state.deployErrorKind = dispatchKind;
                 entry.state.deployErrorBranch = deployRef;
                 entry.state.deployStatus = "failed";
                 return;
@@ -8771,12 +8798,7 @@ function createRequestHandler(
                 ". " +
                 (de || "The dispatch request failed.") +
                 scopeHint;
-              // A non-zero exit is not proof that GitHub created no run: the
-              // request can be accepted and the answer lost (the CLI timing
-              // out, for one), and the retry above may have dispatched twice.
-              // The recognized rejections return before this point, so what
-              // reaches here is a dispatch of unknown outcome.
-              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
+              entry.state.deployErrorKind = dispatchKind;
               entry.state.deployStatus = "failed";
               return;
             }

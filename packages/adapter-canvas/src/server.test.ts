@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   addGraphProgress,
   beginDeployAttempt,
@@ -31,6 +32,8 @@ import {
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
+  classifyDeployDispatchFailure,
+  DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -1693,6 +1696,9 @@ describe("triggerDeployRepairHandoff", () => {
         "attempt-A"
       );
       expect(spent.error).toMatch(/already used its/);
+      // Every error branch reports not-a-loop, so a caller that reads
+      // repairLoop before error cannot turn a refusal into a live loop.
+      expect(spent.repairLoop).toBe(false);
       expect(spent.error).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
     });
 
@@ -2037,5 +2043,71 @@ describe("azureCliAssistMessage", () => {
     expect(message.prompt).toContain("COPILOT_AGENT_SESSION_ID");
     expect(message.displayPrompt).not.toContain("COPILOT_AGENT_SESSION_ID");
     expect(message.displayPrompt.length).toBeLessThan(message.prompt.length);
+  });
+});
+
+describe("deploy failures that may leave a run in flight", () => {
+  // The resolver's unconfirmed-run guard does nothing unless the failure paths
+  // mark themselves, so the marking is pinned here as well as the reading.
+  const SERVER_SRC = readFileSync(
+    new URL("./server.ts", import.meta.url),
+    "utf8"
+  );
+  const monitor = SERVER_SRC.slice(
+    SERVER_SRC.indexOf('pathname === "/api/deploy"')
+  );
+
+  it("treats an unresolved ref as proof that no run was created", () => {
+    for (const stderr of [
+      "No ref found for: feature-branch",
+      "could not resolve to a Repository",
+      "no commit found for the ref feature-branch"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_BRANCH_NOT_PUSHED_KIND
+      );
+  });
+
+  it("treats every other dispatch failure as a run that may exist", () => {
+    // A non-zero exit is not proof GitHub created nothing: the request can be
+    // accepted and the answer lost, and the token-scope retry can dispatch
+    // twice. Guessing "no run" here is what starts a duplicate.
+    for (const stderr of [
+      "",
+      "HTTP 504: Gateway Timeout",
+      'missing required scope "workflow"',
+      "context deadline exceeded"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_RUN_UNCONFIRMED_KIND
+      );
+  });
+
+  it("marks every failure the monitor reports without a confirmed outcome", () => {
+    // Deleting any one of these markers would leave the suite green while
+    // reopening the double-run race, so each is asserted against the source:
+    // reaching them at runtime needs a workflow that dispatches, times out, or
+    // disappears. Confirmed workflow failure is deliberately not in this list —
+    // that one is the only kind a repair may act on.
+    const blockAfter = (marker: string): string => {
+      const at = monitor.indexOf(marker);
+      expect(at).toBeGreaterThan(-1);
+      return monitor.slice(at, monitor.indexOf('deployStatus = "failed"', at));
+    };
+
+    expect(blockAfter("No deploy run found for")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    expect(blockAfter("Timed out waiting for the deploy workflow")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    expect(blockAfter("Deploy monitoring stopped unexpectedly")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    // The dispatch failure takes its kind from the classifier above, which
+    // returns unconfirmed for everything it cannot rule out.
+    expect(blockAfter("Failed to start the run rad commands workflow")).toContain(
+      "deployErrorKind = dispatchKind"
+    );
   });
 });
