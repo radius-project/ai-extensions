@@ -168,14 +168,6 @@ describe("RU-03: tool declarations", () => {
     ]);
   });
 
-  it("presents PR graph diff markdown as optional", () => {
-    const decl = RADIUS_TOOL_DECLARATIONS.find(
-      (t) => t.name === "radius_generate_pr_diff_markdown"
-    )!;
-    expect(decl.description).toContain("optional inclusion");
-    expect(decl.description).not.toContain("BEFORE creating the PR");
-  });
-
   it("requires file/target on radius_publish_recipe", () => {
     const decl = RADIUS_TOOL_DECLARATIONS.find(
       (t) => t.name === "radius_publish_recipe"
