@@ -2,8 +2,8 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
-import { createServerRouteTable } from "../../../src/server/route-table.js";
 import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type { OpenSourceRequest } from "../../../src/server/routes/liveness-source.js";
@@ -34,7 +34,7 @@ function start(): Harness {
   let openSource: ((input: OpenSourceRequest) => unknown) | null = null;
   let instanceStates: ReadonlyMap<string, { state: CanvasState }> = new Map();
 
-  const routes = createServerRouteTable(
+  const routes = createTestRouteTable(
     createLivenessSourceRoutes({
       // Read through a getter so a handler registered after the server exists
       // is still honored, exactly as the SDK entry does in production.
