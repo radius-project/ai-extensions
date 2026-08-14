@@ -22,6 +22,7 @@ import {
   createGraphsPlanningReadsRoutes,
   createGraphsPlanningStreamRoutes
 } from "./routes/graphs-planning-reads.js";
+import { createEnvironmentsRoutes } from "./routes/environments.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -160,6 +161,39 @@ const productionHandlers = {
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false
   }),
+  ...createEnvironmentsRoutes({
+    errorMessage: (error) => String(error),
+    repoMatchesWorkspace: () => false,
+    readInstanceEntry: () => undefined,
+    runCommand: () => Promise.resolve(""),
+    fetchFileFromRepo: () => Promise.resolve(null),
+    appParams: () => [],
+    resolveRepoAppName: () => Promise.resolve(""),
+    resolveEnvDeployment: () => Promise.resolve(null),
+    logError: () => {},
+    cliExec: () => {},
+    envListCacheGet: () => undefined,
+    envListCacheSet: () => {},
+    envListCacheDelete: () => {},
+    envListTtlMs: 0,
+    kickoffWorkflowSync: () => {},
+    now: () => 0,
+    getOperation: () => null,
+    hasCompleteVerificationIdentity: () => false,
+    findWorkflowRun: () => Promise.resolve(null),
+    getRunDetail: () => Promise.resolve(null),
+    fetchRunLog: () => Promise.resolve(null),
+    extractErrorLines: () => [],
+    extractGitHubActionsStepLog: () => "",
+    explainOidcEnterpriseClaim: () => "",
+    finish: () => null,
+    finishSucceeded: () => null,
+    persistBestEffort: () => Promise.resolve(true),
+    persistOperations: () => Promise.resolve(),
+    reportOperationDiagnostic: () => {},
+    verifyWorkflowFile: "radius-verify-credentials.yml",
+    stageVerify: "verify"
+  }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
     defaultBranchForState: () => "main",
@@ -201,7 +235,7 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and this slice moved it onto the route table too, so the
-  // family owns all three of its routes. Three families remain deliberately
+  // family owns all three of its routes. Four families remain deliberately
   // split, and each is named here so no later slice can read one as fully
   // migrated in the ledger.
   // - azure-discovery: its two read routes are migrated; its two writes
@@ -211,7 +245,9 @@ describe("server route ownership boundary", () => {
   //   deferred because it needs its own multi-slice treatment.
   // - graphs-planning: its three read routes, including the SSE stream, are
   //   migrated; its three POST routes stay on the fallback.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status family, the azure-discovery reads, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 11 routes on the legacy fallback", () => {
+  // - environments: its four picker and lifecycle routes are migrated; only
+  //   POST /api/create-environment stays on the fallback for a separate slice.
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, and operations-status families, the azure-discovery reads, the graphs-planning reads, every deployments route but POST /api/deploy, and the environments family except create-environment, and leaves 7 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -239,22 +275,35 @@ describe("server route ownership boundary", () => {
       "POST /api/deploy-reset",
       "POST /api/delete-deployment",
       "GET /api/progress",
-      "GET /api/deployed-graph"
+      "GET /api/deployed-graph",
+      "POST /api/app-params",
+      "POST /api/delete-environment",
+      "GET /api/list-environments",
+      "GET /api/verify-status"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(11);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(7);
     // The now-completed operations-status family, pinned explicitly so a later
     // slice cannot quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
     // The still-split families, pinned explicitly so a later slice cannot
-    // quietly assume either is done.
+    // quietly assume any one is done. environments is named by its residual
+    // key rather than trusting a count.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/create-environment");
+    expect(
+      LEGACY_ROUTE_INVENTORY.filter((key) =>
+        SERVER_ROUTE_DECLARATIONS.some(
+          (route) => routeKey(route) === key && route.owner === "environments"
+        )
+      )
+    ).toEqual(["POST /api/create-environment"]);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
         "POST /api/load-graph",
@@ -284,13 +333,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 11 of 38
+    // Cross-checked against the inventory, and independently pinned: 7 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(11);
+    expect(residualLegacyCount).toBe(7);
 
     for (const route of table) {
       const matcher =

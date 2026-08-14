@@ -1527,35 +1527,30 @@ describe("environment creation boundaries", () => {
     return at;
   }
 
-  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
-  // The `azure-discovery` reads that used to bound this route migrated to the
-  // route table, so the next remaining legacy branch delimits the slice.
-  // `/api/app-params` is owned by `environments` and is itself scheduled to
-  // migrate, which is exactly the case `markerIndex` exists to catch.
-  const azureEnd = markerIndex(
-    'pathname === "/api/app-params"',
-    azureStart + 'pathname === "/api/azure-auto-setup"'.length
-  );
-  const createStart = markerIndex('pathname === "/api/create-environment"');
-  // Resolve the end structurally as the next remaining legacy arm. A named
-  // neighbor inherits that route's migration expiry; a missing END marker is
-  // especially dangerous because slice(start, -1) widens almost to EOF and can
-  // make the ordering assertions below pass vacuously.
-  const nextArm = /pathname === "\/api\//g;
-  nextArm.lastIndex =
-    createStart + 'pathname === "/api/create-environment"'.length;
-  const createEndMatch = nextArm.exec(SERVER_SRC);
-  if (!createEndMatch) {
-    throw new Error(
-      "No legacy branch remains after create-environment to bound its slice."
-    );
+  function nextLegacyRouteIndex(start: number, marker: string): number {
+    const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
+    legacyRoute.lastIndex = start + marker.length;
+    const match = legacyRoute.exec(SERVER_SRC);
+    if (!match) {
+      throw new Error(
+        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
+          "re-scope the raw-text slice that uses this delimiter."
+      );
+    }
+    if (match.index <= start) {
+      throw new Error(
+        `The next legacy route after \`${marker}\` did not produce a bounded slice.`
+      );
+    }
+    return match.index;
   }
-  const createEnd = createEndMatch.index;
-  if (createEnd <= createStart) {
-    throw new Error(
-      "The create-environment legacy slice is not bounded (end <= start)."
-    );
-  }
+
+  const azureMarker = 'pathname === "/api/azure-auto-setup"';
+  const azureStart = markerIndex(azureMarker);
+  const azureEnd = nextLegacyRouteIndex(azureStart, azureMarker);
+  const createMarker = 'pathname === "/api/create-environment"';
+  const createStart = markerIndex(createMarker);
+  const createEnd = nextLegacyRouteIndex(createStart, createMarker);
   const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);

@@ -1,6 +1,8 @@
 import {
   createServerRouteTable,
   MIGRATED_ROUTE_KEYS,
+  routeKey,
+  SERVER_ROUTE_DECLARATIONS,
   type RouteHandlerRegistry,
   type ServerRoute
 } from "../../../src/server/route-table.js";
@@ -36,4 +38,24 @@ export function createTestRouteTable(
     };
   }
   return createServerRouteTable({ ...stubs, ...handlers });
+}
+
+/**
+ * Exercise whichever declared route is currently still owned by the legacy
+ * fallback. The request uses the declaration's method so migrating that route
+ * makes the test route table intercept it and fail loudly instead of leaving a
+ * method-mismatch probe green.
+ */
+export function fetchResidualRoute(baseUrl: string): Promise<Response> {
+  const declaration = SERVER_ROUTE_DECLARATIONS.find(
+    (route) => !MIGRATED_ROUTE_KEYS.includes(routeKey(route))
+  );
+  if (!declaration) {
+    throw new Error(
+      "No residual server route remains to exercise the fallback."
+    );
+  }
+  return fetch(`${baseUrl}${declaration.path}`, {
+    method: declaration.method === "ANY" ? "GET" : declaration.method
+  });
 }
