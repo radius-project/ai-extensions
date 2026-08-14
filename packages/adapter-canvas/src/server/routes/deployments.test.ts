@@ -377,7 +377,9 @@ describe("deployments routes (SU-06)", () => {
 
     // `||` rather than `??` throughout the projection: an empty string or a
     // zero is "no value" to this poll, and the client renders `null`/"pending"
-    // differently from `""`/`0`.
+    // differently from `""`/`0`. `deployErrorKind: ""` is deliberately outside
+    // `DeployErrorKind`, so the cast goes through `unknown`: the point of the
+    // case is that a value the type forbids still normalizes to `null`.
     it("normalizes empty-string and zero state to the absent values", () => {
       const state: CanvasState = {
         deployStatus: "",
