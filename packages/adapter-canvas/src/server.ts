@@ -8,12 +8,7 @@
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
-import { createServer } from "node:http";
-import type {
-  IncomingMessage,
-  Server as HttpServer,
-  ServerResponse
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -38,7 +33,6 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
 import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
@@ -56,9 +50,7 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache,
-  primeGhIdentity,
-  setPreferredGhLogin
+  resetGhIdentityCache
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
 import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
@@ -203,14 +195,22 @@ import {
   environmentPage,
   deployingPage
 } from "./pages.js";
+import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import {
+  syncRequestedPage,
+  type CanvasRequestContext
+} from "./server/request-context.js";
+import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
+import { createServerRouteTable } from "./server/route-table.js";
+import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
+import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
+import type { CanvasServerEntry } from "./server/types.js";
 
-export interface CanvasServerEntry {
-  server: HttpServer;
-  baseUrl: string;
-  url: string;
-  page: string;
-  state: CanvasState;
-}
+export type { CanvasServerEntry } from "./server/types.js";
 
 interface CommandResult {
   code: string | number;
@@ -297,17 +297,6 @@ interface DiscoveryResult {
   vpcs: DiscoveryItem[];
   subnets: DiscoveryItem[];
   errors?: Record<string, string>;
-}
-
-interface BranchInfo {
-  name: string;
-  sha: string;
-}
-
-interface BranchResult {
-  branches?: BranchInfo[];
-  workspaceBranch?: string;
-  error?: string;
 }
 
 interface ChildProcessInput {
@@ -502,9 +491,140 @@ interface FederatedCredential {
   subject: string;
 }
 
-// Per-instance canvas servers: instanceId -> { server, url, page, state }.
-// Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map<string, CanvasServerEntry>();
+// Composition root for the migrated `liveness-source` family. The handlers
+// receive only the three seams they use; the open handler is read through a
+// getter so the SDK entry can still register it after construction.
+const livenessSourceRoutes = createLivenessSourceRoutes({
+  getOpenSourceHandler: () => openSourceHandler,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  toSafeRepoRelPath
+});
+
+// Composition root for the migrated `operations-status` family. It receives the
+// four narrow lookup and projection functions it calls; the registry
+// implementation and the client projection stay in `operations.ts`.
+const operationsStatusRoutes = createOperationsStatusRoutes({
+  latest: (repo) => operations.latest(repo),
+  latestAny: () => operations.latestAny(),
+  get: (operationId) => operations.get(operationId),
+  toClientView
+});
+
+// Composition root for the migrated `repositories` family. Three seams: the
+// subprocess runner, a reader for the live instance state the branch cache is
+// written to, and the workspace-repo predicate, which stays defined here and is
+// injected rather than copied.
+const repositoriesRoutes = createRepositoriesRoutes({
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  repoMatchesWorkspace
+});
+
+// Composition root for the credential-profile and GitHub-identity half of the
+// `identity-credentials` family. Ten narrow function seams: the three profile
+// store operations, the four gh identity operations, the advisory repo
+// preflight, the repo-slug guard, and the error formatter. `preflightRepoAdmin`
+// and `errorMessage` stay defined here and are injected rather than moved, so
+// the route module spawns nothing and touches no disk.
+const identityProfilesRoutes = createIdentityProfilesRoutes({
+  listCredentialProfiles,
+  saveCredentialProfile,
+  deleteCredentialProfile,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  switchGhAccount,
+  setPreferredGitHubLogin,
+  preflightRepoAdmin,
+  isValidRepoSlug,
+  errorMessage
+});
+
+// Composition root for the auth/verify half of the `identity-credentials`
+// family. Fourteen narrow function seams: the two OIDC generators and the Azure
+// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
+// credential writer and its save, an instance-state reader, and the GUID,
+// Azure-message, prompt-builder and error helpers that stay defined here. The
+// session-prompt hook is bound here too so the route module never reads the
+// mutable module-level handler.
+const identityAuthRoutes = createIdentityAuthRoutes({
+  validateAzureCredentials,
+  generateAzureOIDC,
+  generateAWSOIDC,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  setSharedAzureCredentials: (credentials) => {
+    sharedCredentials.azure = credentials;
+  },
+  saveCredentials,
+  azureCredentialIdValidationError,
+  azureLoginRequiredResponse,
+  isCliCommandMissing,
+  isUuid,
+  buildAzureCliAssistMessage: azureCliAssistMessage,
+  runSessionPrompt: (prompt) =>
+    invokeSessionPrompt(sessionPromptHandler, prompt),
+  runCommand: (command, args, options) => runCommand(command, args, options),
+  errorMessage
+});
+
+// Built once at module initialization so table validation runs a single time
+// and a missing migrated handler fails early rather than per instance.
+const serverRoutes = createServerRouteTable({
+  ...livenessSourceRoutes,
+  ...operationsStatusRoutes,
+  ...repositoriesRoutes,
+  ...identityProfilesRoutes,
+  ...identityAuthRoutes
+});
+
+// Legacy handler objects, kept per instance so the start hook can resume
+// recovered verification monitors and the activity gate can recognise the
+// server-owned token. Released by the stopped hook when the instance stops.
+const legacyHandlers = new Map<
+  string,
+  ReturnType<typeof createLegacyRequestHandler>
+>();
+
+const canvasServer = createCanvasServer(
+  createProductionCanvasServerDependencies({
+    createRequestHandler: ({ instanceId, instances, markActivity }) => {
+      const legacy = createLegacyRequestHandler(
+        instanceId,
+        () => instances.get(instanceId)?.baseUrl || ""
+      );
+      legacyHandlers.set(instanceId, legacy);
+      return createScaffoldRequestHandler({
+        instanceId,
+        instances,
+        routes: serverRoutes,
+        legacyFallback: legacy.handler,
+        // Server-owned internal calls must not refresh the webview activity
+        // clock, or the idle-respawn timer never fires.
+        markActivity: (request) => {
+          if (!legacy.isServerOwned(request)) markActivity();
+        },
+        preRoute: preRouteCanvasRequest
+      });
+    },
+    onStarted: (instanceId) => {
+      shuttingDownInstances.delete(instanceId);
+      legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+    },
+    onStopped: (instanceId) => {
+      legacyHandlers.delete(instanceId);
+    },
+    defaultPage: DEFAULT_CANVAS_PAGE,
+    preferredPort: preferredPortForInstance
+  })
+);
+
+// Compatibility facade shared with the SDK runtime during the route migration.
+export const servers = canvasServer.instances;
+
 let environmentOperationTestRunner:
   ((operationId: string) => Promise<void>) | null = null;
 
@@ -2487,11 +2607,8 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-// request handler and read by the host-channel keepalive via the getter below
-// to tell whether a panel is actively open (so the process isn't idle-reaped).
-let lastWebviewActivityAt = 0;
 export function getLastWebviewActivityAt(): number {
-  return lastWebviewActivityAt;
+  return canvasServer.getLastActivityAt();
 }
 
 function accessForSelection(
@@ -2590,7 +2707,27 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(
+// Global pre-routing shared by migrated routes and the legacy fallback. It
+// preserves the exact order the legacy dispatcher used at the top of its
+// if-chain: reject cross-site mutations before any routing or body parse, then
+// synchronise the requested page onto the instance entry.
+function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+  const { request } = context;
+  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
+    context.json(403, {
+      error: "Cross-site request rejected.",
+      code: "cross-site-forbidden"
+    });
+    return true;
+  }
+  syncRequestedPage(
+    canvasServer.instances.get(context.instanceId),
+    context.url.searchParams.get("page")
+  );
+  return false;
+}
+
+function createLegacyRequestHandler(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {
@@ -2794,68 +2931,15 @@ function createRequestHandler(
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    // Cross-site rejection and requested-page synchronisation now run in the
+    // shared pre-routing step so migrated routes cannot bypass them; the page
+    // fallback below still needs the raw value. Webview-activity marking also
+    // moved to that seam, where it is gated on isServerOwned so server-owned
+    // internal calls still do not count as user activity.
     const isServerOwnedRequest =
       req.headers["x-radius-server-owned"] === serverOwnedToken;
-    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
-    // CSRF defense-in-depth: reject cross-site state-changing requests before
-    // any routing or body parse. See isCrossSiteMutation for the rules.
-    if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(403);
-      res.end(
-        JSON.stringify({
-          error: "Cross-site request rejected.",
-          code: "cross-site-forbidden"
-        })
-      );
-      return;
-    }
     const requestedPage = url.searchParams.get("page");
-    const canvasEntry = servers.get(instanceId);
-    if (canvasEntry && requestedPage) {
-      canvasEntry.page = requestedPage;
-      if (requestedPage === "graph")
-        canvasEntry.state.activeGraphView = "graph";
-      else if (requestedPage === "planned")
-        canvasEntry.state.activeGraphView = "planned";
-      else if (
-        requestedPage === "graph-diff" ||
-        requestedPage === "graphDiff"
-      ) {
-        canvasEntry.state.activeGraphView = "diff";
-      }
-    }
 
-    // Lightweight liveness probe used by the client-side heartbeat so pages
-    // can detect when the server has come back after an idle respawn.
-    if (pathname === "/api/ping") {
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, instanceId }));
-      return;
-    }
-
-    // Operation status. The panel polls this instead of waiting on the POST,
-    // which is what lets it stop blocking: the record outlives the request
-    // that created it, so a reload or a trip to another page can rejoin an
-    // operation already in flight.
-    //
-    // Polled rather than streamed on purpose. SSE would be smoother, but the
-    // canvas reloads on navigation and a reload mid-operation is a routine
-    // event here, not an edge case — a plain GET is trivially resumable and
-    // a reconnecting EventSource is not.
-    if (pathname === "/api/operations" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const record = repo ? operations.latest(repo) : operations.latestAny();
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ operation: record ? toClientView(record) : null })
-      );
-      return;
-    }
     if (pathname === "/api/operations" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -3203,494 +3287,6 @@ function createRequestHandler(
       res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
-    if (pathname.startsWith("/api/operations/") && req.method === "GET") {
-      const operationId = decodeURIComponent(
-        pathname.slice("/api/operations/".length)
-      );
-      const record = operations.get(operationId);
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(record ? 200 : 404);
-      res.end(
-        JSON.stringify(
-          record ?
-            { operation: toClientView(record) }
-          : { error: "Unknown operation." }
-        )
-      );
-      return;
-    }
-
-    // canvas (side pane). Only the webview for a local-workspace graph calls
-    // this (client passes localSource); the actual open is delegated to the
-    // SDK session via the handler registered in extension.ts. Status codes
-    // are meaningful so the webview can flag a failed open to the user:
-    // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
-    if (pathname === "/api/open-source" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      let relPath: string;
-      // `line` is reserved: the editor canvas has no line-selection input
-      // yet, so it is validated and threaded through but not acted on. When
-      // the canvas gains line support, the handler can start honoring it.
-      let line: number;
-      try {
-        const data = JSON.parse(body || "{}");
-        relPath = toSafeRepoRelPath(data.path);
-        const lineRaw = Number.parseInt(data.line, 10);
-        line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "invalid path" }));
-        return;
-      }
-      if (typeof openSourceHandler !== "function") {
-        res.writeHead(503);
-        res.end(JSON.stringify({ ok: false, error: "unavailable" }));
-        return;
-      }
-      try {
-        const entry = servers.get(instanceId);
-        await Promise.resolve(
-          openSourceHandler({
-            path: relPath,
-            line,
-            instanceId,
-            state: entry?.state
-          })
-        );
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            ok: false,
-            error: e instanceof Error ? e.message : "failed"
-          })
-        );
-      }
-      return;
-    }
-
-    // JSON API: OIDC validation
-    if (pathname === "/api/oidc" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        if (data.provider === "azure") {
-          // Real Azure validation via az CLI
-          const validation = await validateAzureCredentials(data);
-          const entry = servers.get(instanceId);
-          if (validation.success) {
-            const result = {
-              message: `✅ Azure authentication confirmed — logged in as ${
-                validation.userName || "user"
-              }`,
-              validated: true,
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              output: generateAzureOIDC(data).output
-            };
-            if (entry) {
-              entry.state.oidcAzure = {
-                ...result,
-                clientId: data.clientId || "",
-                tenantName: "",
-                clientName: ""
-              };
-            }
-            // Persist credentials
-            sharedCredentials.azure = {
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              clientId: data.clientId || ""
-            };
-            saveCredentials();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(JSON.stringify(result));
-          } else {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(
-              JSON.stringify({
-                message: `❌ ${validation.error}`,
-                validated: false,
-                output: ""
-              })
-            );
-          }
-        } else {
-          const result = generateAWSOIDC(data);
-          const entry = servers.get(instanceId);
-          if (entry) {
-            entry.state.oidcAws = {
-              ...result,
-              accountId: data.accountId || "",
-              accountName: data.accountName || "",
-              region: data.region || ""
-            };
-          }
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify(result));
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify Azure CLI login with specified tenant/subscription
-    if (pathname === "/api/verify-azure-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const tenantId = (data.tenantId || "").trim();
-        const subscriptionId = (data.subscriptionId || "").trim();
-
-        // Reject non-GUID credential identifiers before using them in
-        // command guidance or passing the subscription to the az argv.
-        // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
-        // quotes args containing whitespace, so a value like "x&calc" would
-        // be parsed by cmd.exe as a command separator. An empty value is
-        // allowed (fall back to the ambient CLI context). Mirrors the guard
-        // already enforced in /api/azure-auto-setup.
-        const validationError = azureCredentialIdValidationError({
-          tenantId,
-          subscriptionId
-        });
-        if (validationError) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ error: validationError }));
-          return;
-        }
-
-        // NOTE: we intentionally do NOT run `az login` here. Interactive
-        // login opens a browser/device-code flow that blocks indefinitely
-        // and would hang this server. Instead we verify the user's existing
-        // Azure CLI session (and optionally switch subscription). If there
-        // is no session, the canvas can ask Copilot to start device-code login.
-        if (subscriptionId) {
-          try {
-            await runCommand(
-              "az",
-              ["account", "set", "--subscription", subscriptionId],
-              { timeout: 10000 }
-            );
-          } catch (e) {}
-        }
-
-        let acct;
-        try {
-          const acctJson = await runCommand(
-            "az",
-            ["account", "show", "-o", "json"],
-            { timeout: 10000 }
-          );
-          acct = JSON.parse(acctJson);
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : String(e || "");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          if (isCliCommandMissing(detail)) {
-            res.end(
-              JSON.stringify({
-                error: "Azure CLI is not installed.",
-                code: "az-cli-missing",
-                tenantId
-              })
-            );
-          } else {
-            res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId })));
-          }
-          return;
-        }
-
-        // If a tenant was specified and the active session is for a
-        // different tenant, surface a clear, actionable message.
-        if (
-          tenantId &&
-          acct.tenantId &&
-          acct.tenantId.toLowerCase() !== tenantId.toLowerCase()
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify(
-              azureLoginRequiredResponse({
-                tenantId,
-                activeTenantId: acct.tenantId
-              })
-            )
-          );
-          return;
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            user: acct.user?.name || "",
-            tenantId: acct.tenantId,
-            subscriptionId: acct.id,
-            subscriptionName: acct.name
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "Azure CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    if (pathname === "/api/azure-cli-assist" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const action = data.action === "install" ? "install" : "login";
-        const requestedTenantId =
-          typeof data.tenantId === "string" ? data.tenantId.trim() : "";
-        const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = azureCliAssistMessage({ action, tenantId });
-        const promptResult = await invokeSessionPrompt(
-          sessionPromptHandler,
-          prompt
-        );
-        if (promptResult.error) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(promptResult.status);
-          res.end(JSON.stringify({ error: promptResult.error }));
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            message:
-              action === "install" ?
-                "Asked Copilot to help install Azure CLI and start Azure login. Complete the steps it opens, then click Verify Credentials again."
-              : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again."
-          })
-        );
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify an AWS CLI session for a credential profile. Like the Azure
-    // verify, we do NOT log in interactively — we check the caller's existing
-    // `aws sts get-caller-identity` and (optionally) note the requested region.
-    if (pathname === "/api/verify-aws-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        let ident;
-        try {
-          const out = await runCommand(
-            "aws",
-            ["sts", "get-caller-identity", "--output", "json"],
-            { timeout: 15000 }
-          );
-          ident = JSON.parse(out);
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error:
-                'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.'
-            })
-          );
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            accountId: ident.Account || data.accountId || "",
-            arn: ident.Arn || "",
-            user:
-              ident.Arn ?
-                String(ident.Arn).split("/").pop()
-              : ident.Account || "",
-            region: data.region || ""
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "AWS CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    // List the saved credential profiles for a repo.
-    if (pathname === "/api/credential-profiles" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ profiles: repo ? listCredentialProfiles(repo) : [] })
-      );
-      return;
-    }
-
-    // Report the GitHub identity setup will act as, plus switchable accounts.
-    // Used by the Create Environment dialog to warn when the acting account
-    // differs from the one the host UI shows, or lacks the workflow scope.
-    if (pathname === "/api/github-identity" && req.method === "GET") {
-      res.setHeader("Content-Type", "application/json");
-      try {
-        // A re-check (?fresh=1) means the user just changed their gh auth
-        // out-of-band (e.g. ran `gh auth refresh` to add write:packages).
-        // The snapshot is memoized for the process, so drop it first and
-        // force `gh auth status` to be re-read; otherwise we'd return the
-        // stale pre-refresh scopes and the warning would never clear.
-        if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
-        // Resolve identity first — this primes the token strategy, so the
-        // repo preflight below (via ghApiJson→ghChildEnv) acts as the same
-        // account setup will. When the dialog passes its repo, fold in the
-        // admin/read preflight so a non-admin (write/maintain) account is
-        // surfaced HERE, at dialog open next to the account it concerns,
-        // instead of only after the user fills the form and submits. This
-        // mirrors the submit-time gates (which stay authoritative); a
-        // missing/invalid repo just skips the preflight — the identity
-        // response must still render.
-        const identity = await getGitHubIdentity();
-        const repoParam = (url.searchParams.get("repo") || "").trim();
-        if (repoParam && isValidRepoSlug(repoParam)) {
-          try {
-            const accessMsg = await preflightRepoAdmin(repoParam);
-            if (accessMsg) identity.repoAccess = accessMsg;
-          } catch {
-            /* preflight is advisory here; never fail identity on it */
-          }
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify(identity));
-      } catch (e) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), accounts: [] }));
-      }
-      return;
-    }
-
-    // Switch the active GitHub account setup acts as.
-    if (pathname === "/api/github-account" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      try {
-        const data = JSON.parse(body || "{}");
-        const login = (data.login || "").trim();
-        const result = await switchGhAccount(login);
-        if (!result.ok) {
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: result.error || "Failed to switch account."
-            })
-          );
-          return;
-        }
-        // Persist the explicit choice machine-wide so it survives a
-        // restart. Without this the in-memory preference dies with the
-        // process and the token strategy reverts to the injected token's
-        // account — the same wrong-identity failure this flow exists to
-        // prevent, deferred by one process lifetime.
-        setPreferredGitHubLogin(login);
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({ success: true, identity: await getGitHubIdentity() })
-        );
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Create / update a credential profile (already verified client-side).
-    if (pathname === "/api/save-credential-profile" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        if (!repo || !name) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "repo and name are required." }));
-          return;
-        }
-        const saved = saveCredentialProfile(repo, data);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, profile: saved }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Delete a credential profile.
-    if (
-      pathname === "/api/delete-credential-profile" &&
-      req.method === "POST"
-    ) {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        const removed = deleteCredentialProfile(repo, name);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, removed }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
     // Delete a GitHub environment (from the Environments table "Delete Env").
     if (pathname === "/api/delete-environment" && req.method === "POST") {
       let body = "";
@@ -7917,133 +7513,6 @@ function createRequestHandler(
       return;
     }
 
-    if (pathname === "/api/user-repos" && req.method === "GET") {
-      try {
-        // Fetch personal repos and org repos in parallel
-        const [personalRepos, orgRepos] = await Promise.all([
-          new Promise<string[]>((resolve) => {
-            cliExec(
-              "gh",
-              [
-                "repo",
-                "list",
-                "--limit",
-                "30",
-                "--json",
-                "nameWithOwner",
-                "--jq",
-                ".[].nameWithOwner"
-              ],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err) {
-                  resolve([]);
-                  return;
-                }
-                resolve(stdout.trim().split("\n").filter(Boolean));
-              }
-            );
-          }),
-          new Promise<string[]>((resolve) => {
-            // Get orgs the user belongs to, then fetch repos from each
-            cliExec(
-              "gh",
-              ["org", "list"],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err || !stdout.trim()) {
-                  resolve([]);
-                  return;
-                }
-                const orgs = stdout.trim().split("\n").filter(Boolean);
-                const orgPromises = orgs.map(
-                  (org) =>
-                    new Promise<string[]>((res2) => {
-                      cliExec(
-                        "gh",
-                        [
-                          "repo",
-                          "list",
-                          org,
-                          "--limit",
-                          "20",
-                          "--json",
-                          "nameWithOwner",
-                          "--jq",
-                          ".[].nameWithOwner"
-                        ],
-                        { timeout: 15000 },
-                        (err2, stdout2) => {
-                          if (err2) {
-                            res2([]);
-                            return;
-                          }
-                          res2(stdout2.trim().split("\n").filter(Boolean));
-                        }
-                      );
-                    })
-                );
-                Promise.all(orgPromises).then((results) =>
-                  resolve(results.flat())
-                );
-              }
-            );
-          })
-        ]);
-        const allRepos = [...new Set([...personalRepos, ...orgRepos])];
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: allRepos }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/repo-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo;
-        if (!repo) {
-          res.writeHead(200);
-          res.end(JSON.stringify({ branches: [] }));
-          return;
-        }
-        const result = await new Promise<string[]>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/branches?per_page=100`,
-              "--jq",
-              ".[].name"
-            ],
-            { timeout: 15000 },
-            (err, stdout) => {
-              if (err) {
-                resolve([]);
-                return;
-              }
-              resolve(stdout.trim().split("\n").filter(Boolean));
-            }
-          );
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: result }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: [] }));
-      }
-      return;
-    }
-
     if (pathname === "/api/plan-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -8196,81 +7665,6 @@ function createRequestHandler(
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ reload: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/discover-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const result = await new Promise<BranchResult>((resolve) => {
-          cliExec(
-            "gh",
-            ["api", "--paginate", `/repos/${repo}/branches?per_page=100`],
-            { timeout: 15000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({ error: stderr || err.message });
-                return;
-              }
-              try {
-                const raw: unknown = JSON.parse(stdout.trim());
-                const branches =
-                  Array.isArray(raw) ?
-                    raw.map((value) => {
-                      const branch = record(value);
-                      return {
-                        name: optionalString(branch.name),
-                        sha: optionalString(record(branch.commit).sha)
-                      };
-                    })
-                  : [];
-                resolve({ branches });
-              } catch (e) {
-                resolve({ error: "Failed to parse branch data" });
-              }
-            }
-          );
-        });
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        if (
-          entry?.state?.workspaceBranch &&
-          repoMatchesWorkspace(entry.state, repo)
-        ) {
-          const branches = result.branches || [];
-          if (!branches.some((b) => b.name === entry.state.workspaceBranch)) {
-            branches.unshift({
-              name: entry.state.workspaceBranch,
-              sha: "worktree"
-            });
-          }
-          result.branches = branches;
-          result.workspaceBranch = entry.state.workspaceBranch;
-        }
-        if (entry && result.branches) {
-          entry.state.branches = result.branches.map((b) => b.name);
-          entry.state.branchShas = {};
-          for (const b of result.branches)
-            entry.state.branchShas[b.name] = b.sha;
-          entry.state.diffTargetRepo = repo;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
@@ -9850,7 +9244,12 @@ function createRequestHandler(
       res.end(environmentPage(state));
     }
   };
-  return { handler, startRecoveredVerificationTasks };
+  // Exposed so the composition root can gate webview-activity marking: the
+  // scaffold marks activity for every request, but server-owned internal calls
+  // must not count as user activity or the idle-respawn timer never fires.
+  const isServerOwned = (req: IncomingMessage): boolean =>
+    req.headers["x-radius-server-owned"] === serverOwnedToken;
+  return { handler, startRecoveredVerificationTasks, isServerOwned };
 }
 
 const PAGE_RENDERERS = {
@@ -9889,81 +9288,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server: HttpServer, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (err: Error) => {
-      server.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, "127.0.0.1");
-  });
-}
-
-async function startServer(
-  instanceId: string,
-  page = DEFAULT_CANVAS_PAGE
-): Promise<CanvasServerEntry> {
-  let baseUrl = "";
-  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
-  // Restore the user's explicitly chosen GitHub account (if any) before priming
-  // so the very first strategy resolution honors it. This is what makes the
-  // account choice stable across restarts.
-  const persistedLogin = getPreferredGitHubLogin();
-  if (persistedLogin) setPreferredGhLogin(persistedLogin);
-  // Warm the GitHub identity cache in the background at boot so the first gh
-  // calls find the token strategy already resolved instead of paying (or
-  // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
-  // self-healing, so a failure here just means the next caller re-primes.
-  primeGhIdentity().catch(() => {});
-  const server = createServer(requestHandler.handler);
-  let port: number;
-  // Try the stable, instanceId-derived port first; fall back to an ephemeral
-  // port (listen(0)) only if it's already taken/unavailable.
-  const preferred = await preferredPortForInstance(instanceId);
-  try {
-    await listenOn(server, preferred);
-    port = preferred;
-  } catch {
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve)
-    );
-    const address = server.address();
-    port = typeof address === "object" && address ? address.port : 0;
-  }
-  baseUrl = `http://127.0.0.1:${port}`;
-  const entry: CanvasServerEntry = {
-    server,
-    baseUrl,
-    url: `${baseUrl}/?page=${page}`,
-    page,
-    state: {}
-  };
-  servers.set(instanceId, entry);
-  shuttingDownInstances.delete(instanceId);
-  requestHandler.startRecoveredVerificationTasks();
-  return entry;
-}
-
 export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  let entry = servers.get(instanceId);
-  if (entry) {
-    if (page && entry.page !== page) {
-      entry.page = page;
-      entry.url = `${entry.baseUrl}/?page=${page}`;
-    }
-    return entry;
-  }
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.
-  void ensureVendorScripts();
-  return await startServer(instanceId, page);
+  if (!servers.has(instanceId)) void ensureVendorScripts();
+  return await canvasServer.getOrCreate(instanceId, page);
 }
