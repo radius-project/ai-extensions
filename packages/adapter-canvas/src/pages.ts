@@ -1259,8 +1259,13 @@ var ENV_PROVIDERS = {};
 
 function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
-    var branch = document.getElementById('planned-branch').value.trim();
-    var env = document.getElementById('planned-env').value;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // scheduled plan can fire after these elements are gone.
+    var branchEl = document.getElementById('planned-branch');
+    var envEl = document.getElementById('planned-env');
+    if (!branchEl || !envEl) return Promise.resolve();
+    var branch = branchEl.value.trim();
+    var env = envEl.value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
     var statusEl0 = document.getElementById('plan-status');
     if (RADIUS_PLAN_ENVS_STALE) {
@@ -1280,8 +1285,10 @@ function runPlan(isCurrent) {
     if (statusEl0) statusEl0.style.display = 'none';
     RADIUS_PLAN_REQUEST_FAILED = false;
     var wrapper = document.getElementById('graph-container-wrapper');
+    if (!wrapper) return Promise.resolve();
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
+    if (!container) return Promise.resolve();
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
@@ -1416,11 +1423,17 @@ var radiusPlannedSelectorsReady = radiusPopulatePlannedSelectors(CONTEXT_REPO, E
 // currently selected without requiring a separate "Re-Plan" click.
 function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
-    var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
-    var env = document.getElementById('planned-env').value;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // scheduled plan can fire after these elements are gone.
+    var branchEl = document.getElementById('planned-branch');
+    var envEl = document.getElementById('planned-env');
+    if (!branchEl || !envEl) return Promise.resolve();
+    var branch = branchEl.value.trim() || CONTEXT_BRANCH;
+    var env = envEl.value;
     var provider = ENV_PROVIDERS[env] || '${provider}';
     if (!repo) return Promise.resolve();
     var container = document.getElementById('graph-container');
+    if (!container) return Promise.resolve();
     if (RADIUS_PLAN_ENVS_STALE) {
         var staleStatus = document.getElementById('plan-status');
         if (staleStatus) {
@@ -1590,18 +1603,24 @@ function escapeHtmlClient(s) {
 
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
-var diffTimeout = null;
 function queueDiff() {
-    if (diffTimeout) clearTimeout(diffTimeout);
-    diffTimeout = setTimeout(runDiff, 500);
+    if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
+    window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
 
 function runDiff() {
-    var base = document.getElementById('base-branch').value;
-    var head = document.getElementById('head-branch').value;
-    var repo = document.getElementById('diff-repo-select').value;
-    if (!repo || !base || !head) return;
+    window.__radiusDiffTimeout = null;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // pending debounced diff can fire after these elements are gone.
+    var baseEl = document.getElementById('base-branch');
+    var headEl = document.getElementById('head-branch');
+    var repoEl = document.getElementById('diff-repo-select');
     var statusEl = document.getElementById('diff-status');
+    if (!baseEl || !headEl || !repoEl || !statusEl) return;
+    var base = baseEl.value;
+    var head = headEl.value;
+    var repo = repoEl.value;
+    if (!repo || !base || !head) return;
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
@@ -1707,18 +1726,24 @@ function escapeHtmlClient(s) {
 
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
-var diffTimeout = null;
 function queueDiff() {
-    if (diffTimeout) clearTimeout(diffTimeout);
-    diffTimeout = setTimeout(runDiff, 500);
+    if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
+    window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
 
 function runDiff() {
-    var base = document.getElementById('base-branch').value;
-    var head = document.getElementById('head-branch').value;
-    var repo = document.getElementById('diff-repo-select').value;
-    if (!repo || !base || !head) return;
+    window.__radiusDiffTimeout = null;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // pending debounced diff can fire after these elements are gone.
+    var baseEl = document.getElementById('base-branch');
+    var headEl = document.getElementById('head-branch');
+    var repoEl = document.getElementById('diff-repo-select');
     var statusEl = document.getElementById('diff-status');
+    if (!baseEl || !headEl || !repoEl || !statusEl) return;
+    var base = baseEl.value;
+    var head = headEl.value;
+    var repo = repoEl.value;
+    if (!repo || !base || !head) return;
     statusEl.style.display = '';
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
