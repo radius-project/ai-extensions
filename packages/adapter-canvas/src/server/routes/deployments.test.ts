@@ -387,7 +387,7 @@ describe("deployments routes (SU-06)", () => {
         deployStartedAt: 0,
         deployFinishedAt: 0,
         deployRunUrl: ""
-      } as CanvasState;
+      } as unknown as CanvasState;
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
 
