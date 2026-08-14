@@ -380,9 +380,9 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(body).not.toContain("ENOENT");
 
     // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
     expect(residual.status).toBe(418);
-    const deferred = await post(entry.baseUrl, "/api/delete-environment", "{}");
+    const deferred = await post(entry.baseUrl, "/api/create-environment", "{}");
     expect(deferred.status).toBe(418);
   });
 });

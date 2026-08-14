@@ -310,13 +310,13 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(malformed.status).toBe(400);
 
-    // Unmigrated routes still reach the fallback. `/api/delete-environment` is
-    // used rather than a route from this file's family: the auth/verify half of
-    // `identity-credentials` migrated in the following slice, so probing one of
-    // those paths here would silently stop testing the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    // Unmigrated routes still reach the fallback. Routes from other families are
+    // used rather than one from this file's family, so a later migration of an
+    // `identity-credentials` path can't silently stop exercising the fallback.
+    // `/api/create-environment` is the residual `environments` route.
+    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
     expect(residual.status).toBe(418);
-    const deferred = await post(entry.baseUrl, "/api/delete-environment", "{}");
+    const deferred = await post(entry.baseUrl, "/api/create-environment", "{}");
     expect(deferred.status).toBe(418);
   });
 });

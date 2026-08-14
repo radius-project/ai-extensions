@@ -144,7 +144,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(posted.status).toBe(418);
 
     // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
     expect(residual.status).toBe(418);
   });
 

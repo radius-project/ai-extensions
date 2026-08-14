@@ -17,6 +17,7 @@ import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
+import { createEnvironmentsRoutes } from "./routes/environments.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -105,6 +106,39 @@ const productionHandlers = {
     record: () => ({}),
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false
+  }),
+  ...createEnvironmentsRoutes({
+    errorMessage: (error) => String(error),
+    repoMatchesWorkspace: () => false,
+    readInstanceEntry: () => undefined,
+    runCommand: () => Promise.resolve(""),
+    fetchFileFromRepo: () => Promise.resolve(null),
+    appParams: () => [],
+    resolveRepoAppName: () => Promise.resolve(""),
+    resolveEnvDeployment: () => Promise.resolve(null),
+    logError: () => {},
+    cliExec: () => {},
+    envListCacheGet: () => undefined,
+    envListCacheSet: () => {},
+    envListCacheDelete: () => {},
+    envListTtlMs: 0,
+    kickoffWorkflowSync: () => {},
+    now: () => 0,
+    getOperation: () => null,
+    hasCompleteVerificationIdentity: () => false,
+    findWorkflowRun: () => Promise.resolve(null),
+    getRunDetail: () => Promise.resolve(null),
+    fetchRunLog: () => Promise.resolve(null),
+    extractErrorLines: () => [],
+    extractGitHubActionsStepLog: () => "",
+    explainOidcEnterpriseClaim: () => "",
+    finish: () => null,
+    finishSucceeded: () => null,
+    persistBestEffort: () => Promise.resolve(true),
+    persistOperations: () => Promise.resolve(),
+    reportOperationDiagnostic: () => {},
+    verifyWorkflowFile: "radius-verify-credentials.yml",
+    stageVerify: "verify"
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -131,7 +165,7 @@ describe("server route ownership boundary", () => {
   // reason by construction: only its two read-only routes are migrated, and its
   // four remaining routes stay on the legacy fallback. Naming both splits here
   // keeps either family from reading as fully migrated in the ledger.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status GETs, and the graphs-planning reads, and leaves 20 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status GETs, the graphs-planning reads, and the environments family except create-environment, and leaves 16 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -150,15 +184,30 @@ describe("server route ownership boundary", () => {
       "POST /api/repo-branches",
       "POST /api/discover-branches",
       "GET /api/progress",
-      "GET /api/deployed-graph"
+      "GET /api/deployed-graph",
+      "POST /api/app-params",
+      "POST /api/delete-environment",
+      "GET /api/list-environments",
+      "GET /api/verify-status"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(20);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(16);
     // The split families, pinned explicitly so a later slice cannot quietly
-    // assume either one is done.
+    // assume either one is done. environments is split too: its four picker and
+    // lifecycle routes are migrated, and only create-environment stays on the
+    // legacy fallback for a separate slice, so name it here rather than trusting
+    // a count.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/create-environment");
+    expect(
+      LEGACY_ROUTE_INVENTORY.filter((key) =>
+        SERVER_ROUTE_DECLARATIONS.some(
+          (route) => routeKey(route) === key && route.owner === "environments"
+        )
+      )
+    ).toEqual(["POST /api/create-environment"]);
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
         "GET /api/load-graph-stream",
@@ -189,13 +238,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 20 of 38
+    // Cross-checked against the inventory, and independently pinned: 16 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(20);
+    expect(residualLegacyCount).toBe(16);
 
     for (const route of table) {
       const matcher =
