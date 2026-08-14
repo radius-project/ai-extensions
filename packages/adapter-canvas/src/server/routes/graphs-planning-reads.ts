@@ -3,6 +3,7 @@ import type { DeployProgress } from "../../deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import type { CanvasServerEntry } from "../types.js";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -277,5 +278,246 @@ export function createGraphsPlanningReadsRoutes(
     "GET /api/progress": (context) => handleProgress(context, dependencies),
     "GET /api/deployed-graph": (context) =>
       handleDeployedGraph(context, dependencies)
+  };
+}
+
+// ── GET /api/load-graph-stream ──────────────────────────────────────────────
+// The Server-Sent-Events sibling of `POST /api/load-graph`: the Graph tab opens
+// this stream so the modeling progress log shows up live instead of arriving in
+// one lump when the (potentially slow) `rad` compile finishes. It is the first
+// streaming route to migrate, so its wire behavior is preserved byte for byte:
+// the `event:`/`data:` frames, the blank-line terminators, the three SSE
+// headers, the write-then-`end` ordering, and — critically — the fact that the
+// 503 no-entry exit answers *before* any SSE header is set and writes a plain
+// text body rather than a frame.
+
+// The graph-build entry as this route sees it: the live `CanvasServerEntry`, so
+// the entry captured by the 503 guard is the exact object every entry-consuming
+// seam operates on. That single-capture matters for fidelity — the legacy branch
+// read `servers.get(instanceId)` once and reused that reference for the whole
+// stream, so if the instance were deleted mid-compile it still wrote graph
+// provenance to the orphaned entry rather than silently no-op'ing. Re-resolving
+// by `instanceId` inside each seam would change that observable behavior.
+
+// The app.bicep selection `fetchBicepSelection` returns, narrowed to the members
+// this route reads. A null `content` is the "no app.bicep on this branch" signal
+// that triggers the generation handoff.
+export interface LoadGraphStreamBicepSelection {
+  content: string | null;
+  fromWorkspace: boolean;
+  branch: string;
+  bicepPath: string;
+}
+
+export interface LoadGraphStreamRadArtifacts {
+  dir: string;
+  remote: boolean;
+}
+
+export interface LoadGraphStreamRadArtifactsOptions {
+  isLocal: boolean;
+  state: CanvasState | undefined;
+  repo: string;
+  branch: string;
+  bicepRepoPath: string;
+  log: (message: string) => void;
+}
+
+export interface LoadGraphStreamBuildOptions {
+  log: (message: string) => void;
+  saveGraphJsonTo: string;
+  radArtifactsDir: string;
+  cleanupRadArtifactsDir: boolean;
+}
+
+// The source-ref bookkeeping token this route prepares before the compile and
+// checks after it, so a newer request for a different repo/branch wins. Only the
+// `token` is read by this route; the rest of the context stays opaque.
+export interface LoadGraphStreamSourceRefContext {
+  token: string;
+}
+
+// Thirteen narrow function seams for one route. Nothing is moved: the bicep
+// fetch, the rad-artifacts resolver, the graph compiler, the source-ref
+// prepare/commit pair, the app.bicep handoff, the workspace-path deriver, the
+// branch defaulter, the canvas normalizer and the error formatter all stay where
+// they are defined and are handed in. The entry-consuming seams take the live
+// entry the handler captured, not an `instanceId`, so all of them see the same
+// object the 503 guard checked. `github` is bound into
+// `radArtifactsDirForSelection` at the composition root rather than surfaced
+// here, so this module spawns no process and reads no module-level mutable
+// state.
+export interface GraphsPlanningStreamDependencies {
+  // Returns undefined when the instance has no entry, which is what the legacy
+  // `servers.get(instanceId)` miss meant and what drives the 503 exit. The
+  // request context's `state` snapshot cannot express it: it substitutes `{}`
+  // for a missing entry.
+  readInstanceEntry(instanceId: string): CanvasServerEntry | undefined;
+  defaultBranchForState(state: CanvasState | undefined): string;
+  // Prepares the source-ref context for the entry and returns its token.
+  prepareSourceRef(
+    entry: CanvasServerEntry,
+    context: { repo: string; branch: string }
+  ): LoadGraphStreamSourceRefContext;
+  // Commits the modeled resources against `expectedToken`; returns false when a
+  // newer request has superseded this one, exactly like the legacy
+  // `setSourceRefResources` guard.
+  commitSourceRef(
+    entry: CanvasServerEntry,
+    resources: CanvasGraphResource[],
+    context: { repo: string; branch: string },
+    expectedToken: string
+  ): boolean;
+  triggerAppBicepHandoff(
+    entry: CanvasServerEntry,
+    repo: string,
+    branch: string
+  ): void;
+  fetchBicepSelection(
+    entry: CanvasServerEntry,
+    repo: string,
+    branch: string
+  ): Promise<LoadGraphStreamBicepSelection>;
+  workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
+  radArtifactsDirForSelection(
+    options: LoadGraphStreamRadArtifactsOptions
+  ): Promise<LoadGraphStreamRadArtifacts>;
+  buildGraphViaRad(
+    content: string,
+    bicepPath: string,
+    options: LoadGraphStreamBuildOptions
+  ): Promise<unknown[]>;
+  canvasGraphResources(values: unknown[]): CanvasGraphResource[];
+  errorMessage(error: unknown): string;
+}
+
+// The progress log the Graph tab streams while `rad` models the app. The
+// observable contract preserved verbatim from the legacy arm:
+//   * The no-entry exit answers 503 with a plain-text body and NO SSE header —
+//     it precedes `setHeader`, so a missing instance never gets an event-stream.
+//   * The three SSE headers and `writeHead(200)` are written before any frame.
+//   * `progress` frames are `event: progress\ndata: <json>\n\n`; the terminal
+//     `done` frame is `event: done\ndata: <json>\n\n` immediately followed by
+//     `end()`. Every early exit routes through `sendDone`, so the stream always
+//     terminates with exactly one `done` frame and one `end`.
+//   * `||` (not `??`) throughout: an empty `repo`/`branch` string must fall
+//     through to its default, which `??` would not do.
+export async function handleLoadGraphStream(
+  context: CanvasRequestContext,
+  dependencies: GraphsPlanningStreamDependencies
+): Promise<void> {
+  const { response, url, instanceId } = context;
+  const repo = url.searchParams.get("repo") || "";
+  const entry = dependencies.readInstanceEntry(instanceId);
+  if (!entry) {
+    response.writeHead(503);
+    response.end("Canvas server state is unavailable.");
+    return;
+  }
+  const branch =
+    url.searchParams.get("branch") ||
+    dependencies.defaultBranchForState(entry.state);
+  const sourceRefContext = dependencies.prepareSourceRef(entry, {
+    repo,
+    branch
+  });
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.writeHead(200);
+
+  const sendProgress = (message: string): void => {
+    response.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
+  };
+  const sendDone = (data: unknown): void => {
+    response.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
+    response.end();
+  };
+
+  if (!repo) {
+    sendDone({ error: "Please select a repository." });
+    return;
+  }
+
+  try {
+    sendProgress(`Checking ${repo} for existing app.bicep...`);
+    const selection = await dependencies.fetchBicepSelection(
+      entry,
+      repo,
+      branch
+    );
+    const content = selection.content;
+
+    if (content) {
+      sendProgress("Found existing app.bicep — parsing resources...");
+    } else {
+      dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      sendDone({
+        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+        needsAppBicep: true,
+        repo,
+        branch
+      });
+      return;
+    }
+
+    const graphJsonPath =
+      selection.fromWorkspace ?
+        dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
+      : "";
+    const { dir: radArtifactsDir, remote: radArtifactsRemote } =
+      await dependencies.radArtifactsDirForSelection({
+        isLocal: selection.fromWorkspace,
+        state: entry.state,
+        repo,
+        branch,
+        bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+        log: sendProgress
+      });
+    const resources = dependencies.canvasGraphResources(
+      await dependencies.buildGraphViaRad(
+        content,
+        selection.bicepPath || ".radius/app.bicep",
+        {
+          log: sendProgress,
+          saveGraphJsonTo: graphJsonPath,
+          radArtifactsDir,
+          cleanupRadArtifactsDir: radArtifactsRemote
+        }
+      )
+    );
+    sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
+
+    if (
+      !dependencies.commitSourceRef(
+        entry,
+        resources,
+        { repo, branch },
+        sourceRefContext.token
+      )
+    ) {
+      sendDone({ stale: true });
+      return;
+    }
+    entry.state.graphTargetRepo = repo;
+    entry.state.graphBranch = branch;
+    // Authoritative provenance: true only when the local workspace actually
+    // supplied the app.bicep content (file is on disk).
+    entry.state.graphFromWorkspace = selection.fromWorkspace;
+    entry.state.activeGraphView = "graph";
+
+    sendDone({ reload: true });
+  } catch (e) {
+    sendDone({ error: dependencies.errorMessage(e) });
+  }
+}
+
+export function createGraphsPlanningStreamRoutes(
+  dependencies: GraphsPlanningStreamDependencies
+): RouteHandlerRegistry {
+  return {
+    "GET /api/load-graph-stream": (context) =>
+      handleLoadGraphStream(context, dependencies)
   };
 }

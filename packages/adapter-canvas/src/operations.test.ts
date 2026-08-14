@@ -1498,22 +1498,57 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  const azureStart = SERVER_SRC.indexOf('pathname === "/api/azure-auto-setup"');
-  const azureEnd = SERVER_SRC.indexOf(
+  // Resolve a literal marker or throw naming it. `indexOf` returning -1 for an
+  // absent marker is the silent failure this guard exists to prevent: a dead
+  // START marker slices from -1 and a dead END marker slices to EOF, and in both
+  // cases the downstream `toContain`/ordering assertions can pass vacuously
+  // against a wrong slice. Throwing here fails at collection time, naming the
+  // marker, instead of letting a later `it` pass for the wrong reason.
+  const marker = (needle: string, from = 0): number => {
+    const at = SERVER_SRC.indexOf(needle, from);
+    if (at === -1) {
+      throw new Error(
+        `environment creation boundaries: marker not found in server.ts: ${needle}`
+      );
+    }
+    return at;
+  };
+  const azureStart = marker('pathname === "/api/azure-auto-setup"');
+  const azureEnd = marker(
     'pathname === "/api/list-azure-app-registrations"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
-  const createStart = SERVER_SRC.indexOf(
-    'pathname === "/api/create-environment"'
-  );
-  const operationStart = SERVER_SRC.indexOf(
+  const createStart = marker('pathname === "/api/create-environment"');
+  const operationStart = marker(
     'pathname === "/api/operations" && req.method === "POST"'
   );
-  const createEnd = SERVER_SRC.indexOf(
-    'pathname === "/api/load-graph-stream"',
-    createStart + 'pathname === "/api/create-environment"'.length
-  );
-  const deployStart = SERVER_SRC.indexOf('pathname === "/api/deploy"');
+  // The END of the create-environment route body is whatever legacy arm comes
+  // next, resolved structurally as the next `pathname === "/api/` matcher after
+  // createStart rather than by naming a neighbor route. Naming a neighbor would
+  // inherit that route's migration expiry: the neighbor was `load-graph-stream`,
+  // which just migrated onto the route table, and re-pointing to the next named
+  // route (`deploy-status`, itself migrating) would only move the same silent
+  // widening one slice down. The structural resolver survives any neighbor
+  // migration or rename. It also asserts BOUNDEDNESS: the next matcher must
+  // exist and sit strictly after createStart, so an end that ran to EOF (the
+  // dangerous dead-end-marker case) throws here rather than yielding an
+  // over-large slice whose ordering assertions pass vacuously.
+  const NEXT_ARM = /pathname === "\/api\//g;
+  NEXT_ARM.lastIndex =
+    createStart + 'pathname === "/api/create-environment"'.length;
+  const nextArm = NEXT_ARM.exec(SERVER_SRC);
+  if (!nextArm) {
+    throw new Error(
+      "environment creation boundaries: no legacy arm found after create-environment to bound its slice"
+    );
+  }
+  const createEnd = nextArm.index;
+  if (createEnd <= createStart) {
+    throw new Error(
+      "environment creation boundaries: create-environment slice is not bounded (end <= start)"
+    );
+  }
+  const deployStart = marker('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
