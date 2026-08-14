@@ -170,7 +170,9 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/verify-aws-login",
   "GET /api/user-repos",
   "POST /api/repo-branches",
-  "POST /api/discover-branches"
+  "POST /api/discover-branches",
+  "GET /api/progress",
+  "GET /api/deployed-graph"
 ];
 
 export function routeKey(
