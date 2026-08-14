@@ -1527,20 +1527,30 @@ describe("environment creation boundaries", () => {
     return at;
   }
 
-  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
-  // The `azure-discovery` reads that used to bound this route migrated to the
-  // route table, so the next remaining legacy branch delimits the slice.
-  // `/api/app-params` is owned by `environments` and is itself scheduled to
-  // migrate, which is exactly the case `markerIndex` exists to catch.
-  const azureEnd = markerIndex(
-    'pathname === "/api/app-params"',
-    azureStart + 'pathname === "/api/azure-auto-setup"'.length
-  );
-  const createStart = markerIndex('pathname === "/api/create-environment"');
-  const createEnd = markerIndex(
-    'pathname === "/api/load-graph-stream"',
-    createStart + 'pathname === "/api/create-environment"'.length
-  );
+  function nextLegacyRouteIndex(start: number, marker: string): number {
+    const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
+    legacyRoute.lastIndex = start + marker.length;
+    const match = legacyRoute.exec(SERVER_SRC);
+    if (!match) {
+      throw new Error(
+        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
+          "re-scope the raw-text slice that uses this delimiter."
+      );
+    }
+    if (match.index <= start) {
+      throw new Error(
+        `The next legacy route after \`${marker}\` did not produce a bounded slice.`
+      );
+    }
+    return match.index;
+  }
+
+  const azureMarker = 'pathname === "/api/azure-auto-setup"';
+  const azureStart = markerIndex(azureMarker);
+  const azureEnd = nextLegacyRouteIndex(azureStart, azureMarker);
+  const createMarker = 'pathname === "/api/create-environment"';
+  const createStart = markerIndex(createMarker);
+  const createEnd = nextLegacyRouteIndex(createStart, createMarker);
   const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);

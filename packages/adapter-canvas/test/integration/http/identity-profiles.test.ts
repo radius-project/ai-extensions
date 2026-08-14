@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createIdentityProfilesRoutes } from "../../../src/server/routes/identity-profiles.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { GitHubIdentity } from "../../../src/gh.js";
 import type { CredentialProfile } from "../../../src/shared.js";
@@ -310,13 +313,9 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(malformed.status).toBe(400);
 
-    // Unmigrated routes still reach the fallback. `/api/delete-environment` is
-    // used rather than a route from this file's family: the auth/verify half of
-    // `identity-credentials` migrated in the following slice, so probing one of
-    // those paths here would silently stop testing the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
-    const deferred = await post(entry.baseUrl, "/api/delete-environment", "{}");
-    expect(deferred.status).toBe(418);
   });
 });

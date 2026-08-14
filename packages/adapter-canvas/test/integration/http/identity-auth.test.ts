@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createIdentityAuthRoutes } from "../../../src/server/routes/identity-auth.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 
@@ -379,10 +382,9 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(body).toContain("No active AWS CLI session.");
     expect(body).not.toContain("ENOENT");
 
-    // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    // A method-matching route selected from the live residual inventory still
+    // reaches the fallback and will fail loudly when that route migrates.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
-    const deferred = await post(entry.baseUrl, "/api/delete-environment", "{}");
-    expect(deferred.status).toBe(418);
   });
 });
