@@ -12,8 +12,10 @@ import {
   type ServerRoute
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
+import { createDeploymentsRoutes } from "./routes/deployments.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
@@ -69,6 +71,37 @@ const productionHandlers = {
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
+  }),
+  ...createDeploymentsRoutes({
+    readInstanceEntry: () => undefined,
+    triggerDeployRepairHandoff: () => false,
+    deployHandoffStatus: () => ({
+      state: "idle",
+      attempts: 0,
+      maxAttempts: 3,
+      pending: false
+    }),
+    resolveRepoAppName: () => Promise.resolve(""),
+    resolveEnvDeployment: () => Promise.resolve(null),
+    ghOrThrow: () => Promise.resolve(""),
+    resetDeploymentViewState: () => {},
+    deployListCache: new Map(),
+    deployListTtlMs: 0,
+    activeDeploymentMutation: () => undefined,
+    reserveDeploymentMutation: () => null,
+    releaseDeploymentMutation: () => {},
+    deploymentStatusBlocksMutation: () => false,
+    localDeploymentBlocksMutation: () => false,
+    ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    findWorkflowRun: () => Promise.resolve(null),
+    runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    readProcessEnv: () => ({}),
+    setTimer: () => ({})
+  }),
+  ...createAzureDiscoveryRoutes({
+    runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    isUuid: () => false,
+    parseServedReposFromSubjects: () => []
   }),
   ...createIdentityProfilesRoutes({
     listCredentialProfiles: () => [],
@@ -145,12 +178,17 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and this slice moved it onto the route table too, so the
-  // family owns all three of its routes. graphs-planning remains split by
-  // construction: only its two read-only routes are migrated, and its four
-  // remaining routes stay on the legacy fallback. The explicit membership
-  // assertions below keep a later slice from mistaking operations-status'
-  // completeness for a route it can drop, or reading graphs-planning as done.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status family, and the graphs-planning reads, and leaves 19 routes on the legacy fallback", () => {
+  // family owns all three of its routes. Three families remain deliberately
+  // split, and each is named here so no later slice can read one as fully
+  // migrated in the ledger.
+  // - azure-discovery: its two read routes are migrated; its two writes
+  //   (POST /api/azure-auto-setup, ~1,672 lines, and POST /api/discover, ~220)
+  //   are far larger and stay on the fallback for their own slices.
+  // - deployments: everything but POST /api/deploy has migrated; that route is
+  //   deferred because it needs its own multi-slice treatment.
+  // - graphs-planning: only its two read-only routes are migrated; its four
+  //   remaining routes stay on the fallback.
+  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status family, the azure-discovery reads, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 12 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -165,21 +203,34 @@ describe("server route ownership boundary", () => {
       "POST /api/verify-azure-login",
       "POST /api/azure-cli-assist",
       "POST /api/verify-aws-login",
+      "GET /api/list-azure-app-registrations",
+      "GET /api/azure-app-serves-repos",
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
       "POST /api/operations",
+      "GET /api/deploy-status",
+      "GET /api/list-applications",
+      "GET /api/list-deployments",
+      "POST /api/deploy-reset",
+      "POST /api/delete-deployment",
       "GET /api/progress",
       "GET /api/deployed-graph"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(19);
-    // The now-completed family, pinned explicitly so a later slice cannot
-    // quietly re-legacy POST /api/operations.
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(12);
+    // The now-completed operations-status family, pinned explicitly so a later
+    // slice cannot quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
+    // The still-split families, pinned explicitly so a later slice cannot
+    // quietly assume either is done.
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
         "GET /api/load-graph-stream",
@@ -210,13 +261,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 19 of 38
+    // Cross-checked against the inventory, and independently pinned: 12 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(19);
+    expect(residualLegacyCount).toBe(12);
 
     for (const route of table) {
       const matcher =

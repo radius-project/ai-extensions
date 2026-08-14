@@ -1498,28 +1498,42 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  // Every marker below resolves through this helper so a marker that a future
-  // slice deletes fails LOUDLY at collection time, naming itself, instead of
-  // returning -1. `indexOf` returning -1 does not throw: `slice(-1, end)` reads
-  // as `length - 1`, silently yielding a wrong (often empty or 3x-large) region
-  // that makes some assertions pass vacuously while one fails uninformatively.
-  // If you removed a route this names, re-point the marker at whatever legacy
-  // arm now correctly bounds the region rather than patching the assertions.
+  // This suite reads `server.ts` as raw text and slices route bodies out of the
+  // legacy if-chain by their `pathname === ...` markers, so it carries an
+  // undeclared textual coupling to that chain: every slice that migrates a route
+  // onto the route table can delete a delimiter this suite depends on. The
+  // route-table boundary test cannot see that coupling.
+  //
+  // A missing marker must never be allowed to silently resize a slice.
+  // `String.prototype.slice` reads a -1 end as `length - 1`, so a deleted end
+  // delimiter widens a route body to essentially the whole file. The ordering
+  // assertions below then search that widened region for tokens like
+  // `buildAppCreateArgs` that also occur in other routes, and can keep passing
+  // while no longer constraining the route they name.
+  //
+  // Resolving every marker through this helper turns that into an immediate,
+  // self-describing failure naming the marker that needs re-pointing, and it
+  // fails the whole suite rather than only the assertions unlucky enough to
+  // notice.
   function markerIndex(marker: string, from = 0): number {
-    const index = SERVER_SRC.indexOf(marker, from);
-    if (index < 0) {
+    const at = SERVER_SRC.indexOf(marker, from);
+    if (at < 0) {
       throw new Error(
-        `Boundary marker not found in server.ts: ${JSON.stringify(marker)}. ` +
-          "A route slice deleted it; re-point this marker at the legacy arm " +
-          "that now bounds the region."
+        `No legacy branch matching \`${marker}\` remains in server.ts. That ` +
+          "route has most likely migrated onto the route table; re-point this " +
+          "delimiter at the next legacy branch that still bounds the same route."
       );
     }
-    return index;
+    return at;
   }
 
   const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
+  // The `azure-discovery` reads that used to bound this route migrated to the
+  // route table, so the next remaining legacy branch delimits the slice.
+  // `/api/app-params` is owned by `environments` and is itself scheduled to
+  // migrate, which is exactly the case `markerIndex` exists to catch.
   const azureEnd = markerIndex(
-    'pathname === "/api/list-azure-app-registrations"',
+    'pathname === "/api/app-params"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
   const createStart = markerIndex('pathname === "/api/create-environment"');
@@ -1540,6 +1554,24 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).not.toContain(
       'pathname === "/api/operations" && req.method === "POST"'
     );
+  });
+
+  it("bounds every sliced route body on markers that still exist", () => {
+    // Pins the coupling itself rather than leaving it to whichever ordering
+    // assertion happens to notice. Each slice must be non-empty and strictly
+    // smaller than the file, so neither a collapsed nor a widened slice can
+    // reach the assertions below.
+    for (const [name, start, end] of [
+      ["azure-auto-setup", azureStart, azureEnd],
+      ["create-environment", createStart, createEnd],
+      ["deploy", deployStart, SERVER_SRC.length]
+    ] as const) {
+      expect(start, name).toBeGreaterThan(-1);
+      expect(end, name).toBeGreaterThan(start);
+    }
+    expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
