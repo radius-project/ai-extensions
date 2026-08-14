@@ -146,8 +146,10 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
       '{"ok":false,"error":"editor canvas unavailable"}'
     );
 
-    // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
+    // Unmigrated routes still reach the fallback. `/api/create-environment` is
+    // a residual `environments` route on the merged tree (main migrated
+    // `/api/list-applications`, so it can no longer prove fallthrough here).
+    const residual = await fetch(`${entry.baseUrl}/api/create-environment`);
     expect(residual.status).toBe(418);
   });
 

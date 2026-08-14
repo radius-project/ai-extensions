@@ -313,8 +313,10 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     // Unmigrated routes still reach the fallback. Routes from other families are
     // used rather than one from this file's family, so a later migration of an
     // `identity-credentials` path can't silently stop exercising the fallback.
-    // `/api/create-environment` is the residual `environments` route.
-    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
+    // `/api/load-graph-stream` is a residual `graphs-planning` route and
+    // `/api/create-environment` is the residual `environments` route (main
+    // migrated `/api/list-applications`, so it can no longer prove this).
+    const residual = await fetch(`${entry.baseUrl}/api/load-graph-stream`);
     expect(residual.status).toBe(418);
     const deferred = await post(entry.baseUrl, "/api/create-environment", "{}");
     expect(deferred.status).toBe(418);

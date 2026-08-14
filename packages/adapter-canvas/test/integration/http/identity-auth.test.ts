@@ -379,8 +379,11 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(body).toContain("No active AWS CLI session.");
     expect(body).not.toContain("ENOENT");
 
-    // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
+    // Unmigrated routes still reach the fallback. `/api/load-graph-stream` is a
+    // residual `graphs-planning` route and `/api/create-environment` is the
+    // residual `environments` route (main migrated `/api/list-applications`, so
+    // it can no longer prove fallthrough here).
+    const residual = await fetch(`${entry.baseUrl}/api/load-graph-stream`);
     expect(residual.status).toBe(418);
     const deferred = await post(entry.baseUrl, "/api/create-environment", "{}");
     expect(deferred.status).toBe(418);

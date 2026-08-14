@@ -143,8 +143,10 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     });
     expect(posted.status).toBe(418);
 
-    // Unmigrated routes still reach the fallback.
-    const residual = await fetch(`${entry.baseUrl}/api/list-applications`);
+    // Unmigrated routes still reach the fallback. `/api/create-environment` is
+    // a residual `environments` route on the merged tree (main migrated
+    // `/api/list-applications`, so it can no longer prove fallthrough here).
+    const residual = await fetch(`${entry.baseUrl}/api/create-environment`);
     expect(residual.status).toBe(418);
   });
 
