@@ -166,7 +166,7 @@ export function createDeployRequestService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-  if (!dependencies.monitor) {
+  if (!dependencies.monitor || typeof dependencies.monitor.run !== "function") {
     throw new Error(
       "createDeployRequestService is missing required dependencies: monitor"
     );
