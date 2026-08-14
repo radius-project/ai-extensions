@@ -1,6 +1,11 @@
 import { Readable } from "node:stream";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse
+} from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
 import { type ServerRoute } from "../route-table.js";
@@ -16,7 +21,8 @@ import {
   type EnvironmentsInstanceEntry
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
-import { getOrCreateServer } from "../../server.js";
+import { getOrCreateServer, persistBestEffort } from "../../server.js";
+import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
 interface Recording {
   headers: Record<string, string>;
@@ -155,6 +161,33 @@ function cliFake(script: CliScript, misses: string[] = []) {
       scripted.stderr ?? ""
     );
   };
+}
+
+function createControlledEnvironmentServer(
+  overrides: Partial<EnvironmentsDependencies>
+) {
+  const routes = createTestRouteTable(
+    createEnvironmentsRoutes(deps(overrides))
+  );
+  return createCanvasServer({
+    createHttpServer: (handler) => createServer(handler),
+    createRequestHandler: ({ instanceId, instances, markActivity }) =>
+      createRequestHandler({
+        instanceId,
+        instances,
+        routes,
+        markActivity,
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
+        }
+      }),
+    createState: () => ({}),
+    defaultPage: "environment",
+    now: () => Date.now(),
+    preferredPort: async () => 0,
+    prepareIdentity: () => {}
+  });
 }
 
 describe("environments — app-params", () => {
@@ -944,6 +977,175 @@ describe("environments — real loopback", () => {
     });
   });
 
+  it("discovers and persists a matched operation run id over controlled HTTP", async () => {
+    const operation = {
+      repo: "octo/app",
+      environment: "dev",
+      currentStage: "verify",
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev"
+      }
+    };
+    const findWorkflowRun = vi.fn(() => Promise.resolve(55));
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      findWorkflowRun,
+      getRunDetail: () => Promise.resolve(null),
+      persistBestEffort,
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    try {
+      const controlled = await container.getOrCreate("verify-discovery");
+      const res = await fetch(
+        controlled.baseUrl +
+          "/api/verify-status?repo=octo/app&environment=dev&operationId=op-1"
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        state: "pending",
+        runId: 55,
+        runUrl: "https://github.com/octo/app/actions/runs/55"
+      });
+      expect(findWorkflowRun).toHaveBeenCalledWith(
+        "octo/app",
+        "verify.yml",
+        123,
+        null
+      );
+      expect(operation.verification).toEqual({
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev",
+        runId: "55",
+        runUrl: "https://github.com/octo/app/actions/runs/55"
+      });
+      expect(persistOperations).toHaveBeenCalledOnce();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("persists terminal verification success over controlled HTTP", async () => {
+    const operation = {
+      repo: "octo/app",
+      environment: "dev",
+      currentStage: "verify",
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev",
+        runId: "55"
+      }
+    };
+    const finishSucceeded = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "success",
+          steps: []
+        }),
+      finishSucceeded,
+      persistBestEffort,
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    try {
+      const controlled = await container.getOrCreate("verify-success");
+      const res = await fetch(
+        controlled.baseUrl +
+          "/api/verify-status?repo=octo/app&environment=dev&operationId=op-1"
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        state: "success",
+        runId: "55",
+        runUrl: "https://github.com/octo/app/actions/runs/55"
+      });
+      expect(finishSucceeded).toHaveBeenCalledWith(operation);
+      expect(persistOperations).toHaveBeenCalledOnce();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("persists terminal verification failure over controlled HTTP", async () => {
+    const operation = {
+      repo: "octo/app",
+      environment: "dev",
+      currentStage: "verify",
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev",
+        runId: "55"
+      }
+    };
+    const finish = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ name: "Verify", conclusion: "failure" }]
+        }),
+      fetchRunLog: () => Promise.resolve("raw log"),
+      extractErrorLines: () => ["boom"],
+      extractGitHubActionsStepLog: () => "",
+      explainOidcEnterpriseClaim: () => "",
+      finish,
+      persistBestEffort,
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    try {
+      const controlled = await container.getOrCreate("verify-failure");
+      const res = await fetch(
+        controlled.baseUrl +
+          "/api/verify-status?repo=octo/app&environment=dev&operationId=op-1"
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        state: "failed",
+        runId: "55",
+        runUrl: "https://github.com/octo/app/actions/runs/55",
+        error:
+          "Credential verification failed (failure). Failed step: Verify.\nboom"
+      });
+      expect(finish).toHaveBeenCalledWith(operation, "failed_partial", {
+        failure: {
+          code: "verify-run-failed",
+          stage: "verify",
+          message: "Credential verification failed. Failed step: Verify.",
+          classification: "user-fixable",
+          evidence:
+            "Credential verification failed (failure). Failed step: Verify.\nboom"
+        }
+      });
+      expect(persistOperations).toHaveBeenCalledOnce();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
   it("400s POST app-params with no repo", async () => {
     const res = await fetch(baseUrl + "/api/app-params", {
       method: "POST",
@@ -970,6 +1172,116 @@ describe("environments — real loopback", () => {
     expect(await res.json()).toEqual({
       error: "repo and environment are required."
     });
+  });
+
+  it("fails closed at 503 when the active-app check fails over controlled HTTP", async () => {
+    const runCommand = vi.fn(() => Promise.resolve(""));
+    const envListCacheDelete = vi.fn();
+    const logError = vi.fn();
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      resolveRepoAppName: () => Promise.resolve("todo-app"),
+      resolveEnvDeployment: () =>
+        Promise.reject(new Error("github unavailable")),
+      logError,
+      runCommand,
+      envListCacheDelete
+    });
+    try {
+      const controlled = await container.getOrCreate("delete-check-failure");
+      const res = await fetch(controlled.baseUrl + "/api/delete-environment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: "octo/app", environment: "dev" })
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        error:
+          'Could not verify whether an application is still deployed to "dev" ' +
+          "(GitHub API error: github unavailable). The environment was not " +
+          "deleted — please try again."
+      });
+      expect(logError).toHaveBeenCalledWith(
+        "[radius delete-environment] active-app check failed for " +
+          "octo/app/dev: github unavailable"
+      );
+      expect(runCommand).not.toHaveBeenCalled();
+      expect(envListCacheDelete).not.toHaveBeenCalled();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("refuses an active application at 409 over controlled HTTP", async () => {
+    const runCommand = vi.fn(() => Promise.resolve(""));
+    const envListCacheDelete = vi.fn();
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      resolveRepoAppName: () => Promise.resolve("todo-app"),
+      resolveEnvDeployment: () =>
+        Promise.resolve({
+          app: "todo-app",
+          environment: "dev",
+          provider: "azure",
+          status: "deployed",
+          deploymentId: "deployment-1",
+          runUrl: "https://example.test/run"
+        }),
+      runCommand,
+      envListCacheDelete
+    });
+    try {
+      const controlled = await container.getOrCreate("delete-active");
+      const res = await fetch(controlled.baseUrl + "/api/delete-environment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: "octo/app", environment: "dev" })
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error:
+          'Application "todo-app" is still deployed to environment "dev". ' +
+          "Delete the application deployment first, then delete the environment.",
+        code: "app-deployed",
+        app: "todo-app",
+        environment: "dev",
+        redirect: "/?page=deploying&app=todo-app&env=dev"
+      });
+      expect(runCommand).not.toHaveBeenCalled();
+      expect(envListCacheDelete).not.toHaveBeenCalled();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("deletes and invalidates the environment cache over controlled HTTP", async () => {
+    const runCommand = vi.fn(() => Promise.resolve(""));
+    const envListCacheDelete = vi.fn();
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      resolveRepoAppName: () => Promise.resolve("todo-app"),
+      resolveEnvDeployment: () => Promise.resolve(null),
+      runCommand,
+      envListCacheDelete
+    });
+    try {
+      const controlled = await container.getOrCreate("delete-success");
+      const res = await fetch(controlled.baseUrl + "/api/delete-environment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: "octo/app", environment: "dev" })
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true });
+      expect(runCommand).toHaveBeenCalledWith(
+        "gh",
+        ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
+        { timeout: 20000 }
+      );
+      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+    } finally {
+      await container.stopAll();
+    }
   });
 
   it("400s a malformed delete-environment body over the socket", async () => {

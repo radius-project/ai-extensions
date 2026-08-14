@@ -994,7 +994,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
 });
 
 // Built once at module initialization so table validation runs a single time
-// and a missing migrated handler fails early rather than per instance.
+// and a missing typed handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
