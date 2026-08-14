@@ -1453,18 +1453,84 @@ describe("the step-marker convention at the call sites", () => {
     "Verifying the"
   ];
 
-  function stepStrings() {
-    // Capture the whole argument expression, not just its first literal:
-    // several sites concatenate a variable and put the trailing ellipsis on
-    // the final fragment, e.g. 'Creating package "' + name + '"...'.
-    // A migrated route narrates through an injected `pushStep` port rather than
-    // touching the array directly, so those sites are scanned too — otherwise
-    // the convention would stop being enforced exactly where a route moved.
-    const out = [];
-    const re = /(?:steps\.push|ports\.pushStep)\(\s*([\s\S]*?)\);/g;
-    let m;
-    while ((m = re.exec(SERVER_SRC)))
-      out.push(m[1].trim().replace(/,\s*$/, ""));
+  const FORWARDED_STEP_IDENTIFIERS = new Set(["message"]);
+
+  function firstArgumentEnd(source: string, start: number): number {
+    let parentheses = 1;
+    let brackets = 0;
+    let braces = 0;
+    let quote = "";
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = start; i < source.length; i += 1) {
+      const ch = source[i];
+      const next = source[i + 1];
+      if (lineComment) {
+        if (ch === "\n") lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (ch === "*" && next === "/") {
+          blockComment = false;
+          i += 1;
+        }
+        continue;
+      }
+      if (quote) {
+        if (ch === "\\") {
+          i += 1;
+        } else if (ch === quote) {
+          quote = "";
+        }
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        lineComment = true;
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && next === "*") {
+        blockComment = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "(") parentheses += 1;
+      else if (ch === ")") {
+        parentheses -= 1;
+        if (parentheses === 0) return i;
+      } else if (ch === "[") brackets += 1;
+      else if (ch === "]") brackets -= 1;
+      else if (ch === "{") braces += 1;
+      else if (ch === "}") braces -= 1;
+      else if (
+        ch === "," &&
+        parentheses === 1 &&
+        brackets === 0 &&
+        braces === 0
+      ) {
+        return i;
+      }
+    }
+    throw new Error("Unterminated step narration call in server source.");
+  }
+
+  function stepStrings(source = SERVER_SRC): string[] {
+    // Locate the call, then balance its argument expression while skipping
+    // quoted/template text and comments. A narration literal may legitimately
+    // contain `);`; the old non-greedy regex silently truncated it there.
+    const out: string[] = [];
+    const call = /(?:steps\.push|ports\.pushStep)\(\s*/g;
+    let match;
+    while ((match = call.exec(source))) {
+      const start = call.lastIndex;
+      const end = firstArgumentEnd(source, start);
+      out.push(source.slice(start, end).trim());
+      call.lastIndex = end + 1;
+    }
     return out;
   }
 
@@ -1480,20 +1546,38 @@ describe("the step-marker convention at the call sites", () => {
     expect(stepStrings().length).toBeGreaterThan(40);
   });
 
-  it("marks every step that is not a plain successful observation", () => {
-    const unaccounted = stepStrings().filter((s) => {
+  function unaccountedStepStrings(source = SERVER_SRC) {
+    return stepStrings(source).filter((s) => {
       if (MARKED.test(s)) return false;
       if (RUNNING.test(s)) return false;
-      // A bare identifier is a forwarding site — a port re-publishing a message
-      // that a real call site already composed and marked. The literal it
-      // carries is scanned where it is written, not here.
-      if (/^[A-Za-z_$][\w$]*$/.test(s)) return false;
+      // These exact identifiers are forwarding sites: ports re-publish a
+      // message that a real call site already composed and marked. Do not exempt
+      // arbitrary identifiers, which could hide text composed outside the
+      // scanned server corpus.
+      if (FORWARDED_STEP_IDENTIFIERS.has(s)) return false;
       const compact = s.replace(/\s+/g, " ");
       return !PLAIN_OBSERVATIONS.some((allowed) =>
         compact.slice(1).startsWith(allowed)
       );
     });
+  }
+
+  it("marks every step that is not a plain successful observation", () => {
+    const unaccounted = unaccountedStepStrings();
     expect(unaccounted).toEqual([]);
+  });
+
+  it("parses narration literals containing a call terminator", () => {
+    expect(
+      stepStrings('steps.push("✅ Literal contains ); safely.");')
+    ).toEqual(['"✅ Literal contains ); safely."']);
+  });
+
+  it("rejects unrecognized forwarding identifiers", () => {
+    expect(
+      unaccountedStepStrings("steps.push(unlistedForwardingValue);")
+    ).toEqual(["unlistedForwardingValue"]);
+    expect(unaccountedStepStrings("steps.push(message);")).toEqual([]);
   });
 
   it("does not report a deliberately-skipped step as done", () => {
