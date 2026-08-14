@@ -381,15 +381,20 @@ describe("deployments routes (SU-06)", () => {
     // `DeployErrorKind`, so the cast goes through `unknown`: the point of the
     // case is that a value the type forbids still normalizes to `null`.
     it("normalizes empty-string and zero state to the absent values", () => {
-      const state = {
+      const state: CanvasState = {
         deployStatus: "",
         deployError: "",
-        deployErrorKind: "",
         deployErrorBranch: "",
         deployStartedAt: 0,
         deployFinishedAt: 0,
         deployRunUrl: ""
-      } as unknown as CanvasState;
+      };
+      // Persisted state can predate the DeployErrorKind union. Inject the
+      // malformed legacy value at runtime without weakening CanvasState's type.
+      Object.defineProperty(state, "deployErrorKind", {
+        value: "",
+        enumerable: true
+      });
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
 

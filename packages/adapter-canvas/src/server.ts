@@ -215,7 +215,11 @@ import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
-import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
+import {
+  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./server/routes/graphs-planning-reads.js";
+import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -280,16 +284,6 @@ export async function persistBestEffort({
     });
     return false;
   }
-}
-
-interface EnvironmentListResult {
-  error?: string;
-  stdout?: string;
-}
-
-interface VerifyRun {
-  status: string;
-  conclusion: string;
 }
 
 interface ChildProcessInput {
@@ -672,6 +666,96 @@ const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
   repoMatchesWorkspace
 });
 
+// The listing TTL and verify-workflow filename are declared here, before the
+// environments composition root reads them eagerly. Their canonical uses stay
+// below with the rest of the cache and verify constants; hoisting only the
+// declaration keeps the module-init read out of the temporal dead zone.
+const ENV_LIST_TTL_MS = 15000;
+const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
+
+// Composition root for the migrated `environments` family, minus
+// `POST /api/create-environment`, which stays on the legacy fallback for a
+// later slice. Every seam is a narrow named function: the two subprocess
+// runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
+// for `app-params`, the app-name and active-deployment resolvers plus the
+// error logger for `delete-environment`, three narrow accessors over the
+// module-level `envListCache` (so this module owns no cache), the workflow-sync
+// kickoff and clock for `list-environments`, and the operation-registry,
+// run-inspection, and finisher helpers for `verify-status`. `repoMatchesWorkspace`,
+// `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
+// and are injected rather than moved, so the route module spawns nothing and
+// reads no module-level mutable state.
+const environmentsRoutes = createEnvironmentsRoutes({
+  errorMessage,
+  repoMatchesWorkspace,
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  runCommand: (command, args, options) => runCommand(command, args, options),
+  fetchFileFromRepo: (repo, path, branch) =>
+    fetchFileFromRepo(repo, path, branch),
+  appParams,
+  resolveRepoAppName: (repo, branch) => resolveRepoAppName(repo, branch),
+  resolveEnvDeployment: (repo, environment, appName) =>
+    resolveEnvDeployment(repo, environment, appName),
+  logError: (message) => console.error(message),
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  envListCacheGet: (repo) => envListCache.get(repo),
+  envListCacheSet: (repo, entry) => {
+    envListCache.set(repo, entry);
+  },
+  envListCacheDelete: (repo) => {
+    envListCache.delete(repo);
+  },
+  envListTtlMs: ENV_LIST_TTL_MS,
+  kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
+    kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
+  now: () => Date.now(),
+  getOperation: (operationId) => operations.get(operationId),
+  hasCompleteVerificationIdentity,
+  findWorkflowRun: (repo, workflowFile, sinceMs, knownId) =>
+    findWorkflowRun(repo, workflowFile, sinceMs, knownId),
+  getRunDetail: (repo, runId) => getRunDetail(repo, runId),
+  fetchRunLog: (repo, runId) => fetchRunLog(repo, runId),
+  extractErrorLines: (logText, max) => extractErrorLines(logText, max),
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  finish,
+  finishSucceeded,
+  persistBestEffort,
+  persistOperations: () => operations.persist(),
+  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+  stageVerify: STAGE_VERIFY
+});
+
+// The load-graph-stream SSE route, composed with the same helpers its legacy arm
+// closed over. The entry-consuming seams take the live `CanvasServerEntry` the
+// 503 guard resolved (not an `instanceId`), so every seam sees the object the
+// guard checked — matching the legacy arm, which captured `servers.get(...)`
+// once and reused that reference for the whole stream. `github` is bound into
+// `radArtifactsDirForSelection` here rather than surfaced on the seam.
+const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  defaultBranchForState,
+  prepareSourceRef: (entry, context) =>
+    prepareSourceRefResources(entry, "graph", context),
+  commitSourceRef: (entry, resources, context, expectedToken) =>
+    setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  triggerAppBicepHandoff: (entry, repo, branch) =>
+    triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry, repo, branch),
+  workspaceGraphJsonPath: (state, bicepRepoPath) =>
+    workspaceGraphJsonPath(state, bicepRepoPath),
+  radArtifactsDirForSelection: (options) =>
+    radArtifactsDirForSelection({ ...options, github }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  canvasGraphResources,
+  errorMessage
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
@@ -682,7 +766,9 @@ const serverRoutes = createServerRouteTable({
   ...azureDiscoveryRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
-  ...graphsPlanningReadsRoutes
+  ...graphsPlanningReadsRoutes,
+  ...graphsPlanningStreamRoutes,
+  ...environmentsRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -909,7 +995,6 @@ function cachedDeployStatusReader(
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
 // and deploy pages snappy. Invalidated on environment creation.
-const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map<string, CachedPayload>();
 
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
@@ -1090,7 +1175,8 @@ function kickoffWorkflowSync(
 
 // Bare filename of the shared verify-credentials workflow (matches
 // infra.ts's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
-const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
+// Declared alongside the other verify constants; see the composition-root copy
+// above for the eagerly-read value.
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
@@ -3318,112 +3404,6 @@ function createLegacyRequestHandler(
       res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
-    // Delete a GitHub environment (from the Environments table "Delete Env").
-    if (pathname === "/api/delete-environment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const envName = (data.environment || "").trim();
-        if (!repo || !envName) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({ error: "repo and environment are required." })
-          );
-          return;
-        }
-        // Guard: an environment must not be deleted while an application is
-        // still deployed to it (its cloud resources would be orphaned).
-        // Require the app deployment to be torn down first and point the
-        // client at the app-deletion flow.
-        let active = null;
-        try {
-          // Resolve the real app name (from app.bicep) so the guard's
-          // message, redirect, and delete target the app declared in the
-          // bicep rather than the repo basename.
-          const delEntry = servers.get(instanceId);
-          const delBranch =
-            delEntry?.state?.contextBranch ||
-            delEntry?.state?.plannedBranch ||
-            delEntry?.state?.graphBranch ||
-            "main";
-          const delAppName = await resolveRepoAppName(repo, delBranch);
-          active = await resolveEnvDeployment(repo, envName, delAppName);
-        } catch (e) {
-          // Fail closed: if we can't confirm whether an app is still
-          // deployed (e.g. GitHub is unavailable), do NOT delete — that
-          // could orphan the application's cloud resources.
-          console.error(
-            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${errorMessage(
-              e
-            )}`
-          );
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({
-              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${errorMessage(
-                e
-              )}). The environment was not deleted — please try again.`
-            })
-          );
-          return;
-        }
-        if (active) {
-          const deleting = active.status === "deleting";
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(409);
-          res.end(
-            JSON.stringify({
-              error:
-                deleting ?
-                  `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
-                : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
-              code: "app-deployed",
-              app: active.app,
-              environment: envName,
-              redirect: `/?page=deploying&app=${encodeURIComponent(
-                active.app
-              )}&env=${encodeURIComponent(envName)}`
-            })
-          );
-          return;
-        }
-        try {
-          await runCommand(
-            "gh",
-            [
-              "api",
-              "--method",
-              "DELETE",
-              "/repos/" + repo + "/environments/" + encodeURIComponent(envName)
-            ],
-            { timeout: 20000 }
-          );
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(500);
-          res.end(
-            JSON.stringify({
-              error: "Could not delete environment: " + errorMessage(e)
-            })
-          );
-          return;
-        }
-        envListCache.delete(repo);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
     // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
     if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
       if (!isServerOwnedRequest) {
@@ -5097,56 +5077,6 @@ function createLegacyRequestHandler(
     }
 
     // Create GitHub Environment with secrets/variables and commit verify workflow
-    if (pathname === "/api/app-params" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        if (!repo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({ error: "No repository specified.", params: [] })
-          );
-          return;
-        }
-        // Resolve the branch the deploy will run against (the caller's
-        // selection, else the repo default) and locate the app.bicep the
-        // same way the deploy route does (.radius/app.bicep, then app.bicep).
-        let branch = data.branch || "";
-        if (!branch) {
-          const def = await runCommand("gh", [
-            "repo",
-            "view",
-            repo,
-            "--json",
-            "defaultBranchRef",
-            "--jq",
-            ".defaultBranchRef.name"
-          ]).catch(() => "");
-          branch = (def || "").trim() || "main";
-        }
-        let source = await fetchFileFromRepo(repo, ".radius/app.bicep", branch);
-        if (!source)
-          source = await fetchFileFromRepo(repo, "app.bicep", branch);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            branch,
-            found: !!source,
-            params: source ? appParams(source) : []
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), params: [] }));
-      }
-      return;
-    }
-
     if (pathname === "/api/create-environment" && req.method === "POST") {
       if (!isServerOwnedRequest) {
         res.setHeader("Content-Type", "application/json");
@@ -6149,116 +6079,6 @@ function createLegacyRequestHandler(
       return;
     }
 
-    if (pathname === "/api/load-graph-stream" && req.method === "GET") {
-      const url = new URL(req.url || "/", `http://127.0.0.1`);
-      const repo = url.searchParams.get("repo") || "";
-      const entry = servers.get(instanceId);
-      if (!entry) {
-        res.writeHead(503);
-        res.end("Canvas server state is unavailable.");
-        return;
-      }
-      const branch =
-        url.searchParams.get("branch") || defaultBranchForState(entry?.state);
-      const sourceRefContext =
-        entry ?
-          prepareSourceRefResources(entry, "graph", { repo, branch })
-        : null;
-
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.writeHead(200);
-
-      const sendProgress = (message: string): void => {
-        res.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
-      };
-      const sendDone = (data: unknown): void => {
-        res.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
-        res.end();
-      };
-
-      if (!repo) {
-        sendDone({ error: "Please select a repository." });
-        return;
-      }
-
-      try {
-        sendProgress(`Checking ${repo} for existing app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-
-        if (content) {
-          sendProgress("Found existing app.bicep — parsing resources...");
-        } else {
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          sendDone({
-            error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-            needsAppBicep: true,
-            repo,
-            branch
-          });
-          return;
-        }
-
-        const graphJsonPath =
-          entry && selection.fromWorkspace ?
-            workspaceGraphJsonPath(entry.state, selection.bicepPath)
-          : "";
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: sendProgress
-          });
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: sendProgress,
-              saveGraphJsonTo: graphJsonPath,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        sendProgress(
-          `Mapped ${resources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "graph",
-              resources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            sendDone({ stale: true });
-            return;
-          }
-          entry.state.graphTargetRepo = repo;
-          entry.state.graphBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.graphFromWorkspace = selection.fromWorkspace;
-          entry.state.activeGraphView = "graph";
-        }
-
-        sendDone({ reload: true });
-      } catch (e) {
-        sendDone({ error: errorMessage(e) });
-      }
-      return;
-    }
-
     if (pathname === "/api/load-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -6422,402 +6242,6 @@ function createLegacyRequestHandler(
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-environments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ environments: [] });
-        return;
-      }
-
-      const cached = envListCache.get(repo);
-      if (cached && Date.now() - cached.at < ENV_LIST_TTL_MS) {
-        respond(cached.payload);
-        return;
-      }
-
-      const gh = (args: string[], timeout = 12000): Promise<string> =>
-        new Promise<string>((resolve) => {
-          cliExec("gh", args, { timeout }, (err, stdout) => {
-            if (err) {
-              resolve("");
-              return;
-            }
-            resolve((stdout || "").trim());
-          });
-        });
-
-      try {
-        // 1) List environment names + ids for the repo. Kick off the
-        //    verify-credentials workflow-runs fetch in parallel — it's
-        //    independent of the names, so there's no reason to wait.
-        const verifyRunsPromise = gh([
-          "api",
-          `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
-          "--jq",
-          '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
-        ]);
-        const namesRes = await new Promise<EnvironmentListResult>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/environments?per_page=100`,
-              "--jq",
-              '.environments[] | (.id|tostring) + "\\t" + .name'
-            ],
-            { timeout: 12000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({
-                  error:
-                    (stderr || err.message || "").trim() ||
-                    "Failed to list environments."
-                });
-                return;
-              }
-              resolve({ stdout: (stdout || "").trim() });
-            }
-          );
-        });
-        // Surface a genuine API/auth/permission failure instead of
-        // silently reporting "no environments" (which hides real
-        // problems). Failures are not cached so a retry can recover.
-        if (namesRes.error) {
-          respond({ environments: [], error: namesRes.error });
-          return;
-        }
-        const namesRaw = namesRes.stdout || "";
-        const rows =
-          namesRaw ?
-            namesRaw
-              .split("\n")
-              .filter(Boolean)
-              .map((l) => {
-                const tab = l.indexOf("\t");
-                return tab === -1 ?
-                    { id: "", name: l }
-                  : { id: l.slice(0, tab), name: l.slice(tab + 1) };
-              })
-          : [];
-        if (rows.length === 0) {
-          const payload = { environments: [] };
-          respond(payload);
-          envListCache.set(repo, { at: Date.now(), payload });
-          return;
-        }
-
-        // Index the pre-fetched verify runs by run id. The environment
-        // status is derived from these (not from app deployments): an
-        // environment is "Success" only once it exists AND its
-        // verify-credentials workflow has passed.
-        const verifyRunsRaw = await verifyRunsPromise;
-        const verifyRuns = new Map<string, VerifyRun>();
-        if (verifyRunsRaw) {
-          for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
-            const [rid, rstatus, rconclusion] = line.split("\t");
-            verifyRuns.set(rid, { status: rstatus, conclusion: rconclusion });
-          }
-        }
-        // Map a verify run's outcome to an environment status.
-        const verifyStatusOf = (run?: VerifyRun): string | null => {
-          if (!run) return null;
-          if (run.status !== "completed") return "pending"; // queued / in_progress
-          if (run.conclusion === "success") return "success";
-          return "failed"; // failure / cancelled / timed_out / etc.
-        };
-
-        // 2) For each environment, derive provider (from stored variables)
-        //    and a status from the verify-credentials workflow. Both the
-        //    verify and deploy workflows create deployments to the same
-        //    environment, so we walk this env's deployments newest-first
-        //    until we find one created by a verify-credentials run.
-        const environments = await Promise.all(
-          rows.map(async ({ id, name }) => {
-            // The variables (provider) and deployments (status) lookups are
-            // independent, so fire them together.
-            const [varsRaw, depIdsRaw] = await Promise.all([
-              gh([
-                "api",
-                `/repos/${repo}/environments/${encodeURIComponent(
-                  name
-                )}/variables?per_page=100`,
-                "--jq",
-                '.variables[] | .name + "\\t" + (.value // "")'
-              ]),
-              verifyRuns.size > 0 ?
-                gh([
-                  "api",
-                  `/repos/${repo}/deployments?environment=${encodeURIComponent(
-                    name
-                  )}&per_page=10`,
-                  "--jq",
-                  ".[].id"
-                ])
-              : Promise.resolve("")
-            ]);
-            // Parse the "name<TAB>value" variable lines into a map. Only
-            // surface environments created by this extension (tagged with a
-            // RADIUS_MANAGED variable at creation time); anything without it
-            // was created outside Radius and is filtered out below.
-            const vars: Record<string, string> = {};
-            for (const line of varsRaw ?
-              varsRaw.split("\n").filter(Boolean)
-            : []) {
-              const tab = line.indexOf("\t");
-              if (tab === -1) {
-                vars[line] = "";
-                continue;
-              }
-              vars[line.slice(0, tab)] = line.slice(tab + 1);
-            }
-            if (!("RADIUS_MANAGED" in vars)) return null;
-
-            let provider = "";
-            const varNames = Object.keys(vars).join("\n");
-            if (/AZURE_/.test(varNames)) provider = "azure";
-            else if (/AWS_/.test(varNames)) provider = "aws";
-
-            const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
-
-            // Status reflects the verify-credentials workflow only:
-            // pending while it runs, success when it passes, failed if it
-            // fails. Default to "pending" until we find a matching run.
-            let status = "pending";
-            if (verifyRuns.size > 0) {
-              const depIds =
-                depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
-              // Resolve every deployment's originating-run URL in parallel
-              // (deployments come back newest-first), then pick the newest
-              // one created by a verify-credentials run. Doing this serially
-              // was the main source of latency for this endpoint.
-              const logUrls = await Promise.all(
-                depIds.map((depId) =>
-                  gh([
-                    "api",
-                    `/repos/${repo}/deployments/${depId}/statuses?per_page=1`,
-                    "--jq",
-                    '.[0].log_url // .[0].target_url // ""'
-                  ])
-                )
-              );
-              for (const logUrl of logUrls) {
-                const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                if (!m) continue;
-                const run = verifyRuns.get(m[1]);
-                if (run) {
-                  status = verifyStatusOf(run) || status;
-                  break;
-                }
-              }
-            }
-
-            const webUrl =
-              id ?
-                `https://github.com/${repo}/settings/environments/${id}/edit`
-              : `https://github.com/${repo}/settings/environments`;
-            return { name, provider, status, webUrl, credentialProfile };
-          })
-        );
-
-        const managedEnvironments = environments.filter(
-          (environment) => environment !== null
-        );
-        respond({ environments: managedEnvironments });
-        envListCache.set(repo, {
-          at: Date.now(),
-          payload: { environments: managedEnvironments }
-        });
-        // Background self-heal: update any committed workflow files that
-        // have drifted from the upstream Radius templates. Also target the
-        // session worktree branch (when it's this repo's) so a
-        // worktree-consistent deploy runs the up-to-date workflows, not
-        // just the default branch. Fire-and-forget so it never blocks.
-        const syncEntry = servers.get(instanceId);
-        const workingBranch =
-          (
-            syncEntry?.state?.workspaceBranch &&
-            repoMatchesWorkspace(syncEntry.state, repo)
-          ) ?
-            syncEntry.state.workspaceBranch
-          : "";
-        kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
-      } catch (e) {
-        respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/verify-status" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const operationId = url.searchParams.get("operationId") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ state: "unknown", error: "No repository specified." });
-        return;
-      }
-
-      try {
-        const entry = servers.get(instanceId);
-        const verifyOp = operationId ? operations.get(operationId) : null;
-        if (
-          operationId &&
-          (!verifyOp ||
-            verifyOp.repo !== repo ||
-            verifyOp.environment !==
-              (url.searchParams.get("environment") || verifyOp.environment))
-        ) {
-          respond({
-            state: "expired",
-            terminal: true,
-            error: "The verification operation does not match this request."
-          });
-          return;
-        }
-        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
-          respond({
-            state: "expired",
-            terminal: true,
-            error:
-              "The verification operation has incomplete dispatch identity."
-          });
-          return;
-        }
-        const dispatchedAt =
-          verifyOp?.verification?.dispatchedAt ||
-          entry?.state?.deployDispatchedAt ||
-          0;
-        let runId =
-          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
-        if (!runId) {
-          runId = await findWorkflowRun(
-            repo,
-            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
-            dispatchedAt,
-            null
-          );
-          if (runId && verifyOp) {
-            verifyOp.verification = {
-              dispatchedAt: verifyOp.verification.dispatchedAt,
-              workflow: verifyOp.verification.workflow,
-              ref: verifyOp.verification.ref,
-              environment: verifyOp.verification.environment,
-              runId: String(runId),
-              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
-            };
-            await persistBestEffort({
-              operation: verifyOp,
-              persist: () => operations.persist(),
-              report: (diagnostic) => operations.report?.(diagnostic)
-            });
-          } else if (runId && entry) entry.state.verifyRunId = runId;
-        }
-        if (!runId) {
-          respond({ state: "pending", runId: null });
-          return;
-        }
-
-        const detail = await getRunDetail(repo, runId);
-        const runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        if (!detail) {
-          respond({ state: "pending", runId, runUrl });
-          return;
-        }
-
-        if (detail.status !== "completed") {
-          // Name what the run is doing right now instead of leaving the
-          // caller with nothing but elapsed time. getRunDetail already
-          // returns per-step status, so this costs no extra API surface.
-          // Its jobs sub-resource 503s intermittently and the fallback
-          // deliberately returns no steps, so the activity line has to
-          // degrade silently rather than announce its own absence.
-          const active = (detail.steps || []).find(
-            (s) => s.status === "in_progress"
-          );
-          respond({
-            state: "in_progress",
-            runId,
-            runUrl,
-            activity: active ? active.name : null
-          });
-          return;
-        }
-        if (detail.conclusion === "success") {
-          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
-            finishSucceeded(verifyOp);
-            await persistBestEffort({
-              operation: verifyOp,
-              persist: () => operations.persist(),
-              report: (diagnostic) => operations.report?.(diagnostic)
-            });
-          }
-          respond({ state: "success", runId, runUrl });
-          return;
-        }
-        // Failed — surface the failing step + a few error lines.
-        const failed = (detail.steps || []).filter(
-          (s) =>
-            s.conclusion &&
-            s.conclusion !== "success" &&
-            s.conclusion !== "skipped"
-        );
-        let errMsg =
-          "Credential verification failed" +
-          (detail.conclusion ? " (" + detail.conclusion + ")" : "") +
-          ".";
-        if (failed.length)
-          errMsg +=
-            " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
-        const log = await fetchRunLog(repo, runId);
-        const lines = extractErrorLines(log, 8);
-        if (lines.length) errMsg += "\n" + lines.join("\n");
-        const azureLoginLog = extractGitHubActionsStepLog(
-          log,
-          "Azure Login (OIDC)"
-        );
-        const oidcClaimHelp = explainOidcEnterpriseClaim(azureLoginLog);
-        if (oidcClaimHelp)
-          errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
-        if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
-          // Everything before verification succeeded and still exists, so
-          // this is partial rather than total failure.
-          finish(verifyOp, "failed_partial", {
-            failure: {
-              code: "verify-run-failed",
-              stage: STAGE_VERIFY,
-              message:
-                "Credential verification failed. " +
-                (failed.length ?
-                  "Failed step: " + failed.map((st) => st.name).join(", ") + "."
-                : ""),
-              classification: "user-fixable",
-              evidence: errMsg
-            }
-          });
-          await persistBestEffort({
-            operation: verifyOp,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
-        }
-        respond({ state: "failed", runId, runUrl, error: errMsg });
-      } catch (e) {
-        respond({ state: "unknown", error: errorMessage(e) });
       }
       return;
     }
