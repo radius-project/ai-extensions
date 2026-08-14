@@ -1,6 +1,6 @@
 // Canvas adapter — HTTP server host for the webview.
 //
-// Owns the local loopback server that backs each canvas instance: the ~21-route
+// Owns the local loopback server that backs each canvas instance: the 40-route
 // request handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
@@ -22,7 +22,7 @@ import {
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
-  stateRegistryForEnvironment
+  stateRegistryForEnvironment,
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
@@ -33,13 +33,13 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  setPreferredGitHubLogin
+  setPreferredGitHubLogin,
 } from "./shared.js";
 import type {
   CanvasGraphResource,
   CanvasState,
   DeployErrorKind,
-  GraphView
+  GraphView,
 } from "./shared.js";
 import {
   fetchFileFromRepo,
@@ -55,7 +55,7 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache
+  resetGhIdentityCache,
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
 import {
@@ -66,7 +66,7 @@ import {
   isValidRepoSlug,
   isAksClusterName,
   isResourceGroupName,
-  GITHUB_API_VERSION
+  GITHUB_API_VERSION,
 } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
@@ -75,7 +75,7 @@ import {
   partitionParams,
   buildDeployRadCommand,
   buildAppGraphRadCommand,
-  extractAppName
+  extractAppName,
 } from "./bicep.js";
 import {
   createWorkspaceGitHub,
@@ -85,15 +85,15 @@ import {
   isWorkspaceSelection,
   resolveSessionId,
   toSafeRepoRelPath,
-  workspaceGraphJsonPath
+  workspaceGraphJsonPath,
 } from "./workspace.js";
 import {
   DEFAULT_CANVAS_PAGE,
-  DEPLOY_REPAIR_ATTEMPT_CAP
+  DEPLOY_REPAIR_ATTEMPT_CAP,
 } from "./runtime/hooks.js";
 import {
   buildVerifyWorkflowDispatchArgs,
-  planCredentialVerification
+  planCredentialVerification,
 } from "./verification-plan.js";
 import {
   operations,
@@ -128,15 +128,15 @@ import {
   INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
-  STAGE_VERIFY
+  STAGE_VERIFY,
 } from "./operations.js";
 import {
   radArtifactsDirForSelection,
-  radArtifactsFingerprint
+  radArtifactsFingerprint,
 } from "./remote-rad-artifacts.js";
 import {
   prepareSourceRefResources,
-  setSourceRefResources
+  setSourceRefResources,
 } from "./source-refs.js";
 import {
   generateAzureOIDC,
@@ -148,7 +148,7 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE
+  DEPLOY_AZURE_FILE,
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -159,7 +159,7 @@ import {
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
-  explainRepoAccessForEnvSetup
+  explainRepoAccessForEnvSetup,
 } from "./deploy.js";
 import {
   applyDeployMessages,
@@ -167,7 +167,7 @@ import {
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
-  settleDeployStatuses
+  settleDeployStatuses,
 } from "./deploy-artifacts.js";
 import {
   graphPage,
@@ -175,13 +175,13 @@ import {
   graphDiffPage,
   deployedGraphPage,
   environmentPage,
-  deployingPage
+  deployingPage,
 } from "./pages.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
 import {
   syncRequestedPage,
-  type CanvasRequestContext
+  type CanvasRequestContext,
 } from "./server/request-context.js";
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
@@ -195,13 +195,13 @@ export {
   buildRoleAssignmentArgs,
   findFederatedCredentialNameCollision,
   isReplicationLagError,
-  pickAksResourceGroup
+  pickAksResourceGroup,
 } from "./server/routes/azure-auto-setup-credentials.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import {
   createGraphsPlanningReadsRoutes,
-  createGraphsPlanningStreamRoutes
+  createGraphsPlanningStreamRoutes,
 } from "./server/routes/graphs-planning-reads.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
@@ -226,7 +226,7 @@ export async function persistMutationCheckpoint({
   operation,
   persist,
   report,
-  fail
+  fail,
 }: {
   operation: any;
   persist: () => Promise<void>;
@@ -239,14 +239,14 @@ export async function persistMutationCheckpoint({
   } catch (error) {
     report?.({
       code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`,
     });
     // Do not retry the same deterministic write or continue making cloud
     // changes without durable provenance for what already succeeded.
     await fail(
       500,
       "Radius changed no further cloud resources because it could not save the setup recovery record.",
-      "operation-persistence-failed"
+      "operation-persistence-failed",
     );
     return false;
   }
@@ -255,7 +255,7 @@ export async function persistMutationCheckpoint({
 export async function persistBestEffort({
   operation,
   persist,
-  report
+  report,
 }: {
   operation: any;
   persist: () => Promise<void>;
@@ -267,7 +267,7 @@ export async function persistBestEffort({
   } catch (error) {
     report?.({
       code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
+      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`,
     });
     return false;
   }
@@ -288,14 +288,14 @@ export function endChildInput(child: ChildProcessInput): void {
 function runCliCommand(
   cmd: string,
   args: string[],
-  timeout = 60000
+  timeout = 60000,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
       resolve({
         code: err ? err.code || 1 : 0,
         stdout: stdout || "",
-        stderr: stderr || ""
+        stderr: stderr || "",
       });
     });
     endChildInput(child);
@@ -338,7 +338,7 @@ type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
 type SessionPromptHandler = (
-  prompt: string | SessionPromptMessage
+  prompt: string | SessionPromptMessage,
 ) => Promise<unknown>;
 
 interface IdValidationInput {
@@ -389,15 +389,14 @@ function optionalString(value: unknown): string {
 function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
   return values.map((value) => {
     const item = record(value);
-    const connections =
-      Array.isArray(item.connections) ?
-        item.connections.map((connection) => {
+    const connections = Array.isArray(item.connections)
+      ? item.connections.map((connection) => {
           const fields = record(connection);
           return {
             ...fields,
             id: optionalString(fields.id),
             name: optionalString(fields.name),
-            direction: optionalString(fields.direction)
+            direction: optionalString(fields.direction),
           };
         })
       : undefined;
@@ -406,7 +405,7 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
       id: optionalString(item.id),
       name: optionalString(item.name),
       type: optionalString(item.type),
-      ...(connections ? { connections } : {})
+      ...(connections ? { connections } : {}),
     };
   });
 }
@@ -443,26 +442,33 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   getOpenSourceHandler: () => openSourceHandler,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
-  toSafeRepoRelPath
+  toSafeRepoRelPath,
 });
 
-// Composition root for the migrated `operations-status` family. The read routes
-// receive the four narrow lookup and projection functions they call; the POST
-// that registers an environment operation receives its own seams. The registry
-// implementation and the client projection stay in `operations.ts`, and the
-// pure guards and factories stay in their modules and are injected rather than
-// imported by the route so the route spawns nothing and touches no disk.
-//
-// `scheduleEnvironmentOperation` bridges the module-level route back to the
-// per-instance server-owned task runner: the migrated table is built once, but
-// scheduling is closure state on the legacy handler for the instance that
-// received the request, so the instance id is passed through and resolved here.
+function scheduleEnvironmentOperationForInstance(
+  instanceId: string,
+  operation: { operationId: string },
+): boolean {
+  const legacy = legacyHandlers.get(instanceId);
+  if (!legacy) {
+    console.error(
+      `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${operation.operationId}.`,
+    );
+    return false;
+  }
+  legacy.scheduleEnvironmentOperation(operation);
+  return true;
+}
+
+// Composition root for the migrated `operations-status` family. Reads, creates,
+// and resumable actions each receive only the registry, mutation, persistence,
+// projection, and per-instance scheduling seams they invoke.
 const operationsStatusRoutes = createOperationsStatusRoutes(
   {
     latest: (repo) => operations.latest(repo),
     latestAny: () => operations.latestAny(),
     get: (operationId) => operations.get(operationId),
-    toClientView
+    toClientView,
   },
   {
     isValidRepoSlug,
@@ -474,19 +480,22 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
     finish,
-    scheduleEnvironmentOperation: (instanceId, op) => {
-      const legacy = legacyHandlers.get(instanceId);
-      if (!legacy) {
-        console.error(
-          `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
-        );
-        return false;
-      }
-      legacy.scheduleEnvironmentOperation(op);
-      return true;
-    },
-    errorMessage
-  }
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+  },
+  {
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    persistOperations: () => operations.persist(),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE,
+  },
 );
 
 // Composition root for the migrated `repositories` family. Three seams: the
@@ -499,7 +508,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
   },
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
-  repoMatchesWorkspace
+  repoMatchesWorkspace,
 });
 
 // Composition root for the migrated `deployments` family: the read routes, the
@@ -543,7 +552,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
         resolve({
           code: err ? err.code || 1 : 0,
           stdout: (stdout || "").trim(),
-          stderr: stderr || ""
+          stderr: stderr || "",
         });
       });
     }),
@@ -554,7 +563,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
   // file names and the instance container they narrow over exist.
   get deployRequest() {
     return deployRequestService;
-  }
+  },
 });
 
 // Composition root for the migrated `azure-discovery` routes. Four seams: the
@@ -567,7 +576,7 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
   parseServedReposFromSubjects: (subjects) =>
-    parseServedReposFromSubjects(subjects as Iterable<unknown>)
+    parseServedReposFromSubjects(subjects as Iterable<unknown>),
 });
 
 const azureAutoSetupRoutes = createAzureAutoSetupRoutes({
@@ -617,7 +626,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes({
     },
     recordCreatedRoleAssignment: (operation, entry) => {
       recordCreatedRoleAssignment(operation, entry);
-    }
+    },
   },
   external: {
     getGitHubIdentity,
@@ -625,23 +634,21 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes({
     preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
     runGitHubJson: async (apiPath) => {
       const result = await ghApiJson(apiPath, {
-        headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+        headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION },
       });
       return {
         ok: result.ok,
         status: result.status,
         json:
-          (
-            result.json !== null &&
-            typeof result.json === "object" &&
-            !Array.isArray(result.json)
-          ) ?
-            record(result.json)
-          : null,
-        stderr: result.stderr
+          result.json !== null &&
+          typeof result.json === "object" &&
+          !Array.isArray(result.json)
+            ? record(result.json)
+            : null,
+        stderr: result.stderr,
       };
     },
-    runAz: (args) => runCliCommand("az", args)
+    runAz: (args) => runCliCommand("az", args),
   },
   tempFile: {
     createPath: () =>
@@ -653,14 +660,14 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes({
       try {
         unlinkSync(path);
       } catch {}
-    }
+    },
   },
   ensureServicePrincipal,
   finalizeSetupFailure,
   persistMutationCheckpoint,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
 });
 
 // Composition root for the credential-profile and GitHub-identity half of the
@@ -679,7 +686,7 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
   setPreferredGitHubLogin,
   preflightRepoAdmin,
   isValidRepoSlug,
-  errorMessage
+  errorMessage,
 });
 
 // Composition root for the auth/verify half of the `identity-credentials`
@@ -707,7 +714,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
-  errorMessage
+  errorMessage,
 });
 
 // Composition root for the read-only half of the `graphs-planning` family. Ten
@@ -729,7 +736,7 @@ const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
   applyDeployMessages,
   record,
   errorMessage,
-  repoMatchesWorkspace
+  repoMatchesWorkspace,
 });
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
@@ -750,7 +757,7 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   buildGraphViaRad: (content, bicepPath, options) =>
     buildGraphViaRad(content, bicepPath, options),
   canvasGraphResources,
-  errorMessage
+  errorMessage,
 });
 
 // Composition root for the write half of the `graphs-planning` family. The
@@ -779,7 +786,7 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
     radArtifactsFingerprint,
     removeDirectory: (dir) => {
       rmSync(dir, { recursive: true, force: true });
-    }
+    },
   }),
   triggerAppBicepHandoff,
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
@@ -799,7 +806,7 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
     computeGraphDiff(baseResources, headResources),
   record,
   optionalString,
-  errorMessage
+  errorMessage,
 });
 
 // The listing TTL and verify-workflow filename are declared here, before the
@@ -862,7 +869,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
   persistOperations: () => operations.persist(),
   reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
   verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-  stageVerify: STAGE_VERIFY
+  stageVerify: STAGE_VERIFY,
 });
 
 // Composition root for `POST /api/create-environment`. The route's four seams
@@ -910,7 +917,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
       registry: input.registry,
-      credentials: input.credentials as GhcrPackageCredentials
+      credentials: input.credentials as GhcrPackageCredentials,
     }),
   stateRegistryForEnvironment,
   getDefaultBranch: (repo) => getDefaultBranch(repo),
@@ -924,7 +931,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
           Date.now() +
           "-" +
           Math.random().toString(36).slice(2) +
-          ".json"
+          ".json",
       );
       writeFileSync(path, contents);
       return path;
@@ -933,7 +940,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       try {
         unlinkSync(path);
       } catch {}
-    }
+    },
   },
   resolveGitHubEnvironmentCreateState,
   recordGitHubEnvironment: (operation, patch) => {
@@ -978,7 +985,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   },
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
+  now: () => Date.now(),
 });
 
 // Built once at module initialization so table validation runs a single time
@@ -996,7 +1003,7 @@ const serverRoutes = createServerRouteTable({
   ...graphsPlanningStreamRoutes,
   ...graphsPlanningWritesRoutes,
   ...environmentsRoutes,
-  ...createEnvironmentRoutes
+  ...createEnvironmentRoutes,
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -1012,7 +1019,7 @@ const canvasServer = createCanvasServer(
     createRequestHandler: ({ instanceId, instances, markActivity }) => {
       const legacy = createLegacyRequestHandler(
         instanceId,
-        () => instances.get(instanceId)?.baseUrl || ""
+        () => instances.get(instanceId)?.baseUrl || "",
       );
       legacyHandlers.set(instanceId, legacy);
       return createScaffoldRequestHandler({
@@ -1025,7 +1032,7 @@ const canvasServer = createCanvasServer(
         markActivity: (request) => {
           if (!legacy.isServerOwned(request)) markActivity();
         },
-        preRoute: preRouteCanvasRequest
+        preRoute: preRouteCanvasRequest,
       });
     },
     onStarted: (instanceId) => {
@@ -1036,8 +1043,8 @@ const canvasServer = createCanvasServer(
       legacyHandlers.delete(instanceId);
     },
     defaultPage: DEFAULT_CANVAS_PAGE,
-    preferredPort: preferredPortForInstance
-  })
+    preferredPort: preferredPortForInstance,
+  }),
 );
 
 // Compatibility facade shared with the SDK runtime during the route migration.
@@ -1047,7 +1054,7 @@ let environmentOperationTestRunner:
   ((operationId: string) => Promise<void>) | null = null;
 
 export function setEnvironmentOperationTestRunner(
-  runner: ((operationId: string) => Promise<void>) | null
+  runner: ((operationId: string) => Promise<void>) | null,
 ): void {
   environmentOperationTestRunner = runner;
 }
@@ -1067,7 +1074,7 @@ export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
 
 export function onEnvironmentTasksSettled(
   instanceId: string,
-  listener: () => void
+  listener: () => void,
 ): () => void {
   let listeners = environmentTasksSettledListeners.get(instanceId);
   if (!listeners) {
@@ -1099,7 +1106,7 @@ export function onEnvironmentTasksSettled(
 
 export function graphDefinitionHash(
   content: string,
-  artifactsFingerprint = ""
+  artifactsFingerprint = "",
 ): string {
   return createHash("sha256")
     .update(content)
@@ -1112,7 +1119,7 @@ export function canReuseModeledGraph(
   state: CanvasState,
   repo: string,
   branch: string,
-  definitionHash: string
+  definitionHash: string,
 ): boolean {
   return (
     state?.graphLoaded === true &&
@@ -1128,7 +1135,7 @@ export function isCurrentSourceRefToken(
     sourceRefContexts?: Partial<Record<GraphView, { token?: string }>>;
   },
   view: GraphView,
-  token: unknown
+  token: unknown,
 ): boolean {
   return !!token && state?.sourceRefContexts?.[view]?.token === token;
 }
@@ -1136,7 +1143,7 @@ export function isCurrentSourceRefToken(
 export function addGraphProgress(
   state: CanvasState,
   generation: number,
-  message: string
+  message: string,
 ): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
   if (!state.progressMessages) state.progressMessages = [];
@@ -1162,14 +1169,14 @@ async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,
   branch: string,
-  runId?: number | string | null
+  runId?: number | string | null,
 ) {
   const environment = state?.deployEnvName || state?.envName || "";
   let application = state?.deployAppName || "";
   if (!application && repo) {
     application = await resolveRepoAppName(
       repo,
-      branch || state?.deployingBranch || state?.graphBranch || ""
+      branch || state?.deployingBranch || state?.graphBranch || "",
     );
     if (application && state) state.deployAppName = application;
   }
@@ -1177,7 +1184,7 @@ async function deployStatusReaderFromState(
     repo,
     environment,
     application,
-    runId: runId ?? state?.deployRunId ?? null
+    runId: runId ?? state?.deployRunId ?? null,
   });
 }
 
@@ -1193,13 +1200,13 @@ const deployStatusReaders = new Map<
 const MAX_DEPLOY_STATUS_READERS = 32;
 
 function cachedDeployStatusReader(
-  options: Parameters<typeof createDeployStatusReader>[0]
+  options: Parameters<typeof createDeployStatusReader>[0],
 ): ReturnType<typeof createDeployStatusReader> {
   const key = [
     options.repo,
     options.environment || "",
     options.application || "",
-    options.runId ?? ""
+    options.runId ?? "",
   ].join("\n");
   const existing = deployStatusReaders.get(key);
   if (existing) {
@@ -1256,7 +1263,7 @@ type DeploymentDispatchReservationInput = Omit<
 
 export function activeDeploymentMutation(
   state: CanvasState,
-  now = Date.now()
+  now = Date.now(),
 ): DeploymentDispatchReservation | undefined {
   const current = state.deploymentMutation;
   if (current && current.expiresAt <= now) {
@@ -1269,12 +1276,12 @@ export function activeDeploymentMutation(
 export function reserveDeploymentMutation(
   state: CanvasState,
   reservation: DeploymentDispatchReservationInput,
-  now = Date.now()
+  now = Date.now(),
 ): DeploymentDispatchReservation | null {
   if (activeDeploymentMutation(state, now)) return null;
   const owner = {
     ...reservation,
-    expiresAt: now + DEPLOYMENT_MUTATION_LEASE_MS
+    expiresAt: now + DEPLOYMENT_MUTATION_LEASE_MS,
   };
   state.deploymentMutation = owner;
   return owner;
@@ -1282,7 +1289,7 @@ export function reserveDeploymentMutation(
 
 export function releaseDeploymentMutation(
   state: CanvasState,
-  reservation: DeploymentDispatchReservation
+  reservation: DeploymentDispatchReservation,
 ): void {
   if (state.deploymentMutation === reservation) delete state.deploymentMutation;
 }
@@ -1295,7 +1302,7 @@ export function deploymentStatusBlocksMutation(status: unknown): boolean {
 
 export function localDeploymentBlocksMutation(
   state: CanvasState,
-  now = Date.now()
+  now = Date.now(),
 ): boolean {
   if (state.deployStatus !== "in_progress") return false;
   return (
@@ -1306,7 +1313,7 @@ export function localDeploymentBlocksMutation(
 
 export function resolveDeploymentEnvironment(
   state: CanvasState,
-  requestedEnvironment: unknown
+  requestedEnvironment: unknown,
 ): string {
   return (
     (typeof requestedEnvironment === "string" && requestedEnvironment) ||
@@ -1317,9 +1324,9 @@ export function resolveDeploymentEnvironment(
 
 export function beginPlannedGraphRequest(state: CanvasState): number {
   const generation =
-    typeof state.plannedRequestGeneration === "number" ?
-      state.plannedRequestGeneration + 1
-    : 1;
+    typeof state.plannedRequestGeneration === "number"
+      ? state.plannedRequestGeneration + 1
+      : 1;
   state.plannedRequestGeneration = generation;
   state.plannedResources = null;
   return generation;
@@ -1327,7 +1334,7 @@ export function beginPlannedGraphRequest(state: CanvasState): number {
 
 export function isCurrentPlannedGraphRequest(
   state: CanvasState,
-  generation: number
+  generation: number,
 ): boolean {
   return state.plannedRequestGeneration === generation;
 }
@@ -1335,7 +1342,7 @@ export function isCurrentPlannedGraphRequest(
 export function resetDeploymentViewState(
   state: CanvasState,
   attemptId: unknown,
-  now = Date.now()
+  now = Date.now(),
 ): void {
   const requestedAttemptId =
     typeof attemptId === "string" ? attemptId : undefined;
@@ -1372,7 +1379,7 @@ const workflowSyncState = new Map<string, number>();
 function kickoffWorkflowSync(
   repo: string,
   managedEnvironments: ManagedEnvironment[],
-  workingBranch: string
+  workingBranch: string,
 ): void {
   if (!repo || !managedEnvironments || managedEnvironments.length === 0) return;
   // Throttle per repo+branch so switching the working branch triggers a fresh
@@ -1383,7 +1390,7 @@ function kickoffWorkflowSync(
   workflowSyncState.set(key, Date.now());
   syncRepoWorkflows(repo, managedEnvironments, {
     workingBranch: workingBranch || "",
-    log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`)
+    log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`),
   })
     .then((r) => {
       if (r && r.updated && r.updated.length) {
@@ -1391,13 +1398,13 @@ function kickoffWorkflowSync(
           `[radius workflow-sync] ${repo}: updated ${
             r.updated.length
           } workflow file(s) across ${(r.branches || []).join(
-            ", "
-          )}: ${r.updated.join(", ")}`
+            ", ",
+          )}: ${r.updated.join(", ")}`,
         );
       }
     })
     .catch((e: unknown) =>
-      console.error(`[radius workflow-sync] ${repo}: ${errorMessage(e)}`)
+      console.error(`[radius workflow-sync] ${repo}: ${errorMessage(e)}`),
     );
 }
 
@@ -1423,7 +1430,7 @@ async function ensureWorkflowsCurrent(
   environment: string,
   provider: string,
   only: string[],
-  workingBranch = ""
+  workingBranch = "",
 ): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], failed: [] };
@@ -1439,8 +1446,8 @@ async function ensureWorkflowsCurrent(
         // the default branch, so a never-committed (or wrongly-refed) file 404s;
         // creating it here makes the dispatch self-healing.
         create: true,
-        log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
-      }
+        log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`),
+      },
     );
     if (
       r &&
@@ -1448,7 +1455,7 @@ async function ensureWorkflowsCurrent(
     ) {
       const changed = [...(r.updated || []), ...(r.created || [])];
       console.error(
-        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
+        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`,
       );
     }
     return { created: r.created || [], failed: r.failed || [] };
@@ -1499,14 +1506,14 @@ export function isCliCommandMissing(detail: unknown): boolean {
     /\bspawn(?:Sync)?\s+az(?:\.exe)?\s+ENOENT\b/i.test(text) ||
     /\baz(?:\.exe)?:\s*command not found\b/i.test(text) ||
     /['"]?az(?:\.exe)?['"]?\s+is not recognized as an internal or external command\b/i.test(
-      text
+      text,
     )
   );
 }
 
 export function azureCredentialIdValidationError({
   tenantId = "",
-  subscriptionId = ""
+  subscriptionId = "",
 }: IdValidationInput = {}): string {
   if (tenantId && !isUuid(tenantId)) {
     return `Invalid tenantId "${tenantId}" (expected a GUID).`;
@@ -1519,27 +1526,26 @@ export function azureCredentialIdValidationError({
 
 export function azureLoginRequiredResponse({
   tenantId = "",
-  activeTenantId = ""
+  activeTenantId = "",
 }: AzureLoginInput = {}): {
   error: string;
   code: string;
   tenantId: string;
 } {
-  const error =
-    activeTenantId ?
-      `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
+  const error = activeTenantId
+    ? `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
     : 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.';
   return { error, code: "az-login-required", tenantId };
 }
 
 export async function invokeSessionPrompt(
   handler: SessionPromptHandler | null,
-  prompt: string | SessionPromptMessage
+  prompt: string | SessionPromptMessage,
 ): Promise<{ status: number; error?: string }> {
   if (typeof handler !== "function") {
     return {
       status: 503,
-      error: "Could not reach the Copilot session to start Azure CLI help."
+      error: "Could not reach the Copilot session to start Azure CLI help.",
     };
   }
   try {
@@ -1548,38 +1554,38 @@ export async function invokeSessionPrompt(
   } catch {
     return {
       status: 502,
-      error: "The Copilot session could not start Azure CLI help."
+      error: "The Copilot session could not start Azure CLI help.",
     };
   }
 }
 
 export function buildAzureCliAssistPrompt({
   action = "login",
-  tenantId = ""
+  tenantId = "",
 }: AzureCliAssistInput = {}): string {
   const safeTenantId =
-    typeof tenantId === "string" && isUuid(tenantId.trim()) ?
-      tenantId.trim()
-    : "";
+    typeof tenantId === "string" && isUuid(tenantId.trim())
+      ? tenantId.trim()
+      : "";
   const loginCommand = `az login --use-device-code${
     safeTenantId ? ` --tenant ${safeTenantId}` : ""
   }`;
   const loginInstructions = [
     `Run \`${loginCommand}\` in this Copilot session.`,
     "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
-    "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
+    "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL.",
   ].join(" ");
   if (action === "install") {
     return [
       "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
       `Please install Azure CLI, then ${loginInstructions}`,
-      "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
+      "After the install and login finish, return to the Radius canvas and click Verify Credentials again.",
     ].join("\n\n");
   }
   return [
     "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
     loginInstructions,
-    "After the login finishes, return to the Radius canvas and click Verify Credentials again."
+    "After the login finishes, return to the Radius canvas and click Verify Credentials again.",
   ].join("\n\n");
 }
 
@@ -1588,21 +1594,21 @@ export function buildAzureCliAssistPrompt({
 // status line, not as multi-paragraph instructions the user appears to have
 // typed. The agent still receives the full prompt.
 export function azureCliAssistDisplayPrompt({
-  action = "login"
+  action = "login",
 }: AzureCliAssistInput = {}): string {
-  return action === "install" ?
-      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+  return action === "install"
+    ? "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
     : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
 }
 
 // Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
 // cannot drift apart or be swapped at the call site.
 export function azureCliAssistMessage(
-  input: AzureCliAssistInput = {}
+  input: AzureCliAssistInput = {},
 ): SessionPromptMessage {
   return {
     prompt: buildAzureCliAssistPrompt(input),
-    displayPrompt: azureCliAssistDisplayPrompt(input)
+    displayPrompt: azureCliAssistDisplayPrompt(input),
   };
 }
 
@@ -1612,13 +1618,13 @@ function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
-  page: string
+  page: string,
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
     if (!repo) return;
     const list = (Array.isArray(branches) ? branches : [branches]).filter(
-      (branch): branch is string => Boolean(branch)
+      (branch): branch is string => Boolean(branch),
     );
     const state = entry?.state;
     const key = `${repo}::${list.join(",")}`;
@@ -1627,7 +1633,7 @@ function triggerAppBicepHandoff(
       state.appBicepHandoffKey = key;
     }
     Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(
-      () => {}
+      () => {},
     );
   } catch {
     /* never let a handoff failure break the response */
@@ -1681,7 +1687,7 @@ export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
 export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
   if (
     /no ref found|could not resolve|no commit found for the ref/i.test(
-      stderr || ""
+      stderr || "",
     )
   )
     return DEPLOY_BRANCH_NOT_PUSHED_KIND;
@@ -1697,7 +1703,7 @@ export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
 // proceeds.
 export function resolveDeployRepairLoop(
   state: CanvasState,
-  requestedAttemptId: unknown
+  requestedAttemptId: unknown,
 ): {
   repairLoop: boolean;
   attemptId: string;
@@ -1713,7 +1719,7 @@ export function resolveDeployRepairLoop(
       repairLoop: false,
       attemptId: "",
       repairAttempt: 0,
-      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
+      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`,
     };
   }
   // A repair redeploy only makes sense against a deploy that actually failed.
@@ -1730,9 +1736,9 @@ export function resolveDeployRepairLoop(
       attemptId: "",
       repairAttempt: 0,
       error:
-        deployStatus === "in_progress" ?
-          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
-        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+        deployStatus === "in_progress"
+          ? `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
+          : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`,
     };
   }
   // "failed" covers two different things, and only one is safe to redeploy.
@@ -1750,7 +1756,7 @@ export function resolveDeployRepairLoop(
       repairLoop: false,
       attemptId: "",
       repairAttempt: 0,
-      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
+      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`,
     };
   }
   // The cap the handoff prompt states is also enforced here, because prompt
@@ -1763,7 +1769,7 @@ export function resolveDeployRepairLoop(
       repairLoop: false,
       attemptId: "",
       repairAttempt: 0,
-      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
+      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`,
     };
   }
   return { repairLoop: true, attemptId: requested, repairAttempt };
@@ -1777,7 +1783,7 @@ export function resolveDeployRepairLoop(
 // (branch resolution) has to happen before this is called.
 export function beginDeployAttempt(
   state: CanvasState,
-  input: DeployAttemptInput
+  input: DeployAttemptInput,
 ): void {
   state.deployStatus = "in_progress";
   state.deployError = null;
@@ -1794,14 +1800,16 @@ export function beginDeployAttempt(
   state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
   // The delivery budget belongs to the loop, not to a single deploy: resetting
   // it on every redeploy would let an undeliverable handoff retry forever.
-  state.deployHandoffAttempts =
-    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  state.deployHandoffAttempts = input.repairLoop
+    ? state.deployHandoffAttempts || 0
+    : 0;
   // Same lifetime as the delivery budget, and counted the way
   // resolveDeployRepairLoop projected it, so the number the agent is told
   // matches the one the next call is checked against. A deploy that opens a
   // new attempt starts a fresh loop with a full budget.
-  state.deployRepairAttempts =
-    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
+  state.deployRepairAttempts = input.repairLoop
+    ? (state.deployRepairAttempts || 0) + 1
+    : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
@@ -1816,7 +1824,7 @@ export function beginDeployAttempt(
     environment: input.environment,
     branch: input.branch,
     provider: input.provider,
-    appFile: input.appFile
+    appFile: input.appFile,
   };
 }
 
@@ -1826,7 +1834,7 @@ export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
 
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
-  instanceId = ""
+  instanceId = "",
 ): boolean {
   try {
     if (typeof deployRepairHandoff !== "function") return false;
@@ -1898,8 +1906,8 @@ export function triggerDeployRepairHandoff(
           error,
           deployRunUrl,
           attemptId,
-          instanceId
-        })
+          instanceId,
+        }),
       ).then(delivered, failed);
     } catch {
       failed();
@@ -1919,7 +1927,7 @@ export function deployHandoffStatus(state: CanvasState): DeployHandoffSummary {
     state: handoffState,
     attempts: state?.deployHandoffAttempts || 0,
     maxAttempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
-    pending: handoffState === "pending" || handoffState === "retryable"
+    pending: handoffState === "pending" || handoffState === "retryable",
   };
 }
 
@@ -1957,7 +1965,7 @@ export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 // non-zero exit so the dispatch path can read stderr and choose its message.
 function runGhForDeploy(
   args: string[],
-  options: { env?: NodeJS.ProcessEnv } = {}
+  options: { env?: NodeJS.ProcessEnv } = {},
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     cliExec(
@@ -1968,9 +1976,9 @@ function runGhForDeploy(
         resolve({
           code: err ? err.code || 1 : 0,
           stdout: stdout || "",
-          stderr: stderr || ""
+          stderr: stderr || "",
         });
-      }
+      },
     );
   });
 }
@@ -1980,7 +1988,7 @@ function runGhForDeploy(
 function runGhWithStdinForDeploy(
   args: string[],
   stdin: string,
-  options: { env?: NodeJS.ProcessEnv } = {}
+  options: { env?: NodeJS.ProcessEnv } = {},
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -1991,9 +1999,9 @@ function runGhWithStdinForDeploy(
         resolve({
           code: err ? err.code || 1 : 0,
           stdout: stdout || "",
-          stderr: stderr || ""
+          stderr: stderr || "",
         });
-      }
+      },
     );
     if (stdin !== undefined) child.stdin?.end(stdin);
   });
@@ -2012,7 +2020,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
     repo,
     branch,
     bicepRepoPath,
-    log
+    log,
   }) =>
     radArtifactsDirForSelection({
       isLocal,
@@ -2021,7 +2029,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
       repo,
       branch,
       bicepRepoPath,
-      log
+      log,
     }),
   buildGraphViaRad: (content, bicepPath, options) =>
     buildGraphViaRad(content, bicepPath, options),
@@ -2029,7 +2037,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
   resolveRecipeOutputs: (parsed, recipes, provider) =>
     resolveRecipeOutputs(github, parsed, recipes, provider),
   canvasGraphResources,
-  errorMessage
+  errorMessage,
 });
 
 const deployDispatchService = createDeployDispatchService({
@@ -2056,7 +2064,7 @@ const deployDispatchService = createDeployDispatchService({
     deployListCache.delete(repo);
   },
   errorMessage,
-  now: () => Date.now()
+  now: () => Date.now(),
 });
 
 const deployOutcomeService = createDeployOutcomeService({
@@ -2067,7 +2075,7 @@ const deployOutcomeService = createDeployOutcomeService({
   extractRadDeployError: (logText) => extractRadDeployError(logText),
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
+  now: () => Date.now(),
 });
 
 const deployMonitorService = createDeployMonitorService({
@@ -2089,7 +2097,7 @@ const deployMonitorService = createDeployMonitorService({
   errorMessage,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
+  now: () => Date.now(),
 });
 
 const deployRequestService = createDeployRequestService({
@@ -2112,7 +2120,7 @@ const deployRequestService = createDeployRequestService({
   monitor: deployMonitorService,
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
   repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
-  errorMessage
+  errorMessage,
 });
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
@@ -2129,7 +2137,7 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
 }
 
 export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
+  result: Partial<CommandResult> | null | undefined,
 ): "created_candidate" | "reused" | null {
   if (!result) return null;
   if (result.code === 0 || result.code === "0") return "reused";
@@ -2143,7 +2151,7 @@ export async function deleteNewlyCreatedGitHubEnvironment(
     | null
     | undefined,
   runDelete: (args: string[]) => Promise<unknown> = (args) =>
-    ghOrThrow(args, 20000)
+    ghOrThrow(args, 20000),
 ): Promise<boolean> {
   if (!artifact || artifact.state !== "created") return false;
   const repo = optionalString(artifact.repo);
@@ -2153,7 +2161,7 @@ export async function deleteNewlyCreatedGitHubEnvironment(
     "api",
     "--method",
     "DELETE",
-    `/repos/${repo}/environments/${encodeURIComponent(name)}`
+    `/repos/${repo}/environments/${encodeURIComponent(name)}`,
   ]);
   return true;
 }
@@ -2161,7 +2169,7 @@ export async function deleteNewlyCreatedGitHubEnvironment(
 function buildRoleAssignmentDeleteArgs({
   objectId,
   role,
-  scope
+  scope,
 }: {
   objectId: string;
   role: string;
@@ -2180,13 +2188,13 @@ function buildRoleAssignmentDeleteArgs({
     "--scope",
     scope,
     "--output",
-    "none"
+    "none",
   ];
 }
 
 function buildFederatedCredentialDeleteArgs({
   appId,
-  name
+  name,
 }: {
   appId: string;
   name: string;
@@ -2199,7 +2207,7 @@ function buildFederatedCredentialDeleteArgs({
     "--id",
     appId,
     "--federated-credential-id",
-    name
+    name,
   ];
 }
 
@@ -2209,25 +2217,25 @@ function buildServicePrincipalDeleteArgs({ id }: { id: string }): string[] {
 
 function isAzureCleanupNotFound(
   artifactType: string,
-  result: Partial<CommandResult> | null | undefined
+  result: Partial<CommandResult> | null | undefined,
 ): boolean {
   const detail = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   if (artifactType === "role_assignment") {
     return /No matched assignments were found to delete|No matching role assignments were found|The role assignment does not exist/i.test(
-      detail
+      detail,
     );
   }
   return (
     isAzResourceNotFound(detail) ||
     /FederatedIdentityCredential.*not found|service principal.*not found|application.*not found|does not exist/i.test(
-      detail
+      detail,
     )
   );
 }
 
 function cleanupTargetLabel(
   artifactType: string,
-  artifact: Record<string, unknown>
+  artifact: Record<string, unknown>,
 ): string {
   if (artifactType === "role_assignment") {
     return `${String(artifact.role || "")} @ ${String(artifact.scope || "")}`;
@@ -2243,7 +2251,7 @@ function cleanupTargetLabel(
 
 export async function ensureServicePrincipal(
   clientId: string,
-  runAz: (args: string[]) => Promise<Partial<CommandResult>>
+  runAz: (args: string[]) => Promise<Partial<CommandResult>>,
 ): Promise<
   | { ok: true; state: "created" | "reused"; objectId: string | null }
   | { ok: false; stderr: string }
@@ -2257,7 +2265,7 @@ export async function ensureServicePrincipal(
     "--query",
     "id",
     "-o",
-    "tsv"
+    "tsv",
   ];
   const before = await runAz(showArgs);
   const existingObjectId = String(before.stdout || "").trim();
@@ -2267,7 +2275,7 @@ export async function ensureServicePrincipal(
   if (before.code === 0 || before.code === "0") {
     return {
       ok: false,
-      stderr: "The Service Principal lookup returned an empty object id."
+      stderr: "The Service Principal lookup returned an empty object id.",
     };
   }
   if (before.code !== 0 && !isAzResourceNotFound(before.stderr)) {
@@ -2275,7 +2283,7 @@ export async function ensureServicePrincipal(
       ok: false,
       stderr:
         String(before.stderr || "").trim() ||
-        "Failed to look up the Service Principal before creation."
+        "Failed to look up the Service Principal before creation.",
     };
   }
 
@@ -2295,7 +2303,7 @@ export async function ensureServicePrincipal(
     stderr:
       String(create.stderr || "").trim() ||
       String(after.stderr || "").trim() ||
-      "Could not create or find the Service Principal."
+      "Could not create or find the Service Principal.",
   };
 }
 
@@ -2303,11 +2311,11 @@ export async function cleanupAzureSetupArtifacts(
   op: any,
   {
     runAz,
-    steps
+    steps,
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
-  }
+  },
 ): Promise<{
   attempt: number;
   state: "not_needed" | "succeeded" | "succeeded_with_warnings";
@@ -2326,8 +2334,9 @@ export async function cleanupAzureSetupArtifacts(
 }> {
   const ledger = getSetupArtifactLedger(op);
   const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
-  const priorResults =
-    Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
+  const priorResults = Array.isArray(ledger?.cleanup?.results)
+    ? ledger.cleanup.results
+    : [];
   if (!ledger) {
     return { attempt, state: "not_needed", results: [], warnings: [] };
   }
@@ -2348,55 +2357,55 @@ export async function cleanupAzureSetupArtifacts(
     deletions.push({
       artifactType: "role_assignment",
       artifact: roleAssignment as Record<string, unknown>,
-      ...(objectId ?
-        {
-          args: buildRoleAssignmentDeleteArgs({
-            objectId,
-            role: String(roleAssignment.role || ""),
-            scope: String(roleAssignment.scope || "")
-          })
-        }
-      : {
-          missingDetail:
-            "Missing the Service Principal object id needed to target this role assignment precisely."
-        })
+      ...(objectId
+        ? {
+            args: buildRoleAssignmentDeleteArgs({
+              objectId,
+              role: String(roleAssignment.role || ""),
+              scope: String(roleAssignment.scope || ""),
+            }),
+          }
+        : {
+            missingDetail:
+              "Missing the Service Principal object id needed to target this role assignment precisely.",
+          }),
     });
   }
 
   const cleanupAppId = String(
-    ledger.azureApp.appId || ledger.servicePrincipal.appId || ""
+    ledger.azureApp.appId || ledger.servicePrincipal.appId || "",
   ).trim();
   for (const credential of [...ledger.federatedCredentials].reverse()) {
     deletions.push({
       artifactType: "federated_credential",
       artifact: credential as Record<string, unknown>,
-      ...(cleanupAppId ?
-        {
-          args: buildFederatedCredentialDeleteArgs({
-            appId: cleanupAppId,
-            name: String(credential.name || "")
-          })
-        }
-      : {
-          missingDetail:
-            "Missing the App Registration id needed to target this federated credential."
-        })
+      ...(cleanupAppId
+        ? {
+            args: buildFederatedCredentialDeleteArgs({
+              appId: cleanupAppId,
+              name: String(credential.name || ""),
+            }),
+          }
+        : {
+            missingDetail:
+              "Missing the App Registration id needed to target this federated credential.",
+          }),
     });
   }
 
   if (ledger.servicePrincipal.state === "created") {
     const spId = String(
-      ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || ""
+      ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || "",
     ).trim();
     deletions.push({
       artifactType: "service_principal",
       artifact: ledger.servicePrincipal as Record<string, unknown>,
-      ...(spId ?
-        { args: buildServicePrincipalDeleteArgs({ id: spId }) }
-      : {
-          missingDetail:
-            "Missing the Service Principal id needed to delete the created identity."
-        })
+      ...(spId
+        ? { args: buildServicePrincipalDeleteArgs({ id: spId }) }
+        : {
+            missingDetail:
+              "Missing the Service Principal id needed to delete the created identity.",
+          }),
     });
   }
 
@@ -2405,12 +2414,12 @@ export async function cleanupAzureSetupArtifacts(
     deletions.push({
       artifactType: "azure_app",
       artifact: ledger.azureApp as Record<string, unknown>,
-      ...(appId ?
-        { args: buildAppDeleteArgs({ appId }) }
-      : {
-          missingDetail:
-            "Missing the App Registration id needed to delete the created application."
-        })
+      ...(appId
+        ? { args: buildAppDeleteArgs({ appId }) }
+        : {
+            missingDetail:
+              "Missing the App Registration id needed to delete the created application.",
+          }),
     });
   }
 
@@ -2421,7 +2430,7 @@ export async function cleanupAzureSetupArtifacts(
 
   recordCleanupState(op, { attempts: attempt, state: "running" });
   steps?.push(
-    "Cleaning up Azure artifacts created during this setup attempt..."
+    "Cleaning up Azure artifacts created during this setup attempt...",
   );
 
   const warnings: string[] = [];
@@ -2444,14 +2453,14 @@ export async function cleanupAzureSetupArtifacts(
       | "azure_app",
     artifact: Record<string, unknown>,
     outcome: "deleted" | "not_found" | "warning" | "skipped",
-    detail: string | null
+    detail: string | null,
   ) => {
     attemptResults.push({
       attempt,
       artifactType,
       target: cleanupTargetLabel(artifactType, artifact),
       outcome,
-      detail
+      detail,
     });
   };
 
@@ -2464,7 +2473,7 @@ export async function cleanupAzureSetupArtifacts(
         deletion.artifactType,
         deletion.artifact,
         "skipped",
-        deletion.missingDetail
+        deletion.missingDetail,
       );
       continue;
     }
@@ -2474,9 +2483,9 @@ export async function cleanupAzureSetupArtifacts(
       result = await runAz(deletion.args || []);
     } catch (error) {
       const detail =
-        error instanceof Error ?
-          error.message
-        : String(error || "Unknown error");
+        error instanceof Error
+          ? error.message
+          : String(error || "Unknown error");
       const warning = `Failed to delete ${label}: ${detail}`;
       warnings.push(warning);
       steps?.push(`⚠ ${warning}`);
@@ -2511,7 +2520,7 @@ export async function cleanupAzureSetupArtifacts(
   recordCleanupState(op, {
     state: finalState,
     attempts: attempt,
-    results
+    results,
   });
   return { attempt, state: finalState, results: attemptResults, warnings };
 }
@@ -2544,7 +2553,7 @@ export async function finalizeSetupFailure(
     extra = {},
     steps,
     runAz,
-    runDeleteEnvironment
+    runDeleteEnvironment,
   }: {
     status: number;
     error: string;
@@ -2556,14 +2565,14 @@ export async function finalizeSetupFailure(
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
-  }
+  },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const safeExtra = sanitizeFailureExtra(extra || {});
   const body: Record<string, unknown> = {
     error,
     ...(code ? { code } : {}),
     ...(op ? { operationId: op.operationId } : {}),
-    ...safeExtra
+    ...safeExtra,
   };
   const ledger = getSetupArtifactLedger(op);
   const commitPointReached = hasReachedSetupCommitPoint(op);
@@ -2617,7 +2626,7 @@ export async function finalizeSetupFailure(
       if (runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
-          steps
+          steps,
         });
         warnings.push(...azureCleanup.warnings);
         results = [
@@ -2632,7 +2641,7 @@ export async function finalizeSetupFailure(
             target: string;
             outcome: "deleted" | "not_found" | "warning" | "skipped";
             detail: string | null;
-          }>)
+          }>),
         ];
         cleanupState = azureCleanup.state;
       } else {
@@ -2643,9 +2652,9 @@ export async function finalizeSetupFailure(
       const envName = optionalString(ledger.githubEnvironment.name);
       if (ledger.githubEnvironment.state === "created") {
         const target =
-          envRepo && envName ?
-            `${envRepo}:${envName}`
-          : envName || envRepo || "GitHub environment";
+          envRepo && envName
+            ? `${envRepo}:${envName}`
+            : envName || envRepo || "GitHub environment";
         if (!runDeleteEnvironment) {
           const detail =
             "Missing the GitHub delete helper needed to remove the newly created environment.";
@@ -2656,14 +2665,14 @@ export async function finalizeSetupFailure(
             artifactType: "github_environment",
             target,
             outcome: "warning",
-            detail
+            detail,
           });
           cleanupState = "succeeded_with_warnings";
         } else {
           try {
             const deleted = await deleteNewlyCreatedGitHubEnvironment(
               ledger.githubEnvironment,
-              runDeleteEnvironment
+              runDeleteEnvironment,
             );
             if (deleted) {
               steps?.push(`✅ Deleted GitHub environment "${envName}"`);
@@ -2672,7 +2681,7 @@ export async function finalizeSetupFailure(
                 artifactType: "github_environment",
                 target,
                 outcome: "deleted",
-                detail: null
+                detail: null,
               });
               if (cleanupState === "not_needed") cleanupState = "succeeded";
             } else {
@@ -2685,7 +2694,7 @@ export async function finalizeSetupFailure(
                 artifactType: "github_environment",
                 target,
                 outcome: "warning",
-                detail
+                detail,
               });
               cleanupState = "succeeded_with_warnings";
             }
@@ -2699,16 +2708,16 @@ export async function finalizeSetupFailure(
               artifactType: "github_environment",
               target,
               outcome: "warning",
-              detail
+              detail,
             });
             cleanupState = "succeeded_with_warnings";
           }
         }
       } else if (ledger.githubEnvironment.state === "created_candidate") {
         const target =
-          envRepo && envName ?
-            `${envRepo}:${envName}`
-          : envName || envRepo || "GitHub environment";
+          envRepo && envName
+            ? `${envRepo}:${envName}`
+            : envName || envRepo || "GitHub environment";
         const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
         warnings.push(detail);
         steps?.push(`⚠️ ${detail}`);
@@ -2717,16 +2726,15 @@ export async function finalizeSetupFailure(
           artifactType: "github_environment",
           target,
           outcome: "skipped",
-          detail
+          detail,
         });
         cleanupState = "succeeded_with_warnings";
       }
 
       if (results.length > 0) {
-        const priorResults =
-          Array.isArray(ledger.cleanup.results) ?
-            ledger.cleanup.results.filter(
-              (entry: any) => entry.attempt < attempt
+        const priorResults = Array.isArray(ledger.cleanup.results)
+          ? ledger.cleanup.results.filter(
+              (entry: any) => entry.attempt < attempt,
             )
           : [];
         if (warnings.length > 0) cleanupState = "succeeded_with_warnings";
@@ -2734,7 +2742,7 @@ export async function finalizeSetupFailure(
         recordCleanupState(op, {
           attempts: attempt,
           state: cleanupState,
-          results: [...priorResults, ...results]
+          results: [...priorResults, ...results],
         });
       }
 
@@ -2760,8 +2768,8 @@ export async function finalizeSetupFailure(
         classification:
           classification ||
           (status === 403 ? "needs-someone-else" : "user-fixable"),
-        evidence
-      }
+        evidence,
+      },
     });
   }
   return { status, body };
@@ -2798,7 +2806,7 @@ async function preflightRepoAdmin(repo: string): Promise<string> {
     repo,
     login,
     readFailed,
-    permissions
+    permissions,
   });
 }
 
@@ -2826,7 +2834,7 @@ type GhcrPackagePreflightResult =
 // packages scope is read keyring-first to match getGhPackageCredentials.
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
-  loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity
+  loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
 ): Promise<GhcrPackagePreflightResult> {
   let packageCredentials: GhcrPackageCredentials;
   try {
@@ -2837,8 +2845,8 @@ export async function preflightGhcrPackageWriteAccess(
       status: 403,
       code: "ghcr-auth-failed",
       error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
-        e
-      )}`
+        e,
+      )}`,
     };
   }
 
@@ -2851,8 +2859,8 @@ export async function preflightGhcrPackageWriteAccess(
       status: 403,
       code: "ghcr-auth-failed",
       error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
-        e
-      )}`
+        e,
+      )}`,
     };
   }
 
@@ -2863,21 +2871,22 @@ export async function preflightGhcrPackageWriteAccess(
       status: 403,
       code: "ghcr-auth-failed",
       error:
-        "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry."
+        "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry.",
     };
   }
   const ghPkgAccount =
     (ghPkgIdentity.accounts || []).find((a) => a.login === ghPkgLogin) || null;
-  const ghPkgHasPackages =
-    ghPkgAccount ? ghPkgAccount.hasPackages
-    : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
-    : false;
+  const ghPkgHasPackages = ghPkgAccount
+    ? ghPkgAccount.hasPackages
+    : ghPkgIdentity.actingLogin === ghPkgLogin
+      ? ghPkgIdentity.actingHasPackages
+      : false;
   if (!ghPkgHasPackages) {
     return {
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`,
     };
   }
 
@@ -2885,7 +2894,7 @@ export async function preflightGhcrPackageWriteAccess(
     ok: true,
     credentials: packageCredentials,
     identity: ghPkgIdentity,
-    login: ghPkgLogin
+    login: ghPkgLogin,
   };
 }
 
@@ -2902,7 +2911,7 @@ const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 // targeting the app's deploy/delete, not for the fail-closed deployment check itself.
 async function resolveRepoAppName(
   repo: string,
-  branch: string
+  branch: string,
 ): Promise<string> {
   let appName = repo.split("/").pop() || repo;
   const ref = branch || "main";
@@ -2913,7 +2922,7 @@ async function resolveRepoAppName(
         "api",
         `/repos/${repo}/contents/${p}?ref=${ref}`,
         "--jq",
-        ".content"
+        ".content",
       ]);
     } catch {
       raw = "";
@@ -2970,7 +2979,7 @@ export function resolveDeployStatus(rec: DeployStatusRecord): string {
 async function resolveEnvDeployment(
   repo: string,
   environment: string,
-  appName: string
+  appName: string,
 ): Promise<DeploymentRow | null> {
   appName = appName || repo.split("/").pop() || repo;
   // Provider is cosmetic (drives portal links only), so a lookup failure here
@@ -2980,10 +2989,10 @@ async function resolveEnvDeployment(
     const varsRaw = await ghOrThrow([
       "api",
       `/repos/${repo}/environments/${encodeURIComponent(
-        environment
+        environment,
       )}/variables?per_page=100`,
       "--jq",
-      ".variables[].name"
+      ".variables[].name",
     ]);
     if (/AZURE_/.test(varsRaw)) provider = "azure";
     else if (/AWS_/.test(varsRaw)) provider = "aws";
@@ -2995,10 +3004,10 @@ async function resolveEnvDeployment(
   const idsRaw = await ghOrThrow([
     "api",
     `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
-      environment
+      environment,
     )}`,
     "--jq",
-    ".[].id"
+    ".[].id",
   ]);
   const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
 
@@ -3007,7 +3016,7 @@ async function resolveEnvDeployment(
       "api",
       `/repos/${repo}/deployments/${id}/statuses?per_page=1`,
       "--jq",
-      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "")'
+      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "")',
     ]);
     const tab = stateRaw.indexOf("\t");
     const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
@@ -3024,7 +3033,7 @@ async function resolveEnvDeployment(
         "api",
         `/repos/${repo}/actions/runs/${m[1]}`,
         "--jq",
-        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")',
       ]);
       const parts = runInfo.split("\t");
       runPath = parts[0] || "";
@@ -3032,10 +3041,10 @@ async function resolveEnvDeployment(
       runConclusion = parts[2] || "";
     }
     const isDeploy = new RegExp(
-      `(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
+      `(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`,
     ).test(runPath);
     const isDelete = new RegExp(
-      `(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
+      `(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`,
     ).test(runPath);
     return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
   };
@@ -3069,7 +3078,7 @@ async function resolveEnvDeployment(
       provider,
       status,
       deploymentId: rec.id,
-      runUrl: rec.runUrl
+      runUrl: rec.runUrl,
     };
   };
 
@@ -3118,12 +3127,12 @@ function deleteLegacyDeployWorkflow(targetRepo: string): Promise<boolean> {
             "-f",
             "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
             "-f",
-            "sha=" + sha
+            "sha=" + sha,
           ],
           { timeout: 30000 },
-          () => resolve(true)
+          () => resolve(true),
         );
-      }
+      },
     );
   });
 }
@@ -3140,7 +3149,7 @@ async function ensureDeployWorkflowsOnBranch(
   repo: string,
   branch: string,
   envName: string,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void = () => {},
 ): Promise<void> {
   if (!repo || !branch) return;
   // Only the dispatcher + the Azure provider workflow are published to target
@@ -3154,13 +3163,13 @@ async function ensureDeployWorkflowsOnBranch(
         [
           "api",
           `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
-            branch
+            branch,
           )}`,
           "--jq",
-          ".sha"
+          ".sha",
         ],
         { timeout: 15000 },
-        (err, stdout) => resolve(!err && !!(stdout || "").trim())
+        (err, stdout) => resolve(!err && !!(stdout || "").trim()),
       );
     });
   const presence = await Promise.all(wanted.map(existsOnBranch));
@@ -3170,7 +3179,7 @@ async function ensureDeployWorkflowsOnBranch(
     'Publishing deploy workflow(s) to branch "' +
       branch +
       '": ' +
-      missing.join(", ")
+      missing.join(", "),
   );
   const generated = await generateDeployWorkflow(envName, ".radius/app.bicep");
   for (const file of missing) {
@@ -3185,7 +3194,7 @@ async function ensureDeployWorkflowsOnBranch(
         file +
         ") to " +
         branch +
-        " for worktree-consistent deploy"
+        " for worktree-consistent deploy",
     );
   }
 }
@@ -3197,18 +3206,17 @@ export function getLastWebviewActivityAt(): number {
 function accessForSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
 ) {
   const state = entry?.state || {};
   const selectedBranch = branch || defaultBranchForState(state);
   const useWorkspace = isWorkspaceSelection(state, repo, selectedBranch);
   return {
     branch: selectedBranch,
-    github:
-      useWorkspace ?
-        createWorkspaceGitHub(state, repo, selectedBranch)
+    github: useWorkspace
+      ? createWorkspaceGitHub(state, repo, selectedBranch)
       : github,
-    useWorkspace
+    useWorkspace,
   };
 }
 
@@ -3231,7 +3239,7 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
@@ -3246,7 +3254,7 @@ async function fetchBicepSelection(
         content: local.content,
         fromWorkspace: true,
         branch: access.branch,
-        bicepPath: local.repoPath
+        bicepPath: local.repoPath,
       };
   }
   const remote = await fetchBicepFromRepo(github, repo, access.branch);
@@ -3254,7 +3262,7 @@ async function fetchBicepSelection(
     content: remote,
     fromWorkspace: false,
     branch: access.branch,
-    bicepPath: ""
+    bicepPath: "",
   };
 }
 
@@ -3262,7 +3270,7 @@ async function fetchFileForSelection(
   entry: CanvasServerEntry,
   repo: string,
   branch: string,
-  repoPath: string
+  repoPath: string,
 ): Promise<string | null> {
   const access = accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
@@ -3270,7 +3278,7 @@ async function fetchFileForSelection(
       entry.state,
       repo,
       access.branch,
-      repoPath
+      repoPath,
     );
     if (local !== null) return local;
   }
@@ -3280,12 +3288,12 @@ async function fetchFileForSelection(
 // Reject browser-labeled cross-site mutations while allowing non-browser clients.
 export function isCrossSiteMutation(
   method: string | undefined,
-  secFetchSite: string | string[] | undefined | null
+  secFetchSite: string | string[] | undefined | null,
 ): boolean {
   const m = String(method || "").toUpperCase();
   if (m === "GET" || m === "HEAD") return false;
   const site = String(
-    Array.isArray(secFetchSite) ? secFetchSite[0] : secFetchSite || ""
+    Array.isArray(secFetchSite) ? secFetchSite[0] : secFetchSite || "",
   )
     .trim()
     .toLowerCase();
@@ -3302,27 +3310,27 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
     context.json(403, {
       error: "Cross-site request rejected.",
-      code: "cross-site-forbidden"
+      code: "cross-site-forbidden",
     });
     return true;
   }
   syncRequestedPage(
     canvasServer.instances.get(context.instanceId),
-    context.url.searchParams.get("page")
+    context.url.searchParams.get("page"),
   );
   return false;
 }
 
 function createLegacyRequestHandler(
   instanceId: string,
-  resolveBaseUrl: () => string
+  resolveBaseUrl: () => string,
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
   const serverOwnedToken = randomUUID();
 
   function scheduleServerOwnedTask(
     operationId: string,
-    task: () => Promise<void>
+    task: () => Promise<void>,
   ): void {
     let instanceTasks = activeEnvironmentTasks.get(instanceId);
     if (!instanceTasks) {
@@ -3339,7 +3347,7 @@ function createLegacyRequestHandler(
         () =>
           new Promise<void>((resolve) => {
             setImmediate(() => resolve());
-          })
+          }),
       )
       .then(task)
       .catch(async (error) => {
@@ -3353,8 +3361,8 @@ function createLegacyRequestHandler(
               stepSeq: null,
               message: errorMessage(error),
               classification: "unknown",
-              evidence: error instanceof Error ? error.stack || null : null
-            }
+              evidence: error instanceof Error ? error.stack || null : null,
+            },
           });
           await operations.persist().catch(() => {});
         }
@@ -3369,7 +3377,7 @@ function createLegacyRequestHandler(
         if (activeForInstance?.size === 0) {
           activeEnvironmentTasks.delete(instanceId);
           for (const listener of environmentTasksSettledListeners.get(
-            instanceId
+            instanceId,
           ) || []) {
             try {
               listener();
@@ -3387,14 +3395,14 @@ function createLegacyRequestHandler(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Radius-Server-Owned": serverOwnedToken
+        "X-Radius-Server-Owned": serverOwnedToken,
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(data),
     });
     const result: any = await response.json();
     if (!response.ok && !result?.inputRequired) {
       throw new Error(
-        result?.error || `Request failed with HTTP ${response.status}.`
+        result?.error || `Request failed with HTTP ${response.status}.`,
       );
     }
     return result;
@@ -3409,17 +3417,17 @@ function createLegacyRequestHandler(
       const params = new URLSearchParams({
         repo: op.repo,
         environment: op.environment,
-        operationId
+        operationId,
       });
       const response = await fetch(
         `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
-        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
+        { headers: { "X-Radius-Server-Owned": serverOwnedToken } },
       );
       const result: any = await response.json();
       if (!response.ok) {
         throw new Error(
           result?.error ||
-            `Verification status failed with HTTP ${response.status}.`
+            `Verification status failed with HTTP ${response.status}.`,
         );
       }
       if (result?.state === "success" || result?.state === "failed") return;
@@ -3437,25 +3445,25 @@ function createLegacyRequestHandler(
                 result?.error ||
                 "Credential verification is no longer being tracked.",
               classification: "user-fixable",
-              evidence: null
-            }
+              evidence: null,
+            },
           });
           await persistBestEffort({
             operation: current,
             persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
+            report: (diagnostic) => operations.report?.(diagnostic),
           });
         }
         return;
       }
       const jitterMs = Math.floor(Math.random() * 1000);
       await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
+        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs),
       );
       delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
     }
     throw new Error(
-      "Credential verification did not complete within 45 minutes."
+      "Credential verification did not complete within 45 minutes.",
     );
   }
 
@@ -3473,7 +3481,7 @@ function createLegacyRequestHandler(
         ...request.azure,
         repo: op.repo,
         environment: op.environment,
-        operationId
+        operationId,
       });
       if (setupResult?.inputRequired || op.state === "input_required") return;
     }
@@ -3486,7 +3494,7 @@ function createLegacyRequestHandler(
       environment: op.environment,
       provider: op.provider,
       operationId,
-      clientId: setupResult?.clientId || request.environment?.clientId || ""
+      clientId: setupResult?.clientId || request.environment?.clientId || "",
     });
     await monitorVerification(operationId);
   }
@@ -3513,10 +3521,9 @@ function createLegacyRequestHandler(
 
   const handler = async (
     req: IncomingMessage,
-    res: ServerResponse<IncomingMessage>
+    res: ServerResponse<IncomingMessage>,
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
-    const pathname = url.pathname;
     // Cross-site rejection and requested-page synchronisation now run in the
     // shared pre-routing step so migrated routes cannot bypass them; the page
     // fallback below still needs the raw value. Webview-activity marking also
@@ -3524,180 +3531,6 @@ function createLegacyRequestHandler(
     // internal calls still do not count as user activity.
     const requestedPage = url.searchParams.get("page");
 
-    const resumeMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
-    );
-    if (resumeMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(resumeMatch[1]);
-      const code = decodeURIComponent(resumeMatch[2]);
-      const op = operations.get(operationId);
-      if (!op) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(404);
-        res.end(
-          JSON.stringify({
-            error: "Unknown operation.",
-            code: "unknown-operation"
-          })
-        );
-        return;
-      }
-      if (
-        op.state === "failed_partial" &&
-        op.failure?.code === "operation-input-expired"
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(410);
-        res.end(
-          JSON.stringify({
-            error: op.failure.message,
-            code: "operation-input-expired",
-            operation: toClientView(op)
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        data = {};
-      }
-      if (
-        !canResumeInput(op, {
-          code,
-          checkpoint: data.checkpoint,
-          repo: data.repo,
-          environment: data.environment,
-          provider: data.provider
-        })
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: "The operation is not waiting for this input.",
-            code: "operation-resume-mismatch",
-            operationId
-          })
-        );
-        return;
-      }
-      if (!op.request && op.resumeRequest) {
-        op.request = structuredClone(op.resumeRequest);
-      }
-      const resumeSnapshot = {
-        inputRequired: structuredClone(op.inputRequired),
-        request: structuredClone(op.request),
-        resumeRequest:
-          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
-      };
-      if (code === "service-management-reference-required") {
-        op.request.azure.serviceManagementReference =
-          data.serviceManagementReference || "";
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.serviceManagementReference =
-            data.serviceManagementReference || "";
-        }
-      } else if (code === "app-selection-required") {
-        op.request.azure.appId = data.appId || "";
-        op.request.azure.createNew = data.createNew === true;
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.appId = data.appId || "";
-          op.resumeRequest.azure.createNew = data.createNew === true;
-        }
-      } else {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Unsupported resume prompt.",
-            code: "unsupported-resume"
-          })
-        );
-        return;
-      }
-      resumeAfterInput(op);
-      try {
-        await operations.persist();
-      } catch (error) {
-        op.request = resumeSnapshot.request;
-        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
-        else op.resumeRequest = resumeSnapshot.resumeRequest;
-        requireInput(op, resumeSnapshot.inputRequired);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
-            code: "operation-resume-persist-failed",
-            operationId,
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(202);
-      res.end(
-        JSON.stringify({
-          operationId,
-          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
-        })
-      );
-      scheduleServerOwnedTask(operationId, () =>
-        runEnvironmentOperation(operationId)
-      );
-      return;
-    }
-    const abandonMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/abandon$/
-    );
-    if (abandonMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(abandonMatch[1]);
-      const op = operations.get(operationId);
-      if (
-        !op ||
-        op.state !== INPUT_REQUIRED_STATE ||
-        op.executionActive ||
-        isTerminalState(op.state)
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(op ? 409 : 404);
-        res.end(
-          JSON.stringify({
-            error:
-              op ?
-                "The operation is not waiting for input."
-              : "Unknown operation.",
-            code: op ? "operation-abandon-mismatch" : "unknown-operation"
-          })
-        );
-        return;
-      }
-      finish(op, "cancelled");
-      try {
-        await operations.persist();
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error: "Radius could not persist the abandoned operation.",
-            code: "operation-abandon-persist-failed",
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ operation: toClientView(op) }));
-      return;
-    }
     // Default: serve the page HTML based on state
     await ensureVendorScripts();
     res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -3744,14 +3577,14 @@ function createLegacyRequestHandler(
   // back here to schedule exactly as the legacy arm did.
   const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
     scheduleServerOwnedTask(op.operationId, () =>
-      runEnvironmentOperation(op.operationId)
+      runEnvironmentOperation(op.operationId),
     );
   };
   return {
     handler,
     startRecoveredVerificationTasks,
     isServerOwned,
-    scheduleEnvironmentOperation
+    scheduleEnvironmentOperation,
   };
 }
 
@@ -3762,7 +3595,7 @@ const PAGE_RENDERERS = {
   "graph-diff": graphDiffPage,
   deployed: deployedGraphPage,
   environment: environmentPage,
-  deploying: deployingPage
+  deploying: deployingPage,
 };
 
 function isCanvasPage(page: string): page is keyof typeof PAGE_RENDERERS {
@@ -3793,7 +3626,7 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
 
 export async function getOrCreateServer(
   instanceId: string,
-  page?: string
+  page?: string,
 ): Promise<CanvasServerEntry> {
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.

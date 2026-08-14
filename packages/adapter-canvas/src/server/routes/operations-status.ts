@@ -1,21 +1,34 @@
 import type { CanvasRequestContext } from "../request-context.js";
-import type { RouteHandlerRegistry } from "../route-table.js";
+import {
+  templatePathParameters,
+  type RouteHandlerRegistry,
+} from "../route-table.js";
 
 // The registry and the client projection stay in `operations.ts`, which is
 // independently tested. These routes are a thin lookup-and-project adapter, so
 // they take the narrow functions they call and nothing else — no registry
 // object, no container, no global server map.
 //
-// The three read routes (the two GETs plus the projection they share) keep the
-// original four ports. The POST that registers a new environment operation adds
-// its own seams below rather than widening a single port object into a
-// general-purpose registry handle: each is a single function, and the test
-// fakes throw on anything a given route is not supposed to reach.
+// The two read routes keep the original four ports. The three POST routes that
+// register, resume, and abandon environment operations add their own seams below
+// rather than widening a single port object into a general-purpose registry
+// handle: each is a single function, and the test fakes throw on anything a
+// given route is not supposed to reach.
 export interface OperationsStatusDependencies {
   latest(repo: string): unknown;
   latestAny(): unknown;
   get(operationId: string): unknown;
   toClientView(record: unknown): unknown;
+}
+
+interface OperationRequest {
+  azure: {
+    serviceManagementReference?: unknown;
+    appId?: unknown;
+    createNew?: unknown;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 }
 
 // The record `createOperation` returns and every seam that touches it. Typed as
@@ -55,7 +68,7 @@ export interface CreateOperationDependencies {
   finish(
     op: OperationRecord,
     state: string,
-    options: { failure: Record<string, unknown> }
+    options: { failure: Record<string, unknown> },
   ): void;
   // Bridges to the per-instance server-owned task runner. The migrated handler
   // is composed once at module init, but scheduling is per-instance closure
@@ -73,12 +86,86 @@ export interface CreateOperationDependencies {
   // leaving an accepted operation durably `running` with no work behind it.
   scheduleEnvironmentOperation(
     instanceId: string,
-    op: OperationRecord
+    op: OperationRecord,
   ): boolean;
   errorMessage(error: unknown): string;
 }
 
+export interface OperationActionRecord extends OperationRecord {
+  state?: string;
+  failure?: { code?: unknown; message?: unknown; [key: string]: unknown };
+  inputRequired?: unknown;
+  executionActive?: boolean;
+  request?: OperationRequest;
+  resumeRequest?: OperationRequest;
+  repo?: unknown;
+  environment?: unknown;
+  provider?: unknown;
+}
+
+export interface OperationActionDependencies {
+  getOperation(operationId: string): OperationActionRecord | null | undefined;
+  canResumeInput(
+    operation: OperationActionRecord,
+    input: {
+      code: string;
+      checkpoint?: string;
+      repo?: string;
+      environment?: string;
+      provider?: string;
+    },
+  ): boolean;
+  resumeAfterInput(operation: OperationActionRecord): void;
+  requireInput(operation: OperationActionRecord, input: unknown): void;
+  finish(operation: OperationActionRecord, state: string): void;
+  isTerminalState(state: unknown): boolean;
+  persistOperations(): Promise<void>;
+  toClientView(operation: OperationActionRecord): unknown;
+  scheduleEnvironmentOperation(
+    instanceId: string,
+    operation: OperationActionRecord,
+  ): void;
+  errorMessage(error: unknown): string;
+  inputRequiredState: string;
+}
+
+const ACTION_FUNCTION_DEPENDENCIES = [
+  "getOperation",
+  "canResumeInput",
+  "resumeAfterInput",
+  "requireInput",
+  "finish",
+  "isTerminalState",
+  "persistOperations",
+  "toClientView",
+  "scheduleEnvironmentOperation",
+  "errorMessage",
+] as const;
+
+function assertOperationActionDependencies(
+  dependencies: OperationActionDependencies,
+): void {
+  for (const name of ACTION_FUNCTION_DEPENDENCIES) {
+    if (typeof dependencies[name] !== "function") {
+      throw new Error(`Missing operations action dependency: ${name}`);
+    }
+  }
+  if (!dependencies.inputRequiredState) {
+    throw new Error("Missing operations action dependency: inputRequiredState");
+  }
+}
+
 const OPERATIONS_PREFIX = "/api/operations/";
+export const RESUME_OPERATION_ROUTE =
+  "/api/operations/:operationId/resume/:code";
+export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
+
+interface ResumeOperationBody extends Record<string, unknown> {
+  checkpoint?: string;
+  repo?: string;
+  environment?: string;
+  provider?: string;
+}
 
 // Operation status. The panel polls this instead of waiting on the POST,
 // which is what lets it stop blocking: the record outlives the request
@@ -91,7 +178,7 @@ const OPERATIONS_PREFIX = "/api/operations/";
 // a reconnecting EventSource is not.
 export function handleLatestOperation(
   context: CanvasRequestContext,
-  dependencies: OperationsStatusDependencies
+  dependencies: OperationsStatusDependencies,
 ): void {
   const repo = context.url.searchParams.get("repo") || "";
   // No repo in hand means "the operation that matters right now": the status
@@ -102,14 +189,14 @@ export function handleLatestOperation(
   context.response.writeHead(200);
   context.response.end(
     JSON.stringify({
-      operation: record ? dependencies.toClientView(record) : null
-    })
+      operation: record ? dependencies.toClientView(record) : null,
+    }),
   );
 }
 
 export function handleOperationById(
   context: CanvasRequestContext,
-  dependencies: OperationsStatusDependencies
+  dependencies: OperationsStatusDependencies,
 ): void {
   // `decodeURIComponent` throws a URIError on a malformed escape such as
   // `/api/operations/%`, which Node's URL parser leaves intact in the pathname.
@@ -120,7 +207,7 @@ export function handleOperationById(
   // into a 4xx or 5xx here would be observable hardening, which this structural
   // slice excludes. It belongs in the separately approved hardening slice.
   const operationId = decodeURIComponent(
-    context.pathname.slice(OPERATIONS_PREFIX.length)
+    context.pathname.slice(OPERATIONS_PREFIX.length),
   );
   const record = dependencies.get(operationId);
   context.response.setHeader("Content-Type", "application/json");
@@ -128,17 +215,17 @@ export function handleOperationById(
   context.response.writeHead(record ? 200 : 404);
   context.response.end(
     JSON.stringify(
-      record ?
-        { operation: dependencies.toClientView(record) }
-      : { error: "Unknown operation." }
-    )
+      record
+        ? { operation: dependencies.toClientView(record) }
+        : { error: "Unknown operation." },
+    ),
   );
 }
 
 function jsonError(
   context: CanvasRequestContext,
   status: number,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
 ): void {
   context.response.setHeader("Content-Type", "application/json");
   context.response.writeHead(status);
@@ -162,7 +249,7 @@ function jsonError(
 // values reach the response and the persisted record.
 export async function handleCreateOperation(
   context: CanvasRequestContext,
-  dependencies: CreateOperationDependencies
+  dependencies: CreateOperationDependencies,
 ): Promise<void> {
   const body = await context.readTextBody();
   let data: any;
@@ -171,7 +258,7 @@ export async function handleCreateOperation(
   } catch {
     jsonError(context, 400, {
       error: "Invalid JSON body.",
-      code: "invalid-json"
+      code: "invalid-json",
     });
     return;
   }
@@ -181,14 +268,14 @@ export async function handleCreateOperation(
   if (!dependencies.isValidRepoSlug(repo)) {
     jsonError(context, 400, {
       error: `Invalid repository "${repo}". Expected "owner/repo".`,
-      code: "invalid-repo"
+      code: "invalid-repo",
     });
     return;
   }
   if (!environment.trim()) {
     jsonError(context, 400, {
       error: "Environment name is required.",
-      code: "environment-required"
+      code: "environment-required",
     });
     return;
   }
@@ -202,7 +289,7 @@ export async function handleCreateOperation(
       jsonError(context, 400, {
         error:
           "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
-        code: "invalid-azure-operation-input"
+        code: "invalid-azure-operation-input",
       });
       return;
     }
@@ -214,7 +301,7 @@ export async function handleCreateOperation(
   ) {
     jsonError(context, 400, {
       error: "AWS setup requires roleArn, accountId, region, and cluster.",
-      code: "invalid-aws-operation-input"
+      code: "invalid-aws-operation-input",
     });
     return;
   }
@@ -225,14 +312,14 @@ export async function handleCreateOperation(
     repo,
     environment,
     stages: dependencies.buildStages({
-      includeIdentity: needsAzureCredentials
+      includeIdentity: needsAzureCredentials,
     }),
     journey: {
       origin: data.origin || null,
       resumeTarget: data.resumeTarget || null,
       resumeBranch: data.resumeBranch || data.branch || null,
-      resumeReason: data.resumeReason || null
-    }
+      resumeReason: data.resumeReason || null,
+    },
   });
   op.request = {
     needsAzureCredentials,
@@ -245,9 +332,9 @@ export async function handleCreateOperation(
       appName: data.appName,
       appId: data.appId || "",
       createNew: data.createNew === true,
-      serviceManagementReference: data.serviceManagementReference || ""
+      serviceManagementReference: data.serviceManagementReference || "",
     },
-    environment: { ...data, environment, provider }
+    environment: { ...data, environment, provider },
   };
   if (provider === "azure") {
     op.resumeRequest = {
@@ -267,8 +354,8 @@ export async function handleCreateOperation(
         origin: data.origin || null,
         resumeTarget: data.resumeTarget || null,
         resumeBranch: data.resumeBranch || null,
-        resumeReason: data.resumeReason || null
-      }
+        resumeReason: data.resumeReason || null,
+      },
     };
   }
   const started = dependencies.startOperation(op);
@@ -276,7 +363,7 @@ export async function handleCreateOperation(
     jsonError(context, 409, {
       error: `Setup is already running for ${repo}.`,
       code: "operation-in-progress",
-      operationId: started.conflict.operationId
+      operationId: started.conflict.operationId,
     });
     return;
   }
@@ -290,13 +377,13 @@ export async function handleCreateOperation(
         stepSeq: null,
         message: "Radius could not durably register the environment operation.",
         classification: "unknown",
-        evidence: dependencies.errorMessage(error)
-      }
+        evidence: dependencies.errorMessage(error),
+      },
     });
     jsonError(context, 500, {
       error:
         "Radius could not durably register the environment operation. No setup work was started.",
-      code: "operation-registration-persist-failed"
+      code: "operation-registration-persist-failed",
     });
     return;
   }
@@ -305,13 +392,13 @@ export async function handleCreateOperation(
   context.response.setHeader("Location", statusUrl);
   context.response.writeHead(202);
   context.response.end(
-    JSON.stringify({ operationId: op.operationId, statusUrl })
+    JSON.stringify({ operationId: op.operationId, statusUrl }),
   );
   // Scheduling comes strictly after the 202 is written, mirroring the legacy
   // ordering the boundary test pins (`res.end` before `scheduleServerOwnedTask`).
   const scheduled = dependencies.scheduleEnvironmentOperation(
     context.instanceId,
-    op
+    op,
   );
   if (!scheduled) {
     // No runner accepted the operation, so nothing will ever advance or finish
@@ -328,8 +415,8 @@ export async function handleCreateOperation(
         message:
           "Radius accepted the environment operation but could not start any setup work for it.",
         classification: "unknown",
-        evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
-      }
+        evidence: `No server-owned task runner was available for instance ${context.instanceId}.`,
+      },
     });
     try {
       await dependencies.persistOperations();
@@ -341,16 +428,184 @@ export async function handleCreateOperation(
   }
 }
 
+function requiredTemplateParameters(
+  template: string,
+  pathname: string,
+): Readonly<Record<string, string>> {
+  const parameters = templatePathParameters(template, pathname);
+  if (!parameters) {
+    throw new Error(
+      `Operation action path ${pathname} does not match ${template}`,
+    );
+  }
+  return parameters;
+}
+
+export async function handleResumeOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationActionDependencies,
+): Promise<void> {
+  const parameters = requiredTemplateParameters(
+    RESUME_OPERATION_ROUTE,
+    context.pathname,
+  );
+  const operationId = decodeURIComponent(parameters.operationId);
+  const code = decodeURIComponent(parameters.code);
+  const operation = dependencies.getOperation(operationId);
+  if (!operation) {
+    jsonError(context, 404, {
+      error: "Unknown operation.",
+      code: "unknown-operation",
+    });
+    return;
+  }
+  if (
+    operation.state === "failed_partial" &&
+    operation.failure?.code === "operation-input-expired"
+  ) {
+    jsonError(context, 410, {
+      error: operation.failure.message,
+      code: "operation-input-expired",
+      operation: dependencies.toClientView(operation),
+    });
+    return;
+  }
+  const body = await context.readTextBody();
+  let data: ResumeOperationBody;
+  try {
+    data = JSON.parse(body) as ResumeOperationBody;
+  } catch {
+    data = {};
+  }
+  if (
+    !dependencies.canResumeInput(operation, {
+      code,
+      checkpoint: data.checkpoint,
+      repo: data.repo,
+      environment: data.environment,
+      provider: data.provider,
+    })
+  ) {
+    jsonError(context, 409, {
+      error: "The operation is not waiting for this input.",
+      code: "operation-resume-mismatch",
+      operationId,
+    });
+    return;
+  }
+  if (!operation.request && operation.resumeRequest) {
+    operation.request = structuredClone(operation.resumeRequest);
+  }
+  const resumeSnapshot = {
+    inputRequired: structuredClone(operation.inputRequired),
+    request: structuredClone(operation.request),
+    resumeRequest: operation.resumeRequest
+      ? structuredClone(operation.resumeRequest)
+      : undefined,
+  };
+  const request = operation.request as OperationRequest;
+  if (code === "service-management-reference-required") {
+    request.azure.serviceManagementReference =
+      data.serviceManagementReference || "";
+    if (operation.resumeRequest?.azure) {
+      operation.resumeRequest.azure.serviceManagementReference =
+        data.serviceManagementReference || "";
+    }
+  } else if (code === "app-selection-required") {
+    request.azure.appId = data.appId || "";
+    request.azure.createNew = data.createNew === true;
+    if (operation.resumeRequest?.azure) {
+      operation.resumeRequest.azure.appId = data.appId || "";
+      operation.resumeRequest.azure.createNew = data.createNew === true;
+    }
+  } else {
+    jsonError(context, 400, {
+      error: "Unsupported resume prompt.",
+      code: "unsupported-resume",
+    });
+    return;
+  }
+  dependencies.resumeAfterInput(operation);
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    operation.request = resumeSnapshot.request;
+    if (resumeSnapshot.resumeRequest === undefined) {
+      delete operation.resumeRequest;
+    } else {
+      operation.resumeRequest = resumeSnapshot.resumeRequest;
+    }
+    dependencies.requireInput(operation, resumeSnapshot.inputRequired);
+    jsonError(context, 500, {
+      error:
+        "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+      code: "operation-resume-persist-failed",
+      operationId,
+      detail: dependencies.errorMessage(error),
+    });
+    return;
+  }
+  context.json(202, {
+    operationId,
+    statusUrl: `/api/operations/${encodeURIComponent(operationId)}`,
+  });
+  dependencies.scheduleEnvironmentOperation(context.instanceId, operation);
+}
+
+export async function handleAbandonOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationActionDependencies,
+): Promise<void> {
+  const parameters = requiredTemplateParameters(
+    ABANDON_OPERATION_ROUTE,
+    context.pathname,
+  );
+  const operationId = decodeURIComponent(parameters.operationId);
+  const operation = dependencies.getOperation(operationId);
+  if (
+    !operation ||
+    operation.state !== dependencies.inputRequiredState ||
+    operation.executionActive ||
+    dependencies.isTerminalState(operation.state)
+  ) {
+    jsonError(context, operation ? 409 : 404, {
+      error: operation
+        ? "The operation is not waiting for input."
+        : "Unknown operation.",
+      code: operation ? "operation-abandon-mismatch" : "unknown-operation",
+    });
+    return;
+  }
+  dependencies.finish(operation, "cancelled");
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    jsonError(context, 500, {
+      error: "Radius could not persist the abandoned operation.",
+      code: "operation-abandon-persist-failed",
+      detail: dependencies.errorMessage(error),
+    });
+    return;
+  }
+  context.json(200, { operation: dependencies.toClientView(operation) });
+}
+
 export function createOperationsStatusRoutes(
   dependencies: OperationsStatusDependencies,
-  createDependencies: CreateOperationDependencies
+  createDependencies: CreateOperationDependencies,
+  actionDependencies: OperationActionDependencies,
 ): RouteHandlerRegistry {
+  assertOperationActionDependencies(actionDependencies);
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
     "GET /api/operations/": (context) =>
       handleOperationById(context, dependencies),
     "POST /api/operations": (context) =>
-      handleCreateOperation(context, createDependencies)
+      handleCreateOperation(context, createDependencies),
+    "POST /api/operations/:operationId/resume/:code": (context) =>
+      handleResumeOperation(context, actionDependencies),
+    "POST /api/operations/:operationId/abandon": (context) =>
+      handleAbandonOperation(context, actionDependencies),
   };
 }

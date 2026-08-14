@@ -1,7 +1,7 @@
 import type { CanvasRequestContext } from "./request-context.js";
 
 export type RouteMethod = "ANY" | "GET" | "POST";
-export type RouteMatcher = "exact" | "prefix";
+export type RouteMatcher = "exact" | "prefix" | "template";
 export type RouteBodyPolicy = "none" | "json";
 export type RouteOwner =
   | "liveness-source"
@@ -14,7 +14,7 @@ export type RouteOwner =
   | "deployments";
 
 export type RouteHandler = (
-  context: CanvasRequestContext
+  context: CanvasRequestContext,
 ) => void | Promise<void>;
 
 export type RouteHandlerRegistry = Readonly<Record<string, RouteHandler>>;
@@ -42,9 +42,59 @@ function declare(
   path: string,
   match: RouteMatcher,
   bodyPolicy: RouteBodyPolicy,
-  owner: RouteOwner
+  owner: RouteOwner,
 ): RouteDeclaration {
   return { method, path, match, bodyPolicy, owner };
+}
+
+interface CompiledRouteTemplate {
+  pattern: RegExp;
+  parameterNames: readonly string[];
+}
+
+const TEMPLATE_PARAMETER = /^:([A-Za-z][A-Za-z0-9]*)$/;
+
+function compileRouteTemplate(template: string): CompiledRouteTemplate {
+  const parameterNames: string[] = [];
+  const pattern = template
+    .split("/")
+    .map((segment) => {
+      if (!segment.startsWith(":")) {
+        return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+      const parameter = TEMPLATE_PARAMETER.exec(segment);
+      if (!parameter) {
+        throw new Error(`Invalid server route template segment: ${segment}`);
+      }
+      const name = parameter[1];
+      if (parameterNames.includes(name)) {
+        throw new Error(`Duplicate server route template parameter: ${name}`);
+      }
+      parameterNames.push(name);
+      return "([^/]+)";
+    })
+    .join("/");
+  if (parameterNames.length === 0) {
+    throw new Error(`Server route template has no parameters: ${template}`);
+  }
+  return {
+    pattern: new RegExp(`^${pattern}$`),
+    parameterNames,
+  };
+}
+
+export function templatePathParameters(
+  template: string,
+  pathname: string,
+): Readonly<Record<string, string>> | undefined {
+  const compiled = compileRouteTemplate(template);
+  const match = compiled.pattern.exec(pathname);
+  if (!match) return undefined;
+  return Object.freeze(
+    Object.fromEntries(
+      compiled.parameterNames.map((name, index) => [name, match[index + 1]]),
+    ),
+  );
 }
 
 // Single source of truth for route ownership. Every method and path the canvas
@@ -61,56 +111,56 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "/api/verify-azure-login",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "POST",
     "/api/azure-cli-assist",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "POST",
     "/api/verify-aws-login",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "GET",
     "/api/credential-profiles",
     "exact",
     "none",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "GET",
     "/api/github-identity",
     "exact",
     "none",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "POST",
     "/api/github-account",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "POST",
     "/api/save-credential-profile",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare(
     "POST",
     "/api/delete-credential-profile",
     "exact",
     "json",
-    "identity-credentials"
+    "identity-credentials",
   ),
   declare("POST", "/api/delete-environment", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
@@ -120,14 +170,14 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "/api/list-azure-app-registrations",
     "exact",
     "none",
-    "azure-discovery"
+    "azure-discovery",
   ),
   declare(
     "GET",
     "/api/azure-app-serves-repos",
     "exact",
     "none",
-    "azure-discovery"
+    "azure-discovery",
   ),
   declare("POST", "/api/app-params", "exact", "json", "environments"),
   declare("POST", "/api/create-environment", "exact", "json", "environments"),
@@ -148,7 +198,21 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("POST", "/api/diff-branches", "exact", "json", "graphs-planning"),
   declare("POST", "/api/deploy", "exact", "json", "deployments"),
   declare("POST", "/api/deploy-reset", "exact", "none", "deployments"),
-  declare("POST", "/api/discover", "exact", "json", "azure-discovery")
+  declare("POST", "/api/discover", "exact", "json", "azure-discovery"),
+  declare(
+    "POST",
+    "/api/operations/:operationId/resume/:code",
+    "template",
+    "json",
+    "operations-status",
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/abandon",
+    "template",
+    "none",
+    "operations-status",
+  ),
 ];
 
 // Routes whose owner module already answers the request. Everything else is
@@ -192,23 +256,25 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/load-graph",
   "POST /api/plan-graph",
   "POST /api/diff-branches",
-  "POST /api/discover"
+  "POST /api/discover",
+  "POST /api/operations/:operationId/resume/:code",
+  "POST /api/operations/:operationId/abandon",
 ];
 
 export function routeKey(
-  route: Pick<RouteDeclaration, "method" | "path">
+  route: Pick<RouteDeclaration, "method" | "path">,
 ): string {
   return `${route.method} ${route.path}`;
 }
 
 export const LEGACY_ROUTE_INVENTORY = Object.freeze(
   SERVER_ROUTE_DECLARATIONS.map(routeKey).filter(
-    (key) => !MIGRATED_ROUTE_KEYS.includes(key)
-  )
+    (key) => !MIGRATED_ROUTE_KEYS.includes(key),
+  ),
 );
 
 export function createServerRouteTable(
-  handlers: RouteHandlerRegistry
+  handlers: RouteHandlerRegistry,
 ): readonly ServerRoute[] {
   const routes = SERVER_ROUTE_DECLARATIONS.map<ServerRoute>((declaration) => {
     const key = routeKey(declaration);
@@ -228,15 +294,17 @@ export function createServerRouteTable(
 export function matchRoute(
   routes: readonly ServerRoute[],
   method: string | undefined,
-  pathname: string
+  pathname: string,
 ): ServerRoute | undefined {
   const normalizedMethod = String(method || "").toUpperCase();
   return routes.find(
     (route) =>
       (route.method === "ANY" || route.method === normalizedMethod) &&
-      (route.match === "prefix" ?
-        pathname.startsWith(route.path)
-      : pathname === route.path)
+      (route.match === "prefix"
+        ? pathname.startsWith(route.path)
+        : route.match === "template"
+          ? templatePathParameters(route.path, pathname) !== undefined
+          : pathname === route.path),
   );
 }
 
@@ -258,14 +326,15 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
     const shadow = precedingPrefixes.find(
       (prefix) =>
         methodsOverlap(prefix.method, route.method) &&
-        route.path.startsWith(prefix.path)
+        route.path.startsWith(prefix.path),
     );
     if (shadow) {
       throw new Error(
-        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
+        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`,
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
+    if (route.match === "template") compileRouteTemplate(route.path);
     if (!route.owner) throw new Error(`Unowned server route: ${key}`);
     if (route.migration === "migrated" && !route.handler) {
       throw new Error(`Migrated server route has no handler: ${key}`);

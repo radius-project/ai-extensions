@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   getOrCreateServer,
   onEnvironmentTasksSettled,
-  setEnvironmentOperationTestRunner
+  setEnvironmentOperationTestRunner,
 } from "./server.js";
 import {
   addLegacyStep,
@@ -25,7 +25,7 @@ import {
   recordServicePrincipal,
   setStageState,
   STAGE_CONFIGURE_ENVIRONMENT,
-  STAGE_VERIFY
+  STAGE_VERIFY,
 } from "./operations.js";
 
 let baseUrl = "";
@@ -50,7 +50,7 @@ async function postJson(path, body) {
   const res = await fetch(baseUrl + path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
 }
@@ -71,11 +71,11 @@ describe("POST /api/operations server-owned execution", () => {
     const following = vi.fn();
     const stopThrowing = onEnvironmentTasksSettled(
       "operations-routes-test",
-      throwing
+      throwing,
     );
     const stopFollowing = onEnvironmentTasksSettled(
       "operations-routes-test",
-      following
+      following,
     );
     await Promise.resolve();
     expect(throwing).toHaveBeenCalledTimes(1);
@@ -105,7 +105,7 @@ describe("POST /api/operations server-owned execution", () => {
       tenantId: "22222222-2222-2222-2222-222222222222",
       subscriptionId: "33333333-3333-3333-3333-333333333333",
       resourceGroup: "rg-dev",
-      cluster: "aks-dev"
+      cluster: "aks-dev",
     });
 
     expect(started.status).toBe(202);
@@ -130,7 +130,7 @@ describe("POST /api/operations server-owned execution", () => {
       tenantId: "22222222-2222-2222-2222-222222222222",
       subscriptionId: "33333333-3333-3333-3333-333333333333",
       resourceGroup: "rg-dev",
-      cluster: "aks-dev"
+      cluster: "aks-dev",
     });
     const second = await postJson("/api/operations", {
       repo: "contoso/conflict",
@@ -140,15 +140,15 @@ describe("POST /api/operations server-owned execution", () => {
       tenantId: "22222222-2222-2222-2222-222222222222",
       subscriptionId: "33333333-3333-3333-3333-333333333333",
       resourceGroup: "rg-dev",
-      cluster: "aks-dev"
+      cluster: "aks-dev",
     });
     expect(first.status).toBe(202);
     expect(second).toMatchObject({
       status: 409,
       body: {
         code: "operation-in-progress",
-        operationId: first.body.operationId
-      }
+        operationId: first.body.operationId,
+      },
     });
   });
 
@@ -163,7 +163,7 @@ describe("POST /api/operations server-owned execution", () => {
       tenantId: "22222222-2222-2222-2222-222222222222",
       subscriptionId: "33333333-3333-3333-3333-333333333333",
       resourceGroup: "rg-dev",
-      cluster: "aks-dev"
+      cluster: "aks-dev",
     });
 
     expect(started.status).toBe(202);
@@ -176,9 +176,9 @@ describe("POST /api/operations server-owned execution", () => {
       const response = await postJson(path, {});
       expect(response).toMatchObject({
         status: 403,
-        body: { code: "server-owned-operation-required" }
+        body: { code: "server-owned-operation-required" },
       });
-    }
+    },
   );
 
   it("resumes only the prompt currently owned by the operation", async () => {
@@ -189,7 +189,7 @@ describe("POST /api/operations server-owned execution", () => {
     requireInput(op, {
       code: "service-management-reference-required",
       checkpoint: "azure-service-management-reference",
-      message: "Enter the Service Management Reference."
+      message: "Enter the Service Management Reference.",
     });
 
     const wrong = await postJson(
@@ -199,8 +199,8 @@ describe("POST /api/operations server-owned execution", () => {
         repo: op.repo,
         environment: op.environment,
         provider: op.provider,
-        appId: "app-1"
-      }
+        appId: "app-1",
+      },
     );
     expect(wrong.status).toBe(409);
 
@@ -208,8 +208,8 @@ describe("POST /api/operations server-owned execution", () => {
       `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
       {
         checkpoint: "azure-service-management-reference",
-        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
-      }
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111",
+      },
     );
     expect(missingContext.status).toBe(409);
 
@@ -220,14 +220,92 @@ describe("POST /api/operations server-owned execution", () => {
         repo: op.repo,
         environment: op.environment,
         provider: op.provider,
-        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
-      }
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111",
+      },
     );
     expect(resumed.status).toBe(202);
     expect(op.state).toBe("running");
     expect(op.request.azure.serviceManagementReference).toBe(
-      "11111111-1111-1111-1111-111111111111"
+      "11111111-1111-1111-1111-111111111111",
     );
+  });
+
+  it("preserves the resume refusal ladder over the real loopback server", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+
+    const unknown = await postJson(
+      "/api/operations/op-missing/resume/app-selection-required",
+      {},
+    );
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" },
+    });
+
+    const expired = seed("contoso/expired");
+    finish(expired, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        message: "The requested input expired.",
+      },
+    });
+    const expiredResponse = await postJson(
+      `/api/operations/${expired.operationId}/resume/app-selection-required`,
+      {},
+    );
+    expect(expiredResponse).toMatchObject({
+      status: 410,
+      body: {
+        code: "operation-input-expired",
+        operation: { operationId: expired.operationId },
+      },
+    });
+
+    const malformed = seed("contoso/malformed");
+    malformed.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true,
+    };
+    requireInput(malformed, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app.",
+    });
+    const malformedResponse = await fetch(
+      `${baseUrl}/api/operations/${malformed.operationId}/resume/app-selection-required`,
+      { method: "POST", body: "{not json" },
+    );
+    expect(malformedResponse.status).toBe(409);
+    expect(await malformedResponse.json()).toMatchObject({
+      code: "operation-resume-mismatch",
+    });
+
+    const unsupported = seed("contoso/unsupported");
+    unsupported.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true,
+    };
+    requireInput(unsupported, {
+      code: "future-prompt",
+      checkpoint: "future-checkpoint",
+      message: "Supply future input.",
+    });
+    const unsupportedResponse = await postJson(
+      `/api/operations/${unsupported.operationId}/resume/future-prompt`,
+      {
+        checkpoint: "future-checkpoint",
+        repo: unsupported.repo,
+        environment: unsupported.environment,
+        provider: unsupported.provider,
+      },
+    );
+    expect(unsupportedResponse).toMatchObject({
+      status: 400,
+      body: { code: "unsupported-resume" },
+    });
   });
 
   it("abandons an input wait and releases the repository lock", async () => {
@@ -237,16 +315,36 @@ describe("POST /api/operations server-owned execution", () => {
     requireInput(op, {
       code: "app-selection-required",
       checkpoint: "azure-app-selection",
-      message: "Choose an app."
+      message: "Choose an app.",
     });
 
     const abandoned = await postJson(
       `/api/operations/${encodeURIComponent(op.operationId)}/abandon`,
-      {}
+      {},
     );
     expect(abandoned.status).toBe(200);
     expect(op.state).toBe("cancelled");
     expect(operations.running(op.repo)).toBeNull();
+  });
+
+  it("refuses abandon for an unknown or non-waiting operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const unknown = await postJson("/api/operations/op-missing/abandon", {});
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" },
+    });
+
+    const running = seed("contoso/not-waiting");
+    const refused = await postJson(
+      `/api/operations/${running.operationId}/abandon`,
+      {},
+    );
+    expect(refused).toMatchObject({
+      status: 409,
+      body: { code: "operation-abandon-mismatch" },
+    });
   });
 });
 
@@ -260,7 +358,7 @@ function seed(repo, { environment = "dev", stages } = {}) {
     provider: "azure",
     repo,
     environment,
-    stages: stages || buildStages()
+    stages: stages || buildStages(),
   });
   operations.start(op);
   return op;
@@ -271,7 +369,7 @@ describe("GET /api/operations", () => {
     // The panel polls this on every page load; an absent operation is the
     // normal case, not an error.
     const { status, body } = await getJson(
-      "/api/operations?repo=nobody%2Fnothing"
+      "/api/operations?repo=nobody%2Fnothing",
     );
     expect(status).toBe(200);
     expect(body.operation).toBeNull();
@@ -293,7 +391,7 @@ describe("GET /api/operations", () => {
     // No percentage anywhere: the step count varies with branching, so one
     // could only ever be derived from an assumed shape.
     expect(JSON.stringify(body.operation)).not.toMatch(
-      /percent|"progress":\s*\d/
+      /percent|"progress":\s*\d/,
     );
   });
 
@@ -301,21 +399,21 @@ describe("GET /api/operations", () => {
     const op = seed("contoso/done");
     addLegacyStep(
       op,
-      "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically."
+      "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically.",
     );
     setStageState(op, STAGE_VERIFY, "skipped");
     finish(op, "action_required", {
       terminal: {
         reason: "pr-merge-required",
         pullRequestUrl: "https://github.com/contoso/done/pull/7",
-        userMessage: "Merge PR #7 to finish setup."
-      }
+        userMessage: "Merge PR #7 to finish setup.",
+      },
     });
 
     const { body } = await getJson("/api/operations?repo=contoso%2Fdone");
     expect(body.operation.terminalState).toBe("action_required");
     expect(body.operation.terminal.pullRequestUrl).toBe(
-      "https://github.com/contoso/done/pull/7"
+      "https://github.com/contoso/done/pull/7",
     );
     expect(body.operation.hasWarnings).toBe(true);
     expect(body.operation.endedAt).toBeTruthy();
@@ -338,13 +436,13 @@ describe("GET /api/operations", () => {
         code: "az-failed",
         message: "Azure CLI failed",
         classification: "user-fixable",
-        evidence: "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY"
-      }
+        evidence: "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY",
+      },
     });
     const { body } = await getJson("/api/operations?repo=contoso%2Fleaky");
     expect(body.operation.failure.message).toBe("Azure CLI failed");
     expect(JSON.stringify(body)).not.toContain(
-      "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY"
+      "IGNORE-PREVIOUS-INSTRUCTIONS-CANARY",
     );
   });
 
@@ -353,7 +451,7 @@ describe("GET /api/operations", () => {
     recordAzureApp(op, {
       state: "reused",
       appId: "shared-app-id",
-      displayName: "shared-app"
+      displayName: "shared-app",
     });
     recordCleanupState(op, {
       state: "succeeded_with_warnings",
@@ -364,23 +462,23 @@ describe("GET /api/operations", () => {
           artifactType: "github_environment",
           target: "contoso/cleanup:dev",
           outcome: "deleted",
-          detail: null
+          detail: null,
         },
         {
           attempt: 1,
           artifactType: "role_assignment",
           target: "Contributor @ /subscriptions/sub/resourceGroups/rg",
           outcome: "warning",
-          detail: "Delete that role assignment manually before retrying."
-        }
-      ]
+          detail: "Delete that role assignment manually before retrying.",
+        },
+      ],
     });
     finish(op, "failed", {
       failure: {
         code: "env-create-failed",
         message: "Creating the GitHub environment failed.",
-        classification: "user-fixable"
-      }
+        classification: "user-fixable",
+      },
     });
 
     const { body } = await getJson("/api/operations?repo=contoso%2Fcleanup");
@@ -388,18 +486,18 @@ describe("GET /api/operations", () => {
       {
         artifactType: "github_environment",
         outcome: "deleted",
-        target: "contoso/cleanup:dev"
-      }
+        target: "contoso/cleanup:dev",
+      },
     ]);
     expect(body.operation.cleanup.retained).toEqual([
       {
         kind: "azure_app",
         reason: "reused",
-        target: "shared-app (shared-app-id)"
-      }
+        target: "shared-app (shared-app-id)",
+      },
     ]);
     expect(body.operation.cleanup.warnings).toEqual([
-      "Delete that role assignment manually before retrying."
+      "Delete that role assignment manually before retrying.",
     ]);
     expect(JSON.stringify(body.operation)).not.toContain("setupArtifacts");
   });
@@ -409,27 +507,27 @@ describe("GET /api/operations", () => {
     recordAzureApp(op, {
       state: "created",
       appId: "app-1",
-      displayName: "radius-deploy-contoso-post-commit"
+      displayName: "radius-deploy-contoso-post-commit",
     });
     recordServicePrincipal(op, {
       state: "created",
       appId: "app-1",
-      objectId: "sp-1"
+      objectId: "sp-1",
     });
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "contoso/post-commit",
-      name: "dev"
+      name: "dev",
     });
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-verify-credentials.yml",
       branch: "main",
-      mode: "default_branch"
+      mode: "default_branch",
     });
     recordCommitState(op, {
       mode: "default_branch",
       branch: "main",
-      baseBranch: "main"
+      baseBranch: "main",
     });
     recordCleanupState(op, { state: "not_needed" });
     finish(op, "failed_partial", {
@@ -437,39 +535,39 @@ describe("GET /api/operations", () => {
         code: "verify-run-failed",
         message:
           "Credential verification failed after the workflows were committed.",
-        classification: "user-fixable"
-      }
+        classification: "user-fixable",
+      },
     });
 
     const { body } = await getJson(
-      "/api/operations?repo=contoso%2Fpost-commit"
+      "/api/operations?repo=contoso%2Fpost-commit",
     );
     expect(body.operation.cleanup.rollbackBeforeCommit).toBe(false);
     expect(body.operation.cleanup.retry).toEqual({
       startsCleanly: false,
       state: "reuses_retained_artifacts",
       guidance:
-        "Retry will reuse the resources that were already written before the failure."
+        "Retry will reuse the resources that were already written before the failure.",
     });
     expect(body.operation.cleanup.retained).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "azure_app",
           reason: "retained",
-          target: "radius-deploy-contoso-post-commit (app-1)"
+          target: "radius-deploy-contoso-post-commit (app-1)",
         }),
         expect.objectContaining({
           kind: "service_principal",
           reason: "retained",
           target:
-            "Service Principal for radius-deploy-contoso-post-commit (app-1)"
+            "Service Principal for radius-deploy-contoso-post-commit (app-1)",
         }),
         expect.objectContaining({
           kind: "github_environment",
           reason: "retained",
-          target: "contoso/post-commit:dev"
-        })
-      ])
+          target: "contoso/post-commit:dev",
+        }),
+      ]),
     );
   });
 });
@@ -478,7 +576,7 @@ describe("GET /api/operations/{id}", () => {
   it("resolves a record by id", async () => {
     const op = seed("contoso/byid");
     const { status, body } = await getJson(
-      `/api/operations/${encodeURIComponent(op.operationId)}`
+      `/api/operations/${encodeURIComponent(op.operationId)}`,
     );
     expect(status).toBe(200);
     expect(body.operation.operationId).toBe(op.operationId);
@@ -487,13 +585,13 @@ describe("GET /api/operations/{id}", () => {
   describe("GET /api/verify-status operation identity", () => {
     it("rejects an unknown operation id instead of adopting a repository run", async () => {
       const { status, body } = await getJson(
-        "/api/verify-status?repo=contoso%2Fstore&environment=dev&operationId=op_missing"
+        "/api/verify-status?repo=contoso%2Fstore&environment=dev&operationId=op_missing",
       );
       expect(status).toBe(200);
       expect(body).toEqual({
         state: "expired",
         terminal: true,
-        error: "The verification operation does not match this request."
+        error: "The verification operation does not match this request.",
       });
     });
 
@@ -503,13 +601,13 @@ describe("GET /api/operations/{id}", () => {
       op.verification = { dispatchedAt: Date.now() };
 
       const { body } = await getJson(
-        `/api/verify-status?repo=contoso%2Fincomplete-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+        `/api/verify-status?repo=contoso%2Fincomplete-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`,
       );
 
       expect(body).toEqual({
         state: "expired",
         terminal: true,
-        error: "The verification operation has incomplete dispatch identity."
+        error: "The verification operation has incomplete dispatch identity.",
       });
     });
 
@@ -523,17 +621,17 @@ describe("GET /api/operations/{id}", () => {
         environment: "dev",
         runId: "12345",
         runUrl:
-          "https://github.com/contoso/workflow-identity/actions/runs/12345"
+          "https://github.com/contoso/workflow-identity/actions/runs/12345",
       };
 
       const { status, body } = await getJson(
-        `/api/verify-status?repo=contoso%2Fworkflow-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`
+        `/api/verify-status?repo=contoso%2Fworkflow-identity&environment=dev&operationId=${encodeURIComponent(op.operationId)}`,
       );
 
       expect(status).toBe(200);
       expect(body.runId).toBe("12345");
       expect(body.runUrl).toBe(
-        "https://github.com/contoso/workflow-identity/actions/runs/12345"
+        "https://github.com/contoso/workflow-identity/actions/runs/12345",
       );
     });
   });
