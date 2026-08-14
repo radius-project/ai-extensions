@@ -668,6 +668,53 @@ describe("deployments read routes (SU-06)", () => {
       expect(written[0].payload).toEqual({ deployments: [row("dev")] });
     });
 
+    // The cache is injected as the live Map rather than owned by this module,
+    // because server.ts still invalidates it (`deployListCache.delete(repo)`) on
+    // deploy and delete dispatch. A stubbed get/set pair cannot model that, so
+    // this case drives a real Map through the full round trip and then deletes
+    // from the outside exactly the way server.ts does. If a later refactor moved
+    // the cache inward, that external invalidation would silently stop working
+    // and this is the test that would catch it.
+    it("round-trips a real Map and misses again after an external delete", async () => {
+      const cache = new Map<string, DeployListCacheEntry>();
+      let ghCalls = 0;
+      const shared: Partial<DeploymentsReadsDependencies> = {
+        deployListCache: cache,
+        readInstanceEntry: () => undefined,
+        ghOrThrow: () => {
+          ghCalls += 1;
+          return Promise.resolve("dev");
+        },
+        resolveRepoAppName: () => Promise.resolve("todolist"),
+        resolveEnvDeployment: (_repo, environment) =>
+          Promise.resolve(row(environment))
+      };
+
+      const first = context("GET", "/api/list-deployments?repo=octo/todolist");
+      await handleListDeployments(first.context, dependencies(shared));
+      expect(ghCalls).toBe(1);
+      expect(cache.has("octo/todolist")).toBe(true);
+      expect(JSON.parse(first.recording.body).deployments).toEqual([
+        row("dev")
+      ]);
+
+      const second = context("GET", "/api/list-deployments?repo=octo/todolist");
+      await handleListDeployments(second.context, dependencies(shared));
+      expect(ghCalls).toBe(1);
+      expect(JSON.parse(second.recording.body).deployments).toEqual([
+        row("dev")
+      ]);
+
+      cache.delete("octo/todolist");
+
+      const third = context("GET", "/api/list-deployments?repo=octo/todolist");
+      await handleListDeployments(third.context, dependencies(shared));
+      expect(ghCalls).toBe(2);
+      expect(JSON.parse(third.recording.body).deployments).toEqual([
+        row("dev")
+      ]);
+    });
+
     it("bypasses the cache read entirely for ?fresh=1", async () => {
       const { recording, context: ctx } = context(
         "GET",
