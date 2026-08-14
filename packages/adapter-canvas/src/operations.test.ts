@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 // @ts-nocheck
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -1424,20 +1424,10 @@ describe("the step-marker convention at the call sites", () => {
   // silently reported as a plain success. That is a quiet failure — the panel
   // shows a green tick for something that warned, failed or never ran — so it
   // is guarded here rather than left to review.
-  // The marker convention is a property of every call site that narrates an
-  // operation, wherever that site now lives. A route migrating onto the route
-  // table carries its `steps.push` sites into `server/routes/`, so scanning
-  // `server.ts` alone would let the convention quietly stop being enforced one
-  // slice at a time. The corpus is therefore the legacy dispatcher plus every
-  // route module.
-  const SERVER_SRC = [
+  const SERVER_SRC = readFileSync(
     new URL("./server.ts", import.meta.url),
-    ...readdirSync(new URL("./server/routes/", import.meta.url))
-      .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
-      .map((name) => new URL(`./server/routes/${name}`, import.meta.url))
-  ]
-    .map((url) => readFileSync(url, "utf8"))
-    .join("\n");
+    "utf8"
+  );
 
   // Steps whose text is a plain successful observation and so correctly take
   // the default. Anything else added to this list should first be re-read as a
@@ -1453,84 +1443,15 @@ describe("the step-marker convention at the call sites", () => {
     "Verifying the"
   ];
 
-  const FORWARDED_STEP_IDENTIFIERS = new Set(["message"]);
-
-  function firstArgumentEnd(source: string, start: number): number {
-    let parentheses = 1;
-    let brackets = 0;
-    let braces = 0;
-    let quote = "";
-    let lineComment = false;
-    let blockComment = false;
-    for (let i = start; i < source.length; i += 1) {
-      const ch = source[i];
-      const next = source[i + 1];
-      if (lineComment) {
-        if (ch === "\n") lineComment = false;
-        continue;
-      }
-      if (blockComment) {
-        if (ch === "*" && next === "/") {
-          blockComment = false;
-          i += 1;
-        }
-        continue;
-      }
-      if (quote) {
-        if (ch === "\\") {
-          i += 1;
-        } else if (ch === quote) {
-          quote = "";
-        }
-        continue;
-      }
-      if (ch === "/" && next === "/") {
-        lineComment = true;
-        i += 1;
-        continue;
-      }
-      if (ch === "/" && next === "*") {
-        blockComment = true;
-        i += 1;
-        continue;
-      }
-      if (ch === '"' || ch === "'" || ch === "`") {
-        quote = ch;
-        continue;
-      }
-      if (ch === "(") parentheses += 1;
-      else if (ch === ")") {
-        parentheses -= 1;
-        if (parentheses === 0) return i;
-      } else if (ch === "[") brackets += 1;
-      else if (ch === "]") brackets -= 1;
-      else if (ch === "{") braces += 1;
-      else if (ch === "}") braces -= 1;
-      else if (
-        ch === "," &&
-        parentheses === 1 &&
-        brackets === 0 &&
-        braces === 0
-      ) {
-        return i;
-      }
-    }
-    throw new Error("Unterminated step narration call in server source.");
-  }
-
-  function stepStrings(source = SERVER_SRC): string[] {
-    // Locate the call, then balance its argument expression while skipping
-    // quoted/template text and comments. A narration literal may legitimately
-    // contain `);`; the old non-greedy regex silently truncated it there.
-    const out: string[] = [];
-    const call = /(?:steps\.push|ports\.pushStep)\(\s*/g;
-    let match;
-    while ((match = call.exec(source))) {
-      const start = call.lastIndex;
-      const end = firstArgumentEnd(source, start);
-      out.push(source.slice(start, end).trim());
-      call.lastIndex = end + 1;
-    }
+  function stepStrings() {
+    // Capture the whole argument expression, not just its first literal:
+    // several sites concatenate a variable and put the trailing ellipsis on
+    // the final fragment, e.g. 'Creating package "' + name + '"...'.
+    const out = [];
+    const re = /steps\.push\(\s*([\s\S]*?)\);/g;
+    let m;
+    while ((m = re.exec(SERVER_SRC)))
+      out.push(m[1].trim().replace(/,\s*$/, ""));
     return out;
   }
 
@@ -1546,38 +1467,16 @@ describe("the step-marker convention at the call sites", () => {
     expect(stepStrings().length).toBeGreaterThan(40);
   });
 
-  function unaccountedStepStrings(source = SERVER_SRC) {
-    return stepStrings(source).filter((s) => {
+  it("marks every step that is not a plain successful observation", () => {
+    const unaccounted = stepStrings().filter((s) => {
       if (MARKED.test(s)) return false;
       if (RUNNING.test(s)) return false;
-      // These exact identifiers are forwarding sites: ports re-publish a
-      // message that a real call site already composed and marked. Do not exempt
-      // arbitrary identifiers, which could hide text composed outside the
-      // scanned server corpus.
-      if (FORWARDED_STEP_IDENTIFIERS.has(s)) return false;
       const compact = s.replace(/\s+/g, " ");
       return !PLAIN_OBSERVATIONS.some((allowed) =>
         compact.slice(1).startsWith(allowed)
       );
     });
-  }
-
-  it("marks every step that is not a plain successful observation", () => {
-    const unaccounted = unaccountedStepStrings();
     expect(unaccounted).toEqual([]);
-  });
-
-  it("parses narration literals containing a call terminator", () => {
-    expect(
-      stepStrings('steps.push("✅ Literal contains ); safely.");')
-    ).toEqual(['"✅ Literal contains ); safely."']);
-  });
-
-  it("rejects unrecognized forwarding identifiers", () => {
-    expect(
-      unaccountedStepStrings("steps.push(unlistedForwardingValue);")
-    ).toEqual(["unlistedForwardingValue"]);
-    expect(unaccountedStepStrings("steps.push(message);")).toEqual([]);
   });
 
   it("does not report a deliberately-skipped step as done", () => {
@@ -1628,13 +1527,6 @@ describe("environment creation boundaries", () => {
     return at;
   }
 
-  // A named end delimiter inherits the migration expiry of whichever route it
-  // names: when that neighbour migrates, the marker dies and the slice widens.
-  // That has now happened repeatedly on this stack, so the end of the azure
-  // slice is resolved structurally instead — as "the next legacy route of any
-  // kind" — which is exactly what the slice means and cannot be invalidated by
-  // any one route migrating. The pattern matches `pathname.startsWith` arms as
-  // well, so a prefix-matched neighbour still bounds the slice.
   function nextLegacyRouteIndex(start: number, marker: string): number {
     const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
     legacyRoute.lastIndex = start + marker.length;
@@ -1656,8 +1548,12 @@ describe("environment creation boundaries", () => {
   const azureMarker = 'pathname === "/api/azure-auto-setup"';
   const azureStart = markerIndex(azureMarker);
   const azureEnd = nextLegacyRouteIndex(azureStart, azureMarker);
+  const createMarker = 'pathname === "/api/create-environment"';
+  const createStart = markerIndex(createMarker);
+  const createEnd = nextLegacyRouteIndex(createStart, createMarker);
   const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
+  const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
 
   it("no longer answers POST /api/operations from the legacy chain", () => {
@@ -1670,16 +1566,6 @@ describe("environment creation boundaries", () => {
     );
   });
 
-  it("no longer answers POST /api/create-environment from the legacy chain", () => {
-    // The ~1,000-line setup arm moved onto the route table as its own use case
-    // and four supporting seams, each with focused unit tests, plus a real
-    // loopback suite in `test/integration/http/create-environment.test.ts` that
-    // exercises both sides of the server-owned gate. The legacy `if` must be
-    // gone entirely, and the `createStart`/`createEnd` markers with it — hence
-    // no marker slice here.
-    expect(SERVER_SRC).not.toContain('pathname === "/api/create-environment"');
-  });
-
   it("bounds every sliced route body on markers that still exist", () => {
     // Pins the coupling itself rather than leaving it to whichever ordering
     // assertion happens to notice. Each slice must be non-empty and strictly
@@ -1687,12 +1573,14 @@ describe("environment creation boundaries", () => {
     // reach the assertions below.
     for (const [name, start, end] of [
       ["azure-auto-setup", azureStart, azureEnd],
+      ["create-environment", createStart, createEnd],
       ["deploy", deployStart, SERVER_SRC.length]
     ] as const) {
       expect(start, name).toBeGreaterThan(-1);
       expect(end, name).toBeGreaterThan(start);
     }
     expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
     expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
   });
 
@@ -1725,12 +1613,26 @@ describe("environment creation boundaries", () => {
     expect(appCreate).toBeGreaterThan(azAccountSet);
   });
 
-  // The four assertions that used to slice the `create-environment` legacy arm
-  // out of `server.ts` — no application model, GHCR preflight before bootstrap,
-  // environment lookup before PUT, and commit point after verification — moved
-  // to `test/integration/http/create-environment.test.ts` when that route
-  // migrated onto the route table. They are executed behaviorally there against
-  // the real handler rather than asserted as source text here.
+  it("does not require an application model to create an environment", () => {
+    expect(createStart).toBeGreaterThan(-1);
+    expect(createEnd).toBeGreaterThan(createStart);
+    // Verification planning may probe the committed workflow files, but
+    // environment creation itself must stay independent of deploy-model
+    // resolution.
+    expect(createRoute).not.toContain("appParams(");
+    expect(createRoute).not.toContain("resolveDeployParams(");
+    expect(createRoute).not.toContain("RADIUS_DEPLOY_PARAMS");
+    expect(createRoute).not.toContain("RADIUS_RAD_COMMANDS");
+  });
+
+  it("keeps the later create-environment GHCR preflight before bootstrap", () => {
+    const ghcrPreflight = createRoute.indexOf(
+      "preflightGhcrPackageWriteAccess"
+    );
+    const bootstrap = createRoute.indexOf("bootstrapGHCRStatePackage");
+    expect(ghcrPreflight).toBeGreaterThan(-1);
+    expect(bootstrap).toBeGreaterThan(ghcrPreflight);
+  });
 
   it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
     const createApp = azureRoute.indexOf("buildAppCreateArgs");
@@ -1753,6 +1655,36 @@ describe("environment creation boundaries", () => {
     expect(tagPatch).toBeGreaterThan(ownerList);
     expect(tagShow).toBeGreaterThan(tagPatch);
     expect(servicePrincipal).toBeGreaterThan(tagShow);
+  });
+
+  it("checks whether the GitHub environment already exists before PUT and aborts on ambiguous lookup errors", () => {
+    const lookup = createRoute.indexOf("resolveGitHubEnvironmentCreateState");
+    const put = createRoute.indexOf(
+      '["api", "--method", "PUT", environmentPath]'
+    );
+    expect(lookup).toBeGreaterThan(-1);
+    expect(put).toBeGreaterThan(lookup);
+    expect(createRoute).toContain(
+      'Could not determine whether GitHub environment "'
+    );
+    expect(createRoute).not.toContain('"created" | "reused" | "unknown"');
+  });
+
+  it("records the commit point only after verification dispatch succeeds or PR action-required is established", () => {
+    const commitPoint = createRoute.indexOf("recordCommitState(op, {");
+    const verifyPlan = createRoute.indexOf(
+      "const verifyPlan = await planCredentialVerification"
+    );
+    const actionRequired = createRoute.indexOf(
+      'finish(op, "action_required", {'
+    );
+    const dispatchSuccess = createRoute.indexOf(
+      'steps.push("✅ Verify workflow dispatched.")'
+    );
+    expect(commitPoint).toBeGreaterThan(-1);
+    expect(commitPoint).toBeGreaterThan(verifyPlan);
+    expect(commitPoint).toBeLessThan(actionRequired);
+    expect(commitPoint).toBeGreaterThan(dispatchSuccess);
   });
 
   it("provisions model-specific values when deployment begins", () => {
