@@ -8,12 +8,7 @@
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
-import { createServer } from "node:http";
-import type {
-  IncomingMessage,
-  Server as HttpServer,
-  ServerResponse
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -38,7 +33,6 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
 import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
@@ -56,9 +50,7 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache,
-  primeGhIdentity,
-  setPreferredGhLogin
+  resetGhIdentityCache
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
 import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
@@ -203,14 +195,17 @@ import {
   environmentPage,
   deployingPage
 } from "./pages.js";
+import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import {
+  syncRequestedPage,
+  type CanvasRequestContext
+} from "./server/request-context.js";
+import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
+import { SERVER_ROUTE_TABLE } from "./server/route-table.js";
+import type { CanvasServerEntry } from "./server/types.js";
 
-export interface CanvasServerEntry {
-  server: HttpServer;
-  baseUrl: string;
-  url: string;
-  page: string;
-  state: CanvasState;
-}
+export type { CanvasServerEntry } from "./server/types.js";
 
 interface CommandResult {
   code: string | number;
@@ -502,9 +497,50 @@ interface FederatedCredential {
   subject: string;
 }
 
-// Per-instance canvas servers: instanceId -> { server, url, page, state }.
-// Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map<string, CanvasServerEntry>();
+// Legacy handler objects, kept per instance so the start hook can resume
+// recovered verification monitors and the activity gate can recognise the
+// server-owned token. Released by the stopped hook when the instance stops.
+const legacyHandlers = new Map<
+  string,
+  ReturnType<typeof createLegacyRequestHandler>
+>();
+
+const canvasServer = createCanvasServer(
+  createProductionCanvasServerDependencies({
+    createRequestHandler: ({ instanceId, instances, markActivity }) => {
+      const legacy = createLegacyRequestHandler(
+        instanceId,
+        () => instances.get(instanceId)?.baseUrl || ""
+      );
+      legacyHandlers.set(instanceId, legacy);
+      return createScaffoldRequestHandler({
+        instanceId,
+        instances,
+        routes: SERVER_ROUTE_TABLE,
+        legacyFallback: legacy.handler,
+        // Server-owned internal calls must not refresh the webview activity
+        // clock, or the idle-respawn timer never fires.
+        markActivity: (request) => {
+          if (!legacy.isServerOwned(request)) markActivity();
+        },
+        preRoute: preRouteCanvasRequest
+      });
+    },
+    onStarted: (instanceId) => {
+      shuttingDownInstances.delete(instanceId);
+      legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+    },
+    onStopped: (instanceId) => {
+      legacyHandlers.delete(instanceId);
+    },
+    defaultPage: DEFAULT_CANVAS_PAGE,
+    preferredPort: preferredPortForInstance
+  })
+);
+
+// Compatibility facade shared with the SDK runtime during the route migration.
+export const servers = canvasServer.instances;
+
 let environmentOperationTestRunner:
   ((operationId: string) => Promise<void>) | null = null;
 
@@ -2487,11 +2523,8 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-// request handler and read by the host-channel keepalive via the getter below
-// to tell whether a panel is actively open (so the process isn't idle-reaped).
-let lastWebviewActivityAt = 0;
 export function getLastWebviewActivityAt(): number {
-  return lastWebviewActivityAt;
+  return canvasServer.getLastActivityAt();
 }
 
 function accessForSelection(
@@ -2590,7 +2623,27 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(
+// Global pre-routing shared by migrated routes and the legacy fallback. It
+// preserves the exact order the legacy dispatcher used at the top of its
+// if-chain: reject cross-site mutations before any routing or body parse, then
+// synchronise the requested page onto the instance entry.
+function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+  const { request } = context;
+  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
+    context.json(403, {
+      error: "Cross-site request rejected.",
+      code: "cross-site-forbidden"
+    });
+    return true;
+  }
+  syncRequestedPage(
+    canvasServer.instances.get(context.instanceId),
+    context.url.searchParams.get("page")
+  );
+  return false;
+}
+
+function createLegacyRequestHandler(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {
@@ -2794,37 +2847,14 @@ function createRequestHandler(
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    // Cross-site rejection and requested-page synchronisation now run in the
+    // shared pre-routing step so migrated routes cannot bypass them; the page
+    // fallback below still needs the raw value. Webview-activity marking also
+    // moved to that seam, where it is gated on isServerOwned so server-owned
+    // internal calls still do not count as user activity.
     const isServerOwnedRequest =
       req.headers["x-radius-server-owned"] === serverOwnedToken;
-    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
-    // CSRF defense-in-depth: reject cross-site state-changing requests before
-    // any routing or body parse. See isCrossSiteMutation for the rules.
-    if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(403);
-      res.end(
-        JSON.stringify({
-          error: "Cross-site request rejected.",
-          code: "cross-site-forbidden"
-        })
-      );
-      return;
-    }
     const requestedPage = url.searchParams.get("page");
-    const canvasEntry = servers.get(instanceId);
-    if (canvasEntry && requestedPage) {
-      canvasEntry.page = requestedPage;
-      if (requestedPage === "graph")
-        canvasEntry.state.activeGraphView = "graph";
-      else if (requestedPage === "planned")
-        canvasEntry.state.activeGraphView = "planned";
-      else if (
-        requestedPage === "graph-diff" ||
-        requestedPage === "graphDiff"
-      ) {
-        canvasEntry.state.activeGraphView = "diff";
-      }
-    }
 
     // Lightweight liveness probe used by the client-side heartbeat so pages
     // can detect when the server has come back after an idle respawn.
@@ -9850,7 +9880,12 @@ function createRequestHandler(
       res.end(environmentPage(state));
     }
   };
-  return { handler, startRecoveredVerificationTasks };
+  // Exposed so the composition root can gate webview-activity marking: the
+  // scaffold marks activity for every request, but server-owned internal calls
+  // must not count as user activity or the idle-respawn timer never fires.
+  const isServerOwned = (req: IncomingMessage): boolean =>
+    req.headers["x-radius-server-owned"] === serverOwnedToken;
+  return { handler, startRecoveredVerificationTasks, isServerOwned };
 }
 
 const PAGE_RENDERERS = {
@@ -9889,81 +9924,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server: HttpServer, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (err: Error) => {
-      server.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, "127.0.0.1");
-  });
-}
-
-async function startServer(
-  instanceId: string,
-  page = DEFAULT_CANVAS_PAGE
-): Promise<CanvasServerEntry> {
-  let baseUrl = "";
-  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
-  // Restore the user's explicitly chosen GitHub account (if any) before priming
-  // so the very first strategy resolution honors it. This is what makes the
-  // account choice stable across restarts.
-  const persistedLogin = getPreferredGitHubLogin();
-  if (persistedLogin) setPreferredGhLogin(persistedLogin);
-  // Warm the GitHub identity cache in the background at boot so the first gh
-  // calls find the token strategy already resolved instead of paying (or
-  // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
-  // self-healing, so a failure here just means the next caller re-primes.
-  primeGhIdentity().catch(() => {});
-  const server = createServer(requestHandler.handler);
-  let port: number;
-  // Try the stable, instanceId-derived port first; fall back to an ephemeral
-  // port (listen(0)) only if it's already taken/unavailable.
-  const preferred = await preferredPortForInstance(instanceId);
-  try {
-    await listenOn(server, preferred);
-    port = preferred;
-  } catch {
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve)
-    );
-    const address = server.address();
-    port = typeof address === "object" && address ? address.port : 0;
-  }
-  baseUrl = `http://127.0.0.1:${port}`;
-  const entry: CanvasServerEntry = {
-    server,
-    baseUrl,
-    url: `${baseUrl}/?page=${page}`,
-    page,
-    state: {}
-  };
-  servers.set(instanceId, entry);
-  shuttingDownInstances.delete(instanceId);
-  requestHandler.startRecoveredVerificationTasks();
-  return entry;
-}
-
 export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  let entry = servers.get(instanceId);
-  if (entry) {
-    if (page && entry.page !== page) {
-      entry.page = page;
-      entry.url = `${entry.baseUrl}/?page=${page}`;
-    }
-    return entry;
-  }
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.
-  void ensureVendorScripts();
-  return await startServer(instanceId, page);
+  if (!servers.has(instanceId)) void ensureVendorScripts();
+  return await canvasServer.getOrCreate(instanceId, page);
 }
