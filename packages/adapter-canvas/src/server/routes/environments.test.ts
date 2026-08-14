@@ -959,6 +959,37 @@ describe("environments — real loopback", () => {
     });
   });
 
+  it("fails closed on the migrated POST delete-environment with missing fields", async () => {
+    // The one destructive migrated route, exercised over the socket. With no
+    // repo/environment it must refuse at the first rung (400) before any
+    // active-app check or DELETE — the fail-closed guard, on the wire.
+    const res = await fetch(baseUrl + "/api/delete-environment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: "octo/app" })
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "repo and environment are required."
+    });
+  });
+
+  it("400s a malformed delete-environment body over the socket", async () => {
+    // A non-empty, non-JSON body reaches the outer catch (the handler reads the
+    // body manually and `JSON.parse` throws), answering 400 rather than a 413 or
+    // a global 500. This is the malformed-input path over a real socket.
+    const res = await fetch(baseUrl + "/api/delete-environment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json"
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(typeof body.error).toBe("string");
+    // Not the rung-1 message: this is the parse-failure catch, a distinct rung.
+    expect(body.error).not.toBe("repo and environment are required.");
+  });
+
   it("falls through a wrong method on a migrated path to the legacy dispatcher", async () => {
     // POST to a GET-only migrated path must NOT be answered by the migrated
     // handler: the route table only matches the declared method, so the
