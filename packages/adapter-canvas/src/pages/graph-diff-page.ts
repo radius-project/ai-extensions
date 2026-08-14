@@ -81,18 +81,24 @@ function escapeHtmlClient(s) {
 
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
-var diffTimeout = null;
 function queueDiff() {
-    if (diffTimeout) clearTimeout(diffTimeout);
-    diffTimeout = setTimeout(runDiff, 500);
+    if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
+    window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
 
 function runDiff() {
-    var base = document.getElementById('base-branch').value;
-    var head = document.getElementById('head-branch').value;
-    var repo = document.getElementById('diff-repo-select').value;
-    if (!repo || !base || !head) return;
+    window.__radiusDiffTimeout = null;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // pending debounced diff can fire after these elements are gone.
+    var baseEl = document.getElementById('base-branch');
+    var headEl = document.getElementById('head-branch');
+    var repoEl = document.getElementById('diff-repo-select');
     var statusEl = document.getElementById('diff-status');
+    if (!baseEl || !headEl || !repoEl || !statusEl) return;
+    var base = baseEl.value;
+    var head = headEl.value;
+    var repo = repoEl.value;
+    if (!repo || !base || !head) return;
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
@@ -198,18 +204,24 @@ function escapeHtmlClient(s) {
 
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
-var diffTimeout = null;
 function queueDiff() {
-    if (diffTimeout) clearTimeout(diffTimeout);
-    diffTimeout = setTimeout(runDiff, 500);
+    if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
+    window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
 
 function runDiff() {
-    var base = document.getElementById('base-branch').value;
-    var head = document.getElementById('head-branch').value;
-    var repo = document.getElementById('diff-repo-select').value;
-    if (!repo || !base || !head) return;
+    window.__radiusDiffTimeout = null;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // pending debounced diff can fire after these elements are gone.
+    var baseEl = document.getElementById('base-branch');
+    var headEl = document.getElementById('head-branch');
+    var repoEl = document.getElementById('diff-repo-select');
     var statusEl = document.getElementById('diff-status');
+    if (!baseEl || !headEl || !repoEl || !statusEl) return;
+    var base = baseEl.value;
+    var head = headEl.value;
+    var repo = repoEl.value;
+    if (!repo || !base || !head) return;
     statusEl.style.display = '';
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';

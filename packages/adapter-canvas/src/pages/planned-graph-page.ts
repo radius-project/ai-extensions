@@ -64,8 +64,13 @@ var ENV_PROVIDERS = {};
 
 function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
-    var branch = document.getElementById('planned-branch').value.trim();
-    var env = document.getElementById('planned-env').value;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // scheduled plan can fire after these elements are gone.
+    var branchEl = document.getElementById('planned-branch');
+    var envEl = document.getElementById('planned-env');
+    if (!branchEl || !envEl) return Promise.resolve();
+    var branch = branchEl.value.trim();
+    var env = envEl.value;
     var provider = ENV_PROVIDERS[env] || '${inlineJsString(provider)}';
     var statusEl0 = document.getElementById('plan-status');
     if (RADIUS_PLAN_ENVS_STALE) {
@@ -85,8 +90,10 @@ function runPlan(isCurrent) {
     if (statusEl0) statusEl0.style.display = 'none';
     RADIUS_PLAN_REQUEST_FAILED = false;
     var wrapper = document.getElementById('graph-container-wrapper');
+    if (!wrapper) return Promise.resolve();
     wrapper.innerHTML = '<div id="graph-container"></div>';
     var container = document.getElementById('graph-container');
+    if (!container) return Promise.resolve();
     container.innerHTML = '<div id="progress-panel" style="padding:20px; max-width:500px; margin:0 auto;">' +
         '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
         '<div class="spinner"></div>' +
@@ -221,11 +228,17 @@ var radiusPlannedSelectorsReady = radiusPopulatePlannedSelectors(CONTEXT_REPO, E
 // currently selected without requiring a separate "Re-Plan" click.
 function runPlan(isCurrent) {
     var repo = CONTEXT_REPO;
-    var branch = document.getElementById('planned-branch').value.trim() || CONTEXT_BRANCH;
-    var env = document.getElementById('planned-env').value;
+    // Sub-tab navigation swaps this page's content out client-side, so a
+    // scheduled plan can fire after these elements are gone.
+    var branchEl = document.getElementById('planned-branch');
+    var envEl = document.getElementById('planned-env');
+    if (!branchEl || !envEl) return Promise.resolve();
+    var branch = branchEl.value.trim() || CONTEXT_BRANCH;
+    var env = envEl.value;
     var provider = ENV_PROVIDERS[env] || '${inlineJsString(provider)}';
     if (!repo) return Promise.resolve();
     var container = document.getElementById('graph-container');
+    if (!container) return Promise.resolve();
     if (RADIUS_PLAN_ENVS_STALE) {
         var staleStatus = document.getElementById('plan-status');
         if (staleStatus) {

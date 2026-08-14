@@ -5,6 +5,11 @@ import {
   expectSafeInlineScripts,
   readEmittedValue
 } from "../../test/support/pages/hostile-state.js";
+import {
+  createFakeStatus,
+  extractBrowserFunction,
+  type FetchCall
+} from "../../test/support/pages/browser-script.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -232,5 +237,148 @@ describe("plannedGraphPage — state rendering and guidance", () => {
       expect(readEmittedValue(html, "CONTEXT_BRANCH")).toBe(hostile);
       expectSafeInlineScripts(html);
     }
+  });
+});
+
+// Graph sub-tab navigation is a client-side partial swap (radiusNavTo replaces
+// #graph-page-content), so the document never unloads and a plan scheduled by
+// the page being left behind still runs — against a DOM whose controls are
+// gone. Both emitted copies of runPlan must resolve their elements before
+// dereferencing them.
+interface PlanHarness {
+  runPlan: (isCurrent: () => boolean) => Promise<void>;
+  fetchCalls: FetchCall[];
+}
+
+function loadPlanScript(
+  html: string,
+  elements: Record<string, unknown>,
+  options: { hasEnv?: boolean; envsStale?: boolean } = {}
+): PlanHarness {
+  const fetchCalls: FetchCall[] = [];
+  const runPlan = new Function(
+    "document",
+    "window",
+    "fetch",
+    "CONTEXT_REPO",
+    "CONTEXT_BRANCH",
+    "ENV_PROVIDERS",
+    "RADIUS_PLAN_HAS_ENV",
+    "RADIUS_PLAN_ENVS_STALE",
+    "RADIUS_PLAN_REQUEST_FAILED",
+    "setInterval",
+    "clearInterval",
+    "setTimeout",
+    `${extractBrowserFunction(html, "runPlan")}\nreturn runPlan;`
+  )(
+    { getElementById: (id: string) => elements[id] ?? null },
+    { location: { reload: () => undefined } },
+    (url: string, init: { body: string }) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return Promise.resolve({
+        json: () => Promise.resolve({ message: "ok" })
+      });
+    },
+    "octo/app",
+    "main",
+    { prod: "azure" },
+    options.hasEnv ?? true,
+    options.envsStale ?? false,
+    false,
+    () => 1,
+    () => undefined,
+    () => 1
+  ) as PlanHarness["runPlan"];
+  return { runPlan, fetchCalls };
+}
+
+function planControls(): Record<string, unknown> {
+  const container = {
+    innerHTML: "",
+    querySelector: () => null,
+    appendChild: () => undefined
+  };
+  return {
+    "planned-branch": { value: "feature-x" },
+    "planned-env": { value: "prod" },
+    "plan-status": createFakeStatus(),
+    "graph-container-wrapper": { innerHTML: "" },
+    "graph-container": container,
+    "progress-steps": container
+  };
+}
+
+describe.each([
+  [
+    "empty state",
+    () => plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" })
+  ],
+  [
+    "rendered plan",
+    () =>
+      plannedGraphPage({
+        plannedResources: sampleResources,
+        plannedRepo: "octo/app",
+        plannedBranch: "main"
+      })
+  ]
+] as Array<[string, () => string]>)(
+  "plannedGraphPage (%s) — runPlan after a client-side sub-tab swap",
+  (_name, render) => {
+    it("resolves without a request when every plan control has been swapped out", async () => {
+      const harness = loadPlanScript(render(), {});
+      await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it.each(["planned-branch", "planned-env"])(
+      "resolves without a request when only #%s is missing",
+      async (missing) => {
+        const elements = planControls();
+        delete elements[missing];
+        const harness = loadPlanScript(render(), elements);
+        await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+        expect(harness.fetchCalls).toEqual([]);
+      }
+    );
+
+    it("resolves without a request when the graph container is gone", async () => {
+      const elements = planControls();
+      delete elements["graph-container"];
+      const harness = loadPlanScript(render(), elements);
+      await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+      expect(harness.fetchCalls).toEqual([]);
+    });
+
+    it("still plans against the selected branch and environment", async () => {
+      const harness = loadPlanScript(render(), planControls());
+      await harness.runPlan(() => true);
+      expect(harness.fetchCalls).toEqual([
+        {
+          url: "/api/plan-graph",
+          body: {
+            repo: "octo/app",
+            branch: "feature-x",
+            provider: "azure",
+            environment: "prod"
+          }
+        }
+      ]);
+    });
+  }
+);
+
+// The empty-state copy renders into a wrapper it recreates on each run, so that
+// lookup is a stale-DOM hazard of its own, distinct from the graph container.
+describe("plannedGraphPage (empty state) — runPlan without its graph wrapper", () => {
+  it("resolves without a request when the wrapper has been swapped out", async () => {
+    const elements = planControls();
+    delete elements["graph-container-wrapper"];
+    const harness = loadPlanScript(
+      plannedGraphPage({ contextRepo: "octo/app", contextBranch: "main" }),
+      elements
+    );
+    await expect(harness.runPlan(() => true)).resolves.toBeUndefined();
+    expect(harness.fetchCalls).toEqual([]);
   });
 });
