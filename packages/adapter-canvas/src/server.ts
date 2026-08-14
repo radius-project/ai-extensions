@@ -221,6 +221,9 @@ import {
   createGraphsPlanningReadsRoutes,
   createGraphsPlanningStreamRoutes
 } from "./server/routes/graphs-planning-reads.js";
+import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
+import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -870,6 +873,61 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   errorMessage
 });
 
+// Composition root for the write half of the `graphs-planning` family. The
+// complete dependency object is assembled here and nowhere else; the workflow
+// service receives narrow function seams and the shared modeling pipeline
+// receives its own eight, so neither module holds a GitHub client, spawns
+// `rad`, or touches disk directly.
+//
+// `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
+// `resolveRecipeOutputs` here rather than injected, which is what keeps the
+// route modules free of it. The pure helpers (`defaultBranchForState`,
+// `computeGraphDiff`, `record`, …) are injected rather than imported by the
+// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  pipeline: createGraphPipeline<CanvasServerEntry>({
+    fetchBicepSelection: (entry, repo, branch) =>
+      fetchBicepSelection(entry, repo, branch),
+    resolveRadArtifactsDir: (request) =>
+      radArtifactsDirForSelection({ ...request, github }),
+    buildGraphViaRad: (content, definitionFile, options) =>
+      buildGraphViaRad(content, definitionFile, options),
+    canvasGraphResources,
+    workspaceGraphJsonPath,
+    graphDefinitionHash,
+    radArtifactsFingerprint,
+    removeDirectory: (dir) => {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }),
+  triggerAppBicepHandoff,
+  prepareSourceRefResources: (entry, view, sourceRefInput) =>
+    prepareSourceRefResources(entry, view, sourceRefInput),
+  setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
+    setSourceRefResources(entry, view, resources, sourceRefInput, token),
+  isCurrentSourceRefToken,
+  defaultBranchForState,
+  canReuseModeledGraph,
+  addGraphProgress,
+  beginPlannedGraphRequest,
+  isCurrentPlannedGraphRequest,
+  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+  resolveRecipeOutputs: (resources, recipes, provider) =>
+    resolveRecipeOutputs(github, resources, recipes, provider),
+  computeGraphDiff: (baseResources, headResources) =>
+    computeGraphDiff(baseResources, headResources),
+  record,
+  optionalString,
+  errorMessage
+});
+
+// The route layer sees exactly one seam: the workflow service above. Parsing
+// and serialization are all it owns.
+const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+  workflows: graphPlanningWorkflows
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
@@ -882,6 +940,7 @@ const serverRoutes = createServerRouteTable({
   ...identityAuthRoutes,
   ...graphsPlanningReadsRoutes,
   ...graphsPlanningStreamRoutes,
+  ...graphsPlanningWritesRoutes,
   ...environmentsRoutes,
   ...createEnvironmentRoutes
 });
@@ -5187,480 +5246,6 @@ function createLegacyRequestHandler(
             /* best-effort */
           }
         }
-      }
-      return;
-    }
-
-    if (pathname === "/api/load-graph" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        const state = entry.state;
-        const branch = data.branch || defaultBranchForState(state);
-        const requestGeneration =
-          entry ?
-            (entry.state.graphBuildGeneration =
-              (entry.state.graphBuildGeneration || 0) + 1)
-          : 0;
-        if (!repo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ error: "Please select a repository." }));
-          return;
-        }
-        const sourceRefContext =
-          entry ?
-            prepareSourceRefResources(entry, "graph", { repo, branch })
-          : null;
-
-        const addProgress = (msg: string): void => {
-          addGraphProgress(state, requestGeneration, msg);
-        };
-        // Reset progress
-        if (entry) entry.state.progressMessages = [];
-
-        addProgress(`Checking ${repo} for existing app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-        if (content) {
-          addProgress("Found existing app.bicep — parsing resources...");
-        } else {
-          addProgress(
-            ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
-          );
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo,
-              branch
-            })
-          );
-          return;
-        }
-
-        const graphJsonPath =
-          entry && selection.fromWorkspace ?
-            workspaceGraphJsonPath(entry.state, selection.bicepPath)
-          : "";
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: addProgress
-          });
-        const definitionHash = graphDefinitionHash(
-          content,
-          radArtifactsFingerprint(radArtifactsDir)
-        );
-        if (entry && entry.state.graphBuildGeneration !== requestGeneration) {
-          if (radArtifactsRemote && radArtifactsDir) {
-            try {
-              rmSync(radArtifactsDir, { recursive: true, force: true });
-            } catch {
-              /* best-effort */
-            }
-          }
-          res.writeHead(409);
-          res.end(JSON.stringify({ stale: true }));
-          return;
-        }
-        if (
-          data.refresh &&
-          entry &&
-          canReuseModeledGraph(entry.state, repo, branch, definitionHash)
-        ) {
-          if (radArtifactsRemote && radArtifactsDir)
-            rmSync(radArtifactsDir, { recursive: true, force: true });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              reload: false,
-              resources: entry.state.graphResources,
-              cached: true
-            })
-          );
-          return;
-        }
-
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: addProgress,
-              saveGraphJsonTo: graphJsonPath,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        addProgress(
-          `Mapped ${resources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (entry.state.graphBuildGeneration !== requestGeneration) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          if (
-            !setSourceRefResources(
-              entry,
-              "graph",
-              resources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.graphTargetRepo = repo;
-          entry.state.graphBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.graphFromWorkspace = selection.fromWorkspace;
-          entry.state.activeGraphView = "graph";
-          entry.state.graphLoaded = true;
-          entry.state.graphDefinitionHash = definitionHash;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ reload: !data.refresh, resources }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/plan-graph" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        const branch = data.branch || defaultBranchForState(entry.state);
-        const provider = data.provider || "azure";
-        const planGeneration = beginPlannedGraphRequest(entry.state);
-        // Persist the selected environment so re-opening (or reloading) the
-        // Planned tab re-selects it by default, matching the graph just shown.
-        entry.state.plannedEnvironment =
-          typeof data.environment === "string" ? data.environment : "";
-        const sourceRefContext =
-          entry ?
-            prepareSourceRefResources(entry, "planned", { repo, branch })
-          : null;
-
-        const addProgress = (msg: string): void => {
-          if (entry) {
-            if (!entry.state.progressMessages)
-              entry.state.progressMessages = [];
-            entry.state.progressMessages.push(msg);
-          }
-        };
-        if (entry) entry.state.progressMessages = [];
-
-        addProgress(`Checking ${repo} for app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-        if (!content) {
-          addProgress(
-            ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
-          );
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo,
-              branch
-            })
-          );
-          return;
-        }
-        addProgress("Found app.bicep — parsing resources...");
-
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: addProgress
-          });
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: addProgress,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        addProgress(
-          `Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`
-        );
-
-        // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
-        let recipes: unknown[] = [];
-        addProgress("Fetching the default recipe pack from GitHub...");
-        recipes = await fetchRecipePack(github, provider);
-        addProgress(
-          `Loaded ${
-            Array.isArray(recipes) ? recipes.length : 0
-          } recipe(s) from the default recipe pack.`
-        );
-
-        // Surface pack recipes we couldn't map to a concrete resource so
-        // the gap is visible (rather than silently rendering the abstract
-        // type). Empty today for the Azure pack; fires if the pack adds a
-        // recipe source the curated map doesn't yet cover.
-        const unmappedRecipes = recipes.filter((recipe) => {
-          const concrete = record(recipe).concreteResources;
-          return !Array.isArray(concrete) || concrete.length === 0;
-        });
-        if (unmappedRecipes.length) {
-          addProgress(
-            `Note: ${
-              unmappedRecipes.length
-            } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
-              .map((recipe) => optionalString(record(recipe).resourceType))
-              .join(", ")}); those nodes show their abstract Radius type.`
-          );
-        }
-
-        // For each abstract resource, resolve its recipe and concrete output resources
-        addProgress("Resolving recipe outputs for planned resources...");
-        const plannedResources = canvasGraphResources(
-          await resolveRecipeOutputs(github, resources, recipes, provider)
-        );
-        addProgress(
-          `Planned ${plannedResources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (!isCurrentPlannedGraphRequest(entry.state, planGeneration)) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          if (
-            !setSourceRefResources(
-              entry,
-              "planned",
-              plannedResources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.plannedRepo = repo;
-          entry.state.plannedBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.plannedFromWorkspace = selection.fromWorkspace;
-          entry.state.plannedProvider = provider;
-          entry.state.resolvedRecipes = recipes;
-          entry.state.activeGraphView = "planned";
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ reload: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/diff-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let sourceRefContext = null;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        sourceRefContext = prepareSourceRefResources(entry, "diff", {
-          repo,
-          baseBranch: data.base,
-          headBranch: data.head
-        });
-        entry.state.diffBase = data.base;
-        entry.state.diffHead = data.head;
-        entry.state.diffTargetRepo = repo;
-        delete entry.state.diffError;
-
-        // Fetch the committed/persisted app.bicep on each branch. app.bicep
-        // generation is owned by the Radius app-bicep skill, so branches
-        // without one simply contribute nothing to the diff (added/removed).
-        const [baseSelection, headSelection] = await Promise.all([
-          fetchBicepSelection(entry, repo, data.base),
-          fetchBicepSelection(entry, repo, data.head)
-        ]);
-
-        if (!baseSelection.content && !headSelection.content) {
-          triggerAppBicepHandoff(
-            entry,
-            repo,
-            [data.base, data.head],
-            "graph-diff"
-          );
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo
-            })
-          );
-          return;
-        }
-
-        const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && baseSelection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch: data.base,
-            bicepRepoPath: baseSelection.bicepPath || ".radius/app.bicep"
-          });
-        const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && headSelection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch: data.head,
-            bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep"
-          });
-        const baseResources = canvasGraphResources(
-          await buildGraphViaRad(
-            baseSelection.content || "",
-            baseSelection.bicepPath || ".radius/app.bicep",
-            {
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          )
-        );
-        const headResources = canvasGraphResources(
-          await buildGraphViaRad(
-            headSelection.content || "",
-            headSelection.bicepPath || ".radius/app.bicep",
-            {
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          )
-        );
-
-        // Compute diff using the shared algorithm (see computeGraphDiff).
-        const diffResources = computeGraphDiff(baseResources, headResources);
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "diff",
-              diffResources,
-              {
-                repo,
-                baseBranch: data.base,
-                headBranch: data.head
-              },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.diffBaseGenerated = false;
-          entry.state.diffHeadGenerated = false;
-          entry.state.page = "graphDiff";
-          entry.state.activeGraphView = "diff";
-          delete entry.state.diffError;
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            message: `Comparing ${data.base} → ${data.head}`,
-            reload: true
-          })
-        );
-      } catch (e) {
-        const entry = servers.get(instanceId);
-        if (
-          entry &&
-          isCurrentSourceRefToken(
-            entry.state,
-            "diff",
-            sourceRefContext?.token || ""
-          )
-        ) {
-          entry.state.diffError = errorMessage(e);
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
       }
       return;
     }
