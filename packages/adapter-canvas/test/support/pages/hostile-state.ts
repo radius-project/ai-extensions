@@ -30,7 +30,8 @@ export function expectSafeInlineScripts(html: string): void {
 // Read back a `var NAME = <literal>;` the renderer emitted, as the browser
 // would evaluate it.
 export function readEmittedValue(html: string, name: string): unknown {
-  const match = html.match(new RegExp(`var ${name} = (.*);\\n`));
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = html.match(new RegExp(`^var ${escaped} = ([\\s\\S]*?);\\n`, "m"));
   expect(match, `${name} is not emitted`).toBeTruthy();
   return new Function(`return ${match?.[1]};`)();
 }
