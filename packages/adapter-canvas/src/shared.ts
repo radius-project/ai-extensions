@@ -186,11 +186,15 @@ export interface CanvasState {
   deployDispatchedAt?: number;
   deployRunId?: string | number | null;
   deployRunUrl?: string | null;
-  deployErrorKind?: string | null;
+  deployErrorKind?: DeployErrorKind | null;
   deployErrorBranch?: string | null;
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
+  // Redeploys the agent has made inside the current repair loop. Bounds the
+  // automatic repair cycle server-side; reset whenever a deploy opens a new
+  // attempt rather than continuing one.
+  deployRepairAttempts?: number;
   verifyRunId?: string | number | null;
   verifyRunUrl?: string;
   deployedGraph?: CanvasGraphResource[] | null;
@@ -199,6 +203,13 @@ export interface CanvasState {
   diffBaseGenerated?: boolean;
   diffHeadGenerated?: boolean;
 }
+
+// Why a deploy failed, in the one dimension the repair guard cares about:
+// "branch-not-pushed" and "run-unconfirmed" both mean an automatic repair must
+// not redeploy, so these strings are matched across server, tests and client.
+// A union rather than string makes a typo in any of them a compile error
+// instead of a guard that silently never fires.
+export type DeployErrorKind = "branch-not-pushed" | "run-unconfirmed";
 
 export function escapeHtml(str: unknown): string {
   if (!str) return "";

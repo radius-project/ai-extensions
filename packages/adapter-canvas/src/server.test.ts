@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   activeDeploymentMutation,
   addGraphProgress,
@@ -41,8 +42,12 @@ import {
   resolveDeployStatus,
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
-  triggerDeployRepairHandoff
+  triggerDeployRepairHandoff,
+  classifyDeployDispatchFailure,
+  DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
   recordAzureApp,
@@ -1807,6 +1812,29 @@ describe("triggerDeployRepairHandoff", () => {
     expect(entry.state.deployHandoffAttempts).toBe(0);
   });
 
+  it("advances the repair count on a loop redeploy and resets it on a new deploy", () => {
+    // The count has to move exactly as resolveDeployRepairLoop projected it,
+    // or the number reported to the agent would not be the one the next call
+    // is checked against.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployRepairAttempts = 1;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployRepairAttempts).toBe(2);
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployRepairAttempts).toBe(0);
+  });
+
   describe("resolveDeployRepairLoop", () => {
     it("treats a deploy with no attempt as an ordinary deploy", () => {
       expect(
@@ -1814,20 +1842,24 @@ describe("triggerDeployRepairHandoff", () => {
           { deployAttempt: { id: "attempt-A" } } as CanvasState,
           ""
         )
-      ).toEqual({ repairLoop: false, attemptId: "" });
+      ).toEqual({ repairLoop: false, attemptId: "", repairAttempt: 0 });
       expect(resolveDeployRepairLoop({} as CanvasState, undefined)).toEqual({
         repairLoop: false,
-        attemptId: ""
+        attemptId: "",
+        repairAttempt: 0
       });
     });
 
     it("keeps a redeploy on the attempt it was handed so the loop stays addressable", () => {
       expect(
         resolveDeployRepairLoop(
-          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed"
+          } as CanvasState,
           "attempt-A"
         )
-      ).toEqual({ repairLoop: true, attemptId: "attempt-A" });
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
     });
 
     it("rejects a stale repair rather than letting it clobber a newer deploy", () => {
@@ -1847,6 +1879,122 @@ describe("triggerDeployRepairHandoff", () => {
       const orphan = resolveDeployRepairLoop({} as CanvasState, "attempt-A");
       expect(orphan.repairLoop).toBe(false);
       expect(orphan.error).toMatch(/no longer the current attempt/);
+    });
+
+    it("counts each redeploy in the loop so the agent is told its budget", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployRepairAttempts: 2
+          } as CanvasState,
+          "attempt-A"
+        ).repairAttempt
+      ).toBe(3);
+    });
+
+    it("refuses a redeploy past the repair cap instead of dispatching another run", () => {
+      // The cap is stated in the handoff prompt, but prompt text is only an
+      // instruction: enforcing it here is what actually stops a runaway loop,
+      // and refusing before dispatch means it costs no workflow run.
+      const spent = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
+          deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(spent.error).toMatch(/already used its/);
+      // Every error branch reports not-a-loop, so a caller that reads
+      // repairLoop before error cannot turn a refusal into a live loop.
+      expect(spent.repairLoop).toBe(false);
+      expect(spent.error).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    });
+
+    it("allows the final attempt within the cap", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP - 1
+          } as CanvasState,
+          "attempt-A"
+        ).error
+      ).toBeUndefined();
+    });
+
+    it("refuses a redeploy while the attempt is still running", () => {
+      // Otherwise a duplicate call would dispatch a second workflow run and a
+      // second monitor over the same state.
+      const running = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "in_progress"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(running.repairLoop).toBe(false);
+      expect(running.repairAttempt).toBe(0);
+      expect(running.error).toMatch(/still running/);
+    });
+
+    it("refuses a redeploy when the run's outcome was never confirmed", () => {
+      // The timeout path sets deployStatus to "failed" while saying the run may
+      // still be going, and a dispatch of unknown outcome does the same. Without
+      // this, an attempt-bound retry would sail through the failed check and
+      // race a second workflow against the same target.
+      const lost = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
+          deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/7"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(lost.repairLoop).toBe(false);
+      expect(lost.repairAttempt).toBe(0);
+      expect(lost.error).toMatch(/may still be in flight/);
+      // The handoff told the agent to keep passing this id; the way out has to
+      // be spelled out or it will keep addressing an attempt that can never be
+      // repaired, because its outcome will never be confirmed.
+      expect(lost.error).toMatch(/without an attemptId/);
+      expect(lost.error).toContain(
+        "https://github.com/acme/widgets/actions/runs/7"
+      );
+    });
+
+    it("still repairs a confirmed failure that carries an unrelated error kind", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployErrorKind: "branch-not-pushed"
+          } as CanvasState,
+          "attempt-A"
+        )
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
+    });
+
+    it("refuses a redeploy on an attempt that already succeeded", () => {
+      // The attempt stays current after it settles and the agent keeps passing
+      // its id, so reuse has to be sent down the new-deploy path: a loop
+      // redeploy is marked agent-owned, which would suppress the handoff if
+      // this one failed.
+      const done = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "complete",
+          deployRepairAttempts: 2
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(done.repairLoop).toBe(false);
+      expect(done.error).toMatch(/without an attemptId/);
     });
   });
 
@@ -2106,5 +2254,71 @@ describe("azureCliAssistMessage", () => {
     expect(message.prompt).toContain("COPILOT_AGENT_SESSION_ID");
     expect(message.displayPrompt).not.toContain("COPILOT_AGENT_SESSION_ID");
     expect(message.displayPrompt.length).toBeLessThan(message.prompt.length);
+  });
+});
+
+describe("deploy failures that may leave a run in flight", () => {
+  // The resolver's unconfirmed-run guard does nothing unless the failure paths
+  // mark themselves, so the marking is pinned here as well as the reading.
+  const SERVER_SRC = readFileSync(
+    new URL("./server.ts", import.meta.url),
+    "utf8"
+  );
+  const monitor = SERVER_SRC.slice(
+    SERVER_SRC.indexOf('pathname === "/api/deploy"')
+  );
+
+  it("treats an unresolved ref as proof that no run was created", () => {
+    for (const stderr of [
+      "No ref found for: feature-branch",
+      "could not resolve to a Repository",
+      "no commit found for the ref feature-branch"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_BRANCH_NOT_PUSHED_KIND
+      );
+  });
+
+  it("treats every other dispatch failure as a run that may exist", () => {
+    // A non-zero exit is not proof GitHub created nothing: the request can be
+    // accepted and the answer lost, and the token-scope retry can dispatch
+    // twice. Guessing "no run" here is what starts a duplicate.
+    for (const stderr of [
+      "",
+      "HTTP 504: Gateway Timeout",
+      'missing required scope "workflow"',
+      "context deadline exceeded"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_RUN_UNCONFIRMED_KIND
+      );
+  });
+
+  it("marks every failure the monitor reports without a confirmed outcome", () => {
+    // Deleting any one of these markers would leave the suite green while
+    // reopening the double-run race, so each is asserted against the source:
+    // reaching them at runtime needs a workflow that dispatches, times out, or
+    // disappears. Confirmed workflow failure is deliberately not in this list —
+    // that one is the only kind a repair may act on.
+    const blockAfter = (marker: string): string => {
+      const at = monitor.indexOf(marker);
+      expect(at).toBeGreaterThan(-1);
+      return monitor.slice(at, monitor.indexOf('deployStatus = "failed"', at));
+    };
+
+    expect(blockAfter("No deploy run found for")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    expect(blockAfter("Timed out waiting for the deploy workflow")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    expect(blockAfter("Deploy monitoring stopped unexpectedly")).toContain(
+      "DEPLOY_RUN_UNCONFIRMED_KIND"
+    );
+    // The dispatch failure takes its kind from the classifier above, which
+    // returns unconfirmed for everything it cannot rule out.
+    expect(
+      blockAfter("Failed to start the run rad commands workflow")
+    ).toContain("deployErrorKind = dispatchKind");
   });
 });

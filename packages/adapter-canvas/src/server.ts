@@ -34,7 +34,12 @@ import {
   deleteCredentialProfile,
   setPreferredGitHubLogin
 } from "./shared.js";
-import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  DeployErrorKind,
+  GraphView
+} from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
@@ -105,7 +110,10 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
+import {
+  DEFAULT_CANVAS_PAGE,
+  DEPLOY_REPAIR_ATTEMPT_CAP
+} from "./runtime/hooks.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -163,9 +171,7 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
-  DELETE_AZURE_FILE
+  DEPLOY_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -203,8 +209,10 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
@@ -524,6 +532,69 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
+// Composition root for the migrated `deployments` family: the four read routes
+// whose body policy is `none`, plus the destructive POST /api/delete-deployment.
+// Only POST /api/deploy is still on the legacy fallback, and it is deliberately
+// out of scope for this slice.
+//
+// The listing cache and its TTL are read through getters because both are
+// declared further down the module and would otherwise be in the temporal dead
+// zone when this object is built at import time. Injecting the cache rather
+// than moving it keeps the other invalidator where it already lives: `server.ts`
+// deletes from the same map when a deploy is dispatched.
+const deploymentsRoutes = createDeploymentsRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  triggerDeployRepairHandoff,
+  deployHandoffStatus,
+  resolveRepoAppName,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  resetDeploymentViewState: (state, attemptId) => {
+    resetDeploymentViewState(state, attemptId);
+  },
+  get deployListCache() {
+    return deployListCache;
+  },
+  get deployListTtlMs() {
+    return DEPLOY_LIST_TTL_MS;
+  },
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  ensureWorkflowsCurrent: (repo, environment, provider, only) =>
+    ensureWorkflowsCurrent(repo, environment, provider, only),
+  findWorkflowRun,
+  runGh: (args, timeout = 20000, extraEnv) =>
+    new Promise((resolve) => {
+      const opts: CliOptions = { timeout };
+      if (extraEnv) opts.env = extraEnv;
+      cliExec("gh", args, opts, (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: (stdout || "").trim(),
+          stderr: stderr || ""
+        });
+      });
+    }),
+  readProcessEnv: () => process.env,
+  setTimer: (callback, ms) => setTimeout(callback, ms)
+});
+
+// Composition root for the two migrated `azure-discovery` read routes. Three
+// seams: the `az` runner (which carries the agent-session-stripped `cliExec`
+// environment the Azure setup routes run under) and the two pure `azure-oidc`
+// helpers, injected rather than imported by the handler module.
+const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
+  runAz: (command, args) => runCliCommand(command, args),
+  isUuid,
+  parseServedReposFromSubjects: (subjects) =>
+    parseServedReposFromSubjects(subjects as Iterable<unknown>)
+});
+
 // Composition root for the credential-profile and GitHub-identity half of the
 // `identity-credentials` family. Ten narrow function seams: the three profile
 // store operations, the four gh identity operations, the advisory repo
@@ -599,6 +670,8 @@ const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
   ...repositoriesRoutes,
+  ...deploymentsRoutes,
+  ...azureDiscoveryRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
   ...graphsPlanningReadsRoutes
@@ -834,7 +907,8 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched (see /api/deploy and /api/delete-deployment).
+// dispatched: /api/deploy is still legacy and evicts below, while the migrated
+// deployments family is handed this same map and evicts from there.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
@@ -1263,28 +1337,114 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
+// Marks a deploy that failed before anything could have started running: the
+// branch it names is not on the remote, so GitHub refused the dispatch. The
+// fix is a git push, not a model repair.
+export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
+  "branch-not-pushed";
+
+// Marks a deploy that failed without proving that no workflow is running: the
+// dispatch outcome was never confirmed, or monitoring stopped before the run
+// reported one. Distinct from a confirmed failure — a workflow GitHub refused
+// to start, or one that ran and reported its own failure — which is the only
+// kind a repair redeploy may act on, because it is the only kind that cannot
+// leave a run in flight for a redeploy to race.
+export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Split a failed `gh workflow run` by whether it proves no run was created.
+// GitHub naming the branch as unresolvable is proof: it rejected the request.
+// Anything else is not — the request can be accepted and the answer lost (the
+// CLI timing out, for one), and the token-scope retry can dispatch twice — so
+// it has to be treated as a run that may exist.
+export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
+  if (
+    /no ref found|could not resolve|no commit found for the ref/i.test(
+      stderr || ""
+    )
+  )
+    return DEPLOY_BRANCH_NOT_PUSHED_KIND;
+  return DEPLOY_RUN_UNCONFIRMED_KIND;
+}
+
 // Decide, server-side, whether an incoming deploy continues an existing repair
-// loop. The tool validates the attempt before it POSTs, but another deploy can
-// start in between, so re-check here against the attempt this panel currently
-// holds: a stale repair must not overwrite the newer deploy or mark it as
-// already owned (which would suppress its own failure handoff). An unbound
-// request is an ordinary deploy and always proceeds.
+// loop, and whether that loop still has budget. The tool validates the attempt
+// before it POSTs, but another deploy can start in between, so re-check here
+// against the attempt this panel currently holds: a stale repair must not
+// overwrite the newer deploy or mark it as already owned (which would suppress
+// its own failure handoff). An unbound request is an ordinary deploy and always
+// proceeds.
 export function resolveDeployRepairLoop(
   state: CanvasState,
   requestedAttemptId: unknown
-): { repairLoop: boolean; attemptId: string; error?: string } {
+): {
+  repairLoop: boolean;
+  attemptId: string;
+  repairAttempt: number;
+  error?: string;
+} {
   const requested =
     typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "" };
+  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
   const current = state?.deployAttempt?.id || "";
   if (current !== requested) {
     return {
       repairLoop: false,
       attemptId: "",
+      repairAttempt: 0,
       error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
     };
   }
-  return { repairLoop: true, attemptId: requested };
+  // A repair redeploy only makes sense against a deploy that actually failed.
+  // The attempt stays current after it settles, and the agent was told to keep
+  // passing its id, so without this an attempt-bound call could land on a
+  // deploy that is still running (starting a second workflow run and a second
+  // monitor over the same state) or on one that already succeeded (spending
+  // repair budget on a finished loop, and — because a loop redeploy is marked
+  // agent-owned — silently suppressing the handoff if it fails).
+  const deployStatus = state?.deployStatus || "";
+  if (deployStatus !== "failed") {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error:
+        deployStatus === "in_progress" ?
+          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
+        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+    };
+  }
+  // "failed" covers two different things, and only one is safe to redeploy.
+  // A confirmed failure — GitHub refused the dispatch, or the run finished and
+  // reported failure — leaves nothing in flight. The rest do not: the dispatch
+  // may have been accepted without us learning of it, or monitoring may have
+  // stopped before the run reported, in which case a redeploy would race a
+  // second run against the same target — exactly what the in_progress check
+  // above prevents, arriving by a different route. Deciding this from stored
+  // state keeps the resolver synchronous; re-querying the run would put an
+  // await in front of beginDeployAttempt, which must not happen.
+  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
+    const runUrl = state?.deployRunUrl || "";
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
+    };
+  }
+  // The cap the handoff prompt states is also enforced here, because prompt
+  // text alone is an instruction the agent can lose track of across a long
+  // repair loop. Refusing before anything is dispatched keeps a runaway loop
+  // from burning CI runs.
+  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
+  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested, repairAttempt };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -1314,6 +1474,12 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // Same lifetime as the delivery budget, and counted the way
+  // resolveDeployRepairLoop projected it, so the number the agent is told
+  // matches the one the next call is checked against. A deploy that opens a
+  // new attempt starts a fresh loop with a full budget.
+  state.deployRepairAttempts =
+    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
@@ -1344,7 +1510,14 @@ export function triggerDeployRepairHandoff(
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
     if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind === "branch-not-pushed") return false;
+    if (
+      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // An attempt whose run may still be in flight can never be repaired: the
+      // resolver refuses its redeploy. Opening a loop only to refuse its first
+      // call would spend a cycle and tell the agent two different things.
+      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
+    )
+      return false;
     if (state.deployRepairing) return false;
     if (
       state.deployHandoffState === "pending" ||
@@ -5088,133 +5261,6 @@ function createLegacyRequestHandler(
       return;
     }
 
-    // List all App Registrations owned by the signed-in user, enriched with
-    // the repos each already serves (from its FIC subjects). Backs the
-    // opt-in "use an existing application" cross-repo picker on the
-    // Environment page. Runs under the same agent-session-stripped cliExec
-    // env as the rest of the Azure setup.
-    if (
-      pathname === "/api/list-azure-app-registrations" &&
-      req.method === "GET"
-    ) {
-      const runCmd = runCliCommand;
-      try {
-        // `--show-mine` scopes to apps the signed-in user owns, so we
-        // avoid an O(N) owner lookup across the whole tenant.
-        const listRes = await runCmd("az", [
-          "ad",
-          "app",
-          "list",
-          "--show-mine",
-          "--query",
-          "[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}",
-          "-o",
-          "json"
-        ]);
-        if (listRes.code !== 0) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "Failed to list App Registrations: " + listRes.stderr,
-              code: "app-list-failed",
-              azError: listRes.stderr
-            })
-          );
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(listRes.stdout);
-        } catch {
-          parsed = null;
-        }
-        if (!Array.isArray(parsed)) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "The App Registration list returned an unexpected result.",
-              code: "app-list-parse"
-            })
-          );
-          return;
-        }
-        // Return the owned apps immediately. The `servesRepos` label
-        // (which repos each app already deploys) needs one
-        // `az ad app federated-credential list` per app, so computing it
-        // up front made the picker block on N process spawns before any
-        // row rendered (a user owning 100 apps paid ~100 spawns). The
-        // client now lazy-loads that label per row via
-        // /api/azure-app-serves-repos, so the list appears at once and
-        // the labels fill in progressively.
-        const apps = parsed
-          .filter((a) => a && a.appId)
-          .map((a) => ({
-            appId: a.appId,
-            displayName: a.displayName,
-            createdDateTime: a.createdDateTime
-          }));
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ apps }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: errorMessage(e), code: "app-list-failed" })
-        );
-      }
-      return;
-    }
-
-    // Lazy per-app companion to /api/list-azure-app-registrations: computes
-    // the "already serves" repo label for ONE App Registration from its
-    // federated-credential subjects. The picker calls this per row after the
-    // list renders, so owning many apps no longer blocks the picker on an
-    // up-front N+1 chain of `az` spawns. Best-effort: any failure yields a
-    // null label rather than an error the row would have to surface.
-    if (pathname === "/api/azure-app-serves-repos" && req.method === "GET") {
-      const appId = url.searchParams.get("appId") || "";
-      if (!isUuid(appId)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "A valid appId is required.",
-            code: "app-serves-bad-id"
-          })
-        );
-        return;
-      }
-      const runCmd = runCliCommand;
-      let servesRepos = null;
-      const ficRes = await runCmd("az", [
-        "ad",
-        "app",
-        "federated-credential",
-        "list",
-        "--id",
-        appId,
-        "--query",
-        "[].subject",
-        "-o",
-        "json"
-      ]);
-      if (ficRes.code === 0) {
-        try {
-          servesRepos =
-            parseServedReposFromSubjects(JSON.parse(ficRes.stdout)) || null;
-        } catch {
-          servesRepos = null;
-        }
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ servesRepos }));
-      return;
-    }
-
     // Create GitHub Environment with secrets/variables and commit verify workflow
     if (pathname === "/api/app-params" && req.method === "POST") {
       let body = "";
@@ -6378,89 +6424,6 @@ function createLegacyRequestHandler(
       return;
     }
 
-    if (pathname === "/api/deploy-status" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const resources =
-        entry?.state?.deployingResources ||
-        entry?.state?.plannedResources ||
-        [];
-      const logs = entry?.state?.deployLogs || [];
-      const logBase = entry?.state?.deployLogBase || 0;
-      const logTotal = logBase + logs.length;
-      const status = entry?.state?.deployStatus || "pending";
-      const error = entry?.state?.deployError || null;
-      const errorKind = entry?.state?.deployErrorKind || null;
-      const errorBranch = entry?.state?.deployErrorBranch || null;
-      const startedAt = entry?.state?.deployStartedAt || null;
-      const finishedAt = entry?.state?.deployFinishedAt || null;
-      const deployedGraph = entry?.state?.deployedGraph || null;
-      const deployRunUrl = entry?.state?.deployRunUrl || null;
-      const attempt = entry?.state?.deployAttempt || null;
-      const active = status === "in_progress";
-      // Every failure path converges on this poll, so it is where a failed
-      // deploy is handed to the agent to repair (once per repair loop).
-      const repairing =
-        triggerDeployRepairHandoff(entry, instanceId) ||
-        entry?.state?.deployRepairing ||
-        false;
-      const handoff = deployHandoffStatus(entry?.state || {});
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      // Incremental log delivery: when the client passes ?since=<absolute
-      // line index>, send only the new lines instead of re-serializing the
-      // entire (bounded) buffer on every 1.5s poll. Callers that omit it
-      // (e.g. the deployed-graph poller, which only reads resources) get the
-      // bounded buffer for backward compatibility.
-      const sinceRaw = url.searchParams.get("since");
-      const since = sinceRaw === null ? NaN : parseInt(sinceRaw, 10);
-      if (Number.isFinite(since)) {
-        const startIdx = Math.max(0, since - logBase);
-        const logsNew = logs.slice(startIdx);
-        res.end(
-          JSON.stringify({
-            resources,
-            logsNew,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      } else {
-        res.end(
-          JSON.stringify({
-            resources,
-            logs,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            attempt,
-            active,
-            repairing,
-            handoff
-          })
-        );
-      }
-      return;
-    }
-
     if (pathname === "/api/load-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -6856,350 +6819,6 @@ function createLegacyRequestHandler(
         kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
       } catch (e) {
         respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-applications" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ applications: [] });
-        return;
-      }
-      try {
-        // The application name is defined in the repo's app.bicep (a repo
-        // hosts a single Radius application in this model). Shared with the
-        // deployments/env-deletion paths via resolveRepoAppName.
-        const entry = servers.get(instanceId);
-        const branch =
-          entry?.state?.contextBranch ||
-          entry?.state?.plannedBranch ||
-          entry?.state?.graphBranch ||
-          "main";
-        const appName = await resolveRepoAppName(repo, branch);
-        respond({ applications: [{ name: appName }] });
-      } catch (e) {
-        respond({
-          applications: [{ name: repo.split("/").pop() || repo }],
-          error: errorMessage(e)
-        });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-deployments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ deployments: [] });
-        return;
-      }
-
-      // (A) Serve a fresh cached listing when available. The fan-out below
-      // is expensive, so a short TTL keeps re-opens and the workflow poll
-      // snappy without showing stale state for long. `?fresh=1` bypasses the
-      // cache read so active status pollers (a running deploy/delete) always
-      // see live status rather than a value cached before the transition.
-      const freshDeploys = url.searchParams.get("fresh") === "1";
-      const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
-      if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) {
-        respond(cachedDeploys.payload);
-        return;
-      }
-
-      try {
-        // Resolve the current deployment per environment from each
-        // environment's OWN history (see resolveEnvDeployment). Querying
-        // per environment — rather than a single repo-wide, capped page —
-        // means a busy environment can never crowd another's latest
-        // deploy/delete record out of the results.
-        const envNamesRaw = await ghOrThrow([
-          "api",
-          "--paginate",
-          `/repos/${repo}/environments?per_page=100`,
-          "--jq",
-          ".environments[].name"
-        ]);
-        const envNames =
-          envNamesRaw ?
-            [...new Set(envNamesRaw.split("\n").filter(Boolean))]
-          : [];
-        // Resolve the real app name once (from app.bicep) so every row targets
-        // the app declared in the bicep, not the repo basename.
-        const listEntry = servers.get(instanceId);
-        const listBranch =
-          listEntry?.state?.contextBranch ||
-          listEntry?.state?.plannedBranch ||
-          listEntry?.state?.graphBranch ||
-          "main";
-        const listAppName = await resolveRepoAppName(repo, listBranch);
-        const resolved = await Promise.all(
-          envNames.map((name) => resolveEnvDeployment(repo, name, listAppName))
-        );
-        const payload = { deployments: resolved.filter(Boolean) };
-        deployListCache.set(repo, { at: Date.now(), payload });
-        respond(payload);
-      } catch (e) {
-        // A GitHub failure surfaces as an error (not a silently-empty list)
-        // so the client keeps its current view / keeps polling rather than
-        // treating an incomplete listing as the truth.
-        respond({ deployments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/delete-deployment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      const respond = (code: number, payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(code);
-        res.end(JSON.stringify(payload));
-      };
-      let deleteReservation: DeploymentDispatchReservation | null = null;
-      let deleteReservationOwner: CanvasState | null = null;
-      const releaseDeleteReservation = (): void => {
-        if (deleteReservation && deleteReservationOwner)
-          releaseDeploymentMutation(deleteReservationOwner, deleteReservation);
-        deleteReservation = null;
-        deleteReservationOwner = null;
-      };
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = data.repo || "";
-        const environment = data.environment || "";
-        const application = data.application || "";
-        if (!repo || !environment || !application) {
-          respond(400, {
-            error: "repo, environment, and application are required."
-          });
-          return;
-        }
-
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          respond(503, { error: "Canvas server state is unavailable." });
-          return;
-        }
-        const attempt = entry.state.deployAttempt;
-        const activeRepo =
-          attempt?.targetRepo || entry.state.deployingRepo || "";
-        const activeEnvironment =
-          attempt?.environment || entry.state.envName || "";
-        const reserved = activeDeploymentMutation(entry.state);
-        if (localDeploymentBlocksMutation(entry.state) || reserved) {
-          const operation = reserved?.kind || "deploy";
-          const conflictRepo = reserved?.repo || activeRepo || repo;
-          const conflictEnvironment =
-            reserved?.environment || activeEnvironment || environment;
-          respond(409, {
-            error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
-          });
-          return;
-        }
-
-        deleteReservationOwner = entry.state;
-        deleteReservation = reserveDeploymentMutation(entry.state, {
-          repo,
-          environment,
-          kind: "delete"
-        });
-        if (!deleteReservation) {
-          const conflict = activeDeploymentMutation(entry.state);
-          respond(409, {
-            error:
-              conflict ?
-                `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
-              : "Another deployment operation is already starting."
-          });
-          return;
-        }
-
-        // Backstop the UI with GitHub's persisted state too. This covers a
-        // deployment started from another canvas instance or browser session.
-        let current: DeploymentRow | null;
-        try {
-          current = await resolveEnvDeployment(repo, environment, application);
-        } catch {
-          releaseDeleteReservation();
-          respond(503, {
-            error:
-              "Could not verify the current deployment state. Check your GitHub connection and try again."
-          });
-          return;
-        }
-        if (current && deploymentStatusBlocksMutation(current.status)) {
-          releaseDeleteReservation();
-          respond(409, {
-            error:
-              current.status === "deleting" ?
-                "This deployment is already being deleted."
-              : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
-          });
-          return;
-        }
-
-        const gh = (
-          args: string[],
-          timeout = 20000,
-          extraEnv?: NodeJS.ProcessEnv
-        ): Promise<CommandResult> =>
-          new Promise<CommandResult>((resolve) => {
-            const opts: CliOptions = { timeout };
-            if (extraEnv) opts.env = extraEnv;
-            cliExec("gh", args, opts, (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: (stdout || "").trim(),
-                stderr: stderr || ""
-              });
-            });
-          });
-        // Dispatching a workflow requires the `workflow` scope, which an
-        // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
-        // back to the keyring credential.
-        const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-          const first = await gh(args);
-          if (first.code === 0) return first;
-          if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await gh(args, 20000, fallbackEnv);
-          return retry.code === 0 ? retry : first;
-        };
-
-        // Deleting a deployment now runs `rad app delete` via the committed
-        // delete-application.yml workflow. This tears down the Radius
-        // application on the ephemeral control plane while leaving the
-        // GitHub Environment (and its credentials) intact.
-        //
-        // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy — and author
-        // them if they're missing (the #273 case). Delete workflow content is
-        // provider-agnostic, and workflow_dispatch runs from the default
-        // branch, so provider/workingBranch aren't needed.
-        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
-          DELETE_APP_DISPATCHER_FILE,
-          DELETE_AZURE_FILE
-        ]);
-        // If the sync couldn't commit the dispatcher to the default branch
-        // (e.g. it's protected, or the token lacks write access), the dispatch
-        // below will 404 on a genuinely-absent workflow. Fail fast with a
-        // specific message naming the branch instead of the generic hint.
-        const commitFail = sync.failed.find(
-          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        if (commitFail) {
-          releaseDeleteReservation();
-          respond(400, {
-            error:
-              "Couldn't commit the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ') to the "' +
-              commitFail.branch +
-              '" branch of ' +
-              repo +
-              ", so there's nothing to dispatch. The branch may be protected" +
-              " or your GitHub token may lack write access to " +
-              repo +
-              "."
-          });
-          return;
-        }
-        // A just-authored workflow isn't registered by GitHub synchronously, so
-        // an immediate workflow_dispatch would 404. When we created it, wait
-        // briefly and retry the not-found race a few times (mirroring the
-        // create-environment verify dispatch); when it was already present, the
-        // single [0]-delay attempt keeps the common path fast.
-        const justCreated = sync.created.some(
-          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        const dispatchedAt = Date.now();
-        const dispatchArgs = [
-          "workflow",
-          "run",
-          DELETE_APP_DISPATCHER_FILE,
-          "-f",
-          "environment=" + environment,
-          "-f",
-          "application=" + application,
-          "--repo",
-          repo
-        ];
-        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
-        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
-        for (const delay of dispatchDelays) {
-          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-          dispatch = await ghWorkflow(dispatchArgs);
-          if (dispatch.code === 0) break;
-          // Only the not-found registration race self-resolves; any other
-          // failure (scope, Actions disabled, …) won't, so stop retrying.
-          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
-        }
-        if (dispatch.code !== 0) {
-          releaseDeleteReservation();
-          const de = (dispatch.stderr || "").trim();
-          const hint =
-            /workflow.{0,20}scope/i.test(de) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " The delete workflow is committed to the default branch" +
-              " automatically before dispatch, so a persistent failure usually" +
-              " means GitHub Actions is disabled for " +
-              repo +
-              " or the default branch is protected — check both and retry.";
-          respond(400, {
-            error:
-              "Failed to start the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ") on " +
-              repo +
-              ". " +
-              (de || "The dispatch request failed.") +
-              hint
-          });
-          return;
-        }
-
-        // Best-effort: resolve the dispatched run's URL so the client can
-        // link to it in GitHub.
-        let runUrl = "";
-        const runId = await findWorkflowRun(
-          repo,
-          DELETE_APP_DISPATCHER_FILE,
-          dispatchedAt,
-          null
-        );
-        if (runId)
-          runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        // A workflow run can become discoverable before it creates its GitHub
-        // deployment record. Retain a short lease in either case to close that
-        // publication gap; after it expires, resolveEnvDeployment is the
-        // durable cross-instance guard.
-        const reservationTimer = setTimeout(
-          releaseDeleteReservation,
-          DEPLOY_LIST_TTL_MS * 2
-        );
-        reservationTimer.unref?.();
-        // A delete is now in flight, so the cached listing is stale — drop
-        // it so the next poll reflects the "Deleting…" state immediately.
-        deployListCache.delete(repo);
-        respond(200, { success: true, runUrl });
-      } catch (e) {
-        releaseDeleteReservation();
-        respond(400, { error: errorMessage(e) });
       }
       return;
     }
@@ -8033,7 +7652,7 @@ function createLegacyRequestHandler(
                     repo +
                     " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                     pushCmd;
-                  entry.state.deployErrorKind = "branch-not-pushed";
+                  entry.state.deployErrorKind = DEPLOY_BRANCH_NOT_PUSHED_KIND;
                   entry.state.deployErrorBranch = deployRef;
                   entry.state.deployStatus = "failed";
                   return;
@@ -8333,12 +7952,11 @@ function createLegacyRequestHandler(
               );
               // A "No ref found" (or unresolved ref) dispatch error
               // means the branch isn't on the remote — surface the same
-              // clean, actionable "push the branch" guidance/UI.
-              if (
-                /no ref found|could not resolve|no commit found for the ref/i.test(
-                  de
-                )
-              ) {
+              // clean, actionable "push the branch" guidance/UI. Every other
+              // dispatch failure is a run of unknown outcome, so the split is
+              // made once, where it can be tested.
+              const dispatchKind = classifyDeployDispatchFailure(de);
+              if (dispatchKind === DEPLOY_BRANCH_NOT_PUSHED_KIND) {
                 const pushCmd = "git push -u origin " + deployRef;
                 addLog("   Push it and redeploy:  " + pushCmd);
                 entry.state.deployError =
@@ -8348,7 +7966,7 @@ function createLegacyRequestHandler(
                   repo +
                   " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                   pushCmd;
-                entry.state.deployErrorKind = "branch-not-pushed";
+                entry.state.deployErrorKind = dispatchKind;
                 entry.state.deployErrorBranch = deployRef;
                 entry.state.deployStatus = "failed";
                 return;
@@ -8371,6 +7989,7 @@ function createLegacyRequestHandler(
                 ". " +
                 (de || "The dispatch request failed.") +
                 scopeHint;
+              entry.state.deployErrorKind = dispatchKind;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -8400,6 +8019,11 @@ function createLegacyRequestHandler(
                 ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
                 repo +
                 ".";
+              // The dispatch succeeded, so a run was very likely created — it
+              // just never became visible here. Treating that as an ordinary
+              // failure would let a repair redeploy race a run that is queued
+              // or merely slow to surface.
+              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -8770,6 +8394,10 @@ function createLegacyRequestHandler(
               repo +
               "/actions/runs/" +
               dRunId;
+            // Monitoring gave up; the run itself may still be going. Mark it so
+            // an attempt-bound repair redeploy is refused rather than racing a
+            // second workflow against the same target.
+            entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
             entry.state.deployStatus = "failed";
           })()
             .catch((monErr) => {
@@ -8785,6 +8413,10 @@ function createLegacyRequestHandler(
                   entry.state.deployError =
                     "Deploy monitoring stopped unexpectedly: " +
                     (monErr && monErr.message ? monErr.message : monErr);
+                // Same reasoning as the timeout above: the monitor died, so
+                // the workflow's real outcome is unknown and a repair redeploy
+                // must not assume the run is over.
+                entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
                 entry.state.deployStatus = "failed";
               } catch {
                 /* ignore */
@@ -8811,35 +8443,26 @@ function createLegacyRequestHandler(
         // outer catch and release the lock while the deploy is still running.
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
+        // Report the loop's position back so the agent sees its remaining
+        // budget on every redeploy, instead of having to remember the cap from
+        // the single handoff that opened the loop.
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ...(loop.repairLoop ?
+              {
+                repairAttempt: loop.repairAttempt,
+                repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
+              }
+            : {})
+          })
+        );
       } catch (e) {
         releaseReservation();
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
       }
-      return;
-    }
-
-    if (pathname === "/api/deploy-reset" && req.method === "POST") {
-      const entry = servers.get(instanceId);
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: Record<string, unknown>;
-      try {
-        data = body ? record(JSON.parse(body)) : {};
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(error) }));
-        return;
-      }
-      if (entry) {
-        resetDeploymentViewState(entry.state, data.attemptId);
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true }));
       return;
     }
 
