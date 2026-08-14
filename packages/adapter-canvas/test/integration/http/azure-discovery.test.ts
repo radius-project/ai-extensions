@@ -33,14 +33,28 @@ interface AzResult {
   stderr?: string;
 }
 
-function start(): Map<string, AzResult> {
-  const script = new Map<string, AzResult>();
+const CLI = {
+  aks: "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json",
+  groups: "az group list --query [].{id:name, name:name} -o json",
+  eks: "aws eks list-clusters --query clusters --output json",
+  vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
+  subnets:
+    "aws ec2 describe-subnets --query Subnets[].{id:SubnetId, name:SubnetId} --output json"
+};
 
-  // `runAz` is faked because it is the one seam with real I/O to isolate: a
-  // scripted map keyed on the full command line, throwing on anything else.
-  // The two predicates are the real `azure-oidc` exports, injected exactly as
-  // the production composition root injects them, because they are pure — a
-  // double there would control nothing and could only diverge from production.
+function start(): {
+  az: Map<string, AzResult>;
+  cli: Map<string, string | { throws: unknown }>;
+} {
+  const script = new Map<string, AzResult>();
+  const cliScript = new Map<string, string | { throws: unknown }>();
+
+  // `runAz` and `runCli` are faked because they are the two seams with real I/O
+  // to isolate: scripted maps keyed on the full command line, throwing on
+  // anything else. The two predicates are the real `azure-oidc` exports,
+  // injected exactly as the production composition root injects them, because
+  // they are pure — a double there would control nothing and could only diverge
+  // from production.
   const routes = createTestRouteTable(
     createAzureDiscoveryRoutes({
       runAz: (command, args) => {
@@ -52,6 +66,17 @@ function start(): Map<string, AzResult> {
           stdout: scripted.stdout ?? "",
           stderr: scripted.stderr ?? ""
         });
+      },
+      runCli: (command, args) => {
+        const line = [command, ...args].join(" ");
+        const scripted = cliScript.get(line);
+        if (scripted === undefined) {
+          throw new Error(`unscripted cli call: ${line}`);
+        }
+        if (typeof scripted !== "string") {
+          return Promise.reject(scripted.throws);
+        }
+        return Promise.resolve(scripted);
       },
       isUuid,
       parseServedReposFromSubjects: (subjects) =>
@@ -79,12 +104,12 @@ function start(): Map<string, AzResult> {
     prepareIdentity: () => {}
   });
 
-  return script;
+  return { az: script, cli: cliScript };
 }
 
-describe("azure-discovery real-loopback HIT (RF-05)", () => {
+describe("azure-discovery real-loopback HIT (RF-03)", () => {
   it("serves the App Registration picker payload over a real socket", async () => {
-    const script = start();
+    const script = start().az;
     script.set(ARGV.list, {
       stdout: JSON.stringify([
         { appId: "a1", displayName: "App One", createdDateTime: "2024-01-01" },
@@ -111,7 +136,7 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
   });
 
   it("computes the serves-repos label and rejects a malformed appId", async () => {
-    const script = start();
+    const script = start().az;
     // A realistic federated-credential subject, so the assertion below pins the
     // real `repo:owner/name:ref:…` -> `owner/name` normalization end to end
     // rather than a passthrough double echoing its own input.
@@ -145,7 +170,7 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
   // takes the failure arm exactly as `1` would -- but nothing over the wire
   // exercised that until now, which left the widened type unused.
   it("treats a string spawn errno as a failure on both routes", async () => {
-    const script = start();
+    const script = start().az;
     script.set(ARGV.list, {
       code: "ENOENT",
       stdout: "[]",
@@ -175,21 +200,89 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
     expect(await served.text()).toBe('{"servesRepos":null}');
   });
 
-  // Hardcoded on purpose. The remaining write in this family is explicitly
-  // deferred to its own slice, and hand-writing the key keeps the two sides of the
-  // assertion on different sources: a probe derived from the route table would
-  // silently follow a future migration and stop being a tripwire.
-  it("leaves the deferred azure-discovery writes on the legacy fallback", async () => {
+  it("enumerates azure resources over a real socket", async () => {
+    const { cli } = start();
+    cli.set(
+      CLI.aks,
+      JSON.stringify([{ id: "aks-1", name: "aks-1", resourceGroup: "rg-1" }])
+    );
+    cli.set(CLI.groups, JSON.stringify([{ id: "rg-1", name: "rg-1" }]));
+    cli.set(
+      "az aks get-credentials --name aks-1 --resource-group rg-1 --overwrite-existing",
+      ""
+    );
+    cli.set(
+      "kubectl get namespaces -o jsonpath={.items[*].metadata.name}",
+      '"default" "radius-system"'
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "azure" })
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.text()).toBe(
+      '{"clusters":[{"id":"aks-1","name":"aks-1","resourceGroup":"rg-1"}],' +
+        '"resourceGroups":[{"id":"rg-1","name":"rg-1","resourceGroup":""}],' +
+        '"namespaces":["default","radius-system"],"vpcs":[],"subnets":[]}'
+    );
+
+    // Only POST is declared, so a GET still falls through to legacy.
+    const got = await fetch(`${entry.baseUrl}/api/discover`);
+    expect(got.status).toBe(418);
+  });
+
+  it("answers 200 with the refusal shape for a bad subscriptionId and a bad body", async () => {
+    // Nothing is scripted on `runCli`, so any spawn attempt throws: both of
+    // these must be refused before the CLI is reached.
     start();
     const entry = await container!.getOrCreate("panel-a");
 
-    for (const path of ["/api/discover"]) {
-      const response = await fetch(`${entry.baseUrl}${path}`, {
-        method: "POST",
-        body: "{}"
-      });
-      expect(response.status, path).toBe(418);
-      expect(await response.text(), path).toBe("legacy");
-    }
+    const refused = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "azure", subscriptionId: "x&calc" })
+    });
+    expect(refused.status).toBe(200);
+    expect(refused.headers.get("content-type")).toBe("application/json");
+    expect(await refused.text()).toBe(
+      '{"error":"Invalid subscriptionId \\"x&calc\\" (expected a GUID).",' +
+        '"clusters":[],"resourceGroups":[],"namespaces":["default"],"vpcs":[],"subnets":[]}'
+    );
+
+    const malformed = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: "not json"
+    });
+    expect(malformed.status).toBe(200);
+    const parsed = (await malformed.json()) as { error: string };
+    expect(parsed.error.length).toBeGreaterThan(0);
+    expect(parsed).toMatchObject({
+      clusters: [],
+      resourceGroups: [],
+      namespaces: ["default"],
+      vpcs: [],
+      subnets: []
+    });
+  });
+
+  it("reports a failing aws enumeration as a partial result rather than an error status", async () => {
+    const { cli } = start();
+    cli.set(CLI.eks, '["eks-1"]');
+    cli.set(CLI.vpcs, { throws: new Error("vpcs denied") });
+    cli.set(CLI.subnets, "[]");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "aws" })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(
+      '{"clusters":[{"id":"eks-1","name":"eks-1"}],"resourceGroups":[],' +
+        '"namespaces":["default","kube-system","radius-system"],"vpcs":[],"subnets":[],' +
+        '"errors":{"vpcs":"vpcs denied"}}'
+    );
   });
 });

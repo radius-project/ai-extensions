@@ -117,6 +117,7 @@ const productionHandlers = {
   }),
   ...createAzureDiscoveryRoutes({
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    runCli: () => Promise.resolve(""),
     isUuid: () => false,
     parseServedReposFromSubjects: () => []
   }),
@@ -318,16 +319,15 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and the base slice moved it onto the route table too, so the
-  // family owns all three of its routes. Two families remain deliberately split,
-  // and each is named here so no later slice can read one as fully migrated in
-  // the ledger.
-  // - azure-discovery: its two read routes and POST /api/azure-auto-setup are
-  //   migrated; POST /api/discover stays on the fallback for its own slice.
+  // family owns all three of its routes. azure-discovery completed on the base
+  // (main migrated POST /api/discover), and deployments completes here, so
+  // graphs-planning is now the only deliberately split family and is named so
+  // no later slice can read it as fully migrated in the ledger.
   // - graphs-planning: its three read routes, including the SSE stream, are
   //   migrated; its three POST routes stay on the fallback.
-  // - environments and deployments: both families have fully migrated, so each
+  // - azure-discovery, environments and deployments: fully migrated, so each
   //   residual is asserted as empty rather than by naming a remaining key.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, environments, and deployments families, Azure auto-setup and the azure-discovery reads, and the graphs-planning reads, and leaves 4 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, operations-status, azure-discovery, environments, and deployments families and the graphs-planning reads, and leaves 3 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -362,25 +362,30 @@ describe("server route ownership boundary", () => {
       "POST /api/delete-environment",
       "GET /api/list-environments",
       "GET /api/verify-status",
-      "POST /api/create-environment"
+      "POST /api/create-environment",
+      "POST /api/discover"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(4);
-    // The split families, pinned explicitly so a later slice cannot quietly
-    // assume any one is done. environments and deployments are now fully
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(3);
+    // The pinned families, so a later slice cannot quietly assume any one is
+    // done. azure-discovery, environments and deployments are now fully
     // migrated, so each residual is asserted as empty rather than by naming a
     // remaining key.
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/azure-auto-setup");
-    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain(
       "POST /api/create-environment"
     );
-    for (const family of ["environments", "deployments"] as const) {
+    for (const family of [
+      "azure-discovery",
+      "environments",
+      "deployments"
+    ] as const) {
       expect(
         LEGACY_ROUTE_INVENTORY.filter((key) =>
           SERVER_ROUTE_DECLARATIONS.some(
@@ -421,8 +426,7 @@ describe("server route ownership boundary", () => {
   const RESIDUAL_ROUTE_PIN = [
     "POST /api/load-graph",
     "POST /api/plan-graph",
-    "POST /api/diff-branches",
-    "POST /api/discover"
+    "POST /api/diff-branches"
   ];
 
   it("moves exactly POST /api/deploy out of the residual inventory", () => {
@@ -462,7 +466,8 @@ describe("server route ownership boundary", () => {
       "POST /api/delete-environment",
       "GET /api/list-environments",
       "GET /api/verify-status",
-      "POST /api/create-environment"
+      "POST /api/create-environment",
+      "POST /api/discover"
     ];
 
     // Nothing the base already owned may be lost by this slice.
@@ -490,13 +495,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 4 of 38
+    // Cross-checked against the inventory, and independently pinned: 3 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(4);
+    expect(residualLegacyCount).toBe(3);
     // The remaining method-aware matchers in `server.ts` must be exactly the
     // residual inventory, keyed independently of the derived complement.
     expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(

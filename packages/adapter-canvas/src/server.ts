@@ -271,35 +271,8 @@ export async function persistBestEffort({
   }
 }
 
-interface DiscoveryItem {
-  id: string;
-  name: string;
-  resourceGroup?: string;
-}
-
-interface DiscoveryResult {
-  clusters: DiscoveryItem[];
-  resourceGroups: DiscoveryItem[];
-  namespaces: string[];
-  vpcs: DiscoveryItem[];
-  subnets: DiscoveryItem[];
-  errors?: Record<string, string>;
-}
-
 interface ChildProcessInput {
   stdin: { end(): unknown } | null;
-}
-
-function discoveryItems(value: unknown): DiscoveryItem[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => {
-    const fields = record(item);
-    return {
-      id: optionalString(fields.id),
-      name: optionalString(fields.name),
-      resourceGroup: optionalString(fields.resourceGroup)
-    };
-  });
 }
 
 export function endChildInput(child: ChildProcessInput): void {
@@ -582,12 +555,14 @@ const deploymentsRoutes = createDeploymentsRoutes({
   }
 });
 
-// Composition root for the two migrated `azure-discovery` read routes. Three
-// seams: the `az` runner (which carries the agent-session-stripped `cliExec`
-// environment the Azure setup routes run under) and the two pure `azure-oidc`
-// helpers, injected rather than imported by the handler module.
+// Composition root for the migrated `azure-discovery` routes. Four seams: the
+// `az` runner (which carries the agent-session-stripped `cliExec` environment
+// the Azure setup routes run under), the general trimmed-stdout CLI runner the
+// discovery enumeration branches on, and the two pure `azure-oidc` helpers,
+// injected rather than imported by the handler module.
 const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runAz: (command, args) => runCliCommand(command, args),
+  runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
@@ -4145,227 +4120,6 @@ function createLegacyRequestHandler(
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
         res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/discover" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const result: DiscoveryResult = {
-          clusters: [],
-          resourceGroups: [],
-          namespaces: [],
-          vpcs: [],
-          subnets: []
-        };
-
-        // Reject a non-GUID subscriptionId before it reaches the az argv.
-        // On Windows cliExec routes az through `cmd.exe /c` and libuv only
-        // quotes args with whitespace, so "x&calc" would be split by cmd.exe
-        // as a command separator. Empty is allowed (ambient CLI context).
-        if (
-          data.subscriptionId &&
-          !isUuid(String(data.subscriptionId).trim())
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
-              clusters: [],
-              resourceGroups: [],
-              namespaces: ["default"],
-              vpcs: [],
-              subnets: []
-            })
-          );
-          return;
-        }
-
-        if (data.provider === "azure") {
-          // Set tenant/subscription context before querying
-          if (data.subscriptionId) {
-            try {
-              await runCommand(
-                "az",
-                ["account", "set", "--subscription", data.subscriptionId],
-                { timeout: 10000 }
-              );
-            } catch (e) {}
-          }
-          const subArgs =
-            data.subscriptionId ? ["--subscription", data.subscriptionId] : [];
-          try {
-            const aksJson = await runCommand(
-              "az",
-              [
-                "aks",
-                "list",
-                "--query",
-                "[].{id:name, name:name, resourceGroup:resourceGroup}",
-                "-o",
-                "json",
-                ...subArgs
-              ],
-              { timeout: 30000 }
-            );
-            result.clusters = discoveryItems(JSON.parse(aksJson));
-          } catch (e) {
-            result.clusters = [];
-            result.errors = result.errors || {};
-            result.errors.clusters = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const rgJson = await runCommand(
-              "az",
-              [
-                "group",
-                "list",
-                "--query",
-                "[].{id:name, name:name}",
-                "-o",
-                "json",
-                ...subArgs
-              ],
-              { timeout: 30000 }
-            );
-            result.resourceGroups = discoveryItems(JSON.parse(rgJson));
-          } catch (e) {
-            result.resourceGroups = [];
-            result.errors = result.errors || {};
-            result.errors.resourceGroups = errorMessage(e).slice(0, 800);
-          }
-          // If we got a cluster, try to get namespaces from it
-          if (result.clusters.length > 0) {
-            try {
-              const rg =
-                result.resourceGroups.length > 0 ?
-                  result.resourceGroups[0].id
-                : "";
-              const clusterName = result.clusters[0].id;
-              if (rg && clusterName) {
-                await runCommand(
-                  "az",
-                  [
-                    "aks",
-                    "get-credentials",
-                    "--name",
-                    clusterName,
-                    "--resource-group",
-                    rg,
-                    "--overwrite-existing"
-                  ],
-                  { timeout: 20000 }
-                );
-                const nsJson = await runCommand(
-                  "kubectl",
-                  [
-                    "get",
-                    "namespaces",
-                    "-o",
-                    "jsonpath={.items[*].metadata.name}"
-                  ],
-                  { timeout: 10000 }
-                );
-                result.namespaces = nsJson
-                  .replace(/"/g, "")
-                  .split(" ")
-                  .filter(Boolean);
-              } else {
-                result.namespaces = ["default", "kube-system", "radius-system"];
-              }
-            } catch (e) {
-              result.namespaces = ["default", "kube-system", "radius-system"];
-            }
-          } else {
-            result.namespaces = ["default", "kube-system", "radius-system"];
-          }
-        } else {
-          try {
-            const eksJson = await runCommand(
-              "aws",
-              [
-                "eks",
-                "list-clusters",
-                "--query",
-                "clusters",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            const clusterNames: unknown = JSON.parse(eksJson);
-            result.clusters =
-              Array.isArray(clusterNames) ?
-                clusterNames
-                  .filter((name): name is string => typeof name === "string")
-                  .map((name) => ({ id: name, name }))
-              : [];
-          } catch (e) {
-            result.clusters = [];
-            result.errors = result.errors || {};
-            result.errors.clusters = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const vpcJson = await runCommand(
-              "aws",
-              [
-                "ec2",
-                "describe-vpcs",
-                "--query",
-                "Vpcs[].{id:VpcId, name:VpcId}",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            result.vpcs = discoveryItems(JSON.parse(vpcJson));
-          } catch (e) {
-            result.vpcs = [];
-            result.errors = result.errors || {};
-            result.errors.vpcs = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const subnetJson = await runCommand(
-              "aws",
-              [
-                "ec2",
-                "describe-subnets",
-                "--query",
-                "Subnets[].{id:SubnetId, name:SubnetId}",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            result.subnets = discoveryItems(JSON.parse(subnetJson));
-          } catch (e) {
-            result.subnets = [];
-            result.errors = result.errors || {};
-            result.errors.subnets = errorMessage(e).slice(0, 800);
-          }
-          result.namespaces = ["default", "kube-system", "radius-system"];
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: errorMessage(e),
-            clusters: [],
-            resourceGroups: [],
-            namespaces: ["default"],
-            vpcs: [],
-            subnets: []
-          })
-        );
       }
       return;
     }
