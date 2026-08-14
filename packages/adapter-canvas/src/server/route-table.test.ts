@@ -15,6 +15,7 @@ import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./routes/deployments.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
@@ -78,6 +79,11 @@ const productionHandlers = {
     runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     readProcessEnv: () => ({}),
     setTimer: () => ({})
+  }),
+  ...createAzureDiscoveryRoutes({
+    runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    isUuid: () => false,
+    parseServedReposFromSubjects: () => []
   }),
   ...createIdentityProfilesRoutes({
     listCredentialProfiles: () => [],
@@ -152,15 +158,18 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  // operations-status is deliberately split: main added POST /api/operations
-  // after the GETs migrated, so the family owns two migrated routes and one
-  // that is still on the legacy fallback. `deployments` is split too, and for a
-  // different reason: everything but POST /api/deploy has migrated, and that one
-  // route is deferred because it needs its own multi-slice treatment.
-  // graphs-planning is split by construction: only its two read-only routes are
-  // migrated, and its four remaining routes stay on the legacy fallback. Naming
-  // all three splits here keeps any family from reading as fully migrated.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status GETs, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 15 routes on the legacy fallback", () => {
+  // Four families are deliberately split, and each is named here so no later
+  // slice can read one as fully migrated in the ledger.
+  // - operations-status: POST /api/operations landed after the GETs migrated,
+  //   so the family owns two migrated routes and one on the legacy fallback.
+  // - azure-discovery: its two read routes are migrated; its two writes
+  //   (POST /api/azure-auto-setup, ~1,672 lines, and POST /api/discover, ~220)
+  //   are far larger and stay on the fallback for their own slices.
+  // - deployments: everything but POST /api/deploy has migrated; that route is
+  //   deferred because it needs its own multi-slice treatment.
+  // - graphs-planning: only its two read-only routes are migrated; its four
+  //   remaining routes stay on the fallback.
+  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status GETs, the azure-discovery reads, the graphs-planning reads, and every deployments route but POST /api/deploy, and leaves 13 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -175,6 +184,8 @@ describe("server route ownership boundary", () => {
       "POST /api/verify-azure-login",
       "POST /api/azure-cli-assist",
       "POST /api/verify-aws-login",
+      "GET /api/list-azure-app-registrations",
+      "GET /api/azure-app-serves-repos",
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
@@ -189,12 +200,14 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(15);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(13);
     // The split families, pinned explicitly so a later slice cannot quietly
     // assume either is done.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
+    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/discover");
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       expect.arrayContaining([
         "GET /api/load-graph-stream",
@@ -225,13 +238,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 15 of 38
+    // Cross-checked against the inventory, and independently pinned: 13 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(15);
+    expect(residualLegacyCount).toBe(13);
 
     for (const route of table) {
       const matcher =

@@ -204,6 +204,7 @@ import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
@@ -575,6 +576,17 @@ const deploymentsRoutes = createDeploymentsRoutes({
   setTimer: (callback, ms) => setTimeout(callback, ms)
 });
 
+// Composition root for the two migrated `azure-discovery` read routes. Three
+// seams: the `az` runner (which carries the agent-session-stripped `cliExec`
+// environment the Azure setup routes run under) and the two pure `azure-oidc`
+// helpers, injected rather than imported by the handler module.
+const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
+  runAz: (command, args) => runCliCommand(command, args),
+  isUuid,
+  parseServedReposFromSubjects: (subjects) =>
+    parseServedReposFromSubjects(subjects as Iterable<unknown>)
+});
+
 // Composition root for the credential-profile and GitHub-identity half of the
 // `identity-credentials` family. Ten narrow function seams: the three profile
 // store operations, the four gh identity operations, the advisory repo
@@ -651,6 +663,7 @@ const serverRoutes = createServerRouteTable({
   ...operationsStatusRoutes,
   ...repositoriesRoutes,
   ...deploymentsRoutes,
+  ...azureDiscoveryRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
   ...graphsPlanningReadsRoutes
@@ -5138,133 +5151,6 @@ function createLegacyRequestHandler(
           }
         }
       }
-      return;
-    }
-
-    // List all App Registrations owned by the signed-in user, enriched with
-    // the repos each already serves (from its FIC subjects). Backs the
-    // opt-in "use an existing application" cross-repo picker on the
-    // Environment page. Runs under the same agent-session-stripped cliExec
-    // env as the rest of the Azure setup.
-    if (
-      pathname === "/api/list-azure-app-registrations" &&
-      req.method === "GET"
-    ) {
-      const runCmd = runCliCommand;
-      try {
-        // `--show-mine` scopes to apps the signed-in user owns, so we
-        // avoid an O(N) owner lookup across the whole tenant.
-        const listRes = await runCmd("az", [
-          "ad",
-          "app",
-          "list",
-          "--show-mine",
-          "--query",
-          "[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}",
-          "-o",
-          "json"
-        ]);
-        if (listRes.code !== 0) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "Failed to list App Registrations: " + listRes.stderr,
-              code: "app-list-failed",
-              azError: listRes.stderr
-            })
-          );
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(listRes.stdout);
-        } catch {
-          parsed = null;
-        }
-        if (!Array.isArray(parsed)) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "The App Registration list returned an unexpected result.",
-              code: "app-list-parse"
-            })
-          );
-          return;
-        }
-        // Return the owned apps immediately. The `servesRepos` label
-        // (which repos each app already deploys) needs one
-        // `az ad app federated-credential list` per app, so computing it
-        // up front made the picker block on N process spawns before any
-        // row rendered (a user owning 100 apps paid ~100 spawns). The
-        // client now lazy-loads that label per row via
-        // /api/azure-app-serves-repos, so the list appears at once and
-        // the labels fill in progressively.
-        const apps = parsed
-          .filter((a) => a && a.appId)
-          .map((a) => ({
-            appId: a.appId,
-            displayName: a.displayName,
-            createdDateTime: a.createdDateTime
-          }));
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ apps }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: errorMessage(e), code: "app-list-failed" })
-        );
-      }
-      return;
-    }
-
-    // Lazy per-app companion to /api/list-azure-app-registrations: computes
-    // the "already serves" repo label for ONE App Registration from its
-    // federated-credential subjects. The picker calls this per row after the
-    // list renders, so owning many apps no longer blocks the picker on an
-    // up-front N+1 chain of `az` spawns. Best-effort: any failure yields a
-    // null label rather than an error the row would have to surface.
-    if (pathname === "/api/azure-app-serves-repos" && req.method === "GET") {
-      const appId = url.searchParams.get("appId") || "";
-      if (!isUuid(appId)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "A valid appId is required.",
-            code: "app-serves-bad-id"
-          })
-        );
-        return;
-      }
-      const runCmd = runCliCommand;
-      let servesRepos = null;
-      const ficRes = await runCmd("az", [
-        "ad",
-        "app",
-        "federated-credential",
-        "list",
-        "--id",
-        appId,
-        "--query",
-        "[].subject",
-        "-o",
-        "json"
-      ]);
-      if (ficRes.code === 0) {
-        try {
-          servesRepos =
-            parseServedReposFromSubjects(JSON.parse(ficRes.stdout)) || null;
-        } catch {
-          servesRepos = null;
-        }
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ servesRepos }));
       return;
     }
 
