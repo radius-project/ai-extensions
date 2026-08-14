@@ -217,7 +217,10 @@ import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
-import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
+import {
+  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./server/routes/graphs-planning-reads.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -865,6 +868,33 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   now: () => Date.now()
 });
 
+// The load-graph-stream SSE route, composed with the same helpers its legacy arm
+// closed over. The entry-consuming seams take the live `CanvasServerEntry` the
+// 503 guard resolved (not an `instanceId`), so every seam sees the object the
+// guard checked — matching the legacy arm, which captured `servers.get(...)`
+// once and reused that reference for the whole stream. `github` is bound into
+// `radArtifactsDirForSelection` here rather than surfaced on the seam.
+const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  defaultBranchForState,
+  prepareSourceRef: (entry, context) =>
+    prepareSourceRefResources(entry, "graph", context),
+  commitSourceRef: (entry, resources, context, expectedToken) =>
+    setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  triggerAppBicepHandoff: (entry, repo, branch) =>
+    triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry, repo, branch),
+  workspaceGraphJsonPath: (state, bicepRepoPath) =>
+    workspaceGraphJsonPath(state, bicepRepoPath),
+  radArtifactsDirForSelection: (options) =>
+    radArtifactsDirForSelection({ ...options, github }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  canvasGraphResources,
+  errorMessage
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
@@ -876,6 +906,7 @@ const serverRoutes = createServerRouteTable({
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
   ...graphsPlanningReadsRoutes,
+  ...graphsPlanningStreamRoutes,
   ...environmentsRoutes,
   ...createEnvironmentRoutes
 });
@@ -5181,116 +5212,6 @@ function createLegacyRequestHandler(
             /* best-effort */
           }
         }
-      }
-      return;
-    }
-
-    if (pathname === "/api/load-graph-stream" && req.method === "GET") {
-      const url = new URL(req.url || "/", `http://127.0.0.1`);
-      const repo = url.searchParams.get("repo") || "";
-      const entry = servers.get(instanceId);
-      if (!entry) {
-        res.writeHead(503);
-        res.end("Canvas server state is unavailable.");
-        return;
-      }
-      const branch =
-        url.searchParams.get("branch") || defaultBranchForState(entry?.state);
-      const sourceRefContext =
-        entry ?
-          prepareSourceRefResources(entry, "graph", { repo, branch })
-        : null;
-
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.writeHead(200);
-
-      const sendProgress = (message: string): void => {
-        res.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
-      };
-      const sendDone = (data: unknown): void => {
-        res.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
-        res.end();
-      };
-
-      if (!repo) {
-        sendDone({ error: "Please select a repository." });
-        return;
-      }
-
-      try {
-        sendProgress(`Checking ${repo} for existing app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-
-        if (content) {
-          sendProgress("Found existing app.bicep — parsing resources...");
-        } else {
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          sendDone({
-            error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-            needsAppBicep: true,
-            repo,
-            branch
-          });
-          return;
-        }
-
-        const graphJsonPath =
-          entry && selection.fromWorkspace ?
-            workspaceGraphJsonPath(entry.state, selection.bicepPath)
-          : "";
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: sendProgress
-          });
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: sendProgress,
-              saveGraphJsonTo: graphJsonPath,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        sendProgress(
-          `Mapped ${resources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "graph",
-              resources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            sendDone({ stale: true });
-            return;
-          }
-          entry.state.graphTargetRepo = repo;
-          entry.state.graphBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.graphFromWorkspace = selection.fromWorkspace;
-          entry.state.activeGraphView = "graph";
-        }
-
-        sendDone({ reload: true });
-      } catch (e) {
-        sendDone({ error: errorMessage(e) });
       }
       return;
     }
