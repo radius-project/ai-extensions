@@ -1498,25 +1498,77 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  const azureStart = SERVER_SRC.indexOf('pathname === "/api/azure-auto-setup"');
-  const azureEnd = SERVER_SRC.indexOf(
-    'pathname === "/api/list-azure-app-registrations"',
+
+  // This suite reads `server.ts` as raw text and slices route bodies out of the
+  // legacy if-chain by their `pathname === ...` markers, so it carries an
+  // undeclared textual coupling to that chain: every slice that migrates a route
+  // onto the route table can delete a delimiter this suite depends on. The
+  // route-table boundary test cannot see that coupling.
+  //
+  // A missing marker must never be allowed to silently resize a slice.
+  // `String.prototype.slice` reads a -1 end as `length - 1`, so a deleted end
+  // delimiter widens a route body to essentially the whole file. The ordering
+  // assertions below then search that widened region for tokens like
+  // `buildAppCreateArgs` that also occur in other routes, and can keep passing
+  // while no longer constraining the route they name.
+  //
+  // Resolving every marker through this helper turns that into an immediate,
+  // self-describing failure naming the marker that needs re-pointing, and it
+  // fails the whole suite rather than only the assertions unlucky enough to
+  // notice.
+  function markerIndex(marker: string, from = 0): number {
+    const at = SERVER_SRC.indexOf(marker, from);
+    if (at < 0) {
+      throw new Error(
+        `No legacy branch matching \`${marker}\` remains in server.ts. That ` +
+          "route has most likely migrated onto the route table; re-point this " +
+          "delimiter at the next legacy branch that still bounds the same route."
+      );
+    }
+    return at;
+  }
+
+  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
+  // The `azure-discovery` reads that used to bound this route migrated to the
+  // route table, and `/api/app-params` — the next legacy branch main used as
+  // this delimiter — has since migrated with the `environments` family. The
+  // next legacy branch that still bounds the slice is `/api/create-environment`,
+  // which stays on the fallback, so it delimits the end of the azure slice.
+  const azureEnd = markerIndex(
+    'pathname === "/api/create-environment"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
-  const createStart = SERVER_SRC.indexOf(
-    'pathname === "/api/create-environment"'
-  );
-  const operationStart = SERVER_SRC.indexOf(
+  const createStart = markerIndex('pathname === "/api/create-environment"');
+  const operationStart = markerIndex(
     'pathname === "/api/operations" && req.method === "POST"'
   );
-  const createEnd = SERVER_SRC.indexOf(
+  const createEnd = markerIndex(
     'pathname === "/api/load-graph-stream"',
     createStart + 'pathname === "/api/create-environment"'.length
   );
-  const deployStart = SERVER_SRC.indexOf('pathname === "/api/deploy"');
+  const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
+
+  it("bounds every sliced route body on markers that still exist", () => {
+    // Pins the coupling itself rather than leaving it to whichever ordering
+    // assertion happens to notice. Each slice must be non-empty and strictly
+    // smaller than the file, so neither a collapsed nor a widened slice can
+    // reach the assertions below.
+    for (const [name, start, end] of [
+      ["azure-auto-setup", azureStart, azureEnd],
+      ["create-environment", createStart, createEnd],
+      ["deploy", deployStart, SERVER_SRC.length]
+    ] as const) {
+      expect(start, name).toBeGreaterThan(-1);
+      expect(end, name).toBeGreaterThan(start);
+    }
+    expect(operationStart).toBeGreaterThan(-1);
+    expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
+  });
 
   it("registers and accepts a server-owned operation before scheduling setup", () => {
     const route = SERVER_SRC.slice(operationStart, azureStart);
