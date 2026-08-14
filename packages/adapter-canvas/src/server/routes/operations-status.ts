@@ -63,7 +63,18 @@ export interface CreateOperationDependencies {
   // composition root resolves the right runner. This is the one place the
   // module-level route reaches per-instance state, and it does so through a
   // single function rather than a handle to the instance map.
-  scheduleEnvironmentOperation(instanceId: string, op: OperationRecord): void;
+  //
+  // Returns whether the operation was actually handed to a runner. In the
+  // legacy arm this could not fail: the request was dispatched by the very
+  // per-instance handler that owned the scheduler, so the scheduler was always
+  // in scope. The migration replaced that closure with a map lookup keyed by
+  // instance id, which reintroduces a should-never-happen miss (a stopped
+  // instance, or a map out of sync). The handler repairs that case rather than
+  // leaving an accepted operation durably `running` with no work behind it.
+  scheduleEnvironmentOperation(
+    instanceId: string,
+    op: OperationRecord
+  ): boolean;
   errorMessage(error: unknown): string;
 }
 
@@ -298,7 +309,36 @@ export async function handleCreateOperation(
   );
   // Scheduling comes strictly after the 202 is written, mirroring the legacy
   // ordering the boundary test pins (`res.end` before `scheduleServerOwnedTask`).
-  dependencies.scheduleEnvironmentOperation(context.instanceId, op);
+  const scheduled = dependencies.scheduleEnvironmentOperation(
+    context.instanceId,
+    op
+  );
+  if (!scheduled) {
+    // No runner accepted the operation, so nothing will ever advance or finish
+    // it. Leaving it `running` would keep polling clients spinning and block a
+    // fresh start for the same repo with a 409 until the record went stale.
+    // The 202 is already on the wire and cannot be recalled, but the record can
+    // be moved to a terminal state and persisted so the failure is observable
+    // through the same status endpoint the client is already polling.
+    dependencies.finish(op, "failed", {
+      failure: {
+        code: "operation-scheduling-failed",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          "Radius accepted the environment operation but could not start any setup work for it.",
+        classification: "unknown",
+        evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
+      }
+    });
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      // Best-effort: the in-memory record is already terminal, so polling
+      // reflects the failure even if this durable write does not land.
+      dependencies.errorMessage(error);
+    }
+  }
 }
 
 export function createOperationsStatusRoutes(

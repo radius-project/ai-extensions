@@ -63,7 +63,7 @@ const productionHandlers = {
       }),
       persistOperations: () => Promise.resolve(),
       finish: () => {},
-      scheduleEnvironmentOperation: () => {},
+      scheduleEnvironmentOperation: () => true,
       errorMessage: (error) => String(error)
     }
   ),

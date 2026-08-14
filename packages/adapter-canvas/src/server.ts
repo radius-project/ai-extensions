@@ -543,9 +543,10 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
         console.error(
           `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
         );
-        return;
+        return false;
       }
       legacy.scheduleEnvironmentOperation(op);
+      return true;
     },
     errorMessage
   }

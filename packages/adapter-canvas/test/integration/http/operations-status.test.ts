@@ -113,6 +113,7 @@ function start(): Harness {
         finish,
         scheduleEnvironmentOperation: (instanceId, op) => {
           scheduled.push({ instanceId, operationId: op.operationId });
+          return true;
         },
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error)
