@@ -146,6 +146,7 @@ document.getElementById('btn-aws').addEventListener('click', function() {
         })
         .catch(function(e) { resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
 });
-<\/script>`
+<\/script>`,
+    "environments"
   );
 }
