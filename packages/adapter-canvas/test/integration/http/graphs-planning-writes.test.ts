@@ -4,6 +4,7 @@ import { computeGraphDiff } from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
 import type {
   AppBicepSelection,
   GraphPipeline
@@ -96,34 +97,41 @@ function start(script: Partial<PipelineScript> = {}): Harness {
 
   const routes = createTestRouteTable(
     createGraphsPlanningWritesRoutes({
-      readInstanceEntry: () => (entryMissing ? undefined : { state }),
-      pipeline,
-      triggerAppBicepHandoff: () => {},
-      prepareSourceRefResources,
-      setSourceRefResources,
-      isCurrentSourceRefToken,
-      defaultBranchForState,
-      canReuseModeledGraph,
-      addGraphProgress,
-      beginPlannedGraphRequest,
-      isCurrentPlannedGraphRequest,
-      fetchRecipePack: () => Promise.resolve([]),
-      resolveRecipeOutputs: (resources) => Promise.resolve(resources),
-      computeGraphDiff: (baseResources, headResources) =>
-        computeGraphDiff(baseResources, headResources) as CanvasGraphResource[],
-      record: (value) => {
-        if (
-          value === null ||
-          typeof value !== "object" ||
-          Array.isArray(value)
-        ) {
-          return {};
-        }
-        return Object.fromEntries(Object.entries(value));
-      },
-      optionalString: (value) => (typeof value === "string" ? value : ""),
-      errorMessage: (error) =>
-        error instanceof Error ? error.message : String(error)
+      // The real workflow service, so this suite still exercises the whole
+      // stack from the socket down to the state machine.
+      workflows: createGraphPlanningWorkflows({
+        readInstanceEntry: () => (entryMissing ? undefined : { state }),
+        pipeline,
+        triggerAppBicepHandoff: () => {},
+        prepareSourceRefResources,
+        setSourceRefResources,
+        isCurrentSourceRefToken,
+        defaultBranchForState,
+        canReuseModeledGraph,
+        addGraphProgress,
+        beginPlannedGraphRequest,
+        isCurrentPlannedGraphRequest,
+        fetchRecipePack: () => Promise.resolve([]),
+        resolveRecipeOutputs: (resources) => Promise.resolve(resources),
+        computeGraphDiff: (baseResources, headResources) =>
+          computeGraphDiff(
+            baseResources,
+            headResources
+          ) as CanvasGraphResource[],
+        record: (value) => {
+          if (
+            value === null ||
+            typeof value !== "object" ||
+            Array.isArray(value)
+          ) {
+            return {};
+          }
+          return Object.fromEntries(Object.entries(value));
+        },
+        optionalString: (value) => (typeof value === "string" ? value : ""),
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      })
     })
   );
 

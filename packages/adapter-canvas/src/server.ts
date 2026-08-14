@@ -217,6 +217,7 @@ import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
@@ -700,17 +701,17 @@ const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
 });
 
 // Composition root for the write half of the `graphs-planning` family. The
-// complete dependency object is assembled here and nowhere else; the handlers
-// receive narrow function seams and the shared modeling pipeline receives its
-// own eight, so neither module holds a GitHub client, spawns `rad`, or touches
-// disk directly.
+// complete dependency object is assembled here and nowhere else; the workflow
+// service receives narrow function seams and the shared modeling pipeline
+// receives its own eight, so neither module holds a GitHub client, spawns
+// `rad`, or touches disk directly.
 //
 // `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
 // `resolveRecipeOutputs` here rather than injected, which is what keeps the
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// handlers, matching how the sibling families inject `repoMatchesWorkspace`.
-const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+const graphPlanningWorkflows = createGraphPlanningWorkflows({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   pipeline: createGraphPipeline({
     fetchBicepSelection: (entry, repo, branch) =>
@@ -746,6 +747,12 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
   record,
   optionalString,
   errorMessage
+});
+
+// The route layer sees exactly one seam: the workflow service above. Parsing
+// and serialization are all it owns.
+const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+  workflows: graphPlanningWorkflows
 });
 
 // Built once at module initialization so table validation runs a single time
@@ -4983,7 +4990,12 @@ function createLegacyRequestHandler(
           for (let attempt = 0; attempt < 6; attempt++) {
             last = await runCmd!(
               "az",
-              buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId })
+              buildRoleAssignmentArgs({
+                objectId,
+                role,
+                scope,
+                subscriptionId
+              })
             );
             if (last.code === 0 || last.stderr.includes("already exists"))
               return {

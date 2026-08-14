@@ -20,6 +20,7 @@ import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
 import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createGraphPipeline } from "./routes/graph-pipeline.js";
 
 interface CompatibilityRoute {
@@ -160,38 +161,41 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createGraphsPlanningWritesRoutes({
-    readInstanceEntry: () => undefined,
-    pipeline: createGraphPipeline({
-      fetchBicepSelection: () =>
-        Promise.resolve({
-          content: null,
-          fromWorkspace: false,
-          branch: "",
-          bicepPath: ""
-        }),
-      resolveRadArtifactsDir: () => Promise.resolve({ dir: "", remote: false }),
-      buildGraphViaRad: () => Promise.resolve([]),
-      canvasGraphResources: () => [],
-      workspaceGraphJsonPath: () => "",
-      graphDefinitionHash: () => "",
-      radArtifactsFingerprint: () => "",
-      removeDirectory: () => {}
-    }),
-    triggerAppBicepHandoff: () => {},
-    prepareSourceRefResources: () => ({ view: "graph", token: "" }),
-    setSourceRefResources: () => false,
-    isCurrentSourceRefToken: () => false,
-    defaultBranchForState: () => "main",
-    canReuseModeledGraph: () => false,
-    addGraphProgress: () => false,
-    beginPlannedGraphRequest: () => 1,
-    isCurrentPlannedGraphRequest: () => false,
-    fetchRecipePack: () => Promise.resolve([]),
-    resolveRecipeOutputs: () => Promise.resolve([]),
-    computeGraphDiff: () => [],
-    record: () => ({}),
-    optionalString: () => "",
-    errorMessage: (error) => String(error)
+    workflows: createGraphPlanningWorkflows({
+      readInstanceEntry: () => undefined,
+      pipeline: createGraphPipeline({
+        fetchBicepSelection: () =>
+          Promise.resolve({
+            content: null,
+            fromWorkspace: false,
+            branch: "",
+            bicepPath: ""
+          }),
+        resolveRadArtifactsDir: () =>
+          Promise.resolve({ dir: "", remote: false }),
+        buildGraphViaRad: () => Promise.resolve([]),
+        canvasGraphResources: () => [],
+        workspaceGraphJsonPath: () => "",
+        graphDefinitionHash: () => "",
+        radArtifactsFingerprint: () => "",
+        removeDirectory: () => {}
+      }),
+      triggerAppBicepHandoff: () => {},
+      prepareSourceRefResources: () => ({ view: "graph", token: "" }),
+      setSourceRefResources: () => false,
+      isCurrentSourceRefToken: () => false,
+      defaultBranchForState: () => "main",
+      canReuseModeledGraph: () => false,
+      addGraphProgress: () => false,
+      beginPlannedGraphRequest: () => 1,
+      isCurrentPlannedGraphRequest: () => false,
+      fetchRecipePack: () => Promise.resolve([]),
+      resolveRecipeOutputs: () => Promise.resolve([]),
+      computeGraphDiff: () => [],
+      record: () => ({}),
+      optionalString: () => "",
+      errorMessage: (error) => String(error)
+    })
   })
 };
 const table = createServerRouteTable(productionHandlers);
