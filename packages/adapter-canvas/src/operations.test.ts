@@ -1642,9 +1642,9 @@ describe("environment creation boundaries", () => {
   // The four assertions that used to slice the `create-environment` legacy arm
   // out of `server.ts` — no application model, GHCR preflight before bootstrap,
   // environment lookup before PUT, and commit point after verification — moved
-  // to `server/routes/create-environment.test.ts` when that route migrated onto
-  // the route table. They are executed behaviorally there against the real
-  // handler rather than asserted as source text here.
+  // to `test/integration/http/create-environment.test.ts` when that route
+  // migrated onto the route table. They are executed behaviorally there against
+  // the real handler rather than asserted as source text here.
 
   it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
     const createApp = azureRoute.indexOf("buildAppCreateArgs");
