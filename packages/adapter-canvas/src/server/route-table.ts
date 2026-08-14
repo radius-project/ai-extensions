@@ -14,7 +14,7 @@ export type RouteOwner =
   | "deployments";
 
 export type RouteHandler = (
-  context: CanvasRequestContext,
+  context: CanvasRequestContext
 ) => void | Promise<void>;
 
 export type RouteHandlerRegistry = Readonly<Record<string, RouteHandler>>;
@@ -27,22 +27,16 @@ export interface RouteDeclaration {
   owner: RouteOwner;
 }
 
-export type ServerRoute =
-  | (RouteDeclaration & {
-      migration: "legacy";
-      handler: null;
-    })
-  | (RouteDeclaration & {
-      migration: "migrated";
-      handler: RouteHandler;
-    });
+export type ServerRoute = RouteDeclaration & {
+  handler: RouteHandler;
+};
 
 function declare(
   method: RouteMethod,
   path: string,
   match: RouteMatcher,
   bodyPolicy: RouteBodyPolicy,
-  owner: RouteOwner,
+  owner: RouteOwner
 ): RouteDeclaration {
   return { method, path, match, bodyPolicy, owner };
 }
@@ -79,21 +73,21 @@ function compileRouteTemplate(template: string): CompiledRouteTemplate {
   }
   return {
     pattern: new RegExp(`^${pattern}$`),
-    parameterNames,
+    parameterNames
   };
 }
 
 export function templatePathParameters(
   template: string,
-  pathname: string,
+  pathname: string
 ): Readonly<Record<string, string>> | undefined {
   const compiled = compileRouteTemplate(template);
   const match = compiled.pattern.exec(pathname);
   if (!match) return undefined;
   return Object.freeze(
     Object.fromEntries(
-      compiled.parameterNames.map((name, index) => [name, match[index + 1]]),
-    ),
+      compiled.parameterNames.map((name, index) => [name, match[index + 1]])
+    )
   );
 }
 
@@ -111,56 +105,56 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "/api/verify-azure-login",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "POST",
     "/api/azure-cli-assist",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "POST",
     "/api/verify-aws-login",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "GET",
     "/api/credential-profiles",
     "exact",
     "none",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "GET",
     "/api/github-identity",
     "exact",
     "none",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "POST",
     "/api/github-account",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "POST",
     "/api/save-credential-profile",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare(
     "POST",
     "/api/delete-credential-profile",
     "exact",
     "json",
-    "identity-credentials",
+    "identity-credentials"
   ),
   declare("POST", "/api/delete-environment", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
@@ -170,14 +164,14 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "/api/list-azure-app-registrations",
     "exact",
     "none",
-    "azure-discovery",
+    "azure-discovery"
   ),
   declare(
     "GET",
     "/api/azure-app-serves-repos",
     "exact",
     "none",
-    "azure-discovery",
+    "azure-discovery"
   ),
   declare("POST", "/api/app-params", "exact", "json", "environments"),
   declare("POST", "/api/create-environment", "exact", "json", "environments"),
@@ -204,88 +198,39 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "/api/operations/:operationId/resume/:code",
     "template",
     "json",
-    "operations-status",
+    "operations-status"
   ),
   declare(
     "POST",
     "/api/operations/:operationId/abandon",
     "template",
     "none",
-    "operations-status",
-  ),
-];
-
-// Routes whose owner module already answers the request. Everything else is
-// still served by the temporary legacy fallback in `server.ts`; this list is the
-// migration ledger the boundary test enforces after every slice.
-export const MIGRATED_ROUTE_KEYS: readonly string[] = [
-  "ANY /api/ping",
-  "GET /api/operations",
-  "GET /api/operations/",
-  "POST /api/open-source",
-  "GET /api/credential-profiles",
-  "GET /api/github-identity",
-  "POST /api/github-account",
-  "POST /api/save-credential-profile",
-  "POST /api/delete-credential-profile",
-  "POST /api/oidc",
-  "POST /api/verify-azure-login",
-  "POST /api/azure-cli-assist",
-  "POST /api/verify-aws-login",
-  "GET /api/list-azure-app-registrations",
-  "GET /api/azure-app-serves-repos",
-  "POST /api/azure-auto-setup",
-  "GET /api/user-repos",
-  "POST /api/repo-branches",
-  "POST /api/discover-branches",
-  "GET /api/load-graph-stream",
-  "POST /api/operations",
-  "GET /api/deploy-status",
-  "GET /api/list-applications",
-  "GET /api/list-deployments",
-  "POST /api/deploy",
-  "POST /api/deploy-reset",
-  "POST /api/delete-deployment",
-  "GET /api/progress",
-  "GET /api/deployed-graph",
-  "POST /api/app-params",
-  "POST /api/delete-environment",
-  "GET /api/list-environments",
-  "GET /api/verify-status",
-  "POST /api/create-environment",
-  "POST /api/load-graph",
-  "POST /api/plan-graph",
-  "POST /api/diff-branches",
-  "POST /api/discover",
-  "POST /api/operations/:operationId/resume/:code",
-  "POST /api/operations/:operationId/abandon",
+    "operations-status"
+  )
 ];
 
 export function routeKey(
-  route: Pick<RouteDeclaration, "method" | "path">,
+  route: Pick<RouteDeclaration, "method" | "path">
 ): string {
   return `${route.method} ${route.path}`;
 }
 
-export const LEGACY_ROUTE_INVENTORY = Object.freeze(
-  SERVER_ROUTE_DECLARATIONS.map(routeKey).filter(
-    (key) => !MIGRATED_ROUTE_KEYS.includes(key),
-  ),
-);
-
 export function createServerRouteTable(
-  handlers: RouteHandlerRegistry,
+  handlers: RouteHandlerRegistry
 ): readonly ServerRoute[] {
+  const declarationKeys = new Set(SERVER_ROUTE_DECLARATIONS.map(routeKey));
+  for (const key of Object.keys(handlers)) {
+    if (!declarationKeys.has(key)) {
+      throw new Error(`Handler registered for undeclared server route: ${key}`);
+    }
+  }
   const routes = SERVER_ROUTE_DECLARATIONS.map<ServerRoute>((declaration) => {
     const key = routeKey(declaration);
-    if (!MIGRATED_ROUTE_KEYS.includes(key)) {
-      return { ...declaration, migration: "legacy", handler: null };
-    }
     const handler = handlers[key];
     if (!handler) {
-      throw new Error(`Missing handler for migrated server route: ${key}`);
+      throw new Error(`Missing handler for server route: ${key}`);
     }
-    return { ...declaration, migration: "migrated", handler };
+    return { ...declaration, handler };
   });
   assertRouteTable(routes);
   return routes;
@@ -294,17 +239,16 @@ export function createServerRouteTable(
 export function matchRoute(
   routes: readonly ServerRoute[],
   method: string | undefined,
-  pathname: string,
+  pathname: string
 ): ServerRoute | undefined {
   const normalizedMethod = String(method || "").toUpperCase();
   return routes.find(
     (route) =>
       (route.method === "ANY" || route.method === normalizedMethod) &&
-      (route.match === "prefix"
-        ? pathname.startsWith(route.path)
-        : route.match === "template"
-          ? templatePathParameters(route.path, pathname) !== undefined
-          : pathname === route.path),
+      (route.match === "prefix" ? pathname.startsWith(route.path)
+      : route.match === "template" ?
+        templatePathParameters(route.path, pathname) !== undefined
+      : pathname === route.path)
   );
 }
 
@@ -326,21 +270,18 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
     const shadow = precedingPrefixes.find(
       (prefix) =>
         methodsOverlap(prefix.method, route.method) &&
-        route.path.startsWith(prefix.path),
+        route.path.startsWith(prefix.path)
     );
     if (shadow) {
       throw new Error(
-        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`,
+        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
     if (route.match === "template") compileRouteTemplate(route.path);
     if (!route.owner) throw new Error(`Unowned server route: ${key}`);
-    if (route.migration === "migrated" && !route.handler) {
-      throw new Error(`Migrated server route has no handler: ${key}`);
-    }
-    if (route.migration === "legacy" && route.handler) {
-      throw new Error(`Legacy server route unexpectedly has a handler: ${key}`);
+    if (typeof route.handler !== "function") {
+      throw new Error(`Server route has no handler: ${key}`);
     }
   }
 }

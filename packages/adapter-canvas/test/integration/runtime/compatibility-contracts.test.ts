@@ -7,7 +7,7 @@ import {
   RADIUS_CANVAS_DISPLAY_NAME,
   RADIUS_CANVAS_ID,
   RADIUS_CANVAS_PAGES,
-  RADIUS_TOOL_DECLARATIONS,
+  RADIUS_TOOL_DECLARATIONS
 } from "../../../src/runtime/declarations.js";
 import { createRadiusCanvas } from "../../../src/runtime/create-radius-canvas.js";
 import {
@@ -17,16 +17,13 @@ import {
   graphDiffPage,
   graphPage,
   oidcPage,
-  plannedGraphPage,
+  plannedGraphPage
 } from "../../../src/pages.js";
 import {
   createFakeDependencies,
-  createFakeSession,
+  createFakeSession
 } from "../../support/runtime/fakes.js";
-import {
-  MIGRATED_ROUTE_KEYS,
-  SERVER_ROUTE_DECLARATIONS,
-} from "../../../src/server/route-table.js";
+import { SERVER_ROUTE_DECLARATIONS } from "../../../src/server/route-table.js";
 
 interface CompatibilityFixture {
   canvas: {
@@ -82,23 +79,23 @@ function filesUnder(path: string): string[] {
 const fixture = JSON.parse(
   readFileSync(
     new URL("../../fixtures/runtime-compatibility.json", import.meta.url),
-    "utf8",
-  ),
+    "utf8"
+  )
 ) as CompatibilityFixture;
 const registration = JSON.parse(
   readFileSync(
     new URL("../../fixtures/artifact-registration.json", import.meta.url),
-    "utf8",
-  ),
+    "utf8"
+  )
 ) as RegistrationFixture;
 const preRemoval = JSON.parse(
   readFileSync(
     new URL(
       "../../fixtures/pre-removal-runtime-declarations.json",
-      import.meta.url,
+      import.meta.url
     ),
-    "utf8",
-  ),
+    "utf8"
+  )
 ) as PreRemovalFixture;
 
 describe("Phase 0 reviewed compatibility oracles", () => {
@@ -107,26 +104,26 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       id: RADIUS_CANVAS_ID,
       displayName: RADIUS_CANVAS_DISPLAY_NAME,
       description: RADIUS_CANVAS_DESCRIPTION,
-      pages: [...RADIUS_CANVAS_PAGES],
+      pages: [...RADIUS_CANVAS_PAGES]
     }).toEqual(fixture.canvas);
 
     expect(RADIUS_ACTION_DECLARATIONS.map(({ name }) => name)).toEqual(
-      fixture.acceptedSurface.actions,
+      fixture.acceptedSurface.actions
     );
     expect(RADIUS_TOOL_DECLARATIONS.map(({ name }) => name)).toEqual(
-      fixture.acceptedSurface.tools,
+      fixture.acceptedSurface.tools
     );
     expect(
       RADIUS_ACTION_DECLARATIONS.map((declaration) => ({
         ...declaration,
-        handlerCallable: true,
-      })),
+        handlerCallable: true
+      }))
     ).toEqual(registration.canvases[0].actions);
     expect(
       RADIUS_TOOL_DECLARATIONS.map((declaration) => ({
         ...declaration,
-        handlerCallable: true,
-      })),
+        handlerCallable: true
+      }))
     ).toEqual(registration.tools);
   });
 
@@ -135,19 +132,19 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     expect(preRemoval.actions).toHaveLength(6);
     expect(preRemoval.tools).toHaveLength(10);
     expect(preRemoval.actions).toEqual(
-      expect.arrayContaining(fixture.acceptedSurface.removedActions),
+      expect.arrayContaining(fixture.acceptedSurface.removedActions)
     );
     expect(preRemoval.tools).toEqual(
-      expect.arrayContaining(fixture.acceptedSurface.removedTools),
+      expect.arrayContaining(fixture.acceptedSurface.removedTools)
     );
 
     const currentNames = new Set([
       ...RADIUS_ACTION_DECLARATIONS.map(({ name }) => name),
-      ...RADIUS_TOOL_DECLARATIONS.map(({ name }) => name),
+      ...RADIUS_TOOL_DECLARATIONS.map(({ name }) => name)
     ]);
     for (const removed of [
       ...fixture.acceptedSurface.removedActions,
-      ...fixture.acceptedSurface.removedTools,
+      ...fixture.acceptedSurface.removedTools
     ]) {
       expect(currentNames.has(removed), removed).toBe(false);
     }
@@ -159,12 +156,12 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       resolve(REPO_ROOT, "plugins/radius/README.md"),
       ...filesUnder(resolve(REPO_ROOT, "plugins/radius/skills")),
       ...filesUnder(resolve(REPO_ROOT, "packages/adapter-canvas/src")).filter(
-        (path) => !path.endsWith(".test.ts"),
-      ),
+        (path) => !path.endsWith(".test.ts")
+      )
     ];
     const removed = [
       ...fixture.acceptedSurface.removedActions,
-      ...fixture.acceptedSurface.removedTools,
+      ...fixture.acceptedSurface.removedTools
     ];
 
     for (const path of surfaces) {
@@ -176,52 +173,19 @@ describe("Phase 0 reviewed compatibility oracles", () => {
   });
 
   it("pins all 40 loopback route method and path declarations", () => {
-    const source = readFileSync(
-      resolve(REPO_ROOT, "packages/adapter-canvas/src/server.ts"),
-      "utf8",
-    );
-
     expect(fixture.routes).toHaveLength(40);
     expect(SERVER_ROUTE_DECLARATIONS).toHaveLength(40);
     expect(
       new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
-        .size,
+        .size
     ).toBe(40);
     expect(
       SERVER_ROUTE_DECLARATIONS.map(({ method, path, match }) => ({
         method,
         path,
-        match,
-      })),
+        match
+      }))
     ).toEqual(fixture.routes);
-
-    // The route table is the single source of routing truth, so the total is
-    // asserted against it rather than by counting matchers in server.ts. Only
-    // routes still on the legacy fallback are required to have a matcher there,
-    // which keeps this contract correct as families migrate out.
-    for (const route of SERVER_ROUTE_DECLARATIONS) {
-      if (MIGRATED_ROUTE_KEYS.includes(`${route.method} ${route.path}`)) {
-        continue;
-      }
-      const matcher =
-        route.match === "prefix"
-          ? `pathname.startsWith("${route.path}")`
-          : `pathname === "${route.path}"`;
-      const methodMatcher =
-        route.method === "ANY" ? "" : `req.method === "${route.method}"`;
-      let offset = source.indexOf(matcher);
-      while (
-        offset >= 0 &&
-        methodMatcher &&
-        !source.slice(offset, offset + 180).includes(methodMatcher)
-      ) {
-        offset = source.indexOf(matcher, offset + matcher.length);
-      }
-      expect(offset, `${route.method} ${route.path}`).toBeGreaterThan(-1);
-      if (route.method !== "ANY") {
-        expect(source.slice(offset, offset + 180)).toContain(methodMatcher);
-      }
-    }
   });
 
   it("pins selected stable markers for every page renderer", () => {
@@ -229,11 +193,11 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       credentials: oidcPage({}),
       graph: graphPage({
         contextRepo: "octo/app",
-        contextBranch: "feature/test",
+        contextBranch: "feature/test"
       }),
       planned: plannedGraphPage({
         contextRepo: "octo/app",
-        contextBranch: "feature/test",
+        contextBranch: "feature/test"
       }),
       "graph-diff": graphDiffPage({
         branches: ["main", "feature/test"],
@@ -245,16 +209,16 @@ describe("Phase 0 reviewed compatibility oracles", () => {
             id: "app",
             name: "app",
             type: "Applications.Core/containers",
-            connections: [],
-          },
-        ],
+            connections: []
+          }
+        ]
       }),
       deployed: deployedGraphPage({ contextRepo: "octo/app" }),
       environment: environmentPage({ contextRepo: "octo/app" }),
       deploying: deployingPage({
         contextRepo: "octo/app",
-        contextBranch: "feature/test",
-      }),
+        contextBranch: "feature/test"
+      })
     };
 
     expect(Object.keys(fixture.htmlMarkers)).toEqual(fixture.canvas.pages);
@@ -271,8 +235,8 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       workspaceContext: {
         workspacePath: "/worktrees/app",
         repo: workspace.repo,
-        branch: workspace.worktreeBranch,
-      },
+        branch: workspace.worktreeBranch
+      }
     });
     fake.sessionHolder.set(createFakeSession());
     const canvas = createRadiusCanvas(fake.deps);
@@ -284,32 +248,32 @@ describe("Phase 0 reviewed compatibility oracles", () => {
       input: {
         page: "graph",
         repo: workspace.repo,
-        branch: workspace.ignoredInputBranch,
-      },
+        branch: workspace.ignoredInputBranch
+      }
     });
     expect(fake.servers.get("radius-panel")?.state.contextBranch).toBe(
-      workspace.worktreeBranch,
+      workspace.worktreeBranch
     );
 
     await canvas.open({
       extensionId: "plugin:radius",
       canvasId: "radius",
       instanceId: "remote-panel",
-      input: { page: "graph", repo: remote.repo, branch: remote.branch },
+      input: { page: "graph", repo: remote.repo, branch: remote.branch }
     });
     expect(fake.servers.get("remote-panel")?.state.contextBranch).toBe(
-      remote.branch,
+      remote.branch
     );
   });
 
   it("pins the single built artifact path and external SDK import", () => {
     const build = readFileSync(
       resolve(REPO_ROOT, "packages/adapter-canvas/build.mjs"),
-      "utf8",
+      "utf8"
     );
     const joined = (declaration: string): string[] => {
       const match = build.match(
-        new RegExp(`const ${declaration} =\\s*\\n?\\s*join\\(([^)]*)\\);`),
+        new RegExp(`const ${declaration} =\\s*\\n?\\s*join\\(([^)]*)\\);`)
       );
       if (!match)
         throw new Error(`build.mjs no longer declares ${declaration}`);
@@ -318,12 +282,12 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     const outfile = [
       ...joined("pluginDir"),
       ...joined("distDir"),
-      ...joined("outfile"),
+      ...joined("outfile")
     ].join("/");
     const externals = [
       ...(build.match(/external:\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(
-        /"([^"]+)"/g,
-      ),
+        /"([^"]+)"/g
+      )
     ].map((entry) => entry[1]);
 
     expect(outfile).toBe(fixture.artifact.path);

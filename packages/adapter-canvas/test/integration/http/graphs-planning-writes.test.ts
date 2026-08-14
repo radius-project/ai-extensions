@@ -134,9 +134,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -318,15 +318,14 @@ describe("graphs-planning writes real-loopback HIT", () => {
   });
 
   it.each([["/api/load-graph"], ["/api/plan-graph"], ["/api/diff-branches"]])(
-    "falls through to the legacy handler for GET %s",
+    "delegates unmatched GET %s",
     async (path) => {
       start();
       const entry = await container!.getOrCreate("panel-a");
       // Only POST is declared, so the method flip must not reach the new handler.
       const response = await fetch(`${entry.baseUrl}${path}`);
-      expect(response.status).toBe(418);
-      expect(await response.text()).toBe("legacy");
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("unmatched");
     }
   );
-
 });

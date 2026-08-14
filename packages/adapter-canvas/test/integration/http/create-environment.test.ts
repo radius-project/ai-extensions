@@ -381,9 +381,9 @@ function start(script: Script = {}): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => state,
@@ -461,7 +461,7 @@ describe("create-environment real-loopback HIT: the server-owned gate", () => {
       headers: { "X-Radius-Server-Owned": SERVER_OWNED_TOKEN }
     });
 
-    expect(response.status).toBe(418);
+    expect(response.status).toBe(404);
   });
 });
 

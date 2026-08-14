@@ -4,7 +4,7 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
   createOperationsStatusRoutes,
-  type OperationActionRecord,
+  type OperationActionRecord
 } from "../../../src/server/routes/operations-status.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
@@ -16,13 +16,13 @@ import {
   isTerminalState,
   requireInput,
   resumeAfterInput,
-  toClientView,
+  toClientView
 } from "../../../src/operations.js";
 import {
   isAksClusterName,
   isResourceGroupName,
   isUuid,
-  isValidRepoSlug,
+  isValidRepoSlug
 } from "../../../src/azure-oidc.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
@@ -63,13 +63,13 @@ const RUNNING: OperationActionRecord = {
     stepSeq: 3,
     message: "build failed",
     classification: "user",
-    evidence: "attacker-influenced build log",
-  },
+    evidence: "attacker-influenced build log"
+  }
 };
 
 function start(): Harness {
   const records = new Map<string, OperationActionRecord>([
-    ["op-running", RUNNING],
+    ["op-running", RUNNING]
   ]);
   const latestCalls: string[] = [];
   let latest: unknown = null;
@@ -87,13 +87,13 @@ function start(): Harness {
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
   const persistOperations = (): Promise<void> => {
     persistCalls.push("persist");
-    return persistError.value
-      ? Promise.reject(persistError.value)
+    return persistError.value ?
+        Promise.reject(persistError.value)
       : Promise.resolve();
   };
   const scheduleEnvironmentOperation = (
     instanceId: string,
-    operation: { operationId: string },
+    operation: { operationId: string }
   ): true => {
     scheduled.push({ instanceId, operationId: operation.operationId });
     return true;
@@ -111,7 +111,7 @@ function start(): Harness {
           return latest;
         },
         get: (operationId) => records.get(operationId) ?? null,
-        toClientView,
+        toClientView
       },
       {
         isValidRepoSlug,
@@ -131,7 +131,7 @@ function start(): Harness {
         finish,
         scheduleEnvironmentOperation,
         errorMessage: (error) =>
-          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error.message : String(error)
       },
       {
         getOperation: (operationId) => records.get(operationId),
@@ -145,9 +145,9 @@ function start(): Harness {
         scheduleEnvironmentOperation,
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error),
-        inputRequiredState: INPUT_REQUIRED_STATE,
-      },
-    ),
+        inputRequiredState: INPUT_REQUIRED_STATE
+      }
+    )
   );
 
   container = createCanvasServer({
@@ -158,16 +158,16 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
-        },
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
+        }
       }),
     createState: () => ({}),
     defaultPage: "graph",
     now: () => Date.now(),
     preferredPort: async () => 0,
-    prepareIdentity: () => {},
+    prepareIdentity: () => {}
   });
 
   return {
@@ -179,7 +179,7 @@ function start(): Harness {
     scheduled,
     setLatest(record) {
       latest = record;
-    },
+    }
   };
 }
 
@@ -191,7 +191,7 @@ const VALID_AZURE_BODY = {
   resourceGroup: "my-rg",
   cluster: "my-aks",
   tenantId: "11111111-1111-1111-1111-111111111111",
-  subscriptionId: "22222222-2222-2222-2222-222222222222",
+  subscriptionId: "22222222-2222-2222-2222-222222222222"
 };
 
 describe("operations-status real-loopback HIT (RF-08)", () => {
@@ -208,7 +208,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
 
     harness.setLatest(RUNNING);
     const byRepo = await fetch(
-      `${entry.baseUrl}/api/operations?repo=${encodeURIComponent("octo/app")}`,
+      `${entry.baseUrl}/api/operations?repo=${encodeURIComponent("octo/app")}`
     );
     expect(byRepo.status).toBe(200);
     const latestPayload = (await byRepo.json()) as {
@@ -244,7 +244,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const response = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(VALID_AZURE_BODY),
+      body: JSON.stringify(VALID_AZURE_BODY)
     });
     expect(response.status).toBe(202);
     expect(response.headers.get("content-type")).toBe("application/json");
@@ -254,7 +254,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     };
     expect(body.operationId).toBeTruthy();
     expect(body.statusUrl).toBe(
-      `/api/operations/${encodeURIComponent(body.operationId)}`,
+      `/api/operations/${encodeURIComponent(body.operationId)}`
     );
     // The Location header points at the same status URL the panel then polls.
     expect(response.headers.get("location")).toBe(body.statusUrl);
@@ -262,7 +262,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     // with the instance that received the request.
     expect(harness.persistCalls).toEqual(["persist"]);
     expect(harness.scheduled).toEqual([
-      { instanceId: "panel-a", operationId: body.operationId },
+      { instanceId: "panel-a", operationId: body.operationId }
     ]);
 
     // The record is now resumable by id over the same socket.
@@ -270,7 +270,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(byId.status).toBe(200);
     expect(
       ((await byId.json()) as { operation: { operationId: string } }).operation
-        .operationId,
+        .operationId
     ).toBe(body.operationId);
   });
 
@@ -280,12 +280,12 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
 
     const response = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST",
-      body: "{not json",
+      body: "{not json"
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
       error: "Invalid JSON body.",
-      code: "invalid-json",
+      code: "invalid-json"
     });
     expect(harness.scheduled).toEqual([]);
     expect(harness.persistCalls).toEqual([]);
@@ -297,19 +297,19 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
 
     const first = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST",
-      body: JSON.stringify(VALID_AZURE_BODY),
+      body: JSON.stringify(VALID_AZURE_BODY)
     });
     const firstBody = (await first.json()) as { operationId: string };
 
     const second = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST",
-      body: JSON.stringify(VALID_AZURE_BODY),
+      body: JSON.stringify(VALID_AZURE_BODY)
     });
     expect(second.status).toBe(409);
     expect(await second.json()).toEqual({
       error: "Setup is already running for octo/app.",
       code: "operation-in-progress",
-      operationId: firstBody.operationId,
+      operationId: firstBody.operationId
     });
     // Only the first request scheduled work.
     expect(harness.scheduled).toHaveLength(1);
@@ -322,13 +322,13 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
 
     const response = await fetch(`${entry.baseUrl}/api/operations`, {
       method: "POST",
-      body: JSON.stringify(VALID_AZURE_BODY),
+      body: JSON.stringify(VALID_AZURE_BODY)
     });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
       error:
         "Radius could not durably register the environment operation. No setup work was started.",
-      code: "operation-registration-persist-failed",
+      code: "operation-registration-persist-failed"
     });
     expect(harness.scheduled).toEqual([]);
   });
@@ -341,16 +341,16 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       provider: "azure",
       repo: "octo/resume",
       environment: "dev",
-      stages: buildStages(),
+      stages: buildStages()
     }) as OperationActionRecord;
     resumable.request = {
       azure: {},
-      environment: { repo: "octo/resume" },
+      environment: { repo: "octo/resume" }
     };
     requireInput(resumable, {
       code: "service-management-reference-required",
       checkpoint: "azure-service-management-reference",
-      message: "Enter the Service Management Reference.",
+      message: "Enter the Service Management Reference."
     });
     harness.records.set(resumable.operationId, resumable);
 
@@ -363,57 +363,56 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
           repo: resumable.repo,
           environment: resumable.environment,
           provider: resumable.provider,
-          serviceManagementReference: "11111111-1111-1111-1111-111111111111",
-        }),
-      },
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
     );
     expect(resumed.status).toBe(202);
     expect(resumable.state).toBe("running");
     expect(resumable.request.azure.serviceManagementReference).toBe(
-      "11111111-1111-1111-1111-111111111111",
+      "11111111-1111-1111-1111-111111111111"
     );
     expect(harness.scheduled).toContainEqual({
       instanceId: "panel-a",
-      operationId: resumable.operationId,
+      operationId: resumable.operationId
     });
 
     const abandonable = createOperation({
       provider: "azure",
       repo: "octo/abandon",
       environment: "dev",
-      stages: buildStages(),
+      stages: buildStages()
     }) as OperationActionRecord;
     requireInput(abandonable, {
       code: "app-selection-required",
       checkpoint: "azure-app-selection",
-      message: "Choose an app.",
+      message: "Choose an app."
     });
     harness.records.set(abandonable.operationId, abandonable);
     const abandoned = await fetch(
       `${entry.baseUrl}/api/operations/${encodeURIComponent(abandonable.operationId)}/abandon`,
-      { method: "POST" },
+      { method: "POST" }
     );
     expect(abandoned.status).toBe(200);
     expect(abandonable.state).toBe("cancelled");
     expect(
       ((await abandoned.json()) as { operation: { state: string } }).operation
-        .state,
+        .state
     ).toBe("cancelled");
 
     // The templates are anchored. An unknown POST subpath still falls through
     // exactly as before instead of being swallowed by a broad operations prefix.
     const unknownPost = await fetch(
       `${entry.baseUrl}/api/operations/${resumable.operationId}/unknown`,
-      { method: "POST" },
+      { method: "POST" }
     );
-    expect(unknownPost.status).toBe(418);
-    expect(await unknownPost.text()).toBe("legacy");
+    expect(unknownPost.status).toBe(404);
+    expect(await unknownPost.text()).toBe("unmatched");
 
-    // The same paths as GET are claimed by the migrated prefix route and 404 on
-    // the composite tail read as an operation id. That matches legacy, whose
-    // GET prefix branch also claimed them, so it is pinned rather than fixed.
+    // The same paths as GET are claimed by the typed prefix route and 404 on the
+    // composite tail read as an operation id, preserving established behavior.
     const asGet = await fetch(
-      `${entry.baseUrl}/api/operations/op-running/abandon`,
+      `${entry.baseUrl}/api/operations/op-running/abandon`
     );
     expect(asGet.status).toBe(404);
     expect(await asGet.text()).toBe('{"error":"Unknown operation."}');
@@ -428,21 +427,21 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       failure: {
         ...RUNNING.failure,
         code: "operation-input-expired",
-        message: "The requested input expired.",
-      },
+        message: "The requested input expired."
+      }
     };
     harness.records.set(expired.operationId, expired);
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(
       `${entry.baseUrl}/api/operations/op-expired/resume/app-selection-required`,
-      { method: "POST", body: "{not json" },
+      { method: "POST", body: "{not json" }
     );
     expect(response.status).toBe(410);
     expect(await response.json()).toMatchObject({
       error: "The requested input expired.",
       code: "operation-input-expired",
-      operation: { operationId: "op-expired" },
+      operation: { operationId: "op-expired" }
     });
     expect(harness.persistCalls).toEqual([]);
     expect(harness.scheduled).toEqual([]);
@@ -454,12 +453,12 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(
-      `${entry.baseUrl}/api/operations/${encodeURIComponent("octo/app:setup")}`,
+      `${entry.baseUrl}/api/operations/${encodeURIComponent("octo/app:setup")}`
     );
     expect(response.status).toBe(200);
     expect(
       ((await response.json()) as { operation: { operationId: string } })
-        .operation.operationId,
+        .operation.operationId
     ).toBe("enc");
   });
 });

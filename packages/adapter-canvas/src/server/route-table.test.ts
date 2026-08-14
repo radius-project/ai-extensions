@@ -3,14 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   assertRouteTable,
   createServerRouteTable,
-  LEGACY_ROUTE_INVENTORY,
   matchRoute,
-  MIGRATED_ROUTE_KEYS,
   routeKey,
   SERVER_ROUTE_DECLARATIONS,
   templatePathParameters,
   type RouteHandler,
-  type ServerRoute,
+  type ServerRoute
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./routes/deployments.js";
@@ -21,9 +19,9 @@ import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import {
-  createGraphsPlanningReadsRoutes,
-  createGraphsPlanningStreamRoutes,
-} from "./routes/graphs-planning-reads.js";
+  createGraphsPlanningRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./routes/graphs-planning.js";
 import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
@@ -39,26 +37,21 @@ interface CompatibilityRoute {
 const fixture = JSON.parse(
   readFileSync(
     new URL("../../test/fixtures/runtime-compatibility.json", import.meta.url),
-    "utf8",
-  ),
+    "utf8"
+  )
 ) as { routes: CompatibilityRoute[] };
-const legacySource = readFileSync(
-  new URL("../server.ts", import.meta.url),
-  "utf8",
-);
-
 const productionHandlers = {
   ...createLivenessSourceRoutes({
     getOpenSourceHandler: () => null,
     readInstanceState: () => undefined,
-    toSafeRepoRelPath: (input) => String(input),
+    toSafeRepoRelPath: (input) => String(input)
   }),
   ...createOperationsStatusRoutes(
     {
       latest: () => null,
       latestAny: () => null,
       get: () => null,
-      toClientView: () => null,
+      toClientView: () => null
     },
     {
       isValidRepoSlug: () => false,
@@ -69,12 +62,12 @@ const productionHandlers = {
       createOperation: () => ({ operationId: "", currentStage: null }),
       startOperation: () => ({
         ok: true,
-        operation: { operationId: "", currentStage: null },
+        operation: { operationId: "", currentStage: null }
       }),
       persistOperations: () => Promise.resolve(),
       finish: () => {},
       scheduleEnvironmentOperation: () => true,
-      errorMessage: (error) => String(error),
+      errorMessage: (error) => String(error)
     },
     {
       getOperation: () => undefined,
@@ -87,13 +80,13 @@ const productionHandlers = {
       toClientView: () => null,
       scheduleEnvironmentOperation: () => {},
       errorMessage: (error) => String(error),
-      inputRequiredState: "input_required",
-    },
+      inputRequiredState: "input_required"
+    }
   ),
   ...createRepositoriesRoutes({
     cliExec: () => {},
     readInstanceState: () => undefined,
-    repoMatchesWorkspace: () => false,
+    repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
     readInstanceEntry: () => undefined,
@@ -102,7 +95,7 @@ const productionHandlers = {
       state: "idle",
       attempts: 0,
       maxAttempts: 3,
-      pending: false,
+      pending: false
     }),
     resolveRepoAppName: () => Promise.resolve(""),
     resolveEnvDeployment: () => Promise.resolve(null),
@@ -126,16 +119,16 @@ const productionHandlers = {
     deployRequest: {
       deploy: () => {
         throw new Error(
-          "unexpected deploy dispatch from the route-table suite",
+          "unexpected deploy dispatch from the route-table suite"
         );
-      },
-    },
+      }
+    }
   }),
   ...createAzureDiscoveryRoutes({
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     runCli: () => Promise.resolve(""),
     isUuid: () => false,
-    parseServedReposFromSubjects: () => [],
+    parseServedReposFromSubjects: () => []
   }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
   ...createIdentityProfilesRoutes({
@@ -151,14 +144,14 @@ const productionHandlers = {
         actingHasPackages: false,
         preferredLogin: null,
         reason: "",
-        accounts: [],
+        accounts: []
       }),
     resetGhIdentityCache: () => {},
     switchGhAccount: () => Promise.resolve({ ok: true }),
     setPreferredGitHubLogin: () => {},
     preflightRepoAdmin: () => Promise.resolve(""),
     isValidRepoSlug: () => false,
-    errorMessage: (error) => String(error),
+    errorMessage: (error) => String(error)
   }),
   ...createIdentityAuthRoutes({
     validateAzureCredentials: () => Promise.resolve({ success: false }),
@@ -174,13 +167,13 @@ const productionHandlers = {
     buildAzureCliAssistMessage: () => ({ prompt: "", displayPrompt: "" }),
     runSessionPrompt: () => Promise.resolve({ status: 200 }),
     runCommand: () => Promise.resolve(""),
-    errorMessage: (error) => String(error),
+    errorMessage: (error) => String(error)
   }),
-  ...createGraphsPlanningReadsRoutes({
+  ...createGraphsPlanningRoutes({
     readInstanceEntry: () => undefined,
     createDeployStatusReader: () => ({
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
-      progress: () => Promise.resolve(null),
+      progress: () => Promise.resolve(null)
     }),
     buildDeployStatusMap: () => new Map(),
     buildDeployMessageMap: () => new Map(),
@@ -190,7 +183,7 @@ const productionHandlers = {
     applyDeployMessages: () => {},
     record: () => ({}),
     errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false,
+    repoMatchesWorkspace: () => false
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
@@ -203,14 +196,14 @@ const productionHandlers = {
         content: null,
         fromWorkspace: false,
         branch: "main",
-        bicepPath: "",
+        bicepPath: ""
       }),
     workspaceGraphJsonPath: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
-    errorMessage: (error) => String(error),
+    errorMessage: (error) => String(error)
   }),
   ...createGraphsPlanningWritesRoutes({
     readInstanceEntry: () => undefined,
@@ -220,7 +213,7 @@ const productionHandlers = {
           content: null,
           fromWorkspace: false,
           branch: "",
-          bicepPath: "",
+          bicepPath: ""
         }),
       resolveRadArtifactsDir: () => Promise.resolve({ dir: "", remote: false }),
       buildGraphViaRad: () => Promise.resolve([]),
@@ -228,7 +221,7 @@ const productionHandlers = {
       workspaceGraphJsonPath: () => "",
       graphDefinitionHash: () => "",
       radArtifactsFingerprint: () => "",
-      removeDirectory: () => {},
+      removeDirectory: () => {}
     }),
     triggerAppBicepHandoff: () => {},
     prepareSourceRefResources: () => ({ view: "graph", token: "" }),
@@ -244,7 +237,7 @@ const productionHandlers = {
     computeGraphDiff: () => [],
     record: () => ({}),
     optionalString: () => "",
-    errorMessage: (error) => String(error),
+    errorMessage: (error) => String(error)
   }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
@@ -277,7 +270,7 @@ const productionHandlers = {
     persistOperations: () => Promise.resolve(),
     reportOperationDiagnostic: () => {},
     verifyWorkflowFile: "radius-verify-credentials.yml",
-    stageVerify: "verify",
+    stageVerify: "verify"
   }),
   // Construction-only: this suite asserts table shape and ownership, so the
   // handler is never invoked here. Its behavior is covered by the collocated
@@ -335,7 +328,7 @@ const productionHandlers = {
         ref: "main",
         defaultBranch: "main",
         pullRequestUrl: "",
-        skipReason: "",
+        skipReason: ""
       }),
     fetchFileFromRepo: () => Promise.resolve(null),
     buildVerifyWorkflowDispatchArgs: () => [],
@@ -346,8 +339,8 @@ const productionHandlers = {
     setStageState: () => {},
     finish: () => {},
     sleep: () => Promise.resolve(),
-    now: () => 0,
-  }),
+    now: () => 0
+  })
 };
 const table = createServerRouteTable(productionHandlers);
 
@@ -367,239 +360,38 @@ describe("server route ownership boundary", () => {
       SERVER_ROUTE_DECLARATIONS.map(({ method, path, match }) => ({
         method,
         path,
-        match,
-      })),
+        match
+      }))
     ).toEqual(fixture.routes);
     expect(
-      SERVER_ROUTE_DECLARATIONS.every((route) => route.owner.length > 0),
+      SERVER_ROUTE_DECLARATIONS.every((route) => route.owner.length > 0)
     ).toBe(true);
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  // operations-status is now fully migrated. The corrected inventory includes
-  // five routes because the prior 38-route count omitted resume and abandon.
-  // - azure-discovery: its two reads and two writes are migrated.
-  // - graphs-planning: its three read routes and three write routes are migrated.
-  // - environments and deployments: both families have fully migrated, so each
-  //   residual is asserted as empty rather than by naming a remaining key.
-  it("owns all 40 routes and leaves no route on the legacy fallback", () => {
-    expect(MIGRATED_ROUTE_KEYS).toEqual([
-      "ANY /api/ping",
-      "GET /api/operations",
-      "GET /api/operations/",
-      "POST /api/open-source",
-      "GET /api/credential-profiles",
-      "GET /api/github-identity",
-      "POST /api/github-account",
-      "POST /api/save-credential-profile",
-      "POST /api/delete-credential-profile",
-      "POST /api/oidc",
-      "POST /api/verify-azure-login",
-      "POST /api/azure-cli-assist",
-      "POST /api/verify-aws-login",
-      "GET /api/list-azure-app-registrations",
-      "GET /api/azure-app-serves-repos",
-      "POST /api/azure-auto-setup",
-      "GET /api/user-repos",
-      "POST /api/repo-branches",
-      "POST /api/discover-branches",
-      "GET /api/load-graph-stream",
-      "POST /api/operations",
-      "GET /api/deploy-status",
-      "GET /api/list-applications",
-      "GET /api/list-deployments",
-      "POST /api/deploy",
-      "POST /api/deploy-reset",
-      "POST /api/delete-deployment",
-      "GET /api/progress",
-      "GET /api/deployed-graph",
-      "POST /api/app-params",
-      "POST /api/delete-environment",
-      "GET /api/list-environments",
-      "GET /api/verify-status",
-      "POST /api/create-environment",
-      "POST /api/load-graph",
-      "POST /api/plan-graph",
-      "POST /api/diff-branches",
-      "POST /api/discover",
-      "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon",
-    ]);
-    expect(Object.keys(productionHandlers).sort()).toEqual(
-      [...MIGRATED_ROUTE_KEYS].sort(),
+  it("requires one concrete handler for every declaration and rejects extras", () => {
+    expect(table.map(routeKey)).toEqual(
+      SERVER_ROUTE_DECLARATIONS.map(routeKey)
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(0);
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/deploy");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/azure-auto-setup");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/discover");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain(
-      "POST /api/create-environment",
+    expect(table.every((route) => typeof route.handler === "function")).toBe(
+      true
     );
-    for (const family of ["environments", "deployments"] as const) {
-      expect(
-        LEGACY_ROUTE_INVENTORY.filter((key) =>
-          SERVER_ROUTE_DECLARATIONS.some(
-            (route) => routeKey(route) === key && route.owner === family,
-          ),
-        ),
-        family,
-      ).toEqual([]);
-    }
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/load-graph");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/plan-graph");
-    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/diff-branches");
-    expect(LEGACY_ROUTE_INVENTORY).toEqual(
-      fixture.routes
-        .map(routeKey)
-        .filter((key) => !MIGRATED_ROUTE_KEYS.includes(key)),
-    );
-    expect(
-      table
-        .filter((route) => route.migration === "migrated")
-        .map(routeKey)
-        .sort(),
-    ).toEqual([...MIGRATED_ROUTE_KEYS].sort());
-    expect(
-      table
-        .filter((route) => route.migration === "legacy")
-        .every((route) => route.handler === null),
-    ).toBe(true);
-  });
-
-  // Independently hardcoded, in declaration order, so the derived complement
-  // above cannot be the only source of truth. A slice that migrates or drops a
-  // route has to update this list deliberately.
-  const RESIDUAL_ROUTE_PIN: string[] = [];
-
-  it("retains the base routes and adds deploy, graph, discover, and operation-action routes", () => {
-    // The pre-deploy migrated ledger, written out by hand rather than derived,
-    // so "base + one key" is proven against an independent transcript instead
-    // of against whatever the ledger currently says.
-    const BASE_MIGRATED_ROUTE_KEYS = [
-      "ANY /api/ping",
-      "GET /api/operations",
-      "GET /api/operations/",
-      "POST /api/open-source",
-      "GET /api/credential-profiles",
-      "GET /api/github-identity",
-      "POST /api/github-account",
-      "POST /api/save-credential-profile",
-      "POST /api/delete-credential-profile",
-      "POST /api/oidc",
-      "POST /api/verify-azure-login",
-      "POST /api/azure-cli-assist",
-      "POST /api/verify-aws-login",
-      "GET /api/list-azure-app-registrations",
-      "GET /api/azure-app-serves-repos",
-      "POST /api/azure-auto-setup",
-      "GET /api/user-repos",
-      "POST /api/repo-branches",
-      "POST /api/discover-branches",
-      "POST /api/operations",
-      "GET /api/deploy-status",
-      "GET /api/list-applications",
-      "GET /api/list-deployments",
-      "POST /api/deploy-reset",
-      "POST /api/delete-deployment",
-      "GET /api/progress",
-      "GET /api/deployed-graph",
-      "POST /api/app-params",
-      "POST /api/delete-environment",
-      "GET /api/list-environments",
-      "GET /api/verify-status",
-      "POST /api/create-environment",
-    ];
-
-    // Nothing the base already owned may be lost by this slice.
-    for (const key of BASE_MIGRATED_ROUTE_KEYS) {
-      expect(MIGRATED_ROUTE_KEYS, key).toContain(key);
-    }
-    expect(
-      MIGRATED_ROUTE_KEYS.filter(
-        (key) => !BASE_MIGRATED_ROUTE_KEYS.includes(key),
-      ),
-    ).toEqual([
-      "GET /api/load-graph-stream",
-      "POST /api/deploy",
-      "POST /api/load-graph",
-      "POST /api/plan-graph",
-      "POST /api/diff-branches",
-      "POST /api/discover",
-      "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon",
-    ]);
-    expect(MIGRATED_ROUTE_KEYS).toHaveLength(
-      BASE_MIGRATED_ROUTE_KEYS.length + 8,
-    );
-
-    // The derived complement and the independent residual pin must agree, in
-    // declaration order.
-    expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(
-      [...RESIDUAL_ROUTE_PIN].sort(),
-    );
-    expect(RESIDUAL_ROUTE_PIN).not.toContain("POST /api/deploy");
-  });
-
-  it("proves the legacy dispatcher has zero API arms", () => {
-    const residualLegacyCount =
-      (legacySource.match(/pathname === "\/api\//g) || []).length +
-      (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length +
-      (legacySource.match(/pathname\.match\(\s*\/\^\\\/api/g) || []).length;
-    // Cross-checked against the inventory and independently pinned: all 40
-    // compatibility routes are concrete typed handlers, including the two
-    // dynamic operation actions that the prior 38-route inventory omitted.
-    expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(0);
-    // The remaining method-aware matchers in `server.ts` must be exactly the
-    // residual inventory, keyed independently of the derived complement.
-    expect([...LEGACY_ROUTE_INVENTORY].sort()).toEqual(
-      [...RESIDUAL_ROUTE_PIN].sort(),
-    );
-
-    for (const route of table) {
-      const matcher =
-        route.match === "prefix"
-          ? `pathname.startsWith("${route.path}")`
-          : `pathname === "${route.path}"`;
-      const methodMatcher =
-        route.method === "ANY" ? "" : `req.method === "${route.method}"`;
-      // A path can carry more than one method (GET and POST /api/operations),
-      // so advance past occurrences whose method does not match. This also keeps
-      // the migrated-absence check below method-aware: a migrated GET must not be
-      // considered still-legacy just because a sibling POST shares its path.
-      let offset = legacySource.indexOf(matcher);
-      while (
-        offset >= 0 &&
-        methodMatcher &&
-        !legacySource.slice(offset, offset + 180).includes(methodMatcher)
-      ) {
-        offset = legacySource.indexOf(matcher, offset + matcher.length);
-      }
-      if (route.migration === "migrated") {
-        // A migrated route must no longer be answered by the legacy chain.
-        expect(offset, routeKey(route)).toBe(-1);
-        continue;
-      }
-      expect(offset, routeKey(route)).toBeGreaterThan(-1);
-      if (route.method !== "ANY") {
-        expect(legacySource.slice(offset, offset + 180)).toContain(
-          `req.method === "${route.method}"`,
-        );
-      }
-    }
-  });
-
-  it("fails when a migrated route has no handler", () => {
     expect(() => createServerRouteTable({})).toThrow(
-      "Missing handler for migrated server route: ANY /api/ping",
+      "Missing handler for server route: ANY /api/ping"
     );
     expect(() =>
       createServerRouteTable({
-        "ANY /api/ping": productionHandlers["ANY /api/ping"] as RouteHandler,
-      }),
-    ).toThrow("Missing handler for migrated server route: GET /api/operations");
+        "ANY /api/ping": productionHandlers["ANY /api/ping"] as RouteHandler
+      })
+    ).toThrow("Missing handler for server route: GET /api/operations");
+    expect(() =>
+      createServerRouteTable({
+        ...productionHandlers,
+        "GET /api/undeclared": () => {}
+      })
+    ).toThrow(
+      "Handler registered for undeclared server route: GET /api/undeclared"
+    );
   });
 
   it("matches the exact operations route before the by-id prefix route", () => {
@@ -612,25 +404,22 @@ describe("server route ownership boundary", () => {
     expect(latest?.handler).not.toBe(byId?.handler);
     // A trailing slash with no id is a by-id lookup for the empty id.
     expect(routeKey(matchRoute(table, "GET", "/api/operations/")!)).toBe(
-      "GET /api/operations/",
+      "GET /api/operations/"
     );
     // Declaration order is what makes that true, so pin it.
     expect(
       SERVER_ROUTE_DECLARATIONS.findIndex(
-        (route) => routeKey(route) === "GET /api/operations",
-      ),
+        (route) => routeKey(route) === "GET /api/operations"
+      )
     ).toBeLessThan(
       SERVER_ROUTE_DECLARATIONS.findIndex(
-        (route) => routeKey(route) === "GET /api/operations/",
-      ),
+        (route) => routeKey(route) === "GET /api/operations/"
+      )
     );
-    // POST /api/operations is now migrated, so it must resolve to its own
-    // declaration rather than being swallowed by the GET rule, carry a handler,
-    // and land on a handler distinct from the two GET routes.
+    // POST /api/operations must resolve to its own declaration rather than being
+    // swallowed by the GET rule and land on a distinct concrete handler.
     const created = matchRoute(table, "POST", "/api/operations");
     expect(routeKey(created!)).toBe("POST /api/operations");
-    expect(created?.migration).toBe("migrated");
-    expect(created?.handler).not.toBeNull();
     expect(created?.handler).not.toBe(latest?.handler);
     expect(created?.handler).not.toBe(byId?.handler);
     // A method with no declaration at all still falls through.
@@ -641,21 +430,21 @@ describe("server route ownership boundary", () => {
     const resume = matchRoute(
       table,
       "POST",
-      "/api/operations/op-1/resume/app-selection-required",
+      "/api/operations/op-1/resume/app-selection-required"
     );
     const abandon = matchRoute(table, "POST", "/api/operations/op-1/abandon");
     expect(routeKey(resume!)).toBe(
-      "POST /api/operations/:operationId/resume/:code",
+      "POST /api/operations/:operationId/resume/:code"
     );
     expect(routeKey(abandon!)).toBe(
-      "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/abandon"
     );
     for (const path of [
       "/api/operations//resume/code",
       "/api/operations/op/resume/",
       "/api/operations/op/resume/code/extra",
       "/api/operations/op/abandon/extra",
-      "/api/operations/op/unknown",
+      "/api/operations/op/unknown"
     ]) {
       expect(matchRoute(table, "POST", path), path).toBeUndefined();
     }
@@ -666,29 +455,26 @@ describe("server route ownership boundary", () => {
     const resumeAsGet = matchRoute(
       table,
       "GET",
-      "/api/operations/op-1/resume/abc",
+      "/api/operations/op-1/resume/abc"
     );
     expect(routeKey(resumeAsGet!)).toBe("GET /api/operations/");
   });
 
   it("extracts raw template segments and regex-escapes literal path text", () => {
     expect(
-      templatePathParameters(
-        "/api/v1.0/:operationId",
-        "/api/v1.0/octo%2Fsetup",
-      ),
+      templatePathParameters("/api/v1.0/:operationId", "/api/v1.0/octo%2Fsetup")
     ).toEqual({ operationId: "octo%2Fsetup" });
     expect(
-      templatePathParameters("/api/v1.0/:operationId", "/api/v1x0/op"),
+      templatePathParameters("/api/v1.0/:operationId", "/api/v1x0/op")
     ).toBeUndefined();
     expect(() => templatePathParameters("/api/:123", "/api/value")).toThrow(
-      "Invalid server route template segment: :123",
+      "Invalid server route template segment: :123"
     );
     expect(() =>
-      templatePathParameters("/api/:id/:id", "/api/one/two"),
+      templatePathParameters("/api/:id/:id", "/api/one/two")
     ).toThrow("Duplicate server route template parameter: id");
     expect(() => templatePathParameters("/api/static", "/api/static")).toThrow(
-      "Server route template has no parameters: /api/static",
+      "Server route template has no parameters: /api/static"
     );
   });
 
@@ -698,49 +484,31 @@ describe("server route ownership boundary", () => {
     expect(matchRoute(table, undefined, "/api/operations")).toBeUndefined();
     expect(matchRoute(table, undefined, "/api/operations/abc")).toBeUndefined();
     expect(routeKey(matchRoute(table, undefined, "/api/ping")!)).toBe(
-      "ANY /api/ping",
+      "ANY /api/ping"
     );
     // Method comparison is case-insensitive on the way in.
     expect(routeKey(matchRoute(table, "get", "/api/operations")!)).toBe(
-      "GET /api/operations",
+      "GET /api/operations"
     );
   });
 
   it("fails on duplicate, unowned, or handlerless routes", () => {
-    const legacyRoute = {
-      ...table[0],
-      migration: "legacy",
-      handler: () => {},
-    } as unknown as ServerRoute;
     expect(() => assertRouteTable([...table, table[0]])).toThrow(
-      "Duplicate server route: ANY /api/ping",
+      "Duplicate server route: ANY /api/ping"
     );
 
     expect(() =>
-      assertRouteTable([{ ...table[0], owner: "" } as unknown as ServerRoute]),
+      assertRouteTable([{ ...table[0], owner: "" } as unknown as ServerRoute])
     ).toThrow("Unowned server route: ANY /api/ping");
 
     expect(() =>
       assertRouteTable([
         {
           ...table[0],
-          migration: "migrated",
-          handler: null,
-        } as unknown as ServerRoute,
-      ]),
-    ).toThrow("Migrated server route has no handler: ANY /api/ping");
-
-    expect(() =>
-      assertRouteTable([
-        {
-          ...legacyRoute,
-          migration: "legacy",
-          handler: () => {},
-        } as unknown as ServerRoute,
-      ]),
-    ).toThrow(
-      `Legacy server route unexpectedly has a handler: ${routeKey(legacyRoute)}`,
-    );
+          handler: null
+        } as unknown as ServerRoute
+      ])
+    ).toThrow("Server route has no handler: ANY /api/ping");
   });
 
   it("fails when a prefix route makes a later route unreachable", () => {
@@ -753,11 +521,11 @@ describe("server route ownership boundary", () => {
         {
           ...(prefix as ServerRoute),
           path: "/api/operations/summary",
-          match: "exact",
-        } as ServerRoute,
-      ]),
+          match: "exact"
+        } as ServerRoute
+      ])
     ).toThrow(
-      "Server route GET /api/operations/summary is unreachable behind earlier prefix route GET /api/operations/",
+      "Server route GET /api/operations/summary is unreachable behind earlier prefix route GET /api/operations/"
     );
 
     expect(() =>
@@ -766,17 +534,17 @@ describe("server route ownership boundary", () => {
         {
           ...(prefix as ServerRoute),
           path: "/api/operations/logs/",
-          method: "ANY",
-        } as ServerRoute,
-      ]),
+          method: "ANY"
+        } as ServerRoute
+      ])
     ).toThrow(
-      "Server route ANY /api/operations/logs/ is unreachable behind earlier prefix route GET /api/operations/",
+      "Server route ANY /api/operations/logs/ is unreachable behind earlier prefix route GET /api/operations/"
     );
   });
 
   it("allows routes an earlier prefix route cannot claim", () => {
     const prefix = table.find(
-      (route) => route.path === "/api/operations/",
+      (route) => route.path === "/api/operations/"
     ) as ServerRoute;
 
     // Disjoint method: the prefix cannot claim a POST sub-route.
@@ -787,23 +555,23 @@ describe("server route ownership boundary", () => {
           ...prefix,
           path: "/api/operations/abandon",
           match: "exact",
-          method: "POST",
-        } as ServerRoute,
-      ]),
+          method: "POST"
+        } as ServerRoute
+      ])
     ).not.toThrow();
 
     // Outside the prefix, and the exact sibling that legitimately precedes it.
     expect(() =>
       assertRouteTable([
         prefix,
-        { ...prefix, path: "/api/operation", match: "exact" } as ServerRoute,
-      ]),
+        { ...prefix, path: "/api/operation", match: "exact" } as ServerRoute
+      ])
     ).not.toThrow();
     expect(() =>
       assertRouteTable([
         { ...prefix, path: "/api/operations", match: "exact" } as ServerRoute,
-        prefix,
-      ]),
+        prefix
+      ])
     ).not.toThrow();
   });
 });

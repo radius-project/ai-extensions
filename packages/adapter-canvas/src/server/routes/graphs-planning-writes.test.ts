@@ -34,7 +34,7 @@ import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
-// for a test — the same approach `graphs-planning-reads.test.ts` takes with
+// for a test — the same approach `graphs-planning.test.ts` takes with
 // `legacyErrorMessage`. They are pure, so a copy is a faithful injection.
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

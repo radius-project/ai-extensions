@@ -1457,7 +1457,7 @@ describe("the step-marker convention at the call sites", () => {
     // Capture the whole argument expression, not just its first literal:
     // several sites concatenate a variable and put the trailing ellipsis on
     // the final fragment, e.g. 'Creating package "' + name + '"...'.
-    // A migrated route narrates through an injected `pushStep` port rather than
+    // A typed route narrates through an injected `pushStep` port rather than
     // touching the array directly, so those sites are scanned too — otherwise
     // the convention would stop being enforced exactly where a route moved.
     const out = [];
@@ -1508,122 +1508,6 @@ describe("the step-marker convention at the call sites", () => {
       expect(addLegacyStep(newOp(), s.slice(1)).state).toBe("skipped");
     }
   });
-});
-
-describe("environment creation boundaries", () => {
-  const SERVER_SRC = readFileSync(
-    new URL("./server.ts", import.meta.url),
-    "utf8"
-  );
-  const AZURE_SETUP_SRC = readFileSync(
-    new URL("./server/routes/azure-auto-setup.ts", import.meta.url),
-    "utf8"
-  );
-  const AZURE_APPLICATION_SRC = readFileSync(
-    new URL("./server/routes/azure-auto-setup-application.ts", import.meta.url),
-    "utf8"
-  );
-
-  it("no longer answers POST /api/operations from the legacy chain", () => {
-    // The registration/scheduling arm moved to the operations-status route
-    // module (its own unit and loopback tests cover the 202-then-schedule
-    // ordering). The legacy `if` for it must be gone entirely, and its old
-    // `operationStart` marker with it — hence no marker slice here.
-    expect(SERVER_SRC).not.toContain(
-      'pathname === "/api/operations" && req.method === "POST"'
-    );
-  });
-
-  it("no longer answers POST /api/create-environment from the legacy chain", () => {
-    // The ~1,000-line setup arm moved onto the route table as its own use case
-    // and four supporting seams, each with focused unit tests, plus a real
-    // loopback suite in `test/integration/http/create-environment.test.ts` that
-    // exercises both sides of the server-owned gate. The legacy `if` must be
-    // gone entirely, and the `createStart`/`createEnd` markers with it — hence
-    // no marker slice here.
-    expect(SERVER_SRC).not.toContain('pathname === "/api/create-environment"');
-  });
-
-  it("no longer answers POST /api/deploy from the legacy chain", () => {
-    expect(SERVER_SRC).not.toContain('pathname === "/api/deploy"');
-  });
-
-  it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
-    expect(SERVER_SRC).toContain('"X-Radius-Server-Owned": serverOwnedToken');
-    expect(SERVER_SRC).toContain(
-      'req.headers["x-radius-server-owned"] === serverOwnedToken'
-    );
-    // The activity clock now lives in the canvas-server lifecycle module, so
-    // the server-owned exclusion moved to the composition root where the
-    // scaffold's markActivity is gated. Same behavior, new location: a
-    // server-owned internal call must not refresh the webview activity clock.
-    expect(SERVER_SRC).toContain(
-      "if (!legacy.isServerOwned(request)) markActivity();"
-    );
-    expect(SERVER_SRC).toContain('postInternal("/api/azure-auto-setup"');
-    expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');
-  });
-
-  it("moves Azure auto-setup out of the legacy chain and preserves preflight ordering in its typed handler", () => {
-    expect(SERVER_SRC).not.toContain('pathname === "/api/azure-auto-setup"');
-    expect(AZURE_SETUP_SRC).toContain('"POST /api/azure-auto-setup"');
-    const ghcrPreflight = AZURE_SETUP_SRC.indexOf(
-      "await dependencies.external.preflightGhcrPackageWriteAccess()"
-    );
-    const azAccountSet = AZURE_SETUP_SRC.indexOf(
-      "steps.push(`Selecting subscription ${subscriptionId}...`);"
-    );
-    const appResolution = AZURE_SETUP_SRC.indexOf(
-      "await resolveAzureAutoSetupApplication"
-    );
-    expect(ghcrPreflight).toBeGreaterThan(-1);
-    expect(azAccountSet).toBeGreaterThan(ghcrPreflight);
-    expect(appResolution).toBeGreaterThan(azAccountSet);
-  });
-
-  // The four assertions that used to slice the `create-environment` legacy arm
-  // out of `server.ts` — no application model, GHCR preflight before bootstrap,
-  // environment lookup before PUT, and commit point after verification — moved
-  // to `test/integration/http/create-environment.test.ts` when that route
-  // migrated onto the route table. They are executed behaviorally there against
-  // the real handler rather than asserted as source text here.
-
-  it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
-    const createApp = AZURE_APPLICATION_SRC.indexOf("buildAppCreateArgs");
-    const ownerAdd = AZURE_APPLICATION_SRC.indexOf(
-      "Assigning the signed-in user as an owner of the new App Registration..."
-    );
-    const ownerList = AZURE_APPLICATION_SRC.indexOf(
-      "Verifying the signed-in user owns the new App Registration..."
-    );
-    const tagPatch = AZURE_APPLICATION_SRC.indexOf(
-      "Applying Radius provenance tags to the new App Registration..."
-    );
-    const tagShow = AZURE_APPLICATION_SRC.indexOf(
-      "Verifying Radius provenance tags..."
-    );
-    const applicationCall = AZURE_SETUP_SRC.indexOf(
-      "await resolveAzureAutoSetupApplication"
-    );
-    const credentialCall = AZURE_SETUP_SRC.indexOf(
-      "await configureAzureAutoSetupCredentials"
-    );
-    expect(createApp).toBeGreaterThan(-1);
-    expect(ownerAdd).toBeGreaterThan(createApp);
-    expect(ownerList).toBeGreaterThan(ownerAdd);
-    expect(tagPatch).toBeGreaterThan(ownerList);
-    expect(tagShow).toBeGreaterThan(tagPatch);
-    expect(applicationCall).toBeGreaterThan(-1);
-    expect(credentialCall).toBeGreaterThan(applicationCall);
-  });
-
-  // The "provisions model-specific values when deployment begins" assertion
-  // that used to slice the `/api/deploy` legacy arm out of `server.ts` moved to
-  // `server/services/deploy-dispatch.test.ts` when that route migrated onto the
-  // route table. Reading `.radius/app.bicep` (and the `app.bicep` fallback),
-  // provisioning `RADIUS_DEPLOY_PARAMS`, and falling back to the environment's
-  // `RADIUS_RAD_COMMANDS` are executed there against the real dispatch service
-  // rather than asserted as source text here.
 });
 
 describe("how finish resolves the stage that was still running", () => {

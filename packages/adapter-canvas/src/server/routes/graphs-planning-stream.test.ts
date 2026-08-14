@@ -9,7 +9,7 @@ import {
   handleLoadGraphStream,
   type GraphsPlanningStreamDependencies,
   type LoadGraphStreamBicepSelection
-} from "./graphs-planning-reads.js";
+} from "./graphs-planning.js";
 
 // ── Recorder ─────────────────────────────────────────────────────────────────
 // The stream handler writes SSE frames through `response.write` and terminates

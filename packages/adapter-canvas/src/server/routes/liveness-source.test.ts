@@ -105,8 +105,8 @@ function safePath(input: unknown): string {
   return value;
 }
 
-// Verbatim transcription of the two branches removed from the legacy
-// `createLegacyRequestHandler` if-chain. The differential cases below keep the
+// Verbatim transcription of the two branches removed from the former inline
+// dispatcher. The differential cases below keep the
 // compatibility proof without duplicating the unit-test request harness.
 interface LegacyWorld {
   instanceId: string;
