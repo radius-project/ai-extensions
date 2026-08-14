@@ -44,12 +44,30 @@ const productionHandlers = {
     readInstanceState: () => undefined,
     toSafeRepoRelPath: (input) => String(input)
   }),
-  ...createOperationsStatusRoutes({
-    latest: () => null,
-    latestAny: () => null,
-    get: () => null,
-    toClientView: () => null
-  }),
+  ...createOperationsStatusRoutes(
+    {
+      latest: () => null,
+      latestAny: () => null,
+      get: () => null,
+      toClientView: () => null
+    },
+    {
+      isValidRepoSlug: () => false,
+      isResourceGroupName: () => false,
+      isAksClusterName: () => false,
+      isUuid: () => false,
+      buildStages: () => [],
+      createOperation: () => ({ operationId: "", currentStage: null }),
+      startOperation: () => ({
+        ok: true,
+        operation: { operationId: "", currentStage: null }
+      }),
+      persistOperations: () => Promise.resolve(),
+      finish: () => {},
+      scheduleEnvironmentOperation: () => true,
+      errorMessage: (error) => String(error)
+    }
+  ),
   ...createRepositoriesRoutes({
     cliExec: () => {},
     readInstanceState: () => undefined,
@@ -192,10 +210,11 @@ describe("server route ownership boundary", () => {
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
-  // Five families are deliberately split, and each is named here so no later
-  // slice can read one as fully migrated in the ledger.
-  // - operations-status: POST /api/operations landed after the GETs migrated,
-  //   so the family owns two migrated routes and one on the legacy fallback.
+  // operations-status is now fully migrated: main added POST /api/operations
+  // after the GETs, and this slice moved it onto the route table too, so the
+  // family owns all three of its routes. Four families remain deliberately
+  // split, and each is named here so no later slice can read one as fully
+  // migrated in the ledger.
   // - azure-discovery: its two read routes are migrated; its two writes
   //   (POST /api/azure-auto-setup, ~1,672 lines, and POST /api/discover, ~220)
   //   are far larger and stay on the fallback for their own slices.
@@ -205,7 +224,7 @@ describe("server route ownership boundary", () => {
   //   remaining routes stay on the fallback.
   // - environments: its four picker and lifecycle routes are migrated; only
   //   POST /api/create-environment stays on the fallback for a separate slice.
-  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status GETs, the azure-discovery reads, the graphs-planning reads, every deployments route but POST /api/deploy, and the environments family except create-environment, and leaves 9 routes on the legacy fallback", () => {
+  it("owns the liveness-source, repositories, identity-profile, identity-auth, and operations-status families, the azure-discovery reads, the graphs-planning reads, every deployments route but POST /api/deploy, and the environments family except create-environment, and leaves 8 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -225,6 +244,7 @@ describe("server route ownership boundary", () => {
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
+      "POST /api/operations",
       "GET /api/deploy-status",
       "GET /api/list-applications",
       "GET /api/list-deployments",
@@ -240,11 +260,14 @@ describe("server route ownership boundary", () => {
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(9);
-    // The split families, pinned explicitly so a later slice cannot quietly
-    // assume any one is done. environments is named by its residual key rather
-    // than trusting a count.
-    expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(8);
+    // The now-completed operations-status family, pinned explicitly so a later
+    // slice cannot quietly re-legacy POST /api/operations.
+    expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
+    // The still-split families, pinned explicitly so a later slice cannot
+    // quietly assume any one is done. environments is named by its residual
+    // key rather than trusting a count.
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/deploy");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/delete-deployment");
     expect(LEGACY_ROUTE_INVENTORY).toContain("POST /api/azure-auto-setup");
@@ -287,13 +310,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 9 of 38
+    // Cross-checked against the inventory, and independently pinned: 8 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(9);
+    expect(residualLegacyCount).toBe(8);
 
     for (const route of table) {
       const matcher =
@@ -361,13 +384,15 @@ describe("server route ownership boundary", () => {
         (route) => routeKey(route) === "GET /api/operations/"
       )
     );
-    // POST /api/operations is declared but still legacy, so it must resolve to
-    // its own declaration rather than being swallowed by the GET rule, and it
-    // must carry no handler so it keeps falling through to the legacy chain.
+    // POST /api/operations is now migrated, so it must resolve to its own
+    // declaration rather than being swallowed by the GET rule, carry a handler,
+    // and land on a handler distinct from the two GET routes.
     const created = matchRoute(table, "POST", "/api/operations");
     expect(routeKey(created!)).toBe("POST /api/operations");
-    expect(created?.migration).toBe("legacy");
-    expect(created?.handler).toBeNull();
+    expect(created?.migration).toBe("migrated");
+    expect(created?.handler).not.toBeNull();
+    expect(created?.handler).not.toBe(latest?.handler);
+    expect(created?.handler).not.toBe(byId?.handler);
     // A method with no declaration at all still falls through.
     expect(matchRoute(table, "DELETE", "/api/operations")).toBeUndefined();
   });
