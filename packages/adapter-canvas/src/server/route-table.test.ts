@@ -16,6 +16,7 @@ import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
+import { createGraphsPlanningReadsRoutes } from "./routes/graphs-planning-reads.js";
 
 interface CompatibilityRoute {
   method: "ANY" | "GET" | "POST";
@@ -106,6 +107,22 @@ const productionHandlers = {
     runSessionPrompt: () => Promise.resolve({ status: 200 }),
     runCommand: () => Promise.resolve(""),
     errorMessage: (error) => String(error)
+  }),
+  ...createGraphsPlanningReadsRoutes({
+    readInstanceEntry: () => undefined,
+    createDeployStatusReader: () => ({
+      graph: () => Promise.resolve({ graph: null, status: "missing" }),
+      progress: () => Promise.resolve(null)
+    }),
+    buildDeployStatusMap: () => new Map(),
+    buildDeployMessageMap: () => new Map(),
+    deployStatusKeys: () => [],
+    projectDeployedGraph: () => [],
+    canvasGraphResources: () => [],
+    applyDeployMessages: () => {},
+    record: () => ({}),
+    errorMessage: (error) => String(error),
+    repoMatchesWorkspace: () => false
   })
 };
 const table = createServerRouteTable(productionHandlers);
@@ -128,9 +145,12 @@ describe("server route ownership boundary", () => {
 
   // operations-status is now fully migrated: main added POST /api/operations
   // after the GETs, and this slice moved it onto the route table too, so the
-  // family owns all three of its routes. The explicit membership assertion below
-  // keeps a later slice from mistaking that completeness for a route it can drop.
-  it("owns the liveness-source, repositories, identity-profile, identity-auth, and operations-status families and leaves 21 routes on the legacy fallback", () => {
+  // family owns all three of its routes. graphs-planning remains split by
+  // construction: only its two read-only routes are migrated, and its four
+  // remaining routes stay on the legacy fallback. The explicit membership
+  // assertions below keep a later slice from mistaking operations-status'
+  // completeness for a route it can drop, or reading graphs-planning as done.
+  it("owns the liveness-source, repositories, identity-profile, and identity-auth families, the operations-status family, and the graphs-planning reads, and leaves 19 routes on the legacy fallback", () => {
     expect(MIGRATED_ROUTE_KEYS).toEqual([
       "ANY /api/ping",
       "GET /api/operations",
@@ -148,16 +168,26 @@ describe("server route ownership boundary", () => {
       "GET /api/user-repos",
       "POST /api/repo-branches",
       "POST /api/discover-branches",
-      "POST /api/operations"
+      "POST /api/operations",
+      "GET /api/progress",
+      "GET /api/deployed-graph"
     ]);
     expect(Object.keys(productionHandlers).sort()).toEqual(
       [...MIGRATED_ROUTE_KEYS].sort()
     );
-    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(21);
+    expect(LEGACY_ROUTE_INVENTORY).toHaveLength(19);
     // The now-completed family, pinned explicitly so a later slice cannot
     // quietly re-legacy POST /api/operations.
     expect(MIGRATED_ROUTE_KEYS).toContain("POST /api/operations");
     expect(LEGACY_ROUTE_INVENTORY).not.toContain("POST /api/operations");
+    expect(LEGACY_ROUTE_INVENTORY).toEqual(
+      expect.arrayContaining([
+        "GET /api/load-graph-stream",
+        "POST /api/load-graph",
+        "POST /api/plan-graph",
+        "POST /api/diff-branches"
+      ])
+    );
     expect(LEGACY_ROUTE_INVENTORY).toEqual(
       fixture.routes
         .map(routeKey)
@@ -180,13 +210,13 @@ describe("server route ownership boundary", () => {
     const residualLegacyCount =
       (legacySource.match(/pathname === "\/api\//g) || []).length +
       (legacySource.match(/pathname\.startsWith\("\/api\//g) || []).length;
-    // Cross-checked against the inventory, and independently pinned: 21 of 38
+    // Cross-checked against the inventory, and independently pinned: 19 of 38
     // after this slice. The regex counts only `pathname ===` and
     // `pathname.startsWith` matchers, so the two regex-matched routes main
     // added under /api/operations/ (:id/resume/:code and the abandon route) are
     // not counted here and are not declared in the route table either.
     expect(residualLegacyCount).toBe(LEGACY_ROUTE_INVENTORY.length);
-    expect(residualLegacyCount).toBe(21);
+    expect(residualLegacyCount).toBe(19);
 
     for (const route of table) {
       const matcher =

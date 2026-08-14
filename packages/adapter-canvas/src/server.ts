@@ -23,7 +23,6 @@ import {
   stateRegistryForEnvironment,
   buildEnvironmentSuffix
 } from "@radius-project/core";
-import type { DeployStatus } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
 import {
@@ -208,6 +207,7 @@ import { createOperationsStatusRoutes } from "./server/routes/operations-status.
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
+import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -596,6 +596,28 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
+// Composition root for the read-only half of the `graphs-planning` family. Ten
+// narrow function seams: the instance-state reader, the cached deploy-status
+// reader factory, the two artifact map builders, the status-key and projection
+// helpers from `@radius-project/core`, the canvas resource normalizer, the
+// message applier, and the record/error/workspace-repo helpers that stay defined
+// here. The reader factory is injected already-cached so the route module owns
+// no cache of its own.
+const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  deployStatusKeys,
+  projectDeployedGraph: (modeled, statusByKey) =>
+    projectDeployedGraph(modeled as any[], statusByKey),
+  canvasGraphResources,
+  applyDeployMessages,
+  record,
+  errorMessage,
+  repoMatchesWorkspace
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
@@ -603,7 +625,8 @@ const serverRoutes = createServerRouteTable({
   ...operationsStatusRoutes,
   ...repositoriesRoutes,
   ...identityProfilesRoutes,
-  ...identityAuthRoutes
+  ...identityAuthRoutes,
+  ...graphsPlanningReadsRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -6204,174 +6227,6 @@ function createLegacyRequestHandler(
       } catch (e) {
         sendDone({ error: errorMessage(e) });
       }
-      return;
-    }
-
-    if (pathname === "/api/progress" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const messages = entry?.state?.progressMessages || [];
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ messages }));
-      return;
-    }
-
-    if (pathname === "/api/deployed-graph" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const reqUrl = new URL(req.url || "/", `http://127.0.0.1`);
-      const repo =
-        (reqUrl.searchParams.get("repo") || "").trim() ||
-        entry?.state?.contextRepo ||
-        entry?.state?.deployingRepo ||
-        entry?.state?.plannedRepo ||
-        entry?.state?.graphTargetRepo ||
-        "";
-      res.setHeader("Content-Type", "application/json");
-      if (!repo) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ resources: [], repo: "", mode: "greyed" }));
-        return;
-      }
-      const state = entry?.state || {};
-      const branch =
-        state.workspaceBranch && repoMatchesWorkspace(state, repo) ?
-          state.workspaceBranch
-        : "main";
-
-      // The page's selectors are authoritative: the user can pick an
-      // environment other than the one this session last deployed to, and the
-      // graph must follow the selection rather than silently rendering another
-      // environment's deploy under the selected environment's label.
-      const sessionEnv = state.deployEnvName || state.envName || "";
-      const requestedEnv =
-        (reqUrl.searchParams.get("environment") || "").trim() || sessionEnv;
-      const requestedApp =
-        (reqUrl.searchParams.get("application") || "").trim() ||
-        state.deployAppName ||
-        "";
-
-      // The Deployed view is a projection: a fixed topology (the modeled
-      // application) painted with a per-resource status that is resolved
-      // separately. Keeping them independent means the graph renders before any
-      // status is known and never changes shape when a deploy starts or ends.
-      //
-      //   live     - a deploy is in flight for this selection.
-      //   terminal - a deployment's status is known.
-      //   greyed   - nothing is known; every node renders pending.
-      //
-      // This session's own deploy status only describes the environment it
-      // deployed to, so it is used only when the selection matches.
-      const sessionMatchesSelection =
-        !requestedEnv ||
-        !sessionEnv ||
-        requestedEnv.toLowerCase() === sessionEnv.toLowerCase();
-      const deploying =
-        state.deployStatus === "in_progress" && sessionMatchesSelection;
-
-      const statusByKey = new Map<string, DeployStatus>();
-      // The resources the deploy monitor tracks are the freshest status this
-      // process has, both during a run and after it settles. Seed from them
-      // first so a terminal deploy keeps its colors even when the artifact read
-      // comes back empty — repainting a just-deployed app as pending would
-      // reproduce the very bug this transport replaced.
-      if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
-        for (const resource of state.deployingResources) {
-          const status = resource?.deployStatus as DeployStatus | undefined;
-          if (!status || status === "pending") continue;
-          for (const key of deployStatusKeys(resource)) {
-            if (!statusByKey.has(key)) statusByKey.set(key, status);
-          }
-        }
-      }
-
-      let graph: unknown = null;
-      let readOk = false;
-      let updatedAt: string | null = null;
-      // The app selector is a hint, not a hard filter: the reader falls back to
-      // an env-only match when the selected app has no artifact yet (the app
-      // name can itself be a guess from the repo short name). Surface the app it
-      // actually resolved so the page can say which one is on screen rather than
-      // mislabeling another app's status under the selected name.
-      let resolvedApp: string | null = requestedApp || null;
-      const messageByKey = new Map<string, string>();
-      try {
-        const reader = cachedDeployStatusReader({
-          repo,
-          environment: requestedEnv,
-          application: requestedApp,
-          // While a deploy is in flight, scope to its run so a previous
-          // deployment's newest-repo-wide artifact can't overwrite the live
-          // topology/status. The in-flight run hasn't uploaded yet, so this
-          // read is empty and the seeded live statuses stand.
-          runId: deploying ? (state.deployRunId ?? null) : null
-        });
-        const result = await reader.graph();
-        graph = result.graph;
-        readOk = result.status === "ok" || result.status === "stale";
-        const progress = await reader.progress();
-        updatedAt = progress?.updatedAt || null;
-        if (progress?.application) resolvedApp = progress.application;
-        for (const [key, status] of buildDeployStatusMap(progress)) {
-          if (!statusByKey.has(key)) statusByKey.set(key, status);
-        }
-        for (const [key, message] of buildDeployMessageMap(progress)) {
-          if (!messageByKey.has(key)) messageByKey.set(key, message);
-        }
-      } catch (e) {
-        // A status read failure must not blank the tab: fall through to the
-        // seeded statuses and the modeled topology.
-        if (entry?.state) {
-          if (!entry.state.progressMessages) entry.state.progressMessages = [];
-          entry.state.progressMessages.push(
-            `Deployed graph status read failed: ${errorMessage(e)}`
-          );
-        }
-      }
-      if (!graph && sessionMatchesSelection && state.deployedGraph)
-        graph = state.deployedGraph;
-
-      // A deployment is "terminal" when its status is known, which is not the
-      // same as having a published graph: the producer only attaches
-      // deploy-graph.json to its final upload, so a run can report real
-      // per-resource status with no graph at all.
-      const mode: "live" | "terminal" | "greyed" =
-        deploying ? "live"
-        : statusByKey.size > 0 || readOk || graph ? "terminal"
-        : "greyed";
-
-      // Topology: prefer the graph the deploy actually published (it reflects
-      // what is running), falling back to the modeled resources so the skeleton
-      // renders before anything has ever been deployed.
-      const graphRecord = record(graph);
-      let topology: unknown[] =
-        Array.isArray(graph) ? graph
-        : Array.isArray(graphRecord.resources) ? graphRecord.resources
-        : [];
-      if (topology.length === 0) {
-        topology =
-          (sessionMatchesSelection ? state.deployingResources : null) ||
-          state.plannedResources ||
-          state.graphResources ||
-          [];
-      }
-
-      const resources = canvasGraphResources(
-        projectDeployedGraph(topology as any[], statusByKey)
-      );
-      // Attach the producer's per-resource message so a red node can explain
-      // itself in the popup instead of just being red.
-      applyDeployMessages(resources, messageByKey);
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({
-          resources,
-          repo,
-          branch,
-          mode,
-          updatedAt,
-          application: resolvedApp
-        })
-      );
       return;
     }
 
