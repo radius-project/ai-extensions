@@ -8,12 +8,7 @@
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
-import { createServer } from "node:http";
-import type {
-  IncomingMessage,
-  Server as HttpServer,
-  ServerResponse
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -38,7 +33,6 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
 import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
@@ -56,9 +50,7 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache,
-  primeGhIdentity,
-  setPreferredGhLogin
+  resetGhIdentityCache
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
 import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
@@ -206,14 +198,20 @@ import {
   environmentPage,
   deployingPage
 } from "./pages.js";
+import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import {
+  syncRequestedPage,
+  type CanvasRequestContext
+} from "./server/request-context.js";
+import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
+import { createServerRouteTable } from "./server/route-table.js";
+import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import type { CanvasServerEntry } from "./server/types.js";
 
-export interface CanvasServerEntry {
-  server: HttpServer;
-  baseUrl: string;
-  url: string;
-  page: string;
-  state: CanvasState;
-}
+export type { CanvasServerEntry } from "./server/types.js";
 
 interface CommandResult {
   code: string | number;
@@ -300,17 +298,6 @@ interface DiscoveryResult {
   vpcs: DiscoveryItem[];
   subnets: DiscoveryItem[];
   errors?: Record<string, string>;
-}
-
-interface BranchInfo {
-  name: string;
-  sha: string;
-}
-
-interface BranchResult {
-  branches?: BranchInfo[];
-  workspaceBranch?: string;
-  error?: string;
 }
 
 interface ChildProcessInput {
@@ -505,9 +492,91 @@ interface FederatedCredential {
   subject: string;
 }
 
-// Per-instance canvas servers: instanceId -> { server, url, page, state }.
-// Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map<string, CanvasServerEntry>();
+// Composition root for the migrated `liveness-source` family. The handlers
+// receive only the three seams they use; the open handler is read through a
+// getter so the SDK entry can still register it after construction.
+const livenessSourceRoutes = createLivenessSourceRoutes({
+  getOpenSourceHandler: () => openSourceHandler,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  toSafeRepoRelPath
+});
+
+// Composition root for the migrated `operations-status` family. It receives the
+// four narrow lookup and projection functions it calls; the registry
+// implementation and the client projection stay in `operations.ts`.
+const operationsStatusRoutes = createOperationsStatusRoutes({
+  latest: (repo) => operations.latest(repo),
+  latestAny: () => operations.latestAny(),
+  get: (operationId) => operations.get(operationId),
+  toClientView
+});
+
+// Composition root for the migrated `repositories` family. Three seams: the
+// subprocess runner, a reader for the live instance state the branch cache is
+// written to, and the workspace-repo predicate, which stays defined here and is
+// injected rather than copied.
+const repositoriesRoutes = createRepositoriesRoutes({
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  repoMatchesWorkspace
+});
+
+// Built once at module initialization so table validation runs a single time
+// and a missing migrated handler fails early rather than per instance.
+const serverRoutes = createServerRouteTable({
+  ...livenessSourceRoutes,
+  ...operationsStatusRoutes,
+  ...repositoriesRoutes
+});
+
+// Legacy handler objects, kept per instance so the start hook can resume
+// recovered verification monitors and the activity gate can recognise the
+// server-owned token. Released by the stopped hook when the instance stops.
+const legacyHandlers = new Map<
+  string,
+  ReturnType<typeof createLegacyRequestHandler>
+>();
+
+const canvasServer = createCanvasServer(
+  createProductionCanvasServerDependencies({
+    createRequestHandler: ({ instanceId, instances, markActivity }) => {
+      const legacy = createLegacyRequestHandler(
+        instanceId,
+        () => instances.get(instanceId)?.baseUrl || ""
+      );
+      legacyHandlers.set(instanceId, legacy);
+      return createScaffoldRequestHandler({
+        instanceId,
+        instances,
+        routes: serverRoutes,
+        legacyFallback: legacy.handler,
+        // Server-owned internal calls must not refresh the webview activity
+        // clock, or the idle-respawn timer never fires.
+        markActivity: (request) => {
+          if (!legacy.isServerOwned(request)) markActivity();
+        },
+        preRoute: preRouteCanvasRequest
+      });
+    },
+    onStarted: (instanceId) => {
+      shuttingDownInstances.delete(instanceId);
+      legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+    },
+    onStopped: (instanceId) => {
+      legacyHandlers.delete(instanceId);
+    },
+    defaultPage: DEFAULT_CANVAS_PAGE,
+    preferredPort: preferredPortForInstance
+  })
+);
+
+// Compatibility facade shared with the SDK runtime during the route migration.
+export const servers = canvasServer.instances;
+
 let environmentOperationTestRunner:
   ((operationId: string) => Promise<void>) | null = null;
 
@@ -2561,11 +2630,8 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-// request handler and read by the host-channel keepalive via the getter below
-// to tell whether a panel is actively open (so the process isn't idle-reaped).
-let lastWebviewActivityAt = 0;
 export function getLastWebviewActivityAt(): number {
-  return lastWebviewActivityAt;
+  return canvasServer.getLastActivityAt();
 }
 
 function accessForSelection(
@@ -2664,7 +2730,27 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(
+// Global pre-routing shared by migrated routes and the legacy fallback. It
+// preserves the exact order the legacy dispatcher used at the top of its
+// if-chain: reject cross-site mutations before any routing or body parse, then
+// synchronise the requested page onto the instance entry.
+function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+  const { request } = context;
+  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
+    context.json(403, {
+      error: "Cross-site request rejected.",
+      code: "cross-site-forbidden"
+    });
+    return true;
+  }
+  syncRequestedPage(
+    canvasServer.instances.get(context.instanceId),
+    context.url.searchParams.get("page")
+  );
+  return false;
+}
+
+function createLegacyRequestHandler(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {
@@ -2868,68 +2954,15 @@ function createRequestHandler(
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
     const pathname = url.pathname;
+    // Cross-site rejection and requested-page synchronisation now run in the
+    // shared pre-routing step so migrated routes cannot bypass them; the page
+    // fallback below still needs the raw value. Webview-activity marking also
+    // moved to that seam, where it is gated on isServerOwned so server-owned
+    // internal calls still do not count as user activity.
     const isServerOwnedRequest =
       req.headers["x-radius-server-owned"] === serverOwnedToken;
-    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
-    // CSRF defense-in-depth: reject cross-site state-changing requests before
-    // any routing or body parse. See isCrossSiteMutation for the rules.
-    if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(403);
-      res.end(
-        JSON.stringify({
-          error: "Cross-site request rejected.",
-          code: "cross-site-forbidden"
-        })
-      );
-      return;
-    }
     const requestedPage = url.searchParams.get("page");
-    const canvasEntry = servers.get(instanceId);
-    if (canvasEntry && requestedPage) {
-      canvasEntry.page = requestedPage;
-      if (requestedPage === "graph")
-        canvasEntry.state.activeGraphView = "graph";
-      else if (requestedPage === "planned")
-        canvasEntry.state.activeGraphView = "planned";
-      else if (
-        requestedPage === "graph-diff" ||
-        requestedPage === "graphDiff"
-      ) {
-        canvasEntry.state.activeGraphView = "diff";
-      }
-    }
 
-    // Lightweight liveness probe used by the client-side heartbeat so pages
-    // can detect when the server has come back after an idle respawn.
-    if (pathname === "/api/ping") {
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, instanceId }));
-      return;
-    }
-
-    // Operation status. The panel polls this instead of waiting on the POST,
-    // which is what lets it stop blocking: the record outlives the request
-    // that created it, so a reload or a trip to another page can rejoin an
-    // operation already in flight.
-    //
-    // Polled rather than streamed on purpose. SSE would be smoother, but the
-    // canvas reloads on navigation and a reload mid-operation is a routine
-    // event here, not an edge case — a plain GET is trivially resumable and
-    // a reconnecting EventSource is not.
-    if (pathname === "/api/operations" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const record = repo ? operations.latest(repo) : operations.latestAny();
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ operation: record ? toClientView(record) : null })
-      );
-      return;
-    }
     if (pathname === "/api/operations" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -3277,78 +3310,6 @@ function createRequestHandler(
       res.end(JSON.stringify({ operation: toClientView(op) }));
       return;
     }
-    if (pathname.startsWith("/api/operations/") && req.method === "GET") {
-      const operationId = decodeURIComponent(
-        pathname.slice("/api/operations/".length)
-      );
-      const record = operations.get(operationId);
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(record ? 200 : 404);
-      res.end(
-        JSON.stringify(
-          record ?
-            { operation: toClientView(record) }
-          : { error: "Unknown operation." }
-        )
-      );
-      return;
-    }
-
-    // canvas (side pane). Only the webview for a local-workspace graph calls
-    // this (client passes localSource); the actual open is delegated to the
-    // SDK session via the handler registered in extension.ts. Status codes
-    // are meaningful so the webview can flag a failed open to the user:
-    // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
-    if (pathname === "/api/open-source" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      let relPath: string;
-      // `line` is reserved: the editor canvas has no line-selection input
-      // yet, so it is validated and threaded through but not acted on. When
-      // the canvas gains line support, the handler can start honoring it.
-      let line: number;
-      try {
-        const data = JSON.parse(body || "{}");
-        relPath = toSafeRepoRelPath(data.path);
-        const lineRaw = Number.parseInt(data.line, 10);
-        line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "invalid path" }));
-        return;
-      }
-      if (typeof openSourceHandler !== "function") {
-        res.writeHead(503);
-        res.end(JSON.stringify({ ok: false, error: "unavailable" }));
-        return;
-      }
-      try {
-        const entry = servers.get(instanceId);
-        await Promise.resolve(
-          openSourceHandler({
-            path: relPath,
-            line,
-            instanceId,
-            state: entry?.state
-          })
-        );
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            ok: false,
-            error: e instanceof Error ? e.message : "failed"
-          })
-        );
-      }
-      return;
-    }
-
     // JSON API: OIDC validation
     if (pathname === "/api/oidc" && req.method === "POST") {
       let body = "";
@@ -7991,133 +7952,6 @@ function createRequestHandler(
       return;
     }
 
-    if (pathname === "/api/user-repos" && req.method === "GET") {
-      try {
-        // Fetch personal repos and org repos in parallel
-        const [personalRepos, orgRepos] = await Promise.all([
-          new Promise<string[]>((resolve) => {
-            cliExec(
-              "gh",
-              [
-                "repo",
-                "list",
-                "--limit",
-                "30",
-                "--json",
-                "nameWithOwner",
-                "--jq",
-                ".[].nameWithOwner"
-              ],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err) {
-                  resolve([]);
-                  return;
-                }
-                resolve(stdout.trim().split("\n").filter(Boolean));
-              }
-            );
-          }),
-          new Promise<string[]>((resolve) => {
-            // Get orgs the user belongs to, then fetch repos from each
-            cliExec(
-              "gh",
-              ["org", "list"],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err || !stdout.trim()) {
-                  resolve([]);
-                  return;
-                }
-                const orgs = stdout.trim().split("\n").filter(Boolean);
-                const orgPromises = orgs.map(
-                  (org) =>
-                    new Promise<string[]>((res2) => {
-                      cliExec(
-                        "gh",
-                        [
-                          "repo",
-                          "list",
-                          org,
-                          "--limit",
-                          "20",
-                          "--json",
-                          "nameWithOwner",
-                          "--jq",
-                          ".[].nameWithOwner"
-                        ],
-                        { timeout: 15000 },
-                        (err2, stdout2) => {
-                          if (err2) {
-                            res2([]);
-                            return;
-                          }
-                          res2(stdout2.trim().split("\n").filter(Boolean));
-                        }
-                      );
-                    })
-                );
-                Promise.all(orgPromises).then((results) =>
-                  resolve(results.flat())
-                );
-              }
-            );
-          })
-        ]);
-        const allRepos = [...new Set([...personalRepos, ...orgRepos])];
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: allRepos }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/repo-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo;
-        if (!repo) {
-          res.writeHead(200);
-          res.end(JSON.stringify({ branches: [] }));
-          return;
-        }
-        const result = await new Promise<string[]>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/branches?per_page=100`,
-              "--jq",
-              ".[].name"
-            ],
-            { timeout: 15000 },
-            (err, stdout) => {
-              if (err) {
-                resolve([]);
-                return;
-              }
-              resolve(stdout.trim().split("\n").filter(Boolean));
-            }
-          );
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: result }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: [] }));
-      }
-      return;
-    }
-
     if (pathname === "/api/plan-graph" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -8270,81 +8104,6 @@ function createRequestHandler(
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ reload: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/discover-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const result = await new Promise<BranchResult>((resolve) => {
-          cliExec(
-            "gh",
-            ["api", "--paginate", `/repos/${repo}/branches?per_page=100`],
-            { timeout: 15000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({ error: stderr || err.message });
-                return;
-              }
-              try {
-                const raw: unknown = JSON.parse(stdout.trim());
-                const branches =
-                  Array.isArray(raw) ?
-                    raw.map((value) => {
-                      const branch = record(value);
-                      return {
-                        name: optionalString(branch.name),
-                        sha: optionalString(record(branch.commit).sha)
-                      };
-                    })
-                  : [];
-                resolve({ branches });
-              } catch (e) {
-                resolve({ error: "Failed to parse branch data" });
-              }
-            }
-          );
-        });
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        if (
-          entry?.state?.workspaceBranch &&
-          repoMatchesWorkspace(entry.state, repo)
-        ) {
-          const branches = result.branches || [];
-          if (!branches.some((b) => b.name === entry.state.workspaceBranch)) {
-            branches.unshift({
-              name: entry.state.workspaceBranch,
-              sha: "worktree"
-            });
-          }
-          result.branches = branches;
-          result.workspaceBranch = entry.state.workspaceBranch;
-        }
-        if (entry && result.branches) {
-          entry.state.branches = result.branches.map((b) => b.name);
-          entry.state.branchShas = {};
-          for (const b of result.branches)
-            entry.state.branchShas[b.name] = b.sha;
-          entry.state.diffTargetRepo = repo;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
       } catch (e) {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(400);
@@ -9956,7 +9715,12 @@ function createRequestHandler(
       res.end(environmentPage(state));
     }
   };
-  return { handler, startRecoveredVerificationTasks };
+  // Exposed so the composition root can gate webview-activity marking: the
+  // scaffold marks activity for every request, but server-owned internal calls
+  // must not count as user activity or the idle-respawn timer never fires.
+  const isServerOwned = (req: IncomingMessage): boolean =>
+    req.headers["x-radius-server-owned"] === serverOwnedToken;
+  return { handler, startRecoveredVerificationTasks, isServerOwned };
 }
 
 const PAGE_RENDERERS = {
@@ -9995,81 +9759,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server: HttpServer, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (err: Error) => {
-      server.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, "127.0.0.1");
-  });
-}
-
-async function startServer(
-  instanceId: string,
-  page = DEFAULT_CANVAS_PAGE
-): Promise<CanvasServerEntry> {
-  let baseUrl = "";
-  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
-  // Restore the user's explicitly chosen GitHub account (if any) before priming
-  // so the very first strategy resolution honors it. This is what makes the
-  // account choice stable across restarts.
-  const persistedLogin = getPreferredGitHubLogin();
-  if (persistedLogin) setPreferredGhLogin(persistedLogin);
-  // Warm the GitHub identity cache in the background at boot so the first gh
-  // calls find the token strategy already resolved instead of paying (or
-  // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
-  // self-healing, so a failure here just means the next caller re-primes.
-  primeGhIdentity().catch(() => {});
-  const server = createServer(requestHandler.handler);
-  let port: number;
-  // Try the stable, instanceId-derived port first; fall back to an ephemeral
-  // port (listen(0)) only if it's already taken/unavailable.
-  const preferred = await preferredPortForInstance(instanceId);
-  try {
-    await listenOn(server, preferred);
-    port = preferred;
-  } catch {
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve)
-    );
-    const address = server.address();
-    port = typeof address === "object" && address ? address.port : 0;
-  }
-  baseUrl = `http://127.0.0.1:${port}`;
-  const entry: CanvasServerEntry = {
-    server,
-    baseUrl,
-    url: `${baseUrl}/?page=${page}`,
-    page,
-    state: {}
-  };
-  servers.set(instanceId, entry);
-  shuttingDownInstances.delete(instanceId);
-  requestHandler.startRecoveredVerificationTasks();
-  return entry;
-}
-
 export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  let entry = servers.get(instanceId);
-  if (entry) {
-    if (page && entry.page !== page) {
-      entry.page = page;
-      entry.url = `${entry.baseUrl}/?page=${page}`;
-    }
-    return entry;
-  }
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.
-  void ensureVendorScripts();
-  return await startServer(instanceId, page);
+  if (!servers.has(instanceId)) void ensureVendorScripts();
+  return await canvasServer.getOrCreate(instanceId, page);
 }

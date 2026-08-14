@@ -5,7 +5,8 @@ export default defineConfig({
     include: [
       "src/**/*.test.ts",
       "test/ci/**/*.test.mjs",
-      "test/integration/runtime/**/*.test.ts"
+      "test/integration/runtime/**/*.test.ts",
+      "test/integration/http/**/*.test.ts"
     ],
     environment: "node",
     testTimeout: 15_000
