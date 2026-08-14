@@ -202,7 +202,8 @@ import {
   type CanvasRequestContext
 } from "./server/request-context.js";
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
-import { SERVER_ROUTE_TABLE } from "./server/route-table.js";
+import { createServerRouteTable } from "./server/route-table.js";
+import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -497,6 +498,17 @@ interface FederatedCredential {
   subject: string;
 }
 
+// Composition root for the migrated `liveness-source` family. The handlers
+// receive only the three seams they use; the open handler is read through a
+// getter so the SDK entry can still register it after construction.
+const livenessSourceRoutes = createLivenessSourceRoutes({
+  getOpenSourceHandler: () => openSourceHandler,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  toSafeRepoRelPath
+});
+const serverRoutes = createServerRouteTable(livenessSourceRoutes);
+
 // Legacy handler objects, kept per instance so the start hook can resume
 // recovered verification monitors and the activity gate can recognise the
 // server-owned token. Released by the stopped hook when the instance stops.
@@ -516,7 +528,7 @@ const canvasServer = createCanvasServer(
       return createScaffoldRequestHandler({
         instanceId,
         instances,
-        routes: SERVER_ROUTE_TABLE,
+        routes: serverRoutes,
         legacyFallback: legacy.handler,
         // Server-owned internal calls must not refresh the webview activity
         // clock, or the idle-respawn timer never fires.
@@ -2856,16 +2868,6 @@ function createLegacyRequestHandler(
       req.headers["x-radius-server-owned"] === serverOwnedToken;
     const requestedPage = url.searchParams.get("page");
 
-    // Lightweight liveness probe used by the client-side heartbeat so pages
-    // can detect when the server has come back after an idle respawn.
-    if (pathname === "/api/ping") {
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, instanceId }));
-      return;
-    }
-
     // Operation status. The panel polls this instead of waiting on the POST,
     // which is what lets it stop blocking: the record outlives the request
     // that created it, so a reload or a trip to another page can rejoin an
@@ -3248,60 +3250,6 @@ function createLegacyRequestHandler(
           : { error: "Unknown operation." }
         )
       );
-      return;
-    }
-
-    // canvas (side pane). Only the webview for a local-workspace graph calls
-    // this (client passes localSource); the actual open is delegated to the
-    // SDK session via the handler registered in extension.ts. Status codes
-    // are meaningful so the webview can flag a failed open to the user:
-    // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
-    if (pathname === "/api/open-source" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      let relPath: string;
-      // `line` is reserved: the editor canvas has no line-selection input
-      // yet, so it is validated and threaded through but not acted on. When
-      // the canvas gains line support, the handler can start honoring it.
-      let line: number;
-      try {
-        const data = JSON.parse(body || "{}");
-        relPath = toSafeRepoRelPath(data.path);
-        const lineRaw = Number.parseInt(data.line, 10);
-        line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "invalid path" }));
-        return;
-      }
-      if (typeof openSourceHandler !== "function") {
-        res.writeHead(503);
-        res.end(JSON.stringify({ ok: false, error: "unavailable" }));
-        return;
-      }
-      try {
-        const entry = servers.get(instanceId);
-        await Promise.resolve(
-          openSourceHandler({
-            path: relPath,
-            line,
-            instanceId,
-            state: entry?.state
-          })
-        );
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            ok: false,
-            error: e instanceof Error ? e.message : "failed"
-          })
-        );
-      }
       return;
     }
 

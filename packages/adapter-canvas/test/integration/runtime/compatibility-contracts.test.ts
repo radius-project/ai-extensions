@@ -23,7 +23,10 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../support/runtime/fakes.js";
-import { SERVER_ROUTE_TABLE } from "../../../src/server/route-table.js";
+import {
+  MIGRATED_ROUTE_KEYS,
+  SERVER_ROUTE_DECLARATIONS
+} from "../../../src/server/route-table.js";
 
 interface CompatibilityFixture {
   canvas: {
@@ -179,13 +182,13 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     );
 
     expect(fixture.routes).toHaveLength(38);
-    expect(SERVER_ROUTE_TABLE).toHaveLength(38);
+    expect(SERVER_ROUTE_DECLARATIONS).toHaveLength(38);
     expect(
       new Set(fixture.routes.map((route) => `${route.method} ${route.path}`))
         .size
     ).toBe(38);
     expect(
-      SERVER_ROUTE_TABLE.map(({ method, path, match }) => ({
+      SERVER_ROUTE_DECLARATIONS.map(({ method, path, match }) => ({
         method,
         path,
         match
@@ -196,8 +199,10 @@ describe("Phase 0 reviewed compatibility oracles", () => {
     // asserted against it rather than by counting matchers in server.ts. Only
     // routes still on the legacy fallback are required to have a matcher there,
     // which keeps this contract correct as families migrate out.
-    for (const route of SERVER_ROUTE_TABLE) {
-      if (route.migration !== "legacy") continue;
+    for (const route of SERVER_ROUTE_DECLARATIONS) {
+      if (MIGRATED_ROUTE_KEYS.includes(`${route.method} ${route.path}`)) {
+        continue;
+      }
       const matcher =
         route.match === "prefix" ?
           `pathname.startsWith("${route.path}")`

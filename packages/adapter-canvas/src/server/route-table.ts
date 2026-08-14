@@ -17,7 +17,9 @@ export type RouteHandler = (
   context: CanvasRequestContext
 ) => void | Promise<void>;
 
-interface RouteMetadata {
+export type RouteHandlerRegistry = Readonly<Record<string, RouteHandler>>;
+
+export interface RouteDeclaration {
   method: RouteMethod;
   path: string;
   match: RouteMatcher;
@@ -26,136 +28,165 @@ interface RouteMetadata {
 }
 
 export type ServerRoute =
-  | (RouteMetadata & {
+  | (RouteDeclaration & {
       migration: "legacy";
       handler: null;
     })
-  | (RouteMetadata & {
+  | (RouteDeclaration & {
       migration: "migrated";
       handler: RouteHandler;
     });
 
-function legacy(
+function declare(
   method: RouteMethod,
   path: string,
   match: RouteMatcher,
   bodyPolicy: RouteBodyPolicy,
   owner: RouteOwner
-): ServerRoute {
-  return {
-    method,
-    path,
-    match,
-    bodyPolicy,
-    owner,
-    migration: "legacy",
-    handler: null
-  };
+): RouteDeclaration {
+  return { method, path, match, bodyPolicy, owner };
 }
 
-export const SERVER_ROUTE_TABLE: readonly ServerRoute[] = [
-  legacy("ANY", "/api/ping", "exact", "none", "liveness-source"),
-  legacy("GET", "/api/operations", "exact", "none", "operations-status"),
-  legacy("GET", "/api/operations/", "prefix", "none", "operations-status"),
-  legacy("POST", "/api/open-source", "exact", "json", "liveness-source"),
-  legacy("POST", "/api/oidc", "exact", "json", "identity-credentials"),
-  legacy(
+// Single source of truth for route ownership. Every method and path the canvas
+// server answers is declared exactly once, in the order the legacy dispatcher
+// tested them.
+export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
+  declare("ANY", "/api/ping", "exact", "none", "liveness-source"),
+  declare("GET", "/api/operations", "exact", "none", "operations-status"),
+  declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
+  declare("POST", "/api/open-source", "exact", "json", "liveness-source"),
+  declare("POST", "/api/oidc", "exact", "json", "identity-credentials"),
+  declare(
     "POST",
     "/api/verify-azure-login",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "POST",
     "/api/azure-cli-assist",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "POST",
     "/api/verify-aws-login",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "GET",
     "/api/credential-profiles",
     "exact",
     "none",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "GET",
     "/api/github-identity",
     "exact",
     "none",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "POST",
     "/api/github-account",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "POST",
     "/api/save-credential-profile",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy(
+  declare(
     "POST",
     "/api/delete-credential-profile",
     "exact",
     "json",
     "identity-credentials"
   ),
-  legacy("POST", "/api/delete-environment", "exact", "json", "environments"),
-  legacy("POST", "/api/operations", "exact", "json", "operations-status"),
-  legacy("POST", "/api/azure-auto-setup", "exact", "json", "azure-discovery"),
-  legacy(
+  declare("POST", "/api/delete-environment", "exact", "json", "environments"),
+  declare("POST", "/api/operations", "exact", "json", "operations-status"),
+  declare("POST", "/api/azure-auto-setup", "exact", "json", "azure-discovery"),
+  declare(
     "GET",
     "/api/list-azure-app-registrations",
     "exact",
     "none",
     "azure-discovery"
   ),
-  legacy(
+  declare(
     "GET",
     "/api/azure-app-serves-repos",
     "exact",
     "none",
     "azure-discovery"
   ),
-  legacy("POST", "/api/app-params", "exact", "json", "environments"),
-  legacy("POST", "/api/create-environment", "exact", "json", "environments"),
-  legacy("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),
-  legacy("GET", "/api/progress", "exact", "none", "graphs-planning"),
-  legacy("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
-  legacy("GET", "/api/deploy-status", "exact", "none", "deployments"),
-  legacy("POST", "/api/load-graph", "exact", "json", "graphs-planning"),
-  legacy("GET", "/api/list-environments", "exact", "none", "environments"),
-  legacy("GET", "/api/list-applications", "exact", "none", "deployments"),
-  legacy("GET", "/api/list-deployments", "exact", "none", "deployments"),
-  legacy("POST", "/api/delete-deployment", "exact", "json", "deployments"),
-  legacy("GET", "/api/verify-status", "exact", "none", "environments"),
-  legacy("GET", "/api/user-repos", "exact", "none", "repositories"),
-  legacy("POST", "/api/repo-branches", "exact", "json", "repositories"),
-  legacy("POST", "/api/plan-graph", "exact", "json", "graphs-planning"),
-  legacy("POST", "/api/discover-branches", "exact", "json", "repositories"),
-  legacy("POST", "/api/diff-branches", "exact", "json", "graphs-planning"),
-  legacy("POST", "/api/deploy", "exact", "json", "deployments"),
-  legacy("POST", "/api/deploy-reset", "exact", "none", "deployments"),
-  legacy("POST", "/api/discover", "exact", "json", "azure-discovery")
+  declare("POST", "/api/app-params", "exact", "json", "environments"),
+  declare("POST", "/api/create-environment", "exact", "json", "environments"),
+  declare("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),
+  declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
+  declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
+  declare("GET", "/api/deploy-status", "exact", "none", "deployments"),
+  declare("POST", "/api/load-graph", "exact", "json", "graphs-planning"),
+  declare("GET", "/api/list-environments", "exact", "none", "environments"),
+  declare("GET", "/api/list-applications", "exact", "none", "deployments"),
+  declare("GET", "/api/list-deployments", "exact", "none", "deployments"),
+  declare("POST", "/api/delete-deployment", "exact", "json", "deployments"),
+  declare("GET", "/api/verify-status", "exact", "none", "environments"),
+  declare("GET", "/api/user-repos", "exact", "none", "repositories"),
+  declare("POST", "/api/repo-branches", "exact", "json", "repositories"),
+  declare("POST", "/api/plan-graph", "exact", "json", "graphs-planning"),
+  declare("POST", "/api/discover-branches", "exact", "json", "repositories"),
+  declare("POST", "/api/diff-branches", "exact", "json", "graphs-planning"),
+  declare("POST", "/api/deploy", "exact", "json", "deployments"),
+  declare("POST", "/api/deploy-reset", "exact", "none", "deployments"),
+  declare("POST", "/api/discover", "exact", "json", "azure-discovery")
 ];
 
-export function routeKey(route: Pick<ServerRoute, "method" | "path">): string {
+// Routes whose owner module already answers the request. Everything else is
+// still served by the temporary legacy fallback in `server.ts`; this list is the
+// migration ledger the boundary test enforces after every slice.
+export const MIGRATED_ROUTE_KEYS: readonly string[] = [
+  "ANY /api/ping",
+  "POST /api/open-source"
+];
+
+export function routeKey(
+  route: Pick<RouteDeclaration, "method" | "path">
+): string {
   return `${route.method} ${route.path}`;
+}
+
+export const LEGACY_ROUTE_INVENTORY = Object.freeze(
+  SERVER_ROUTE_DECLARATIONS.map(routeKey).filter(
+    (key) => !MIGRATED_ROUTE_KEYS.includes(key)
+  )
+);
+
+export function createServerRouteTable(
+  handlers: RouteHandlerRegistry
+): readonly ServerRoute[] {
+  const routes = SERVER_ROUTE_DECLARATIONS.map<ServerRoute>((declaration) => {
+    const key = routeKey(declaration);
+    if (!MIGRATED_ROUTE_KEYS.includes(key)) {
+      return { ...declaration, migration: "legacy", handler: null };
+    }
+    const handler = handlers[key];
+    if (!handler) {
+      throw new Error(`Missing handler for migrated server route: ${key}`);
+    }
+    return { ...declaration, migration: "migrated", handler };
+  });
+  assertRouteTable(routes);
+  return routes;
 }
 
 export function matchRoute(
@@ -208,9 +239,3 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
     }
   }
 }
-
-export const LEGACY_ROUTE_INVENTORY = Object.freeze(
-  SERVER_ROUTE_TABLE.filter((route) => route.migration === "legacy").map(
-    routeKey
-  )
-);
