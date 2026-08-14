@@ -316,15 +316,21 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       application: null
     });
 
-    // Unmigrated routes still reach the fallback. `/api/list-environments` is
-    // used rather than a route from this family: this family's write routes
-    // migrated in the following slice and `GET /api/load-graph-stream` is
-    // migrating in its own, so probing either would silently stop testing the
-    // fallback and start asserting against a migrated handler. The inventory
-    // assertion turns that into a loud failure the next time it happens.
-    const residualKey = "GET /api/list-environments";
-    expect(LEGACY_ROUTE_INVENTORY).toContain(residualKey);
-    const residual = await fetch(`${entry.baseUrl}/api/list-environments`);
+    // Unmigrated routes still reach the fallback. The probe target is derived
+    // from the inventory rather than named: a named probe inherits the
+    // migration expiry of the route it names, and silently stops testing the
+    // fallback once that route migrates. Deriving it means the probe follows
+    // whatever is still residual, and fails loudly when nothing is.
+    const [residualKey] = LEGACY_ROUTE_INVENTORY;
+    if (!residualKey) {
+      throw new Error(
+        "No residual route remains, so the legacy fallback can no longer be " +
+          "probed. Delete the fallback and this probe together."
+      );
+    }
+    const [method, path] = residualKey.split(" ");
+    expect(path?.startsWith("/api/")).toBe(true);
+    const residual = await fetch(`${entry.baseUrl}${path}`, { method });
     expect(residual.status).toBe(418);
   });
 });

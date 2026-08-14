@@ -173,6 +173,7 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "GET /api/user-repos",
   "POST /api/repo-branches",
   "POST /api/discover-branches",
+  "GET /api/load-graph-stream",
   "POST /api/operations",
   "GET /api/deploy-status",
   "GET /api/list-applications",
@@ -181,6 +182,10 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/delete-deployment",
   "GET /api/progress",
   "GET /api/deployed-graph",
+  "POST /api/app-params",
+  "POST /api/delete-environment",
+  "GET /api/list-environments",
+  "GET /api/verify-status",
   "POST /api/load-graph",
   "POST /api/plan-graph",
   "POST /api/diff-branches"

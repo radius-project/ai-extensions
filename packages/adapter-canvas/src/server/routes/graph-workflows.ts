@@ -53,26 +53,28 @@ export interface GraphPlanningWorkflows {
   diffBranches(request: GraphWorkflowRequest): Promise<GraphWorkflowOutcome>;
 }
 
-export interface GraphWorkflowDependencies {
+export interface GraphWorkflowDependencies<
+  TEntry extends GraphInstanceEntry = GraphInstanceEntry
+> {
   // Returns undefined when the instance has no entry, which is what the legacy
   // `servers.get(instanceId)` miss meant. A request context's `state` snapshot
   // cannot be used: it substitutes `{}` for a missing entry and so cannot
   // express the 503 these three workflows answer.
-  readInstanceEntry(instanceId: string): GraphInstanceEntry | undefined;
-  pipeline: GraphPipeline;
+  readInstanceEntry(instanceId: string): TEntry | undefined;
+  pipeline: GraphPipeline<TEntry>;
   triggerAppBicepHandoff(
-    entry: GraphInstanceEntry | undefined,
+    entry: TEntry | undefined,
     repo: string,
     branches: string | string[],
     page: string
   ): void;
   prepareSourceRefResources(
-    entry: GraphInstanceEntry,
+    entry: TEntry,
     view: GraphView,
     context: Record<string, unknown>
   ): SourceRefContext;
   setSourceRefResources(
-    entry: GraphInstanceEntry,
+    entry: TEntry,
     view: GraphView,
     resources: CanvasGraphResource[],
     context: Record<string, unknown>,
@@ -130,13 +132,13 @@ function bare(
 
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
-export function createGraphPlanningWorkflows(
-  dependencies: GraphWorkflowDependencies
+export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
+  dependencies: GraphWorkflowDependencies<TEntry>
 ): GraphPlanningWorkflows {
   const { pipeline } = dependencies;
 
   function appBicepHandoffOutcome(
-    entry: GraphInstanceEntry,
+    entry: TEntry,
     repo: string,
     branch: string
   ): GraphWorkflowOutcome {

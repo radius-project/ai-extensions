@@ -339,15 +339,25 @@ describe("graphs-planning writes real-loopback HIT", () => {
   );
 
   it("still routes an unmigrated path to the legacy fallback", async () => {
-    // Resolved from the inventory rather than named, so this probe cannot
-    // silently start asserting against a migrated handler when the route it
-    // names is migrated in a later slice.
-    const residualKey = "GET /api/list-environments";
-    expect(LEGACY_ROUTE_INVENTORY).toContain(residualKey);
+    // Resolved from the inventory rather than named. A named probe inherits the
+    // migration expiry of the route it names: once that route migrates, the
+    // probe stops proving the fallback is reachable and starts asserting
+    // against a migrated handler. Deriving it means the probe follows whatever
+    // is still residual, and fails loudly when nothing is.
+    const [residualKey] = LEGACY_ROUTE_INVENTORY;
+    if (!residualKey) {
+      throw new Error(
+        "No residual route remains, so the legacy fallback can no longer be " +
+          "probed. Delete the fallback and this probe together."
+      );
+    }
+    const [method, path] = residualKey.split(" ");
+    expect(method).toBeTruthy();
+    expect(path?.startsWith("/api/")).toBe(true);
 
     start();
     const entry = await container!.getOrCreate("panel-a");
-    const response = await fetch(`${entry.baseUrl}/api/list-environments`);
+    const response = await fetch(`${entry.baseUrl}${path}`, { method });
     expect(response.status).toBe(418);
     expect(await response.text()).toBe("legacy");
   });
