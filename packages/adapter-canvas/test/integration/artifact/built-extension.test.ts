@@ -122,7 +122,14 @@ describe("P0-C built Radius extension artifact", () => {
           /packages\/adapter-canvas\/src\/runtime\/bootstrap\.ts$/
         ),
         expect.stringMatching(/packages\/adapter-canvas\/src\/server\.ts$/),
-        expect.stringMatching(/packages\/adapter-canvas\/src\/pages\.ts$/),
+        // The page renderers are owned by src/pages/; src/pages.ts is only a
+        // behaviour-free re-export facade, so the bundler forwards through it.
+        expect.stringMatching(
+          /packages\/adapter-canvas\/src\/pages\/shell\.ts$/
+        ),
+        expect.stringMatching(
+          /packages\/adapter-canvas\/src\/pages\/environment-page\.ts$/
+        ),
         expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/),
         expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/),
         expect.stringMatching(/skills\/radius-app-bicep\/SKILL\.md$/),
@@ -233,5 +240,79 @@ describe("P0-C built Radius extension artifact", () => {
         readFileSync(sourceSkill, "utf8")
       );
     }
+  });
+
+  it("packages the extracted page modules behind the forwarding facade exactly once", () => {
+    assertCurrentArtifact();
+    const bundle = readFileSync(ARTIFACT, "utf8");
+    const sourceMap = JSON.parse(readFileSync(SOURCE_MAP, "utf8")) as {
+      sources: string[];
+    };
+    const normalizedSources = sourceMap.sources.map((source) =>
+      source.replaceAll("\\", "/")
+    );
+    const pageModules = [
+      "pages/browser-function.ts",
+      "pages/encoding.ts",
+      "pages/shell-styles.ts",
+      "pages/shell.ts",
+      "pages/graph-header.ts",
+      "pages/graph-page.ts",
+      "pages/planned-graph-page.ts",
+      "pages/fragments.ts",
+      "pages/graph-diff-page.ts",
+      "pages/deployed-graph-page.ts",
+      "pages/environment-page.ts",
+      "pages/environment/environments-pane.ts",
+      "pages/environment/credentials-pane.ts",
+      "pages/environment/client-environments.ts",
+      "pages/environment/client-operations.ts",
+      "pages/environment/client-profiles.ts",
+      "pages/environment/client-discovery.ts",
+      "pages/environment/client-credentials.ts",
+      "pages/deploying-page.ts",
+      "pages/deploying/client-deployments.ts"
+    ];
+    for (const pageModule of pageModules) {
+      expect(
+        normalizedSources.filter((source) =>
+          source.endsWith(`packages/adapter-canvas/src/${pageModule}`)
+        ),
+        pageModule
+      ).toHaveLength(1);
+    }
+
+    // The compatibility facade holds no behaviour, so the bundler resolves its
+    // re-exports to the owning modules and contributes no module of its own.
+    // Logic added to src/pages.ts would show up here.
+    expect(
+      normalizedSources.filter((source) =>
+        source.endsWith("packages/adapter-canvas/src/pages.ts")
+      )
+    ).toHaveLength(0);
+    // oidcPage is reachable only through the facade — no route renders it — so
+    // the bundler drops it. It stays exported for compatibility and is covered
+    // by its collocated unit tests.
+    expect(
+      normalizedSources.filter((source) =>
+        source.endsWith("packages/adapter-canvas/src/pages/oidc-page.ts")
+      )
+    ).toHaveLength(0);
+
+    // Splitting the renderers must not duplicate page text in the artifact: the
+    // shell stylesheet and the fragments shared by several pages stay
+    // single-sourced through their owning module.
+    for (const marker of [
+      'id="graph-diff-subtitle"',
+      'id="deploy-delete-modal"',
+      "--rad-brand: #da4c2a;"
+    ]) {
+      expect(bundle.split(marker).length - 1, marker).toBe(1);
+    }
+
+    // Page modules are bundled into the single artifact, never imported or
+    // fetched at runtime.
+    expect(bundle).not.toMatch(/import\(\s*["'][^"']*pages\//);
+    expect(bundle).not.toMatch(/from\s*["']\.[^"']*pages[^"']*["']/);
   });
 });
