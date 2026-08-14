@@ -6,9 +6,11 @@
 // requests.
 //
 // Every case here is a refusal, which the route answers before it touches gh or
-// the network, so nothing needs to be stubbed. The one accepted deploy uses an
-// empty repo, which the background monitor rejects immediately, so it never
-// reaches the network either.
+// the network. That is what keeps them cheap and deterministic: an accepted
+// deploy starts the background monitor, which talks to GitHub and polls for a
+// run, so covering that end needs a fake for most of the deploy path and does
+// not belong here. What an accepted deploy does to the repair counter is
+// covered by the beginDeployAttempt cases in server.test.ts.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
@@ -20,6 +22,7 @@ import {
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { MIGRATED_ROUTE_KEYS } from "./server/route-table.js";
+import { cliExec, runCommand } from "./gh.js";
 import type { CanvasState } from "./shared.js";
 
 // The deploy dispatch is a `gh workflow run` issued through cliExec, and the
@@ -153,6 +156,14 @@ function expectNoGitHubCliUse(): void {
 }
 
 describe("/api/deploy repair-loop refusals", () => {
+  it("records the functions the route itself imports", () => {
+    // A zero-call assertion means nothing if the replacement never took
+    // effect. These are the bindings server.ts imports from ./gh.js, so
+    // proving they are the recorded ones proves the route is being observed.
+    expect(cliExec).toBe(ghCli.cliExec);
+    expect(runCommand).toBe(ghCli.runCommand);
+  });
+
   it("still runs through the handler these cases bind to", () => {
     // These bind the legacy handler directly, which is where /api/deploy is
     // served from today. If it is ever migrated onto the route table, that
@@ -241,47 +252,5 @@ describe("/api/deploy repair-loop refusals", () => {
     expect(state.deployAttempt?.id).toBe("attempt-B");
     expect(state.deployAttempt?.targetRepo).toBe("acme/other");
     expect(state.deployRepairAttempts).toBe(0);
-  });
-
-  it("routes its GitHub CLI calls through the replaced module", async () => {
-    // Without this, the assertions above could pass because nothing observes
-    // the route rather than because the route stayed away from the CLI. An
-    // accepted deploy that omits a branch has to resolve the repo's default
-    // one, which is a gh call and must therefore be recorded here.
-    seed(failedAttempt({ deployRepairAttempts: 0 }));
-    const { status } = await postDeploy({
-      targetRepo: "",
-      environment: "production",
-      provider: "azure",
-      appFile: ".radius/app.bicep"
-    });
-
-    expect(status).toBe(200);
-    expect(ghCli.runCommand).toHaveBeenCalledWith(
-      "gh",
-      expect.arrayContaining(["repo", "view"])
-    );
-  });
-
-  it("accepts an unbound deploy, opening a new attempt and resetting the count", async () => {
-    // What the browser Deploy button sends: no attemptId. It must start a fresh
-    // loop rather than continue the agent's, so a human clicking Deploy never
-    // spends repair budget. An empty repo keeps the monitor off the network.
-    const state = seed(failedAttempt({ deployRepairAttempts: 4 }));
-    const { status } = await postDeploy({
-      targetRepo: "",
-      environment: "production",
-      branch: "feat",
-      provider: "azure",
-      appFile: ".radius/app.bicep"
-    });
-
-    expect(status).toBe(200);
-    // The counter reset is the signal that this opened a new loop rather than
-    // continuing the agent's. deployRepairing is deliberately not asserted:
-    // the deploy is eligible to hand its own failure off, and that handoff
-    // flips the flag from the background monitor, so its value here is a race.
-    expect(state.deployRepairAttempts).toBe(0);
-    expect(state.deployAttempt?.id).not.toBe("attempt-A");
   });
 });
