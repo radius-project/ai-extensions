@@ -168,10 +168,17 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/verify-azure-login",
   "POST /api/azure-cli-assist",
   "POST /api/verify-aws-login",
+  "GET /api/list-azure-app-registrations",
+  "GET /api/azure-app-serves-repos",
   "GET /api/user-repos",
   "POST /api/repo-branches",
   "POST /api/discover-branches",
   "GET /api/load-graph-stream",
+  "GET /api/deploy-status",
+  "GET /api/list-applications",
+  "GET /api/list-deployments",
+  "POST /api/deploy-reset",
+  "POST /api/delete-deployment",
   "GET /api/progress",
   "GET /api/deployed-graph"
 ];

@@ -1498,60 +1498,91 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  // Resolve a literal marker or throw naming it. `indexOf` returning -1 for an
-  // absent marker is the silent failure this guard exists to prevent: a dead
-  // START marker slices from -1 and a dead END marker slices to EOF, and in both
-  // cases the downstream `toContain`/ordering assertions can pass vacuously
-  // against a wrong slice. Throwing here fails at collection time, naming the
-  // marker, instead of letting a later `it` pass for the wrong reason.
-  const marker = (needle: string, from = 0): number => {
-    const at = SERVER_SRC.indexOf(needle, from);
-    if (at === -1) {
+
+  // This suite reads `server.ts` as raw text and slices route bodies out of the
+  // legacy if-chain by their `pathname === ...` markers, so it carries an
+  // undeclared textual coupling to that chain: every slice that migrates a route
+  // onto the route table can delete a delimiter this suite depends on. The
+  // route-table boundary test cannot see that coupling.
+  //
+  // A missing marker must never be allowed to silently resize a slice.
+  // `String.prototype.slice` reads a -1 end as `length - 1`, so a deleted end
+  // delimiter widens a route body to essentially the whole file. The ordering
+  // assertions below then search that widened region for tokens like
+  // `buildAppCreateArgs` that also occur in other routes, and can keep passing
+  // while no longer constraining the route they name.
+  //
+  // Resolving every marker through this helper turns that into an immediate,
+  // self-describing failure naming the marker that needs re-pointing, and it
+  // fails the whole suite rather than only the assertions unlucky enough to
+  // notice.
+  function markerIndex(marker: string, from = 0): number {
+    const at = SERVER_SRC.indexOf(marker, from);
+    if (at < 0) {
       throw new Error(
-        `environment creation boundaries: marker not found in server.ts: ${needle}`
+        `No legacy branch matching \`${marker}\` remains in server.ts. That ` +
+          "route has most likely migrated onto the route table; re-point this " +
+          "delimiter at the next legacy branch that still bounds the same route."
       );
     }
     return at;
-  };
-  const azureStart = marker('pathname === "/api/azure-auto-setup"');
-  const azureEnd = marker(
-    'pathname === "/api/list-azure-app-registrations"',
+  }
+
+  const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
+  // The `azure-discovery` reads that used to bound this route migrated to the
+  // route table, so the next remaining legacy branch delimits the slice.
+  // `/api/app-params` is owned by `environments` and is itself scheduled to
+  // migrate, which is exactly the case `markerIndex` exists to catch.
+  const azureEnd = markerIndex(
+    'pathname === "/api/app-params"',
     azureStart + 'pathname === "/api/azure-auto-setup"'.length
   );
-  const createStart = marker('pathname === "/api/create-environment"');
-  const operationStart = marker(
+  const createStart = markerIndex('pathname === "/api/create-environment"');
+  const operationStart = markerIndex(
     'pathname === "/api/operations" && req.method === "POST"'
   );
-  // The END of the create-environment route body is whatever legacy arm comes
-  // next, resolved structurally as the next `pathname === "/api/` matcher after
-  // createStart rather than by naming a neighbor route. Naming a neighbor would
-  // inherit that route's migration expiry: the neighbor was `load-graph-stream`,
-  // which just migrated onto the route table, and re-pointing to the next named
-  // route (`deploy-status`, itself migrating) would only move the same silent
-  // widening one slice down. The structural resolver survives any neighbor
-  // migration or rename. It also asserts BOUNDEDNESS: the next matcher must
-  // exist and sit strictly after createStart, so an end that ran to EOF (the
-  // dangerous dead-end-marker case) throws here rather than yielding an
-  // over-large slice whose ordering assertions pass vacuously.
-  const NEXT_ARM = /pathname === "\/api\//g;
-  NEXT_ARM.lastIndex =
+  // Resolve the end structurally as the next remaining legacy arm. A named
+  // neighbor inherits that route's migration expiry; a missing END marker is
+  // especially dangerous because slice(start, -1) widens almost to EOF and can
+  // make the ordering assertions below pass vacuously.
+  const nextArm = /pathname === "\/api\//g;
+  nextArm.lastIndex =
     createStart + 'pathname === "/api/create-environment"'.length;
-  const nextArm = NEXT_ARM.exec(SERVER_SRC);
-  if (!nextArm) {
+  const createEndMatch = nextArm.exec(SERVER_SRC);
+  if (!createEndMatch) {
     throw new Error(
-      "environment creation boundaries: no legacy arm found after create-environment to bound its slice"
+      "No legacy branch remains after create-environment to bound its slice."
     );
   }
-  const createEnd = nextArm.index;
+  const createEnd = createEndMatch.index;
   if (createEnd <= createStart) {
     throw new Error(
-      "environment creation boundaries: create-environment slice is not bounded (end <= start)"
+      "The create-environment legacy slice is not bounded (end <= start)."
     );
   }
-  const deployStart = marker('pathname === "/api/deploy"');
+  const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
   const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
+
+  it("bounds every sliced route body on markers that still exist", () => {
+    // Pins the coupling itself rather than leaving it to whichever ordering
+    // assertion happens to notice. Each slice must be non-empty and strictly
+    // smaller than the file, so neither a collapsed nor a widened slice can
+    // reach the assertions below.
+    for (const [name, start, end] of [
+      ["azure-auto-setup", azureStart, azureEnd],
+      ["create-environment", createStart, createEnd],
+      ["deploy", deployStart, SERVER_SRC.length]
+    ] as const) {
+      expect(start, name).toBeGreaterThan(-1);
+      expect(end, name).toBeGreaterThan(start);
+    }
+    expect(operationStart).toBeGreaterThan(-1);
+    expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
+    expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
+  });
 
   it("registers and accepts a server-owned operation before scheduling setup", () => {
     const route = SERVER_SRC.slice(operationStart, azureStart);
