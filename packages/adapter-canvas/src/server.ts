@@ -34,7 +34,12 @@ import {
   deleteCredentialProfile,
   setPreferredGitHubLogin
 } from "./shared.js";
-import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  DeployErrorKind,
+  GraphView
+} from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
@@ -105,7 +110,10 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
+import {
+  DEFAULT_CANVAS_PAGE,
+  DEPLOY_REPAIR_ATTEMPT_CAP
+} from "./runtime/hooks.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -474,15 +482,48 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
-// Composition root for the migrated `operations-status` family. It receives the
-// four narrow lookup and projection functions it calls; the registry
-// implementation and the client projection stay in `operations.ts`.
-const operationsStatusRoutes = createOperationsStatusRoutes({
-  latest: (repo) => operations.latest(repo),
-  latestAny: () => operations.latestAny(),
-  get: (operationId) => operations.get(operationId),
-  toClientView
-});
+// Composition root for the migrated `operations-status` family. The read routes
+// receive the four narrow lookup and projection functions they call; the POST
+// that registers an environment operation receives its own seams. The registry
+// implementation and the client projection stay in `operations.ts`, and the
+// pure guards and factories stay in their modules and are injected rather than
+// imported by the route so the route spawns nothing and touches no disk.
+//
+// `scheduleEnvironmentOperation` bridges the module-level route back to the
+// per-instance server-owned task runner: the migrated table is built once, but
+// scheduling is closure state on the legacy handler for the instance that
+// received the request, so the instance id is passed through and resolved here.
+const operationsStatusRoutes = createOperationsStatusRoutes(
+  {
+    latest: (repo) => operations.latest(repo),
+    latestAny: () => operations.latestAny(),
+    get: (operationId) => operations.get(operationId),
+    toClientView
+  },
+  {
+    isValidRepoSlug,
+    isResourceGroupName,
+    isAksClusterName,
+    isUuid,
+    buildStages,
+    createOperation,
+    startOperation: (op) => operations.start(op),
+    persistOperations: () => operations.persist(),
+    finish,
+    scheduleEnvironmentOperation: (instanceId, op) => {
+      const legacy = legacyHandlers.get(instanceId);
+      if (!legacy) {
+        console.error(
+          `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
+        );
+        return false;
+      }
+      legacy.scheduleEnvironmentOperation(op);
+      return true;
+    },
+    errorMessage
+  }
+);
 
 // Composition root for the migrated `repositories` family. Three seams: the
 // subprocess runner, a reader for the live instance state the branch cache is
@@ -1304,28 +1345,114 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
+// Marks a deploy that failed before anything could have started running: the
+// branch it names is not on the remote, so GitHub refused the dispatch. The
+// fix is a git push, not a model repair.
+export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
+  "branch-not-pushed";
+
+// Marks a deploy that failed without proving that no workflow is running: the
+// dispatch outcome was never confirmed, or monitoring stopped before the run
+// reported one. Distinct from a confirmed failure — a workflow GitHub refused
+// to start, or one that ran and reported its own failure — which is the only
+// kind a repair redeploy may act on, because it is the only kind that cannot
+// leave a run in flight for a redeploy to race.
+export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Split a failed `gh workflow run` by whether it proves no run was created.
+// GitHub naming the branch as unresolvable is proof: it rejected the request.
+// Anything else is not — the request can be accepted and the answer lost (the
+// CLI timing out, for one), and the token-scope retry can dispatch twice — so
+// it has to be treated as a run that may exist.
+export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
+  if (
+    /no ref found|could not resolve|no commit found for the ref/i.test(
+      stderr || ""
+    )
+  )
+    return DEPLOY_BRANCH_NOT_PUSHED_KIND;
+  return DEPLOY_RUN_UNCONFIRMED_KIND;
+}
+
 // Decide, server-side, whether an incoming deploy continues an existing repair
-// loop. The tool validates the attempt before it POSTs, but another deploy can
-// start in between, so re-check here against the attempt this panel currently
-// holds: a stale repair must not overwrite the newer deploy or mark it as
-// already owned (which would suppress its own failure handoff). An unbound
-// request is an ordinary deploy and always proceeds.
+// loop, and whether that loop still has budget. The tool validates the attempt
+// before it POSTs, but another deploy can start in between, so re-check here
+// against the attempt this panel currently holds: a stale repair must not
+// overwrite the newer deploy or mark it as already owned (which would suppress
+// its own failure handoff). An unbound request is an ordinary deploy and always
+// proceeds.
 export function resolveDeployRepairLoop(
   state: CanvasState,
   requestedAttemptId: unknown
-): { repairLoop: boolean; attemptId: string; error?: string } {
+): {
+  repairLoop: boolean;
+  attemptId: string;
+  repairAttempt: number;
+  error?: string;
+} {
   const requested =
     typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "" };
+  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
   const current = state?.deployAttempt?.id || "";
   if (current !== requested) {
     return {
       repairLoop: false,
       attemptId: "",
+      repairAttempt: 0,
       error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
     };
   }
-  return { repairLoop: true, attemptId: requested };
+  // A repair redeploy only makes sense against a deploy that actually failed.
+  // The attempt stays current after it settles, and the agent was told to keep
+  // passing its id, so without this an attempt-bound call could land on a
+  // deploy that is still running (starting a second workflow run and a second
+  // monitor over the same state) or on one that already succeeded (spending
+  // repair budget on a finished loop, and — because a loop redeploy is marked
+  // agent-owned — silently suppressing the handoff if it fails).
+  const deployStatus = state?.deployStatus || "";
+  if (deployStatus !== "failed") {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error:
+        deployStatus === "in_progress" ?
+          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
+        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+    };
+  }
+  // "failed" covers two different things, and only one is safe to redeploy.
+  // A confirmed failure — GitHub refused the dispatch, or the run finished and
+  // reported failure — leaves nothing in flight. The rest do not: the dispatch
+  // may have been accepted without us learning of it, or monitoring may have
+  // stopped before the run reported, in which case a redeploy would race a
+  // second run against the same target — exactly what the in_progress check
+  // above prevents, arriving by a different route. Deciding this from stored
+  // state keeps the resolver synchronous; re-querying the run would put an
+  // await in front of beginDeployAttempt, which must not happen.
+  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
+    const runUrl = state?.deployRunUrl || "";
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
+    };
+  }
+  // The cap the handoff prompt states is also enforced here, because prompt
+  // text alone is an instruction the agent can lose track of across a long
+  // repair loop. Refusing before anything is dispatched keeps a runaway loop
+  // from burning CI runs.
+  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
+  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested, repairAttempt };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -1355,6 +1482,12 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // Same lifetime as the delivery budget, and counted the way
+  // resolveDeployRepairLoop projected it, so the number the agent is told
+  // matches the one the next call is checked against. A deploy that opens a
+  // new attempt starts a fresh loop with a full budget.
+  state.deployRepairAttempts =
+    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
@@ -1385,7 +1518,14 @@ export function triggerDeployRepairHandoff(
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
     if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind === "branch-not-pushed") return false;
+    if (
+      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // An attempt whose run may still be in flight can never be repaired: the
+      // resolver refuses its redeploy. Opening a loop only to refuse its first
+      // call would spend a cycle and tell the agent two different things.
+      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
+    )
+      return false;
     if (state.deployRepairing) return false;
     if (
       state.deployHandoffState === "pending" ||
@@ -3004,179 +3144,6 @@ function createLegacyRequestHandler(
       req.headers["x-radius-server-owned"] === serverOwnedToken;
     const requestedPage = url.searchParams.get("page");
 
-    if (pathname === "/api/operations" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
-        );
-        return;
-      }
-      const repo = String(data.repo || "");
-      const environment = String(data.environment || data.name || "dev").trim();
-      const provider = data.provider === "aws" ? "aws" : "azure";
-      if (!isValidRepoSlug(repo)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: `Invalid repository "${repo}". Expected "owner/repo".`,
-            code: "invalid-repo"
-          })
-        );
-        return;
-      }
-      if (!environment.trim()) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Environment name is required.",
-            code: "environment-required"
-          })
-        );
-        return;
-      }
-      if (provider === "azure") {
-        if (
-          !isResourceGroupName(String(data.resourceGroup || "")) ||
-          !isAksClusterName(String(data.cluster || "")) ||
-          !isUuid(String(data.tenantId || "")) ||
-          !isUuid(String(data.subscriptionId || ""))
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error:
-                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
-              code: "invalid-azure-operation-input"
-            })
-          );
-          return;
-        }
-      } else if (
-        !String(data.roleArn || "").trim() ||
-        !String(data.accountId || "").trim() ||
-        !String(data.region || "").trim() ||
-        !String(data.cluster || "").trim()
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error:
-              "AWS setup requires roleArn, accountId, region, and cluster.",
-            code: "invalid-aws-operation-input"
-          })
-        );
-        return;
-      }
-      const needsAzureCredentials =
-        provider === "azure" && !String(data.clientId || "").trim();
-      const op = createOperation({
-        provider,
-        repo,
-        environment,
-        stages: buildStages({ includeIdentity: needsAzureCredentials }),
-        journey: {
-          origin: data.origin || null,
-          resumeTarget: data.resumeTarget || null,
-          resumeBranch: data.resumeBranch || data.branch || null,
-          resumeReason: data.resumeReason || null
-        }
-      });
-      op.request = {
-        needsAzureCredentials,
-        azure: {
-          resourceGroup: data.resourceGroup || "",
-          cluster: data.cluster || "",
-          clusterResourceGroup: data.clusterResourceGroup || "",
-          subscriptionId: data.subscriptionId || "",
-          tenantId: data.tenantId || "",
-          appName: data.appName,
-          appId: data.appId || "",
-          createNew: data.createNew === true,
-          serviceManagementReference: data.serviceManagementReference || ""
-        },
-        environment: { ...data, environment, provider }
-      };
-      if (provider === "azure") {
-        op.resumeRequest = {
-          needsAzureCredentials,
-          azure: structuredClone(op.request.azure),
-          environment: {
-            repo,
-            environment,
-            provider,
-            cluster: data.cluster || "",
-            namespace: data.namespace || "",
-            profileName: data.profileName || "",
-            branch: data.branch || "",
-            tenantId: data.tenantId || "",
-            subscriptionId: data.subscriptionId || "",
-            resourceGroup: data.resourceGroup || "",
-            origin: data.origin || null,
-            resumeTarget: data.resumeTarget || null,
-            resumeBranch: data.resumeBranch || null,
-            resumeReason: data.resumeReason || null
-          }
-        };
-      }
-      const started = operations.start(op);
-      if (!started.ok) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: `Setup is already running for ${repo}.`,
-            code: "operation-in-progress",
-            operationId: started.conflict.operationId
-          })
-        );
-        return;
-      }
-      try {
-        await operations.persist();
-      } catch (error) {
-        finish(op, "failed", {
-          failure: {
-            code: "operation-registration-persist-failed",
-            stage: op.currentStage,
-            stepSeq: null,
-            message:
-              "Radius could not durably register the environment operation.",
-            classification: "unknown",
-            evidence: errorMessage(error)
-          }
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not durably register the environment operation. No setup work was started.",
-            code: "operation-registration-persist-failed"
-          })
-        );
-        return;
-      }
-      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Location", statusUrl);
-      res.writeHead(202);
-      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
-      scheduleServerOwnedTask(op.operationId, () =>
-        runEnvironmentOperation(op.operationId)
-      );
-      return;
-    }
     const resumeMatch = pathname.match(
       /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
     );
@@ -7520,7 +7487,7 @@ function createLegacyRequestHandler(
                     repo +
                     " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                     pushCmd;
-                  entry.state.deployErrorKind = "branch-not-pushed";
+                  entry.state.deployErrorKind = DEPLOY_BRANCH_NOT_PUSHED_KIND;
                   entry.state.deployErrorBranch = deployRef;
                   entry.state.deployStatus = "failed";
                   return;
@@ -7820,12 +7787,11 @@ function createLegacyRequestHandler(
               );
               // A "No ref found" (or unresolved ref) dispatch error
               // means the branch isn't on the remote — surface the same
-              // clean, actionable "push the branch" guidance/UI.
-              if (
-                /no ref found|could not resolve|no commit found for the ref/i.test(
-                  de
-                )
-              ) {
+              // clean, actionable "push the branch" guidance/UI. Every other
+              // dispatch failure is a run of unknown outcome, so the split is
+              // made once, where it can be tested.
+              const dispatchKind = classifyDeployDispatchFailure(de);
+              if (dispatchKind === DEPLOY_BRANCH_NOT_PUSHED_KIND) {
                 const pushCmd = "git push -u origin " + deployRef;
                 addLog("   Push it and redeploy:  " + pushCmd);
                 entry.state.deployError =
@@ -7835,7 +7801,7 @@ function createLegacyRequestHandler(
                   repo +
                   " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
                   pushCmd;
-                entry.state.deployErrorKind = "branch-not-pushed";
+                entry.state.deployErrorKind = dispatchKind;
                 entry.state.deployErrorBranch = deployRef;
                 entry.state.deployStatus = "failed";
                 return;
@@ -7858,6 +7824,7 @@ function createLegacyRequestHandler(
                 ". " +
                 (de || "The dispatch request failed.") +
                 scopeHint;
+              entry.state.deployErrorKind = dispatchKind;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -7887,6 +7854,11 @@ function createLegacyRequestHandler(
                 ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
                 repo +
                 ".";
+              // The dispatch succeeded, so a run was very likely created — it
+              // just never became visible here. Treating that as an ordinary
+              // failure would let a repair redeploy race a run that is queued
+              // or merely slow to surface.
+              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
               entry.state.deployStatus = "failed";
               return;
             }
@@ -8257,6 +8229,10 @@ function createLegacyRequestHandler(
               repo +
               "/actions/runs/" +
               dRunId;
+            // Monitoring gave up; the run itself may still be going. Mark it so
+            // an attempt-bound repair redeploy is refused rather than racing a
+            // second workflow against the same target.
+            entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
             entry.state.deployStatus = "failed";
           })()
             .catch((monErr) => {
@@ -8272,6 +8248,10 @@ function createLegacyRequestHandler(
                   entry.state.deployError =
                     "Deploy monitoring stopped unexpectedly: " +
                     (monErr && monErr.message ? monErr.message : monErr);
+                // Same reasoning as the timeout above: the monitor died, so
+                // the workflow's real outcome is unknown and a repair redeploy
+                // must not assume the run is over.
+                entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
                 entry.state.deployStatus = "failed";
               } catch {
                 /* ignore */
@@ -8298,7 +8278,20 @@ function createLegacyRequestHandler(
         // outer catch and release the lock while the deploy is still running.
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
+        // Report the loop's position back so the agent sees its remaining
+        // budget on every redeploy, instead of having to remember the cap from
+        // the single handoff that opened the loop.
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ...(loop.repairLoop ?
+              {
+                repairAttempt: loop.repairAttempt,
+                repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
+              }
+            : {})
+          })
+        );
       } catch (e) {
         releaseReservation();
         res.setHeader("Content-Type", "application/json");
@@ -8348,7 +8341,21 @@ function createLegacyRequestHandler(
   // must not count as user activity or the idle-respawn timer never fires.
   const isServerOwned = (req: IncomingMessage): boolean =>
     req.headers["x-radius-server-owned"] === serverOwnedToken;
-  return { handler, startRecoveredVerificationTasks, isServerOwned };
+  // Exposed so the migrated `POST /api/operations` route, which is composed once
+  // at module init, can reach this instance's server-owned task runner. The
+  // route registers and persists the operation itself and then hands the record
+  // back here to schedule exactly as the legacy arm did.
+  const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
+    scheduleServerOwnedTask(op.operationId, () =>
+      runEnvironmentOperation(op.operationId)
+    );
+  };
+  return {
+    handler,
+    startRecoveredVerificationTasks,
+    isServerOwned,
+    scheduleEnvironmentOperation
+  };
 }
 
 const PAGE_RENDERERS = {

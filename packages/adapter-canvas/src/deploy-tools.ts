@@ -157,6 +157,31 @@ export function buildDeployPayload(
   };
 }
 
+// Describe a started deploy back to the agent. A redeploy inside a repair loop
+// also reports where it sits in that loop: the cap is stated once in the
+// handoff prompt, which is easy to lose track of several repairs later, so it
+// is repeated on every attempt alongside the server-side enforcement.
+export function describeDeployStarted(
+  payload: { targetRepo?: string; branch?: string; environment?: string } = {},
+  result: { repairAttempt?: unknown; repairAttemptCap?: unknown } = {}
+): string {
+  const attempt = Number(result.repairAttempt) || 0;
+  const cap = Number(result.repairAttemptCap) || 0;
+  let budget = "";
+  if (attempt > 0 && cap > 0) {
+    budget =
+      ` This is automatic repair attempt ${attempt} of ${cap}.` +
+      (attempt >= cap ?
+        " It is the last one: if it fails, report the failure to the user instead of redeploying again."
+      : "");
+  }
+  return (
+    `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started.` +
+    ` It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed.` +
+    ` Poll the radius_deploy_status tool until it reports success or failed.${budget}`
+  );
+}
+
 // Reject a payload that would deploy something unintended rather than guessing.
 export function validateDeployPayload(payload: {
   targetRepo?: unknown;
