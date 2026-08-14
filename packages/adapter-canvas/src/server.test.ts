@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  activeDeploymentMutation,
   addGraphProgress,
+  beginPlannedGraphRequest,
   beginDeployAttempt,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
@@ -11,7 +13,10 @@ import {
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
   canReuseModeledGraph,
+  DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
+  deploymentStatusBlocksMutation,
+  DEPLOYMENT_MUTATION_LEASE_MS,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
   DEPLOY_HANDOFF_RETRY_DELAY_MS,
@@ -23,11 +28,17 @@ import {
   isCrossSiteMutation,
   isCliCommandMissing,
   isCurrentSourceRefToken,
+  isCurrentPlannedGraphRequest,
   isReplicationLagError,
   invokeSessionPrompt,
+  localDeploymentBlocksMutation,
   pickAksResourceGroup,
   preflightGhcrPackageWriteAccess,
+  resetDeploymentViewState,
   resolveGitHubEnvironmentCreateState,
+  releaseDeploymentMutation,
+  reserveDeploymentMutation,
+  resolveDeploymentEnvironment,
   resolveDeployStatus,
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
@@ -52,6 +63,16 @@ import {
 } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 import type { DeployRepairHandoffInput } from "./server.js";
+
+describe("DEPLOY_RAD_COMMANDS_STEP", () => {
+  it("matches the step name in the upstream run-rad-commands action", () => {
+    // The deploy monitor gates all of its in-flight handling on finding a step
+    // with this name. It previously read "Deploy Application", which exists
+    // nowhere in radius-project/radius, so that entire code path never ran on
+    // a real deploy. Pin the value so the same silent break cannot recur.
+    expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+  });
+});
 
 describe("endChildInput", () => {
   it("keeps command execution authoritative when closing stdin fails", () => {
@@ -1230,6 +1251,196 @@ describe("pickAksResourceGroup", () => {
 
   it("ignores non-string cluster RG values", () => {
     expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+  });
+});
+
+describe("deploymentStatusBlocksMutation", () => {
+  it.each(["pending", "in_progress", "deleting"])(
+    "blocks the non-terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(true);
+    }
+  );
+
+  it.each(["success", "failed", "unknown", "", undefined])(
+    "allows the terminal status %s",
+    (status) => {
+      expect(deploymentStatusBlocksMutation(status)).toBe(false);
+    }
+  );
+});
+
+describe("deployment mutation reservations", () => {
+  it("allows one mutation at a time and releases its owner", () => {
+    const state: CanvasState = {};
+    const deploy = reserveDeploymentMutation(state, {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy"
+    });
+
+    expect(deploy).not.toBeNull();
+    if (!deploy) throw new Error("expected deployment reservation");
+    expect(
+      reserveDeploymentMutation(state, {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "delete"
+      })
+    ).toBeNull();
+
+    releaseDeploymentMutation(state, deploy);
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+
+  it("does not let a stale completion release a newer mutation", () => {
+    const stale = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "deploy" as const,
+      expiresAt: 100
+    };
+    const current = {
+      repo: "octo/app",
+      environment: "prod",
+      kind: "delete" as const,
+      expiresAt: 200
+    };
+    const state: CanvasState = { deploymentMutation: current };
+
+    releaseDeploymentMutation(state, stale);
+
+    expect(state.deploymentMutation).toBe(current);
+  });
+
+  it("expires abandoned reservations and lets a later operation recover", () => {
+    const state: CanvasState = {};
+    const abandoned = reserveDeploymentMutation(
+      state,
+      {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy"
+      },
+      100
+    );
+    expect(abandoned?.expiresAt).toBe(100 + DEPLOYMENT_MUTATION_LEASE_MS);
+    expect(
+      activeDeploymentMutation(state, 100 + DEPLOYMENT_MUTATION_LEASE_MS - 1)
+    ).toBe(abandoned);
+
+    const recovered = reserveDeploymentMutation(
+      state,
+      {
+        repo: "octo/app",
+        environment: "staging",
+        kind: "deploy"
+      },
+      100 + DEPLOYMENT_MUTATION_LEASE_MS
+    );
+
+    expect(recovered).not.toBeNull();
+    expect(state.deploymentMutation).toBe(recovered);
+  });
+});
+
+describe("deployment mutation recovery", () => {
+  it("bounds stale local in-progress state but preserves fresh and legacy state", () => {
+    expect(
+      localDeploymentBlocksMutation(
+        { deployStatus: "in_progress", deployStartedAt: 100 },
+        100 + DEPLOYMENT_MUTATION_LEASE_MS - 1
+      )
+    ).toBe(true);
+    expect(
+      localDeploymentBlocksMutation(
+        { deployStatus: "in_progress", deployStartedAt: 100 },
+        100 + DEPLOYMENT_MUTATION_LEASE_MS
+      )
+    ).toBe(false);
+    expect(
+      localDeploymentBlocksMutation({ deployStatus: "in_progress" }, 100)
+    ).toBe(true);
+    expect(
+      localDeploymentBlocksMutation({ deployStatus: "success" }, 100)
+    ).toBe(false);
+  });
+
+  it("restores the state-backed environment fallback for existing callers", () => {
+    expect(resolveDeploymentEnvironment({ envName: "prod" }, undefined)).toBe(
+      "prod"
+    );
+    expect(resolveDeploymentEnvironment({ envName: "prod" }, "staging")).toBe(
+      "staging"
+    );
+    expect(resolveDeploymentEnvironment({}, undefined)).toBe("");
+  });
+
+  it("clears both the result and any abandoned reservation on reset", () => {
+    const state: CanvasState = {
+      deployResult: { message: "done" },
+      deployAttempt: { id: "attempt-1" },
+      deploymentMutation: {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy",
+        expiresAt: 1000,
+        attemptId: "attempt-1"
+      }
+    };
+
+    resetDeploymentViewState(state, "attempt-1", 100);
+
+    expect(state.deployResult).toBeUndefined();
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+
+  it("does not let an old result page reset a newer reservation", () => {
+    const current = {
+      repo: "octo/app",
+      environment: "staging",
+      kind: "deploy" as const,
+      expiresAt: 1000,
+      attemptId: "attempt-2"
+    };
+    const state: CanvasState = {
+      deployResult: { message: "new result" },
+      deployAttempt: { id: "attempt-2" },
+      deploymentMutation: current
+    };
+
+    resetDeploymentViewState(state, "attempt-1", 100);
+
+    expect(state.deployResult).toEqual({ message: "new result" });
+    expect(state.deploymentMutation).toBe(current);
+  });
+
+  it("clears an expired reservation even without an attempt match", () => {
+    const state: CanvasState = {
+      deploymentMutation: {
+        repo: "octo/app",
+        environment: "prod",
+        kind: "deploy",
+        expiresAt: 100
+      }
+    };
+
+    resetDeploymentViewState(state, undefined, 100);
+
+    expect(state.deploymentMutation).toBeUndefined();
+  });
+});
+
+describe("planned graph request generations", () => {
+  it("clears stale resources and lets only the latest request commit", () => {
+    const state: CanvasState = { plannedResources: [{ name: "old" }] };
+
+    const first = beginPlannedGraphRequest(state);
+    const second = beginPlannedGraphRequest(state);
+
+    expect(state.plannedResources).toBeNull();
+    expect(isCurrentPlannedGraphRequest(state, first)).toBe(false);
+    expect(isCurrentPlannedGraphRequest(state, second)).toBe(true);
   });
 });
 

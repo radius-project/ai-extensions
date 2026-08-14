@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.test.json && pnpm -r run --if-present typecheck",
     "test": "vitest run",
     "test:integration:runtime": "pnpm --filter @radius-project/adapter-canvas run test:integration:runtime",
+    "test:integration:http": "pnpm --filter @radius-project/adapter-canvas run test:integration:http",
     "test:integration:artifact": "pnpm --filter @radius-project/adapter-canvas run test:integration:artifact",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",

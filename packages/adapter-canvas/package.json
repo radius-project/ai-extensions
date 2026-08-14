@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:integration:runtime": "vitest run test/integration/runtime",
+    "test:integration:http": "vitest run test/integration/http",
     "test:integration:artifact": "vitest run --config vitest.artifact.config.ts",
     "watch": "node build.mjs --watch",
     "demo": "node dev/run-demo.mjs",

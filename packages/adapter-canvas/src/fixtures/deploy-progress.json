@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "application": "todolist",
+  "environment": "dev",
+  "runId": 30940461732,
+  "sequence": 1,
+  "updatedAt": "2026-08-06T22:52:42Z",
+  "state": "succeeded",
+  "resources": [
+    {
+      "id": "/planes/radius/local/resourcegroups/dev/providers/Radius.Compute/containers/web",
+      "name": "web",
+      "type": "Radius.Compute/containers",
+      "provisioningState": "Succeeded",
+      "status": "success",
+      "message": ""
+    },
+    {
+      "id": "/planes/radius/local/resourcegroups/dev/providers/Radius.Data/postgres/db",
+      "name": "db",
+      "type": "Radius.Data/postgres",
+      "provisioningState": "Failed",
+      "status": "failed",
+      "message": "recipe execution failed: image pull backoff"
+    },
+    {
+      "id": "",
+      "name": "queue",
+      "type": "Radius.Messaging/rabbitMQQueues",
+      "provisioningState": "Updating",
+      "status": "in_progress",
+      "message": ""
+    }
+  ]
+}

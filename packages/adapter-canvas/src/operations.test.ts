@@ -1534,8 +1534,12 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).toContain(
       'req.headers["x-radius-server-owned"] === serverOwnedToken'
     );
+    // The activity clock now lives in the canvas-server lifecycle module, so
+    // the server-owned exclusion moved to the composition root where the
+    // scaffold's markActivity is gated. Same behavior, new location: a
+    // server-owned internal call must not refresh the webview activity clock.
     expect(SERVER_SRC).toContain(
-      "if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now()"
+      "if (!legacy.isServerOwned(request)) markActivity();"
     );
     expect(SERVER_SRC).toContain('postInternal("/api/azure-auto-setup"');
     expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');
