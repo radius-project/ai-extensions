@@ -39,6 +39,12 @@ import {
   HOSTILE_STATE,
   expectSafeInlineScripts
 } from "../test/support/pages/hostile-state.js";
+import { readFileSync } from "node:fs";
+import {
+  parsePageCompatibilityFixture,
+  projectPage
+} from "../test/support/pages/compatibility-projection.js";
+import type { CanvasState } from "./shared.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -475,6 +481,97 @@ describe("no page lets state escape its inline scripts", () => {
       expectSafeInlineScripts(html);
       expect(html).not.toContain("<script>alert(1)</script>");
       expect(html).not.toContain('href="javascript:');
+    }
+  );
+});
+
+// Durable Phase 3 compatibility oracle. The expected projections were produced
+// from the pre-extraction renderers at f2282b7 and are never recomputed here:
+// this suite renders the current facade exports and compares the same
+// deterministic projection. See test/fixtures/page-renderer-compatibility.json
+// for provenance and the update policy.
+describe("legacy page renderer compatibility oracle", () => {
+  const fixture = parsePageCompatibilityFixture(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../test/fixtures/page-renderer-compatibility.json",
+          import.meta.url
+        ),
+        "utf8"
+      )
+    )
+  );
+
+  // Mirrors the server's page dispatch, so the oracle exercises the pages the
+  // canvas actually routes to.
+  const renderers: Record<string, (state: CanvasState) => string> = {
+    graph: graphPage,
+    planned: plannedGraphPage,
+    "graph-diff": graphDiffPage,
+    deployed: deployedGraphPage,
+    credentials: environmentPage,
+    environment: environmentPage,
+    deploying: deployingPage
+  };
+
+  it("records the oracle's provenance and review policy", () => {
+    expect(fixture.schemaVersion).toBe(1);
+    expect(fixture.source.commit).toBe(
+      "f2282b7ea77887a834d67dad84c3a966f9c14f30"
+    );
+    expect(fixture.source.path).toBe("packages/adapter-canvas/src/pages.ts");
+    expect(fixture.source.hostileInputs).toContain("PU-02");
+    expect(fixture.source.updatePolicy).toContain("reviewed");
+    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#367");
+  });
+
+  it("forwards exactly the legacy public export surface", () => {
+    expect(Object.keys(facade).sort()).toEqual([...fixture.exports].sort());
+  });
+
+  it("covers every routed page plus the shared shell", () => {
+    expect(
+      [...new Set(fixture.cases.map((entry) => entry.page))].sort()
+    ).toEqual([
+      "credentials",
+      "deployed",
+      "deploying",
+      "environment",
+      "graph",
+      "graph-diff",
+      "pageShell",
+      "planned"
+    ]);
+  });
+
+  it.each(fixture.cases.map((entry) => [entry.id, entry] as const))(
+    "%s still matches the legacy projection",
+    (_id, testCase) => {
+      const html =
+        testCase.page === "pageShell" ?
+          pageShell(
+            testCase.shellTitle ?? "",
+            testCase.shellBody ?? "",
+            testCase.shellActiveNav
+          )
+        : renderers[testCase.page](testCase.state);
+
+      expect(
+        projectPage(html, {
+          markers: testCase.markers,
+          hashedScripts: testCase.hashedScripts,
+          scope: testCase.scope
+        })
+      ).toEqual({
+        ...testCase.expected,
+        // Shell payloads are recorded once for the whole fixture; asserting the
+        // merge keeps every case covering them.
+        scriptDigests: {
+          ...fixture.sharedScriptDigests,
+          ...testCase.expected.scriptDigests
+        }
+      });
     }
   );
 });
