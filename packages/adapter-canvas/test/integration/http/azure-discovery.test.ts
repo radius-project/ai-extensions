@@ -138,6 +138,43 @@ describe("azure-discovery real-loopback HIT (RF-05)", () => {
     );
   });
 
+  // The autofix that widened `AzResult.code` to `string | number` was correct:
+  // `runCliCommand` resolves `code: err ? err.code || 1 : 0`, and Node reports a
+  // spawn failure as a string errno, so a missing `az` really does deliver
+  // `"ENOENT"` here. Both handlers compare strictly against `0`, so a string
+  // takes the failure arm exactly as `1` would -- but nothing over the wire
+  // exercised that until now, which left the widened type unused.
+  it("treats a string spawn errno as a failure on both routes", async () => {
+    const script = start();
+    script.set(ARGV.list, {
+      code: "ENOENT",
+      stdout: "[]",
+      stderr: "az: command not found"
+    });
+    script.set(ARGV.fic(APP_ID), {
+      code: "ENOENT",
+      stdout: '["repo:octo/app:ref:refs/heads/main"]'
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const listed = await fetch(
+      `${entry.baseUrl}/api/list-azure-app-registrations`
+    );
+    expect(listed.status).toBe(400);
+    expect(await listed.text()).toBe(
+      '{"error":"Failed to list App Registrations: az: command not found","code":"app-list-failed","azError":"az: command not found"}'
+    );
+
+    // Answers `null` rather than `[]`: the label is unavailable, which is a
+    // different answer from "serves no repos". The scripted stdout would have
+    // parsed cleanly, so a 200 here would mean the failure check was skipped.
+    const served = await fetch(
+      `${entry.baseUrl}/api/azure-app-serves-repos?appId=${APP_ID}`
+    );
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe('{"servesRepos":null}');
+  });
+
   // Hardcoded on purpose. The two writes in this family are explicitly deferred
   // to their own slices, and hand-writing the keys keeps the two sides of the
   // assertion on different sources: a probe derived from the route table would
