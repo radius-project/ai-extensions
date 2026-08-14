@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 // @ts-nocheck
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -1424,10 +1424,20 @@ describe("the step-marker convention at the call sites", () => {
   // silently reported as a plain success. That is a quiet failure — the panel
   // shows a green tick for something that warned, failed or never ran — so it
   // is guarded here rather than left to review.
-  const SERVER_SRC = readFileSync(
+  // The marker convention is a property of every call site that narrates an
+  // operation, wherever that site now lives. A route migrating onto the route
+  // table carries its `steps.push` sites into `server/routes/`, so scanning
+  // `server.ts` alone would let the convention quietly stop being enforced one
+  // slice at a time. The corpus is therefore the legacy dispatcher plus every
+  // route module.
+  const SERVER_SRC = [
     new URL("./server.ts", import.meta.url),
-    "utf8"
-  );
+    ...readdirSync(new URL("./server/routes/", import.meta.url))
+      .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+      .map((name) => new URL(`./server/routes/${name}`, import.meta.url))
+  ]
+    .map((url) => readFileSync(url, "utf8"))
+    .join("\n");
 
   // Steps whose text is a plain successful observation and so correctly take
   // the default. Anything else added to this list should first be re-read as a
@@ -1447,8 +1457,11 @@ describe("the step-marker convention at the call sites", () => {
     // Capture the whole argument expression, not just its first literal:
     // several sites concatenate a variable and put the trailing ellipsis on
     // the final fragment, e.g. 'Creating package "' + name + '"...'.
+    // A migrated route narrates through an injected `pushStep` port rather than
+    // touching the array directly, so those sites are scanned too — otherwise
+    // the convention would stop being enforced exactly where a route moved.
     const out = [];
-    const re = /steps\.push\(\s*([\s\S]*?)\);/g;
+    const re = /(?:steps\.push|ports\.pushStep)\(\s*([\s\S]*?)\);/g;
     let m;
     while ((m = re.exec(SERVER_SRC)))
       out.push(m[1].trim().replace(/,\s*$/, ""));
@@ -1471,6 +1484,10 @@ describe("the step-marker convention at the call sites", () => {
     const unaccounted = stepStrings().filter((s) => {
       if (MARKED.test(s)) return false;
       if (RUNNING.test(s)) return false;
+      // A bare identifier is a forwarding site — a port re-publishing a message
+      // that a real call site already composed and marked. The literal it
+      // carries is scanned where it is written, not here.
+      if (/^[A-Za-z_$][\w$]*$/.test(s)) return false;
       const compact = s.replace(/\s+/g, " ");
       return !PLAIN_OBSERVATIONS.some((allowed) =>
         compact.slice(1).startsWith(allowed)
@@ -1528,27 +1545,41 @@ describe("environment creation boundaries", () => {
     return at;
   }
 
+  // A named end delimiter inherits the migration expiry of whichever route it
+  // names: when that neighbour migrates, the marker dies and the slice widens.
+  // That has now happened twice on this stack, so the end of the azure slice is
+  // resolved structurally instead — as "the next legacy branch of any kind" —
+  // which is exactly what the slice means and cannot be invalidated by any one
+  // route migrating.
+  function nextLegacyBranchAfter(name: string, start: number): number {
+    const pattern = /pathname === "\/api\//g;
+    pattern.lastIndex = start + 1;
+    const match = pattern.exec(SERVER_SRC);
+    if (!match) {
+      throw new Error(
+        `No legacy branch remains after the \`${name}\` branch in server.ts. ` +
+          "The legacy if-chain has drained past this slice; delete this " +
+          "structural slice rather than letting it widen to the end of the file."
+      );
+    }
+    const end = match.index;
+    if (end <= start) {
+      throw new Error(
+        `Resolved a non-advancing end delimiter for the \`${name}\` slice in ` +
+          `server.ts (end ${end} <= start ${start}). Refusing to slice, because ` +
+          "a collapsed or inverted range makes every assertion below vacuous."
+      );
+    }
+    return end;
+  }
+
   const azureStart = markerIndex('pathname === "/api/azure-auto-setup"');
-  // The `azure-discovery` reads that used to bound this route migrated to the
-  // route table, and `/api/app-params` — the next legacy branch main used as
-  // this delimiter — has since migrated with the `environments` family. The
-  // next legacy branch that still bounds the slice is `/api/create-environment`,
-  // which stays on the fallback, so it delimits the end of the azure slice.
-  const azureEnd = markerIndex(
-    'pathname === "/api/create-environment"',
-    azureStart + 'pathname === "/api/azure-auto-setup"'.length
-  );
-  const createStart = markerIndex('pathname === "/api/create-environment"');
+  const azureEnd = nextLegacyBranchAfter("azure-auto-setup", azureStart);
   const operationStart = markerIndex(
     'pathname === "/api/operations" && req.method === "POST"'
   );
-  const createEnd = markerIndex(
-    'pathname === "/api/load-graph-stream"',
-    createStart + 'pathname === "/api/create-environment"'.length
-  );
   const deployStart = markerIndex('pathname === "/api/deploy"');
   const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
-  const createRoute = SERVER_SRC.slice(createStart, createEnd);
   const deployRoute = SERVER_SRC.slice(deployStart);
 
   it("bounds every sliced route body on markers that still exist", () => {
@@ -1558,7 +1589,6 @@ describe("environment creation boundaries", () => {
     // reach the assertions below.
     for (const [name, start, end] of [
       ["azure-auto-setup", azureStart, azureEnd],
-      ["create-environment", createStart, createEnd],
       ["deploy", deployStart, SERVER_SRC.length]
     ] as const) {
       expect(start, name).toBeGreaterThan(-1);
@@ -1566,7 +1596,6 @@ describe("environment creation boundaries", () => {
     }
     expect(operationStart).toBeGreaterThan(-1);
     expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
-    expect(createRoute.length).toBeLessThan(SERVER_SRC.length);
     expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
   });
 
@@ -1610,26 +1639,12 @@ describe("environment creation boundaries", () => {
     expect(appCreate).toBeGreaterThan(azAccountSet);
   });
 
-  it("does not require an application model to create an environment", () => {
-    expect(createStart).toBeGreaterThan(-1);
-    expect(createEnd).toBeGreaterThan(createStart);
-    // Verification planning may probe the committed workflow files, but
-    // environment creation itself must stay independent of deploy-model
-    // resolution.
-    expect(createRoute).not.toContain("appParams(");
-    expect(createRoute).not.toContain("resolveDeployParams(");
-    expect(createRoute).not.toContain("RADIUS_DEPLOY_PARAMS");
-    expect(createRoute).not.toContain("RADIUS_RAD_COMMANDS");
-  });
-
-  it("keeps the later create-environment GHCR preflight before bootstrap", () => {
-    const ghcrPreflight = createRoute.indexOf(
-      "preflightGhcrPackageWriteAccess"
-    );
-    const bootstrap = createRoute.indexOf("bootstrapGHCRStatePackage");
-    expect(ghcrPreflight).toBeGreaterThan(-1);
-    expect(bootstrap).toBeGreaterThan(ghcrPreflight);
-  });
+  // The four assertions that used to slice the `create-environment` legacy arm
+  // out of `server.ts` — no application model, GHCR preflight before bootstrap,
+  // environment lookup before PUT, and commit point after verification — moved
+  // to `server/routes/create-environment.test.ts` when that route migrated onto
+  // the route table. They are executed behaviorally there against the real
+  // handler rather than asserted as source text here.
 
   it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
     const createApp = azureRoute.indexOf("buildAppCreateArgs");
@@ -1652,36 +1667,6 @@ describe("environment creation boundaries", () => {
     expect(tagPatch).toBeGreaterThan(ownerList);
     expect(tagShow).toBeGreaterThan(tagPatch);
     expect(servicePrincipal).toBeGreaterThan(tagShow);
-  });
-
-  it("checks whether the GitHub environment already exists before PUT and aborts on ambiguous lookup errors", () => {
-    const lookup = createRoute.indexOf("resolveGitHubEnvironmentCreateState");
-    const put = createRoute.indexOf(
-      '["api", "--method", "PUT", environmentPath]'
-    );
-    expect(lookup).toBeGreaterThan(-1);
-    expect(put).toBeGreaterThan(lookup);
-    expect(createRoute).toContain(
-      'Could not determine whether GitHub environment "'
-    );
-    expect(createRoute).not.toContain('"created" | "reused" | "unknown"');
-  });
-
-  it("records the commit point only after verification dispatch succeeds or PR action-required is established", () => {
-    const commitPoint = createRoute.indexOf("recordCommitState(op, {");
-    const verifyPlan = createRoute.indexOf(
-      "const verifyPlan = await planCredentialVerification"
-    );
-    const actionRequired = createRoute.indexOf(
-      'finish(op, "action_required", {'
-    );
-    const dispatchSuccess = createRoute.indexOf(
-      'steps.push("✅ Verify workflow dispatched.")'
-    );
-    expect(commitPoint).toBeGreaterThan(-1);
-    expect(commitPoint).toBeGreaterThan(verifyPlan);
-    expect(commitPoint).toBeLessThan(actionRequired);
-    expect(commitPoint).toBeGreaterThan(dispatchSuccess);
   });
 
   it("provisions model-specific values when deployment begins", () => {

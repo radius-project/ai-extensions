@@ -10,7 +10,9 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   computeGraphDiff,
   deployStatusKeys,
@@ -208,6 +210,7 @@ import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import { createGraphsPlanningReadsRoutes } from "./server/routes/graphs-planning-reads.js";
+import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
@@ -217,11 +220,6 @@ interface CommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
-}
-
-interface PullRequestState {
-  branch: string;
-  base: string;
 }
 
 export async function persistMutationCheckpoint({
@@ -710,6 +708,122 @@ const environmentsRoutes = createEnvironmentsRoutes({
   stageVerify: STAGE_VERIFY
 });
 
+// Composition root for `POST /api/create-environment`. The route's four seams
+// live in `create-environment*.ts`; everything they touch is injected here, so
+// the module spawns no process directly, imports no `node:fs`, and reads no
+// module-level mutable state. `isServerOwnedRequest` is deliberately a
+// per-request function rather than a value: the token is a per-instance
+// `randomUUID()` held by that instance's legacy handler, and this route is
+// reachable only through the internal loopback POST that carries it.
+const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  isServerOwnedRequest: (instanceId, request) =>
+    legacyHandlers.get(instanceId)?.isServerOwned(request) ?? false,
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  cliExec: (command, args, options, callback) =>
+    cliExec(command, args, options, callback),
+  readProcessEnv: () => process.env,
+  isValidRepoSlug,
+  getOperation: (operationId) => operations.get(operationId),
+  isStale: (operation) => isStale(operation),
+  createOperation,
+  buildStages,
+  startOperation: (operation) => operations.start(operation),
+  persistOperations: () => operations.persist(),
+  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+  finishFailed: (operation, failure) => {
+    finish(operation, "failed", { failure });
+  },
+  enterStage: (operation, stage) => {
+    enterStage(operation, stage);
+  },
+  errorMessage,
+  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+  stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
+  addLegacyStep: (operation, text) => {
+    addLegacyStep(operation, text);
+  },
+  finalizeSetupFailure: (operation, input) =>
+    finalizeSetupFailure(operation, input as never),
+  persistMutationCheckpoint,
+  persistBestEffort,
+  runAzCommand: (args) => runCliCommand("az", args),
+  preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
+  preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
+  bootstrapGHCRStatePackage: (input) =>
+    bootstrapGHCRStatePackage({
+      targetRepository: input.targetRepository,
+      registry: input.registry,
+      credentials: input.credentials as GhcrPackageCredentials
+    }),
+  stateRegistryForEnvironment,
+  getDefaultBranch: (repo) => getDefaultBranch(repo),
+  getBranchHeadSha: (repo, branch) => getBranchHeadSha(repo, branch),
+  createBranchRef: (repo, branch, sha) => createBranchRef(repo, branch, sha),
+  tempFile: {
+    write: (contents) => {
+      const path = join(
+        tmpdir(),
+        "radius-wf-commit-" +
+          Date.now() +
+          "-" +
+          Math.random().toString(36).slice(2) +
+          ".json"
+      );
+      writeFileSync(path, contents);
+      return path;
+    },
+    remove: (path) => {
+      try {
+        unlinkSync(path);
+      } catch {}
+    }
+  },
+  resolveGitHubEnvironmentCreateState,
+  recordGitHubEnvironment: (operation, patch) => {
+    recordGitHubEnvironment(operation, patch);
+  },
+  envListCacheDelete: (repo) => {
+    envListCache.delete(repo);
+  },
+  ociStateBackend: OCI_STATE_BACKEND,
+  defaultStateArchive: DEFAULT_STATE_ARCHIVE,
+  azureCredential: () => cloudCredential(sharedCredentials.azure),
+  awsCredential: () => cloudCredential(sharedCredentials.aws),
+  optionalString,
+  generateVerifyWorkflow: (environment, provider) =>
+    generateVerifyWorkflow(environment, provider),
+  generateDeployWorkflow: (environment, appFile) =>
+    generateDeployWorkflow(environment, appFile),
+  generateDeleteWorkflow: (environment) => generateDeleteWorkflow(environment),
+  recordCommittedWorkflowFile: (operation, entry) => {
+    recordCommittedWorkflowFile(operation, entry);
+  },
+  deleteLegacyDeployWorkflow: (repo) => deleteLegacyDeployWorkflow(repo),
+  createPullRequestApi: (repo, head, base, title, body) =>
+    createPullRequestApi(repo, head, base, title, body),
+  planCredentialVerification,
+  fetchFileFromRepo: (repo, path, branch) =>
+    fetchFileFromRepo(repo, path, branch),
+  buildVerifyWorkflowDispatchArgs,
+  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+  stageVerify: STAGE_VERIFY,
+  recordCleanupState: (operation, patch) => {
+    recordCleanupState(operation, patch);
+  },
+  recordCommitState: (operation, patch) => {
+    recordCommitState(operation, patch);
+  },
+  setStageState: (operation, stage, state) => {
+    setStageState(operation, stage, state);
+  },
+  finish: (operation, state, options) => {
+    finish(operation, state, options);
+  },
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
 // Built once at module initialization so table validation runs a single time
 // and a missing migrated handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
@@ -721,7 +835,8 @@ const serverRoutes = createServerRouteTable({
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
   ...graphsPlanningReadsRoutes,
-  ...environmentsRoutes
+  ...environmentsRoutes,
+  ...createEnvironmentRoutes
 });
 
 // Legacy handler objects, kept per instance so the start hook can resume
@@ -5099,1009 +5214,6 @@ function createLegacyRequestHandler(
             /* best-effort */
           }
         }
-      }
-      return;
-    }
-
-    // Create GitHub Environment with secrets/variables and commit verify workflow
-    if (pathname === "/api/create-environment" && req.method === "POST") {
-      if (!isServerOwnedRequest) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(403);
-        res.end(
-          JSON.stringify({
-            error: "This endpoint is reserved for server-owned operations.",
-            code: "server-owned-operation-required"
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      // Declared out here so the generic catch below can close it rather
-      // than discarding everything the route had learned.
-      let op: any = null;
-      let steps: string[] = [];
-      let deleteGitHubEnvironmentRunner:
-        ((args: string[]) => Promise<unknown>) | null = null;
-      try {
-        const data = JSON.parse(body);
-        const targetRepo = data.repo || "";
-        const envName = data.environment || "dev";
-        const provider = data.provider || "azure";
-
-        if (!targetRepo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "No target repository specified." }));
-          return;
-        }
-
-        if (!isValidRepoSlug(targetRepo)) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: `Invalid repository "${targetRepo}". Expected "owner/repo".`,
-              code: "invalid-repo"
-            })
-          );
-          return;
-        }
-
-        // Adopt the record /api/azure-auto-setup left running, so the two
-        // POSTs read as one operation. When credentials already exist that
-        // route never ran, so start a record here instead — with the
-        // identity stage omitted rather than shown as skipped, because a
-        // stage that cannot happen has no business in the checklist.
-        const continuationId =
-          typeof data.operationId === "string" ? data.operationId : "";
-        if (continuationId) {
-          const existing = operations.get(continuationId);
-          if (
-            !existing ||
-            isStale(existing) ||
-            existing.repo !== targetRepo ||
-            existing.environment !== envName ||
-            existing.provider !== provider ||
-            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
-              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
-            existing.inputRequired
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error:
-                  "The environment request does not match the setup operation it is continuing.",
-                code: "operation-continuation-mismatch",
-                operationId: continuationId
-              })
-            );
-            return;
-          }
-          op = existing;
-          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
-        } else {
-          op = createOperation({
-            provider,
-            repo: targetRepo,
-            environment: envName,
-            stages: buildStages({ includeIdentity: false }),
-            journey: {
-              origin: data.origin || null,
-              resumeTarget: data.resumeTarget || null,
-              resumeBranch: data.resumeBranch || data.branch || null,
-              resumeReason: data.resumeReason || null
-            }
-          });
-          const started = operations.start(op);
-          if (!started.ok) {
-            op = null;
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error: `Setup is already running for ${targetRepo}.`,
-                code: "operation-in-progress",
-                operationId: started.conflict.operationId
-              })
-            );
-            return;
-          }
-          try {
-            await operations.persist();
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-            });
-            finish(op, "failed", {
-              failure: {
-                code: "operation-persistence-failed",
-                stage: op.currentStage,
-                stepSeq: null,
-                message:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                classification: "unknown"
-              }
-            });
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(500);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                code: "operation-persistence-failed",
-                operationId: op.operationId
-              })
-            );
-            return;
-          }
-          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
-        }
-
-        steps = [];
-        const rawPush = steps.push.bind(steps);
-        steps.push = (...items: string[]) => {
-          for (const item of items) {
-            try {
-              addLegacyStep(op, item);
-            } catch {
-              /* narration must never break setup */
-            }
-          }
-          return rawPush(...items);
-        };
-
-        // Preflight repo access + admin BEFORE any GitHub mutation.
-        // Reachable directly when credentials already exist and
-        // azure-auto-setup is skipped, so guarding here too is required.
-        const accessMsg = await preflightRepoAdmin(targetRepo);
-        if (accessMsg) {
-          const failure = await finalizeSetupFailure(op, {
-            status: 403,
-            error: accessMsg,
-            code: "repo-admin-required",
-            stage: STAGE_CONFIGURE_ENVIRONMENT,
-            classification: "needs-someone-else",
-            steps,
-            runAz:
-              provider === "azure" ? (args) => runCliCommand("az", args) : null
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(failure.status);
-          res.end(JSON.stringify(failure.body));
-          return;
-        }
-
-        const runGh = (
-          args: string[],
-          stdin?: string,
-          extraOpts: CliOptions = {}
-        ): Promise<CommandResult> => {
-          return new Promise((resolve) => {
-            const child = cliExec(
-              "gh",
-              args,
-              { timeout: 30000, ...(extraOpts || {}) },
-              (err, stdout, stderr) => {
-                resolve({
-                  code: err ? err.code || 1 : 0,
-                  stdout: stdout || "",
-                  stderr: stderr || ""
-                });
-              }
-            );
-            if (stdin !== undefined) child.stdin?.end(stdin);
-          });
-        };
-
-        const runGhOrThrow = async (
-          args: string[],
-          message: string,
-          stdin?: string
-        ): Promise<CommandResult> => {
-          const result = await runGh(args, stdin);
-          if (result.code !== 0) {
-            const detail = (result.stderr || result.stdout || "").trim();
-            throw new Error(detail ? `${message}: ${detail}` : message);
-          }
-          return result;
-        };
-
-        const setEnvironmentVariable = async (
-          name: string,
-          value: string
-        ): Promise<boolean> => {
-          if (!value) return false;
-          await runGhOrThrow(
-            [
-              "variable",
-              "set",
-              name,
-              "--body",
-              value,
-              "--env",
-              envName,
-              "--repo",
-              targetRepo
-            ],
-            `Failed to set ${name} on GitHub environment "${envName}"`
-          );
-          return true;
-        };
-        deleteGitHubEnvironmentRunner = async (args) => {
-          const result = await runGh(args);
-          if (result.code !== 0) {
-            const detail = (result.stderr || result.stdout || "").trim();
-            throw new Error(detail || "GitHub API request failed.");
-          }
-        };
-
-        const fail = async (
-          status: number,
-          error: string,
-          code: string,
-          extra: Record<string, unknown> = {}
-        ): Promise<void> => {
-          const failure = await finalizeSetupFailure(op, {
-            status,
-            error,
-            code,
-            extra,
-            steps,
-            evidence:
-              typeof extra.azError === "string" ? extra.azError
-              : typeof extra.ghError === "string" ? extra.ghError
-              : null,
-            runAz:
-              provider === "azure" ? (args) => runCliCommand("az", args) : null,
-            runDeleteEnvironment: deleteGitHubEnvironmentRunner
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(failure.status);
-          res.end(JSON.stringify(failure.body));
-        };
-        const checkpoint = () =>
-          persistMutationCheckpoint({
-            operation: op,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic),
-            fail
-          });
-
-        // The host often injects GH_TOKEN (an OAuth app token) that lacks the
-        // `workflow` scope, which is required to create/update files under
-        // .github/workflows/ or to dispatch workflows. The user's stored gh
-        // credential (keyring) usually has that scope. For workflow-scoped
-        // commands, run normally first; if it fails while an injected token is
-        // present, retry with GH_TOKEN/GITHUB_TOKEN stripped so gh falls back
-        // to the keyring credential. (A missing `workflow` scope surfaces as
-        // either a 403 "without workflow scope" on updates or a bare 404 on
-        // creates, so we retry on any failure rather than pattern-matching.)
-        const needsWorkflowScope = (stderr?: string): boolean => {
-          return (
-            /workflow.{0,20}scope/i.test(stderr || "") ||
-            /without .?workflow.? scope/i.test(stderr || "")
-          );
-        };
-        const runGhWorkflow = async (
-          args: string[],
-          stdin?: string
-        ): Promise<CommandResult> => {
-          const first = await runGh(args, stdin);
-          if (first.code === 0) return first;
-          const hasInjectedToken = !!(
-            process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-          );
-          if (!hasInjectedToken) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await runGh(args, stdin, { env: fallbackEnv });
-          // Prefer the retry only if it actually succeeded; otherwise keep the
-          // original error, which is usually the more meaningful one.
-          return retry.code === 0 ? retry : first;
-        };
-        const defaultBranch = (await getDefaultBranch(targetRepo)) || "main";
-        const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
-
-        steps.push(
-          'Creating private GHCR state package "' + stateRegistry + '"...'
-        );
-        const ghcrPreflight = await preflightGhcrPackageWriteAccess();
-        if (!ghcrPreflight.ok) {
-          await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
-          return;
-        }
-        const packageCredentials = ghcrPreflight.credentials;
-        const statePackage = await bootstrapGHCRStatePackage({
-          targetRepository: targetRepo,
-          registry: stateRegistry,
-          credentials: packageCredentials
-        });
-        steps.push(
-          `✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`
-        );
-
-        // --- Workflow commit + PR-fallback plumbing ---------------------
-        // Workflow files are normally committed straight to the repo's
-        // default branch via the contents API. When that branch is
-        // protected (or the user otherwise lacks direct-push permission),
-        // the PUT fails; instead of aborting, we lazily create a feature
-        // branch, commit every workflow file there, and open a PR the user
-        // can merge. The PR link is surfaced in `steps`.
-        const { writeFileSync, unlinkSync } = await import("node:fs");
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-
-        // A protected-branch / missing-write-access failure (as opposed to
-        // a missing `workflow` token scope, which a PR can't fix). Kept
-        // deliberately broad; branch creation gates the fallback, so a
-        // genuine no-access repo still surfaces the original error.
-        const isProtectedBranchFailure = (stderr: string): boolean => {
-          const s = stderr || "";
-          if (needsWorkflowScope(s)) return false;
-          return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(
-            s
-          );
-        };
-
-        // PR-fallback state; populated lazily on the first protected-branch
-        // failure. Once set, every subsequent workflow commit targets the
-        // PR branch instead of the default branch.
-        let prState: PullRequestState | undefined;
-        const beginPrFallback = async (): Promise<PullRequestState> => {
-          if (prState) return prState;
-          const base = (await getDefaultBranch(targetRepo)) || "main";
-          const baseSha = await getBranchHeadSha(targetRepo, base);
-          if (!baseSha)
-            throw new Error(`could not resolve head of base branch "${base}"`);
-          const branch = `radius/setup-${envName}-workflows-${Date.now()}`;
-          const created = await createBranchRef(targetRepo, branch, baseSha);
-          if (!created.ok)
-            throw new Error(
-              `could not create branch "${branch}": ${created.stderr}`
-            );
-          prState = { branch, base };
-          steps.push(
-            `ℹ️ No permission to push to "${base}" directly — committing workflows to branch "${branch}" and opening a pull request.`
-          );
-          return prState;
-        };
-
-        // Commit one workflow file via the contents API. `branch === ''`
-        // targets the default branch. Looks up the existing blob SHA on the
-        // same ref so a re-commit is an update rather than a rejected
-        // create. Returns the raw runGhWorkflow result ({ code, stderr }).
-        const putWorkflowContent = async (
-          path: string,
-          contentB64: string,
-          message: string,
-          branch = ""
-        ): Promise<CommandResult> => {
-          const refQ = branch ? "?ref=" + encodeURIComponent(branch) : "";
-          const shaRes = await runGh([
-            "api",
-            "/repos/" + targetRepo + "/contents/" + path + refQ,
-            "--jq",
-            ".sha"
-          ]);
-          const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
-          const bodyObj = {
-            message,
-            content: contentB64,
-            ...(branch ? { branch } : {}),
-            ...(sha ? { sha } : {})
-          };
-          const tmp = join(
-            tmpdir(),
-            "radius-wf-commit-" +
-              Date.now() +
-              "-" +
-              Math.random().toString(36).slice(2) +
-              ".json"
-          );
-          writeFileSync(tmp, JSON.stringify(bodyObj));
-          const r = await runGhWorkflow([
-            "api",
-            "--method",
-            "PUT",
-            "/repos/" + targetRepo + "/contents/" + path,
-            "--input",
-            tmp
-          ]);
-          try {
-            unlinkSync(tmp);
-          } catch {}
-          return r;
-        };
-
-        // Commit a workflow file, transparently switching to the PR branch
-        // (creating it on first use) when the default branch rejects the
-        // push for permission reasons. Returns { ok, stderr, viaPr }.
-        const commitWorkflowFileSmart = async (
-          path: string,
-          contentB64: string,
-          message: string
-        ): Promise<{ ok: boolean; stderr?: string; viaPr: boolean }> => {
-          if (prState) {
-            const r = await putWorkflowContent(
-              path,
-              contentB64,
-              message,
-              prState.branch
-            );
-            return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
-          }
-          const direct = await putWorkflowContent(
-            path,
-            contentB64,
-            message,
-            ""
-          );
-          if (direct.code === 0) return { ok: true, viaPr: false };
-          if (isProtectedBranchFailure(direct.stderr)) {
-            let fallback: PullRequestState;
-            try {
-              fallback = await beginPrFallback();
-              prState = fallback;
-            } catch (e) {
-              return {
-                ok: false,
-                stderr: `${direct.stderr} (PR fallback failed: ${errorMessage(
-                  e
-                )})`,
-                viaPr: false
-              };
-            }
-            const r = await putWorkflowContent(
-              path,
-              contentB64,
-              message,
-              fallback.branch
-            );
-            return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
-          }
-          return { ok: false, stderr: direct.stderr, viaPr: false };
-        };
-
-        // Step 1: Create the GitHub environment
-        const environmentPath =
-          "/repos/" +
-          targetRepo +
-          "/environments/" +
-          encodeURIComponent(envName);
-        const environmentLookup = await runGh(["api", environmentPath]);
-        const environmentState =
-          resolveGitHubEnvironmentCreateState(environmentLookup);
-        if (!environmentState) {
-          const detail =
-            (
-              environmentLookup.stderr ||
-              environmentLookup.stdout ||
-              ""
-            ).trim() || "The GitHub API lookup failed.";
-          throw new Error(
-            `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
-          );
-        }
-        steps.push('Creating GitHub environment "' + envName + '"...');
-        await runGhOrThrow(
-          ["api", "--method", "PUT", environmentPath],
-          'Failed to create GitHub environment "' + envName + '"'
-        );
-        recordGitHubEnvironment(op, {
-          state: environmentState,
-          repo: targetRepo,
-          name: envName
-        });
-        if (!(await checkpoint())) return;
-        // Tag the environment as Radius-managed so the listing can filter
-        // out environments created outside this extension.
-        await setEnvironmentVariable("RADIUS_MANAGED", "true");
-        // A new environment invalidates the cached listing for this repo.
-        envListCache.delete(targetRepo);
-
-        steps.push(
-          'Configuring Radius state package "' + stateRegistry + '"...'
-        );
-        await setEnvironmentVariable("RADIUS_STATE_BACKEND", OCI_STATE_BACKEND);
-        await setEnvironmentVariable("RADIUS_STATE_REGISTRY", stateRegistry);
-        await setEnvironmentVariable(
-          "RADIUS_STATE_ARCHIVE",
-          DEFAULT_STATE_ARCHIVE
-        );
-        steps.push(
-          `✅ Radius state package configured with archive tag "${DEFAULT_STATE_ARCHIVE}".`
-        );
-
-        // Record the credential profile this environment was created from
-        // so the Environments listing can show it in the Credentials column.
-        if (data.profileName) {
-          await setEnvironmentVariable(
-            "RADIUS_CREDENTIAL_PROFILE",
-            data.profileName
-          );
-        }
-
-        // Step 2: Set environment variables and secrets based on provider
-        steps.push("Setting environment variables and secrets...");
-        // Fall back to shared credentials for values not provided in the request
-        const azureCreds = cloudCredential(sharedCredentials.azure);
-        const awsCreds = cloudCredential(sharedCredentials.aws);
-
-        if (provider === "azure") {
-          const clientId = data.clientId || optionalString(azureCreds.clientId);
-          const tenantId = data.tenantId || optionalString(azureCreds.tenantId);
-          const subscriptionId =
-            data.subscriptionId || optionalString(azureCreds.subscriptionId);
-          const rg = data.resourceGroup || "";
-          const k8s = data.cluster || "";
-
-          await setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
-          await setEnvironmentVariable("AZURE_TENANT_ID", tenantId);
-          await setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
-          await setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
-          await setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
-          await setEnvironmentVariable("AZURE_LOCATION", data.location);
-          await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-
-          const setCount = [
-            clientId,
-            tenantId,
-            subscriptionId,
-            rg,
-            k8s,
-            data.location,
-            data.namespace
-          ].filter(Boolean).length;
-          steps.push(`Set ${setCount} environment value(s) for Azure.`);
-          if (!clientId || !tenantId || !subscriptionId) {
-            steps.push(
-              "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
-            );
-          }
-        } else {
-          const roleArn = data.roleArn || "";
-          const region =
-            data.region || optionalString(awsCreds.region) || "us-east-1";
-          const accountId =
-            data.accountId || optionalString(awsCreds.accountId);
-          const k8s = data.cluster || "";
-
-          await setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
-          await setEnvironmentVariable("AWS_REGION", region);
-          await setEnvironmentVariable("AWS_ACCOUNT_ID", accountId);
-          await setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
-          await setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
-          await setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-          await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-        }
-
-        // Step 3: Commit the verify-credentials workflow
-        steps.push("Committing verify-credentials workflow...");
-        const verifyWorkflow = await generateVerifyWorkflow(envName, provider);
-        const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
-        const verifyPath = ".github/workflows/radius-verify-credentials.yml";
-
-        const verifyCommit = await commitWorkflowFileSmart(
-          verifyPath,
-          verifyContent,
-          "Add Radius verify-credentials workflow for environment " + envName
-        );
-
-        if (!verifyCommit.ok) {
-          steps.push("❌ Failed to commit verify-credentials workflow.");
-          const scopeHint =
-            needsWorkflowScope(verifyCommit.stderr) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-          await fail(
-            400,
-            "Failed to commit the verify-credentials workflow (" +
-              verifyPath +
-              ") to " +
-              targetRepo +
-              ". " +
-              ((verifyCommit.stderr || "").trim() ||
-                "The GitHub API request failed.") +
-              scopeHint,
-            "verify-workflow-commit-failed",
-            { steps, ghError: verifyCommit.stderr || "" }
-          );
-          return;
-        }
-        steps.push("✅ Verify workflow committed.");
-        recordCommittedWorkflowFile(op, {
-          path: verifyPath,
-          branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
-          mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
-        });
-        if (!(await checkpoint())) return;
-
-        // Step 4: Also commit the deploy workflows (dispatcher + both
-        // provider workflows). The dispatcher references both provider
-        // files by path, so all three must exist in the target repo.
-        steps.push("Committing deploy workflows...");
-        const deployWorkflows = await generateDeployWorkflow(
-          envName,
-          ".radius/app.bicep"
-        );
-
-        for (const [fileName, content] of Object.entries(deployWorkflows)) {
-          const deployContent = Buffer.from(content).toString("base64");
-          const deployPath = ".github/workflows/" + fileName;
-
-          const deployCommit = await commitWorkflowFileSmart(
-            deployPath,
-            deployContent,
-            "Add Radius deploy workflow (" +
-              fileName +
-              ") for environment " +
-              envName
-          );
-
-          if (!deployCommit.ok) {
-            steps.push("❌ Failed to commit deploy workflow " + fileName + ".");
-            const scopeHint2 =
-              needsWorkflowScope(deployCommit.stderr) ?
-                ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-              : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-            await fail(
-              400,
-              "Failed to commit the deploy workflow (" +
-                deployPath +
-                ") to " +
-                targetRepo +
-                ". " +
-                ((deployCommit.stderr || "").trim() ||
-                  "The GitHub API request failed.") +
-                scopeHint2,
-              "deploy-workflow-commit-failed",
-              { steps, ghError: deployCommit.stderr || "" }
-            );
-            return;
-          }
-          recordCommittedWorkflowFile(op, {
-            path: deployPath,
-            branch:
-              deployCommit.viaPr ? prState?.branch || null : defaultBranch,
-            mode: deployCommit.viaPr ? "pull_request" : "default_branch"
-          });
-          if (!(await checkpoint())) return;
-        }
-        // Best-effort: remove the legacy monolithic deploy workflow so it
-        // does not double-trigger alongside the new dispatcher. Skipped in
-        // PR-fallback mode since we can't push to the default branch.
-        if (!prState) await deleteLegacyDeployWorkflow(targetRepo);
-        steps.push("✅ Deploy workflows committed.");
-
-        // Step 4b: Commit the application-delete workflows (dispatcher +
-        // Azure provider workflow) so the Delete Deployment button can
-        // dispatch `rad app delete`. Only Azure workflows are generated and
-        // committed; the AWS provider file is never produced.
-        steps.push("Committing delete workflows...");
-        try {
-          const deleteWorkflows = await generateDeleteWorkflow(envName);
-          for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-            const delContent = Buffer.from(content).toString("base64");
-            const delPath = ".github/workflows/" + fileName;
-
-            const delCommit = await commitWorkflowFileSmart(
-              delPath,
-              delContent,
-              "Add Radius delete workflow (" +
-                fileName +
-                ") for environment " +
-                envName
-            );
-
-            if (!delCommit.ok) {
-              steps.push(
-                "⚠️ Could not commit delete workflow " +
-                  fileName +
-                  ": " +
-                  ((delCommit.stderr || "").trim() ||
-                    "GitHub API request failed.")
-              );
-            }
-            if (delCommit.ok) {
-              recordCommittedWorkflowFile(op, {
-                path: delPath,
-                branch:
-                  delCommit.viaPr ? prState?.branch || null : defaultBranch,
-                mode: delCommit.viaPr ? "pull_request" : "default_branch"
-              });
-              if (!(await checkpoint())) return;
-            }
-          }
-          steps.push("✅ Delete workflows committed.");
-        } catch (delErr) {
-          // Delete workflows are non-critical to environment creation, so
-          // surface the failure but don't abort the whole flow.
-          steps.push(
-            "⚠️ Could not generate/commit delete workflows: " +
-              errorMessage(delErr)
-          );
-        }
-
-        // Step 4c: If any workflow commit fell back to a PR branch, open the
-        // pull request now so the user can merge it. Until it's merged, the
-        // workflows don't exist on the default branch, so we skip dispatching
-        // the verify run (it would 404) and tell the user to merge first.
-        let pullRequestUrl = "";
-        if (prState) {
-          const prTitle =
-            "Add Radius deploy workflows for environment " + envName;
-          const prBody = [
-            "This PR adds the GitHub Actions workflows that power the Radius extension for the **" +
-              envName +
-              "** environment:",
-            "",
-            "- `.github/workflows/radius-verify-credentials.yml`",
-            "- Radius deploy workflow(s) under `.github/workflows/`",
-            "- Radius delete workflow(s) under `.github/workflows/`",
-            "",
-            "They were committed to `" +
-              prState.branch +
-              "` because direct pushes to `" +
-              prState.base +
-              "` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas."
-          ].join("\n");
-          const pr = await createPullRequestApi(
-            targetRepo,
-            prState.branch,
-            prState.base,
-            prTitle,
-            prBody
-          );
-          if (pr.ok) {
-            pullRequestUrl = pr.url || "";
-            steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
-            steps.push(
-              '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
-                prState.base +
-                '".'
-            );
-          } else {
-            steps.push(
-              '⚠️ Committed workflows to branch "' +
-                prState.branch +
-                '" but could not open a pull request automatically: ' +
-                ((pr.stderr || "").trim() || "GitHub API request failed.") +
-                ' Open one manually from that branch into "' +
-                prState.base +
-                '".'
-            );
-          }
-        }
-        // Step 5: Dispatch the verify workflow.
-        //
-        // On the PR path this used to be an unconditional skip, which was
-        // right for a first-time setup and wrong for every repository that
-        // already had the workflows on its default branch. planCredentialVerification
-        // decides instead, and returns an empty pullRequestUrl when it
-        // dispatches so a merely informational PR is not mistaken for a
-        // blocking one.
-        let verifyRunUrl = "";
-        let verifyRunId = null;
-        const dispatchedAt = Date.now();
-        const verifyPlan = await planCredentialVerification({
-          targetRepo,
-          prState: prState || null,
-          pullRequestUrl,
-          fetchFile: fetchFileFromRepo,
-          resolveDefaultBranch: getDefaultBranch
-        });
-        pullRequestUrl = verifyPlan.pullRequestUrl;
-        if (!verifyPlan.shouldDispatch) {
-          steps.push(
-            `⏭️ Skipping credential verification until the pull request is merged — ${
-              verifyPlan.skipReason ||
-              "the workflows are not on the default branch yet"
-            }.`
-          );
-        } else {
-          if (verifyPlan.ref)
-            steps.push(
-              `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
-            );
-          steps.push("Dispatching verify-credentials workflow...");
-          // Wait briefly for GitHub to index the workflow, then dispatch with
-          // a few retries to ride out indexing/propagation races.
-          await new Promise((r) => setTimeout(r, 3000));
-          const dispatchDelays = [0, 2000, 5000];
-          let dispatchResult: CommandResult = {
-            code: 1,
-            stdout: "",
-            stderr: ""
-          };
-          for (const delay of dispatchDelays) {
-            if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-            dispatchResult = await runGhWorkflow(
-              buildVerifyWorkflowDispatchArgs({
-                workflowFile: VERIFY_WORKFLOW_FILE,
-                targetRepo,
-                envName,
-                ref: verifyPlan.ref
-              })
-            );
-            if (dispatchResult.code === 0) break;
-          }
-
-          if (dispatchResult.code === 0) {
-            steps.push("✅ Verify workflow dispatched.");
-            await new Promise((r) => setTimeout(r, 5000));
-            const runsResult = await runGh([
-              "run",
-              "list",
-              "--workflow=radius-verify-credentials.yml",
-              "--limit",
-              "1",
-              "--json",
-              "databaseId,status,url",
-              "--repo",
-              targetRepo
-            ]);
-            try {
-              const parsed: unknown = JSON.parse(runsResult.stdout);
-              const runs = Array.isArray(parsed) ? parsed : [];
-              if (runs.length > 0) {
-                verifyRunId = runs[0].databaseId;
-                verifyRunUrl =
-                  "https://github.com/" +
-                  targetRepo +
-                  "/actions/runs/" +
-                  verifyRunId;
-                steps.push("Verify run: " + verifyRunUrl);
-              }
-            } catch {}
-            steps.push(
-              "Credentials verification dispatched. Deploy your application from the Environments list when ready."
-            );
-          } else {
-            const detail =
-              (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
-              "The GitHub CLI request failed.";
-            steps.push("❌ Could not dispatch verify workflow: " + detail);
-            await fail(
-              400,
-              "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
-                detail,
-              "verify-dispatch-failed",
-              {
-                environment: envName,
-                provider,
-                repo: targetRepo,
-                stateBackend: OCI_STATE_BACKEND,
-                stateRegistry,
-                stateArchive: DEFAULT_STATE_ARCHIVE,
-                steps,
-                ghError: detail
-              }
-            );
-            return;
-          }
-        }
-
-        // Record dispatch markers so the deploy monitor can track the
-        // correct (newly-triggered) runs rather than any stale runs.
-        {
-          op.verification = {
-            dispatchedAt,
-            workflow: VERIFY_WORKFLOW_FILE,
-            ref: verifyPlan.ref || defaultBranch,
-            environment: envName,
-            runId: verifyRunId == null ? null : String(verifyRunId),
-            runUrl: verifyRunUrl || null
-          };
-          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
-          if (!(await checkpoint())) return;
-          const entry = servers.get(instanceId);
-          if (entry) {
-            entry.state.deployDispatchedAt = dispatchedAt;
-            entry.state.verifyRunId = verifyRunId;
-            entry.state.verifyRunUrl = verifyRunUrl;
-          }
-        }
-
-        const actionRequired = !verifyPlan.shouldDispatch;
-        recordCleanupState(op, { state: "not_needed" });
-        if (actionRequired) {
-          recordCommitState(op, {
-            mode: "pull_request",
-            branch: prState?.branch || defaultBranch,
-            baseBranch:
-              prState?.base || verifyPlan.defaultBranch || defaultBranch,
-            pullRequestUrl: pullRequestUrl || null
-          });
-          // The third terminal state, and the one the product kept
-          // getting wrong. Verification was never dispatched, so there
-          // is nothing to wait for and nothing failed — the operation is
-          // finished and the remaining work is the user's. The client
-          // used to poll for a verify run that could not exist and, eight
-          // minutes later, reported this as a timeout.
-          setStageState(op, STAGE_VERIFY, "skipped");
-          finish(op, "action_required", {
-            terminal: {
-              reason: "pr-merge-required",
-              pullRequestUrl: pullRequestUrl || null,
-              branch: prState?.branch || null,
-              baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-              userMessage:
-                pullRequestUrl ?
-                  "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-                : `Open and merge a pull request from "${
-                    prState?.branch || "the setup branch"
-                  }" into "${
-                    prState?.base ||
-                    verifyPlan.defaultBranch ||
-                    "the default branch"
-                  }" to finish setup.`
-            }
-          });
-          await persistBestEffort({
-            operation: op,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
-        } else {
-          recordCommitState(op, {
-            mode: prState ? "pull_request" : "default_branch",
-            branch: prState?.branch || defaultBranch,
-            baseBranch:
-              prState?.base || verifyPlan.defaultBranch || defaultBranch,
-            pullRequestUrl: pullRequestUrl || null
-          });
-          // Verification is dispatched but still running; stage and exact
-          // dispatch identity were persisted together above.
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            operationId: op.operationId,
-            environment: envName,
-            provider,
-            repo: targetRepo,
-            stateBackend: OCI_STATE_BACKEND,
-            stateRegistry,
-            stateArchive: DEFAULT_STATE_ARCHIVE,
-            verifyRunUrl,
-            // Stated, not inferred. A pull request can exist on a run that
-            // verified perfectly well, so the client must not read a URL as
-            // a control-flow decision — that inference is what #247 was.
-            actionRequired,
-            pullRequestUrl,
-            pullRequestBranch: actionRequired ? prState?.branch || null : null,
-            pullRequestBaseBranch:
-              actionRequired ?
-                prState?.base || verifyPlan.defaultBranch || null
-              : null,
-            steps
-          })
-        );
-      } catch (e) {
-        const failure = await finalizeSetupFailure(op, {
-          status: 400,
-          error: errorMessage(e),
-          code: "create-environment-unhandled",
-          classification: "unknown",
-          evidence: e instanceof Error ? e.stack || null : null,
-          steps,
-          runAz:
-            op && op.provider === "azure" ?
-              (args) => runCliCommand("az", args)
-            : null,
-          runDeleteEnvironment: deleteGitHubEnvironmentRunner
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(failure.status);
-        res.end(JSON.stringify(failure.body));
       }
       return;
     }
