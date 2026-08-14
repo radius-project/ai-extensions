@@ -2317,8 +2317,8 @@ describe("deploy failures that may leave a run in flight", () => {
     );
     // The dispatch failure takes its kind from the classifier above, which
     // returns unconfirmed for everything it cannot rule out.
-    expect(blockAfter("Failed to start the run rad commands workflow")).toContain(
-      "deployErrorKind = dispatchKind"
-    );
+    expect(
+      blockAfter("Failed to start the run rad commands workflow")
+    ).toContain("deployErrorKind = dispatchKind");
   });
 });

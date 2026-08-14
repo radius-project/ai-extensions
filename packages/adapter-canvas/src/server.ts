@@ -1217,13 +1217,13 @@ export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
 // CLI timing out, for one), and the token-scope retry can dispatch twice — so
 // it has to be treated as a run that may exist.
 export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
-  return (
+  if (
     /no ref found|could not resolve|no commit found for the ref/i.test(
       stderr || ""
     )
-  ) ?
-      DEPLOY_BRANCH_NOT_PUSHED_KIND
-    : DEPLOY_RUN_UNCONFIRMED_KIND;
+  )
+    return DEPLOY_BRANCH_NOT_PUSHED_KIND;
+  return DEPLOY_RUN_UNCONFIRMED_KIND;
 }
 
 // Decide, server-side, whether an incoming deploy continues an existing repair
