@@ -6,8 +6,8 @@ import type {
   EnvironmentVerifyRun
 } from "./environments-types.js";
 
-// The `environments` family, minus `POST /api/create-environment`, which stays
-// on the legacy fallback and is migrated by a separate slice. The four routes
+// The `environments` family, minus `POST /api/create-environment`, which is
+// large enough to live in its own `create-environment*.ts` seams. The four routes
 // here are the environment picker's read surface (`list-environments`,
 // `verify-status`), the deploy page's parameter probe (`app-params`), and the
 // one destructive route (`delete-environment`). They are migrated together

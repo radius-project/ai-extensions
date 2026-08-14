@@ -64,7 +64,10 @@ export interface CreateEnvironmentOperation {
   environment?: string;
   provider?: string;
   currentStage?: string;
-  inputRequired?: boolean;
+  // The real record stores a prompt object here (or `null`), not a flag; the
+  // refusal only tests it for truthiness, so `unknown` keeps this declaration
+  // from being narrower than what `operations.ts` actually writes.
+  inputRequired?: unknown;
   verification?: unknown;
 }
 

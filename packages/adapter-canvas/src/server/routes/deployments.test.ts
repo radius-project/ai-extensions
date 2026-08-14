@@ -377,17 +377,19 @@ describe("deployments routes (SU-06)", () => {
 
     // `||` rather than `??` throughout the projection: an empty string or a
     // zero is "no value" to this poll, and the client renders `null`/"pending"
-    // differently from `""`/`0`.
+    // differently from `""`/`0`. `deployErrorKind` is narrowed to a union, so
+    // `null` is the only absent value it can carry; the rest are free strings
+    // and numbers where `""` and `0` are the cases `||` and `??` disagree on.
     it("normalizes empty-string and zero state to the absent values", () => {
       const state = {
         deployStatus: "",
         deployError: "",
-        deployErrorKind: "",
+        deployErrorKind: null,
         deployErrorBranch: "",
         deployStartedAt: 0,
         deployFinishedAt: 0,
         deployRunUrl: ""
-      } as CanvasState;
+      } satisfies CanvasState;
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
 

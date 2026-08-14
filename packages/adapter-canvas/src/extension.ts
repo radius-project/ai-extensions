@@ -48,7 +48,8 @@ import {
   buildDeployPayload,
   validateDeployPayload,
   validateDeployAttempt,
-  summarizeDeployStatus
+  summarizeDeployStatus,
+  describeDeployStarted
 } from "./deploy-tools.js";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.js";
 import {
@@ -137,7 +138,8 @@ const dependencies: RadiusExtensionDependencies = {
     buildDeployPayload,
     validateDeployPayload,
     validateDeployAttempt,
-    summarizeDeployStatus
+    summarizeDeployStatus,
+    describeDeployStarted
   },
   sourceRefs: {
     getSourceRefResources,

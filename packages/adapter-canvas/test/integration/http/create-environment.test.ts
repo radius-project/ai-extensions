@@ -8,7 +8,11 @@ import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
 } from "../../../src/verification-plan.js";
-import { resolveGitHubEnvironmentCreateState } from "../../../src/server.js";
+import {
+  persistBestEffort,
+  persistMutationCheckpoint,
+  resolveGitHubEnvironmentCreateState
+} from "../../../src/server.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
@@ -18,7 +22,8 @@ import type {
 } from "../../../src/server/routes/create-environment.js";
 import type {
   CreateEnvironmentCommandResult,
-  CreateEnvironmentOperation
+  CreateEnvironmentOperation,
+  GhcrPreflightResult
 } from "../../../src/server/routes/create-environment-types.js";
 
 let container: CanvasServerContainer | undefined;
@@ -41,12 +46,7 @@ interface GhRule {
 interface Script {
   gh?: GhRule[];
   repoAdminRefusal?: string;
-  ghcrPreflight?: {
-    ok: boolean;
-    error: string;
-    code: string;
-    credentials: unknown;
-  };
+  ghcrPreflight?: GhcrPreflightResult;
   defaultBranch?: string | null;
   headSha?: string | null;
   createBranch?: { ok: boolean; stderr: string };
@@ -72,6 +72,8 @@ interface Harness {
   committedFiles: Array<{ path: string; branch: string | null; mode: string }>;
   failures: Array<Record<string, unknown>>;
 }
+
+const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
 
 // The default script is a repository with no Radius workflows yet, an
 // unprotected default branch and a healthy `gh`. Each test overrides only the
@@ -121,18 +123,27 @@ function start(script: Script = {}): Harness {
   const failures: Array<Record<string, unknown>> = [];
   let persistCalls = 0;
 
-  const operation = {
+  const operation: CreateEnvironmentOperation = {
     operationId: "op-http",
     repo: "octo/app",
     environment: "dev",
     provider: "azure",
     currentStage: STAGE_CONFIGURE,
     inputRequired: null
-  } as CreateEnvironmentOperation;
+  };
 
   const rules = [...(script.gh ?? []), ...DEFAULT_GH_RULES];
+
+  // `gh api --method PUT .../contents/...` carries its target branch in the
+  // JSON body, not in argv, so the argv alone cannot tell a default-branch
+  // commit from a pull-request-branch one. The fake reads the body the
+  // committer just wrote and rewrites the temp-file argument to `@<branch>`
+  // (or `@default`), which is the only signal `gh` itself would act on.
+  let lastBodyBranch = "default";
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
-    const key = args.join(" ");
+    const key = args
+      .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
+      .join(" ");
     ghCalls.push(key);
     for (const rule of rules) {
       if (rule.match.test(key)) {
@@ -221,24 +232,17 @@ function start(script: Script = {}): Harness {
         body: { error: String(input.error), code: String(input.code) }
       };
     },
-    persistMutationCheckpoint: async ({ persist, fail }) => {
+    // The real helpers, delegated to rather than reimplemented: their refusal
+    // wording and their "stop making cloud changes" contract are production
+    // behavior, so a hand-written double could only diverge from it. The
+    // journal entry observes the call without altering it.
+    persistMutationCheckpoint: (input) => {
       journal.push("checkpoint");
-      try {
-        await persist();
-        return true;
-      } catch {
-        await fail(500, "Could not save progress.", "operation-persist-failed");
-        return false;
-      }
+      return persistMutationCheckpoint(input);
     },
-    persistBestEffort: async ({ persist }) => {
+    persistBestEffort: (input) => {
       journal.push("persistBestEffort");
-      try {
-        await persist();
-        return true;
-      } catch {
-        return false;
-      }
+      return persistBestEffort(input);
     },
     runAzCommand: () => {
       throw new Error("unscripted az call");
@@ -254,8 +258,6 @@ function start(script: Script = {}): Harness {
       return (
         script.ghcrPreflight ?? {
           ok: true,
-          error: "",
-          code: "",
           credentials: { username: "octo" }
         }
       );
@@ -278,7 +280,20 @@ function start(script: Script = {}): Harness {
       return script.createBranch;
     },
     tempFile: {
-      write: () => "/tmp/create-environment-body.json",
+      write: (contents) => {
+        const parsed: unknown = JSON.parse(contents);
+        const branch =
+          (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            "branch" in parsed &&
+            typeof parsed.branch === "string"
+          ) ?
+            parsed.branch
+          : "";
+        lastBodyBranch = branch || "default";
+        return TEMP_BODY_PATH;
+      },
       remove: () => undefined
     },
 
@@ -503,9 +518,9 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     const harness = start({
       ghcrPreflight: {
         ok: false,
+        status: 403,
         error: "Your token cannot write packages.",
-        code: "ghcr-package-write-required",
-        credentials: null
+        code: "ghcr-package-write-required"
       }
     });
 
@@ -522,7 +537,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
 
 describe("create-environment real-loopback HIT: the seven-step workflow", () => {
   it("answers a single synchronous 200 describing the whole run", async () => {
-    const harness = start();
+    start();
 
     const response = await post({ repo: "octo/app", environment: "dev" });
 
@@ -842,10 +857,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 });
 
 describe("create-environment real-loopback HIT: the protected-branch path", () => {
+  // Only the commit that targets the default branch is rejected; the retry the
+  // committer makes against the pull-request branch is allowed through, which
+  // is what a real protected branch does.
   const protectedScript: Script = {
     gh: [
       {
-        match: /^api --method PUT \/repos\/octo\/app\/contents\/[^?]*$/,
+        match: /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
         result: { code: 1, stderr: "protected branch" }
       }
     ],
@@ -972,17 +990,23 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
 describe("create-environment real-loopback HIT: the cancellation gates", () => {
   it("answers 500 and stops touching GitHub when a checkpoint cannot be saved", async () => {
-    // The first checkpoint runs immediately after the environment is created;
-    // everything after it must not run.
-    const harness = start({ persistRejectsAfter: 0 });
+    // Admission persists once and succeeds; the next write is the first
+    // checkpoint, which runs immediately after the environment is created.
+    // Everything after it must not run. The wording is the shared
+    // `persistMutationCheckpoint` helper's ("no further" cloud resources),
+    // which is distinct from the admission-time refusal that reports no cloud
+    // resources at all.
+    const harness = start({ persistRejectsAfter: 1 });
 
     const response = await post({ repo: "octo/app" });
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
-      error: "Could not save progress.",
-      code: "operation-persist-failed"
+      error:
+        "Radius changed no further cloud resources because it could not save the setup recovery record.",
+      code: "operation-persistence-failed"
     });
+    expect(harness.journal).toContain("diagnostic:operation-store-write-failed");
     expect(harness.ghCalls).toEqual([
       "api /repos/octo/app/environments/dev",
       "api --method PUT /repos/octo/app/environments/dev"

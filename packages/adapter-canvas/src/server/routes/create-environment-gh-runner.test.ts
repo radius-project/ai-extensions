@@ -79,13 +79,13 @@ describe("needsWorkflowScope", () => {
     expect(needsWorkflowScope(stderr)).toBe(true);
   });
 
-  it.each([
-    ["HTTP 404: Not Found"],
-    ["protected branch update failed"],
+  it.each<[stderr: string | undefined, label: string]>([
+    ["HTTP 404: Not Found", "an unrelated HTTP failure"],
+    ["protected branch update failed", "a protected-branch rejection"],
     ["", "an empty message"],
     [undefined, "an absent message"]
   ])("does not claim a missing workflow scope for %s", (stderr) => {
-    expect(needsWorkflowScope(stderr as string | undefined)).toBe(false);
+    expect(needsWorkflowScope(stderr)).toBe(false);
   });
 });
 
@@ -157,7 +157,7 @@ describe("the workflow-scope gh runner", () => {
     );
   });
 
-  it.each([
+  it.each<[value: string | undefined, label: string]>([
     ["", "an empty value"],
     [undefined, "an absent value"]
   ])("skips setting an environment variable for %s", async (value) => {
