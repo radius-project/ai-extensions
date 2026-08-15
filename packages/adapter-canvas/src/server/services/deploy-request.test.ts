@@ -194,7 +194,24 @@ describe("deploy request admission", () => {
     const result = await service.deploy({ instanceId: "a", body: "not json" });
 
     expect(result.status).toBe(400);
-    expect(String((result.body as { error: string }).error)).toMatch(/JSON/i);
+    expect(String((result.body as { error: string }).error)).toMatch(
+      /^Invalid JSON body:/
+    );
+  });
+
+  it("answers 400 with a specific error for an empty body", async () => {
+    const service = createDeployRequestService(
+      dependencies({
+        readInstanceEntry: () => {
+          throw new Error("the entry must not be read before the body parses");
+        }
+      })
+    );
+
+    expect(await service.deploy({ instanceId: "a", body: " \r\n " })).toEqual({
+      status: 400,
+      body: { error: "Invalid JSON body: Empty request body." }
+    });
   });
 
   it("answers 400 when the instance entry is gone", async () => {
