@@ -68,9 +68,8 @@ describe("validators", () => {
 
   it("isUuid rejects shell-metacharacter injection (subscriptionId → az on Windows cmd.exe)", () => {
     // /api/discover and /api/verify-azure-login pass subscriptionId into
-    // `az account set --subscription`. On Windows cliExec routes az through
-    // `cmd.exe /c` and libuv only quotes args with whitespace, so an unquoted
-    // "&"/"|" would be parsed as a command separator. isUuid is the guard.
+    // `az account set --subscription`. cliExec quotes Windows argv values, but
+    // the UUID guard remains the domain boundary and defense in depth.
     expect(isUuid("00000000-0000-0000-0000-000000000000&calc")).toBe(false);
     expect(isUuid("x&calc")).toBe(false);
     expect(isUuid(UUID + " & calc")).toBe(false);
