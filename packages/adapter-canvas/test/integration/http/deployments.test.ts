@@ -4,12 +4,26 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
+import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
+import {
+  activeDeploymentMutation,
+  beginDeployAttempt,
+  DEPLOY_RUN_UNCONFIRMED_KIND,
+  deploymentStatusBlocksMutation,
+  localDeploymentBlocksMutation,
+  releaseDeploymentMutation,
+  reserveDeploymentMutation,
+  resolveDeploymentEnvironment,
+  resolveDeployRepairLoop
+} from "../../../src/server.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "../../../src/runtime/hooks.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
   DeployListCacheEntry,
   DeploymentRow
 } from "../../../src/server/routes/deployments.js";
+import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
@@ -86,7 +100,14 @@ function start(): Harness {
         return Promise.resolve({ code: 0, stdout: "", stderr: "" });
       },
       readProcessEnv: () => ({}),
-      setTimer: () => ({})
+      setTimer: () => ({}),
+      // The deploy route has its own harness below, which drives the real
+      // admission service. Reaching it from this one is a wiring bug.
+      deployRequest: {
+        deploy: () => {
+          throw new Error("unexpected deploy dispatch from the read harness");
+        }
+      }
     })
   );
 
@@ -320,12 +341,529 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     }
   });
 
-  it("leaves POST /api/deploy deferred to a later slice", () => {
+  it("migrates POST /api/deploy off the legacy fallback", () => {
     // Written out by hand so the two sides come from different sources: this
-    // fires meaningfully when a later slice migrates the route, rather than
-    // restating whatever the ledger happens to say.
+    // fires meaningfully if the route is ever pushed back onto the fallback.
     for (const key of ["POST /api/deploy"]) {
-      expect(LEGACY_ROUTE_INVENTORY).toContain(key);
+      expect(LEGACY_ROUTE_INVENTORY).not.toContain(key);
     }
+  });
+});
+
+// ── POST /api/deploy over a real loopback socket ─────────────────────────────
+// Drives the real typed request handler, the real route table, and the real
+// admission service, with the real repair-loop, reservation and attempt
+// helpers from `server.ts`. Only the outside world is faked: the background
+// monitor, the persisted GitHub deployment lookup, and the default-branch
+// subprocess. Nothing here reaches the network, a CLI, or a cloud.
+
+interface DeployHarness {
+  monitorCalls: DeployMonitorRequest[];
+  branchLookups: string[][];
+  handoffs: string[];
+  stateOf(instanceId: string): CanvasState;
+  settleMonitor(error?: Error): Promise<void>;
+  setPersistedDeployment(row: DeploymentRow | null): void;
+  failPersistedLookup(failure: boolean): void;
+}
+
+function startDeploy(): DeployHarness {
+  const monitorCalls: DeployMonitorRequest[] = [];
+  const branchLookups: string[][] = [];
+  const handoffs: string[] = [];
+  let releaseMonitor: ((error?: Error) => void) | undefined;
+  let monitorSettled: Promise<void> | undefined;
+  let persisted: DeploymentRow | null = null;
+  let persistedFails = false;
+
+  const deployRequest = createDeployRequestService({
+    readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
+    resolveDeployRepairLoop,
+    resolveDeploymentEnvironment,
+    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    localDeploymentBlocksMutation: (state) =>
+      localDeploymentBlocksMutation(state),
+    reserveDeploymentMutation: (state, reservation) =>
+      reserveDeploymentMutation(state, reservation),
+    releaseDeploymentMutation,
+    deploymentStatusBlocksMutation,
+    resolveEnvDeployment: () =>
+      persistedFails ?
+        Promise.reject(new Error("gh unreachable"))
+      : Promise.resolve(persisted),
+    runCommand: (_command, args) => {
+      branchLookups.push(args);
+      return Promise.resolve("release/7\n");
+    },
+    canvasGraphResources: (values) =>
+      values.filter(
+        (value): value is Record<string, never> =>
+          !!value && typeof value === "object"
+      ),
+    beginDeployAttempt,
+    triggerDeployRepairHandoff: (_entry, instanceId) => {
+      handoffs.push(instanceId);
+      return true;
+    },
+    monitor: {
+      run: (request) => {
+        monitorCalls.push(request);
+        monitorSettled = new Promise<void>((resolve, reject) => {
+          releaseMonitor = (error?: Error) =>
+            error ? reject(error) : resolve();
+        });
+        return monitorSettled;
+      }
+    },
+    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+    repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
+    errorMessage: (error) =>
+      error instanceof Error ? error.message : String(error)
+  });
+
+  const routes = createTestRouteTable(
+    createDeploymentsRoutes({
+      readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
+      triggerDeployRepairHandoff: () => false,
+      deployHandoffStatus: () => ({
+        state: "idle",
+        attempts: 0,
+        maxAttempts: 3,
+        pending: false
+      }),
+      resolveRepoAppName: () => Promise.resolve("todo-app"),
+      resolveEnvDeployment: () => Promise.resolve(null),
+      ghOrThrow: () => Promise.resolve(""),
+      resetDeploymentViewState: () => {},
+      deployListCache: new Map<string, DeployListCacheEntry>(),
+      deployListTtlMs: 15000,
+      activeDeploymentMutation: () => undefined,
+      reserveDeploymentMutation: () => null,
+      releaseDeploymentMutation: () => {},
+      deploymentStatusBlocksMutation: () => false,
+      localDeploymentBlocksMutation: () => false,
+      ensureWorkflowsCurrent: () =>
+        Promise.resolve({ created: [], failed: [] }),
+      findWorkflowRun: () => Promise.resolve(null),
+      runGh: () => {
+        throw new Error("the deploy harness must not run gh");
+      },
+      readProcessEnv: () => ({}),
+      setTimer: () => ({}),
+      deployRequest
+    })
+  );
+
+  container = createCanvasServer({
+    createHttpServer: (handler) => createServer(handler),
+    createRequestHandler: ({ instanceId, instances, markActivity }) =>
+      createRequestHandler({
+        instanceId,
+        instances,
+        routes,
+        markActivity,
+        legacyFallback: (_request, response) => {
+          response.writeHead(418);
+          response.end("legacy");
+        }
+      }),
+    createState: () => ({}),
+    defaultPage: "deploying",
+    now: () => Date.now(),
+    preferredPort: async () => 0,
+    prepareIdentity: () => {}
+  });
+
+  return {
+    monitorCalls,
+    branchLookups,
+    handoffs,
+    stateOf: (instanceId) => {
+      const entry = container?.instances.get(instanceId);
+      if (!entry) throw new Error(`no instance ${instanceId}`);
+      return entry.state;
+    },
+    async settleMonitor(error) {
+      if (!releaseMonitor || !monitorSettled) return;
+      releaseMonitor(error);
+      await monitorSettled.catch(() => {});
+      // Let the .catch/.finally chain the request service attached run.
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    setPersistedDeployment(row) {
+      persisted = row;
+    },
+    failPersistedLookup(failure) {
+      persistedFails = failure;
+    }
+  };
+}
+
+async function jsonBody(response: Response): Promise<Record<string, unknown>> {
+  return (await response.json()) as Record<string, unknown>;
+}
+
+function deployBody(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    targetRepo: "acme/widgets",
+    environment: "production",
+    branch: "feat",
+    provider: "azure",
+    appFile: ".radius/app.bicep",
+    ...overrides
+  });
+}
+
+function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
+  state.deployStatus = "failed";
+  state.deployAttempt = {
+    id: "attempt-A",
+    targetRepo: "acme/widgets",
+    environment: "production",
+    branch: "feat",
+    provider: "azure",
+    appFile: ".radius/app.bicep"
+  };
+  Object.assign(state, extra);
+}
+
+describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it("accepts an ordinary deploy, answers 200 immediately, and hands the monitor the resolved attempt", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+    state.plannedResources = [{ id: "r1", name: "db" }];
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    // An ordinary deploy reports no repair budget: those fields belong to a
+    // loop redeploy only.
+    expect(await response.text()).toBe('{"ok":true}');
+    expect(harness.monitorCalls).toHaveLength(1);
+    expect(harness.monitorCalls[0].repo).toBe("acme/widgets");
+    expect(harness.monitorCalls[0].branch).toBe("feat");
+    expect(harness.monitorCalls[0].provider).toBe("azure");
+    // An explicit branch avoids the default-branch subprocess entirely.
+    expect(harness.branchLookups).toEqual([]);
+    expect(state.deployStatus).toBe("in_progress");
+    expect(state.deployRepairAttempts).toBe(0);
+    expect(state.deployAttempt?.targetRepo).toBe("acme/widgets");
+    expect(state.deployLogs).toEqual([]);
+    // The reservation is held by the monitor while it runs, then released
+    // exactly once in its terminal cleanup.
+    expect(activeDeploymentMutation(state)?.attemptId).toBe(
+      state.deployAttempt?.id
+    );
+    await harness.settleMonitor();
+    expect(activeDeploymentMutation(state)).toBeUndefined();
+    expect(harness.handoffs).toEqual(["panel-a"]);
+  });
+
+  it("resolves the repo default branch when the request names none", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody({ branch: "" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(harness.branchLookups).toEqual([
+      [
+        "repo",
+        "view",
+        "acme/widgets",
+        "--json",
+        "defaultBranchRef",
+        "--jq",
+        ".defaultBranchRef.name"
+      ]
+    ]);
+    expect(harness.stateOf("panel-a").deployAttempt?.branch).toBe("release/7");
+    await harness.settleMonitor();
+  });
+
+  it("accepts a repair redeploy, keeps the attempt id, and reports the loop budget", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+    failedAttempt(state, { deployRepairAttempts: 1 });
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody({ attemptId: "attempt-A" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      repairAttempt: 2,
+      repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
+    });
+    expect(state.deployAttempt?.id).toBe("attempt-A");
+    expect(state.deployRepairAttempts).toBe(2);
+    expect(state.deployRepairing).toBe(true);
+    expect(harness.monitorCalls).toHaveLength(1);
+    await harness.settleMonitor();
+  });
+
+  it.each([
+    [
+      "over the repair cap",
+      { deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP },
+      /already used its/
+    ],
+    ["still running", { deployStatus: "in_progress" }, /still running/],
+    ["already complete", { deployStatus: "complete" }, /without an attemptId/],
+    [
+      "unconfirmed run",
+      {
+        deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+        deployRunUrl: "https://github.com/acme/widgets/actions/runs/7"
+      },
+      /may still be in flight/
+    ]
+  ])(
+    "refuses a repair redeploy that is %s with an inert 409",
+    async (_name, extra, message) => {
+      const harness = startDeploy();
+      const entry = await container!.getOrCreate("panel-a");
+      const state = harness.stateOf("panel-a");
+      failedAttempt(state, { deployRepairAttempts: 1, ...extra });
+      const attemptsBefore = state.deployRepairAttempts;
+      const statusBefore = state.deployStatus;
+
+      const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+        method: "POST",
+        body: deployBody({ attemptId: "attempt-A" })
+      });
+
+      expect(response.status).toBe(409);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(String((await jsonBody(response)).error)).toMatch(message);
+      // Inert: no monitor, no branch lookup, no log buffer, no counter
+      // movement, no reservation, and no transition out of the stored status.
+      expect(harness.monitorCalls).toEqual([]);
+      expect(harness.branchLookups).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+      expect(state.deployLogs).toBeUndefined();
+      expect(state.deployRepairAttempts).toBe(attemptsBefore);
+      expect(state.deployStatus).toBe(statusBefore);
+      expect(state.deployAttempt?.id).toBe("attempt-A");
+      expect(activeDeploymentMutation(state)).toBeUndefined();
+    }
+  );
+
+  it("refuses a stale attempt without clobbering the current one", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+    state.deployStatus = "failed";
+    state.deployRepairAttempts = 0;
+    state.deployAttempt = {
+      id: "attempt-B",
+      targetRepo: "acme/other",
+      environment: "staging",
+      branch: "main",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    };
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody({ attemptId: "attempt-A" })
+    });
+
+    expect(response.status).toBe(409);
+    expect(String((await jsonBody(response)).error)).toMatch(
+      /no longer the current attempt/
+    );
+    expect(harness.monitorCalls).toEqual([]);
+    expect(harness.branchLookups).toEqual([]);
+    expect(state.deployAttempt?.id).toBe("attempt-B");
+    expect(state.deployAttempt?.targetRepo).toBe("acme/other");
+    expect(state.deployRepairAttempts).toBe(0);
+  });
+
+  it("refuses a second deploy while one is already in flight", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const first = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+    expect(first.status).toBe(200);
+
+    const second = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+    expect(second.status).toBe(409);
+    expect(String((await jsonBody(second)).error)).toContain(
+      "A deploy operation for acme/widgets in environment production is already in progress."
+    );
+    expect(harness.monitorCalls).toHaveLength(1);
+    await harness.settleMonitor();
+  });
+
+  it("fails closed when the persisted deployment state cannot be read", async () => {
+    const harness = startDeploy();
+    harness.failPersistedLookup(true);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+
+    expect(response.status).toBe(503);
+    expect(String((await jsonBody(response)).error)).toMatch(
+      /Could not verify whether this environment/
+    );
+    expect(harness.monitorCalls).toEqual([]);
+    // The reservation taken before the lookup is released again, so a retry is
+    // not blocked by the failure.
+    expect(
+      activeDeploymentMutation(harness.stateOf("panel-a"))
+    ).toBeUndefined();
+  });
+
+  it("refuses when GitHub still reports the environment busy", async () => {
+    const harness = startDeploy();
+    harness.setPersistedDeployment({
+      app: "todo-app",
+      environment: "production",
+      provider: "azure",
+      status: "deleting",
+      deploymentId: "dep-1",
+      runUrl: "https://example.test/1"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "This deployment is currently being deleted. Wait for it to finish before deploying again."
+    });
+    expect(harness.monitorCalls).toEqual([]);
+    expect(
+      activeDeploymentMutation(harness.stateOf("panel-a"))
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["malformed JSON", "not json", /JSON/i],
+    ["a null body", "null", /null/i],
+    ["an empty body", "", /JSON/i]
+  ])("answers 400 for %s", async (_name, body, message) => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(String((await jsonBody(response)).error)).toMatch(message);
+    expect(harness.monitorCalls).toEqual([]);
+  });
+
+  it("answers 400 when the request names no repository or environment", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "azure" })
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "targetRepo and environment are required."
+    });
+    expect(harness.monitorCalls).toEqual([]);
+  });
+
+  it("settles the deploy as unconfirmed when the background monitor throws", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+    expect(response.status).toBe(200);
+
+    await harness.settleMonitor(new Error("monitor exploded"));
+
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toBe(
+      "Deploy monitoring stopped unexpectedly: monitor exploded"
+    );
+    expect(state.deployErrorKind).toBe(DEPLOY_RUN_UNCONFIRMED_KIND);
+    expect(state.deployLogs).toEqual([
+      "❌ Deploy monitor stopped unexpectedly: monitor exploded"
+    ]);
+    // Cleanup still runs on the failure path: handoff attempted once, and the
+    // reservation released.
+    expect(harness.handoffs).toEqual(["panel-a"]);
+    expect(activeDeploymentMutation(state)).toBeUndefined();
+  });
+
+  it("leaves GET /api/deploy on the legacy fallback", async () => {
+    startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`);
+
+    expect(response.status).toBe(418);
+    expect(await response.text()).toBe("legacy");
+  });
+
+  it("keeps two canvas instances isolated", async () => {
+    const harness = startDeploy();
+    const a = await container!.getOrCreate("panel-a");
+    const b = await container!.getOrCreate("panel-b");
+    expect(a.baseUrl).not.toBe(b.baseUrl);
+
+    const first = await fetch(`${a.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+    expect(first.status).toBe(200);
+
+    // panel-b holds no reservation of its own, so its deploy is admitted even
+    // though panel-a is mid-deploy.
+    const second = await fetch(`${b.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody({ targetRepo: "acme/other", environment: "staging" })
+    });
+    expect(second.status).toBe(200);
+
+    const stateA = harness.stateOf("panel-a");
+    const stateB = harness.stateOf("panel-b");
+    expect(stateA.deployingRepo).toBe("acme/widgets");
+    expect(stateB.deployingRepo).toBe("acme/other");
+    expect(stateA.deployAttempt?.id).not.toBe(stateB.deployAttempt?.id);
+    expect(harness.monitorCalls.map((call) => call.repo)).toEqual([
+      "acme/widgets",
+      "acme/other"
+    ]);
+    await harness.settleMonitor();
   });
 });
