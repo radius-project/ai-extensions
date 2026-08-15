@@ -31,7 +31,9 @@ export function expectSafeInlineScripts(html: string): void {
 // would evaluate it.
 export function readEmittedValue(html: string, name: string): unknown {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = html.match(new RegExp(`^var ${escaped} = ([\\s\\S]*?);\\n`, "m"));
+  const match = html.match(
+    new RegExp(`^var ${escaped} = ([\\s\\S]*?);\\n`, "m")
+  );
   expect(match, `${name} is not emitted`).toBeTruthy();
   return new Function(`return ${match?.[1]};`)();
 }
