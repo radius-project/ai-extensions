@@ -9,8 +9,10 @@ import type {
   AppBicepSelection,
   GraphPipeline
 } from "../../../src/server/routes/graph-pipeline.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
-import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -339,25 +341,14 @@ describe("graphs-planning writes real-loopback HIT", () => {
   );
 
   it("still routes an unmigrated path to the legacy fallback", async () => {
-    // Resolved from the inventory rather than named. A named probe inherits the
-    // migration expiry of the route it names: once that route migrates, the
-    // probe stops proving the fallback is reachable and starts asserting
-    // against a migrated handler. Deriving it means the probe follows whatever
-    // is still residual, and fails loudly when nothing is.
-    const [residualKey] = LEGACY_ROUTE_INVENTORY;
-    if (!residualKey) {
-      throw new Error(
-        "No residual route remains, so the legacy fallback can no longer be " +
-          "probed. Delete the fallback and this probe together."
-      );
-    }
-    const [method, path] = residualKey.split(" ");
-    expect(method).toBeTruthy();
-    expect(path?.startsWith("/api/")).toBe(true);
-
+    // Resolved by the shared helper rather than named here. A named probe
+    // inherits the migration expiry of the route it names: once that route
+    // migrates, the probe stops proving the fallback is reachable and starts
+    // asserting against a migrated handler. The helper follows whatever the
+    // fallback still owns and fails loudly when its target becomes declared.
     start();
     const entry = await container!.getOrCreate("panel-a");
-    const response = await fetch(`${entry.baseUrl}${path}`, { method });
+    const response = await fetchResidualRoute(entry.baseUrl);
     expect(response.status).toBe(418);
     expect(await response.text()).toBe("legacy");
   });

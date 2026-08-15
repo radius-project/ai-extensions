@@ -203,6 +203,11 @@ import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
+import { createDeployRequestService } from "./server/services/deploy-request.js";
+import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
+import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
+import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
+import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -493,16 +498,13 @@ const repositoriesRoutes = createRepositoriesRoutes({
   repoMatchesWorkspace
 });
 
-// Composition root for the migrated `deployments` family: the four read routes
-// whose body policy is `none`, plus the destructive POST /api/delete-deployment.
-// Only POST /api/deploy is still on the legacy fallback, and it is deliberately
-// out of scope for this slice.
+// Composition root for the migrated `deployments` family: the read routes, the
+// destructive POST /api/delete-deployment, and POST /api/deploy, whose
+// multi-stage runtime behavior lives in the deploy services composed below.
 //
-// The listing cache and its TTL are read through getters because both are
-// declared further down the module and would otherwise be in the temporal dead
-// zone when this object is built at import time. Injecting the cache rather
-// than moving it keeps the other invalidator where it already lives: `server.ts`
-// deletes from the same map when a deploy is dispatched.
+// The listing cache, its TTL and the deploy service are read through getters
+// because all three are declared further down the module and would otherwise be
+// in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
@@ -542,7 +544,13 @@ const deploymentsRoutes = createDeploymentsRoutes({
       });
     }),
   readProcessEnv: () => process.env,
-  setTimer: (callback, ms) => setTimeout(callback, ms)
+  setTimer: (callback, ms) => setTimeout(callback, ms),
+  // Declared as a getter for the same temporal-dead-zone reason as the cache
+  // above: the deploy services are composed further down, after the workflow
+  // file names and the instance container they narrow over exist.
+  get deployRequest() {
+    return deployRequestService;
+  }
 });
 
 // Composition root for the migrated `azure-discovery` routes. Four seams: the
@@ -1237,8 +1245,9 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched: /api/deploy is still legacy and evicts below, while the migrated
-// deployments family is handed this same map and evicts from there.
+// dispatched: the migrated deployments family is handed this same map and evicts
+// from there, while the deploy dispatch service evicts through the
+// `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
@@ -1953,6 +1962,176 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // Do not guess at this value: it must match
 // radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
+
+// ── POST /api/deploy composition root ────────────────────────────────────────
+// One complete dependency object per deploy service, each narrowed to the seams
+// that service actually uses. Every factory validates its own list at
+// construction, so a missing seam fails while this module initialises rather
+// than mid-deploy. Placed here because the workflow file names, the listing
+// cache and the instance container above are all `const` and would otherwise be
+// in the temporal dead zone at the family's composition site.
+
+// The deploy's own gh runner: 30s timeout, resolves (never rejects) on a
+// non-zero exit so the dispatch path can read stderr and choose its message.
+function runGhForDeploy(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    cliExec(
+      "gh",
+      args,
+      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
+      (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: stdout || "",
+          stderr: stderr || ""
+        });
+      }
+    );
+  });
+}
+
+// Like runGhForDeploy but feeds a value (e.g. a secret JSON) over stdin so it
+// never lands on the argv/process list.
+function runGhWithStdinForDeploy(
+  args: string[],
+  stdin: string,
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = cliExec(
+      "gh",
+      args,
+      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
+      (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: stdout || "",
+          stderr: stderr || ""
+        });
+      }
+    );
+    if (stdin !== undefined) child.stdin?.end(stdin);
+  });
+}
+
+const deployPlannedGraphService = createPlannedGraphRecoveryService({
+  prepareSourceRefResources: (entry, view, context) =>
+    prepareSourceRefResources(entry, view, context),
+  setSourceRefResources: (entry, view, resources, context, expectedToken) =>
+    setSourceRefResources(entry, view, resources, context, expectedToken),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry as CanvasServerEntry, repo, branch),
+  radArtifactsDirForSelection: ({
+    isLocal,
+    state,
+    repo,
+    branch,
+    bicepRepoPath,
+    log
+  }) =>
+    radArtifactsDirForSelection({
+      isLocal,
+      state,
+      github,
+      repo,
+      branch,
+      bicepRepoPath,
+      log
+    }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+  resolveRecipeOutputs: (parsed, recipes, provider) =>
+    resolveRecipeOutputs(github, parsed, recipes, provider),
+  canvasGraphResources,
+  errorMessage
+});
+
+const deployDispatchService = createDeployDispatchService({
+  deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
+  deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
+  branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  getBranchHeadSha,
+  getDefaultBranch,
+  runGh: runGhForDeploy,
+  runGhWithStdin: runGhWithStdinForDeploy,
+  readProcessEnv: () => process.env,
+  fetchFileForSelection: (entry, repo, branch, repoPath) =>
+    fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
+  appParams,
+  resolveDeployParams: (params) => resolveDeployParams(params),
+  partitionParams,
+  extractAppName,
+  buildDeployRadCommand,
+  buildAppGraphRadCommand,
+  ensureDeployWorkflowsOnBranch,
+  ensureWorkflowsCurrent,
+  classifyDeployDispatchFailure,
+  invalidateDeployListCache: (repo) => {
+    deployListCache.delete(repo);
+  },
+  errorMessage,
+  now: () => Date.now()
+});
+
+const deployOutcomeService = createDeployOutcomeService({
+  settleDeployStatuses,
+  fetchRunLog,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  extractRadDeployError: (logText) => extractRadDeployError(logText),
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
+const deployMonitorService = createDeployMonitorService({
+  plannedGraph: deployPlannedGraphService,
+  dispatch: deployDispatchService,
+  outcome: deployOutcomeService,
+  deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
+  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+  findWorkflowRun,
+  getRunDetail,
+  createStatusReader: (state, repo, branch, runId) =>
+    deployStatusReaderFromState(state, repo, branch, runId),
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  generatePortalUrl,
+  optionalString,
+  errorMessage,
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
+const deployRequestService = createDeployRequestService({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveDeployRepairLoop,
+  resolveDeploymentEnvironment,
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  resolveEnvDeployment,
+  runCommand: (command, args) => runCommand(command, args),
+  canvasGraphResources,
+  beginDeployAttempt,
+  triggerDeployRepairHandoff: (entry, instanceId) =>
+    triggerDeployRepairHandoff(entry, instanceId),
+  monitor: deployMonitorService,
+  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+  repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
+  errorMessage
+});
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
@@ -3532,1178 +3711,6 @@ function createLegacyRequestHandler(
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ operation: toClientView(op) }));
-      return;
-    }
-
-    if (pathname === "/api/deploy" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let reservation: DeploymentDispatchReservation | null = null;
-      let reservationOwner: CanvasState | null = null;
-      const releaseReservation = (): void => {
-        if (reservation && reservationOwner)
-          releaseDeploymentMutation(reservationOwner, reservation);
-        reservation = null;
-        reservationOwner = null;
-      };
-      try {
-        const data = JSON.parse(body);
-        const entry = servers.get(instanceId);
-        if (!entry) throw new Error("Canvas server state is unavailable.");
-        // Re-validate the repair-loop attempt before touching any state: the
-        // tool checked it before sending, but a newer deploy may have started
-        // since, and a stale repair must not clobber it.
-        const loop = resolveDeployRepairLoop(entry.state, data.attemptId);
-        if (loop.error) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(409);
-          res.end(JSON.stringify({ error: loop.error }));
-          return;
-        }
-        // Store deploy params
-        if (entry) {
-          const repo =
-            data.targetRepo ||
-            entry.state.plannedRepo ||
-            entry.state.contextRepo ||
-            "";
-          const environment = resolveDeploymentEnvironment(
-            entry.state,
-            data.environment
-          );
-          if (!repo || !environment) {
-            throw new Error("targetRepo and environment are required.");
-          }
-          const activeMutation = activeDeploymentMutation(entry.state);
-          if (localDeploymentBlocksMutation(entry.state) || activeMutation) {
-            const activeRepo =
-              activeMutation?.repo ||
-              entry.state.deployAttempt?.targetRepo ||
-              entry.state.deployingRepo ||
-              repo;
-            const activeEnvironment =
-              activeMutation?.environment ||
-              entry.state.deployAttempt?.environment ||
-              entry.state.envName ||
-              environment;
-            const operation = activeMutation?.kind || "deploy";
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error: `A ${operation} operation for ${activeRepo} in environment ${activeEnvironment} is already in progress. Wait for it to finish before starting another operation.`
-              })
-            );
-            return;
-          }
-
-          reservationOwner = entry.state;
-          reservation = reserveDeploymentMutation(entry.state, {
-            repo,
-            environment,
-            kind: "deploy"
-          });
-          if (!reservation) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error: "Another deployment operation is already starting."
-              })
-            );
-            return;
-          }
-
-          // The canvas-local state closes the immediate double-click race; the
-          // persisted GitHub status closes the same race across sessions.
-          let current: DeploymentRow | null;
-          try {
-            current = await resolveEnvDeployment(
-              repo,
-              environment,
-              repo.split("/").pop() || repo
-            );
-          } catch {
-            releaseReservation();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(503);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Could not verify whether this environment already has an operation in progress. Check your GitHub connection and try again."
-              })
-            );
-            return;
-          }
-          if (current && deploymentStatusBlocksMutation(current.status)) {
-            releaseReservation();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error:
-                  current.status === "deleting" ?
-                    "This deployment is currently being deleted. Wait for it to finish before deploying again."
-                  : "A deployment to this environment is already in progress."
-              })
-            );
-            return;
-          }
-          // Resolve the branch to deploy. When the client doesn't specify
-          // one, fall back to the repo's real default branch (which may be
-          // master/develop, not main) so the dispatch --ref and the
-          // "branch not pushed" guard below target a branch that exists.
-          // Resolved up front, before any state is touched: beginDeployAttempt
-          // has to run without an await in front of it, or the previous attempt
-          // stays current across that window and its handoff can settle onto the
-          // deploy starting here.
-          let branch = data.branch || "";
-          if (!branch) {
-            const detectedDefault = (
-              (await runCommand("gh", [
-                "repo",
-                "view",
-                repo,
-                "--json",
-                "defaultBranchRef",
-                "--jq",
-                ".defaultBranchRef.name"
-              ]).catch(() => "")) || ""
-            ).trim();
-            branch = detectedDefault || "main";
-          }
-          entry.state.deployParams = { ...data, environment };
-          entry.state.envName = environment;
-          entry.state.deployProvider = data.provider;
-          entry.state.deployingRepo = repo;
-          entry.state.appFile = data.appFile;
-
-          // Snapshot the planned graph (nodes start as pending). If the
-          // planned graph hasn't been resolved yet, it is built on the fly
-          // inside the monitor so the deploying page always shows it.
-          const cloned: unknown = JSON.parse(
-            JSON.stringify(entry.state.plannedResources || [])
-          );
-          let resources = canvasGraphResources(
-            Array.isArray(cloned) ? cloned : []
-          );
-          resources.forEach((r) => {
-            r.deployStatus = "pending";
-            if (r.outputResources)
-              r.outputResources.forEach((o) => {
-                o.deployStatus = "pending";
-              });
-          });
-          entry.state.deployingResources = resources;
-          entry.state.deployLogs = [];
-          entry.state.deployLogBase = 0;
-          const provider = data.provider || "azure";
-          beginDeployAttempt(entry.state, {
-            repo,
-            branch,
-            provider,
-            environment,
-            appFile: data.appFile || ".radius/app.bicep",
-            repairLoop: loop.repairLoop,
-            attemptId: loop.attemptId
-          });
-          if (reservation)
-            reservation.attemptId = entry.state.deployAttempt?.id;
-          // Bounded ring buffer: a verbose deploy can stream tens of
-          // thousands of recipe/terraform log lines. Keeping them all in
-          // memory (and re-serializing the whole array to every 1.5s
-          // status poll) grew unbounded and got the extension process
-          // OOM-killed mid-deploy. Cap the buffer and track how many
-          // lines were dropped so the client can still page through new
-          // lines by absolute offset.
-          const DEPLOY_LOG_CAP = 4000;
-          const addLog = (msg: string): void => {
-            const dl = entry.state.deployLogs || [];
-            entry.state.deployLogs = dl;
-            dl.push(msg);
-            if (dl.length > DEPLOY_LOG_CAP) {
-              const drop = dl.length - DEPLOY_LOG_CAP;
-              dl.splice(0, drop);
-              entry.state.deployLogBase =
-                (entry.state.deployLogBase || 0) + drop;
-            }
-          };
-          const setStatus = (
-            r: CanvasGraphResource,
-            s: "pending" | "in_progress" | "success" | "failed"
-          ): void => {
-            r.deployStatus = s;
-            if (r.outputResources)
-              r.outputResources.forEach((o) => {
-                o.deployStatus = s;
-                if (s === "success") {
-                  const portalUrlKey = optionalString(
-                    provider === "azure" ?
-                      o.id || o.type || o.displayType || ""
-                    : o.type || o.displayType || o.id || ""
-                  );
-                  o.portalUrl = generatePortalUrl(
-                    portalUrlKey,
-                    provider,
-                    entry.state
-                  );
-                }
-              });
-          };
-
-          // Monitor BOTH workflows in sequence: first verify-credentials,
-          // then the deploy workflow. Do NOT dispatch — they were already
-          // triggered from the environment page.
-          (async () => {
-            const delay = (ms: number) =>
-              new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-            if (!repo) {
-              addLog("❌ No target repository specified.");
-              entry.state.deployError =
-                "No target repository was specified for the deployment.";
-              entry.state.deployStatus = "failed";
-              return;
-            }
-
-            // Build the planned graph if it wasn't resolved beforehand.
-            if (resources.length === 0) {
-              addLog("Resolving planned application graph for " + repo + "...");
-              const sourceRefContext = prepareSourceRefResources(
-                entry,
-                "planned",
-                { repo, branch }
-              );
-              try {
-                const selection = await fetchBicepSelection(
-                  entry,
-                  repo,
-                  branch
-                );
-                const content = selection.content;
-                if (content) {
-                  const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-                    await radArtifactsDirForSelection({
-                      isLocal: !!(entry && selection.fromWorkspace),
-                      state: entry?.state,
-                      github,
-                      repo,
-                      branch,
-                      bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-                      log: addLog
-                    });
-                  const parsed = canvasGraphResources(
-                    await buildGraphViaRad(
-                      content,
-                      selection.bicepPath || ".radius/app.bicep",
-                      {
-                        log: addLog,
-                        radArtifactsDir,
-                        cleanupRadArtifactsDir: radArtifactsRemote
-                      }
-                    )
-                  );
-                  const recipes = await fetchRecipePack(github, provider);
-                  const planned = canvasGraphResources(
-                    await resolveRecipeOutputs(
-                      github,
-                      parsed,
-                      recipes,
-                      provider
-                    )
-                  );
-                  planned.forEach((r) => {
-                    r.deployStatus = "pending";
-                    if (r.outputResources)
-                      r.outputResources.forEach((o) => {
-                        o.deployStatus = "pending";
-                      });
-                  });
-                  const committed = setSourceRefResources(
-                    entry,
-                    "planned",
-                    planned,
-                    {
-                      repo,
-                      branch
-                    },
-                    sourceRefContext.token
-                  );
-                  if (committed) entry.state.plannedRepo = repo;
-                  resources = planned;
-                  entry.state.deployingResources = resources;
-                  addLog("Planned " + planned.length + " resource(s).");
-                } else {
-                  addLog(
-                    "⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph."
-                  );
-                }
-              } catch (e) {
-                addLog("⚠ Could not resolve planned graph: " + errorMessage(e));
-              }
-            }
-
-            // ── Phase 1: Dispatch the run-rad-commands workflow ─────
-            // Credentials are verified separately when the environment
-            // is created, so deploying is now an explicit action: we
-            // dispatch the unified run-rad-commands workflow here (the
-            // "Repo Radius" entry point that runs `rad deploy` by
-            // default) rather than relying on a verify → deploy chain.
-            addLog("━━ Deploying Radius application ━━");
-            const envForDeploy =
-              entry.state.envName || data.environment || "dev";
-            // Persist the resolved environment so the deployed-graph
-            // reader (GHCR artifact tag) can be rebuilt from state later.
-            entry.state.deployEnvName = envForDeploy;
-            const deployWorkflowFile = DEPLOY_WORKFLOW_FILE;
-            // Deploy the SELECTED branch's code (worktree-consistent): run
-            // the workflow on `branch` so it checks out and `rad deploy`s
-            // that branch's app.bicep — the same file the params below are
-            // computed from — instead of always deploying the default branch.
-            // `branch` is already resolved to the selected branch or the
-            // repo's real default above, so it's never empty here.
-            const deployRef = branch;
-
-            // Fail fast (with clear, actionable guidance) when the
-            // selected branch hasn't been pushed to the remote yet. A
-            // worktree/feature branch that only exists locally has no
-            // ref on GitHub, so both publishing the workflow files and
-            // dispatching the run against `--ref <branch>` are doomed.
-            // We confirm the repo itself is reachable (its default
-            // branch resolves) before blaming the branch, so a
-            // transient/auth error isn't misreported as "not pushed".
-            if (deployRef) {
-              const refSha = await getBranchHeadSha(repo, deployRef);
-              if (!refSha) {
-                const repoDefault = await getDefaultBranch(repo);
-                if (repoDefault) {
-                  const pushCmd = "git push -u origin " + deployRef;
-                  addLog(
-                    '❌ Branch "' +
-                      deployRef +
-                      '" has not been pushed to ' +
-                      repo +
-                      "."
-                  );
-                  addLog("   Push it and redeploy:  " + pushCmd);
-                  entry.state.deployError =
-                    'The branch "' +
-                    deployRef +
-                    "\" hasn't been pushed to " +
-                    repo +
-                    " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-                    pushCmd;
-                  entry.state.deployErrorKind = DEPLOY_BRANCH_NOT_PUSHED_KIND;
-                  entry.state.deployErrorBranch = deployRef;
-                  entry.state.deployStatus = "failed";
-                  return;
-                }
-              }
-            }
-            const runGhDeploy = (
-              args: string[],
-              envOverride?: NodeJS.ProcessEnv
-            ): Promise<CommandResult> =>
-              new Promise<CommandResult>((resolve) => {
-                cliExec(
-                  "gh",
-                  args,
-                  {
-                    timeout: 30000,
-                    ...(envOverride ? { env: envOverride } : {})
-                  },
-                  (err, stdout, stderr) => {
-                    resolve({
-                      code: err ? err.code || 1 : 0,
-                      stdout: stdout || "",
-                      stderr: stderr || ""
-                    });
-                  }
-                );
-              });
-            // Like runGhDeploy but feeds a value (e.g. a secret JSON) over
-            // stdin so it never lands on the argv/process list.
-            const runGhDeployStdin = (
-              args: string[],
-              stdin: string,
-              envOverride?: NodeJS.ProcessEnv
-            ): Promise<CommandResult> =>
-              new Promise((resolve) => {
-                const child = cliExec(
-                  "gh",
-                  args,
-                  {
-                    timeout: 30000,
-                    ...(envOverride ? { env: envOverride } : {})
-                  },
-                  (err, stdout, stderr) => {
-                    resolve({
-                      code: err ? err.code || 1 : 0,
-                      stdout: stdout || "",
-                      stderr: stderr || ""
-                    });
-                  }
-                );
-                if (stdin !== undefined) child.stdin?.end(stdin);
-              });
-            const dispatchArgs = [
-              "workflow",
-              "run",
-              deployWorkflowFile,
-              "--ref",
-              deployRef,
-              "-f",
-              "environment=" + envForDeploy,
-              "--repo",
-              repo
-            ];
-
-            // Recompute the rad commands from the CURRENT app.bicep at
-            // dispatch time (rather than relying on the RADIUS_RAD_COMMANDS
-            // variable captured when the environment was created) so the
-            // deploy always reflects the latest bicep. Also append
-            // `rad app graph` so the deployed application graph is rendered
-            // as part of the run. Secret params are still appended by the
-            // workflow from the RADIUS_DEPLOY_PARAMS secret.
-            //
-            // A fatal secret-provisioning problem (the deployed bicep needs a
-            // secret param the environment can't be made to carry) is recorded
-            // here and short-circuits the dispatch below, so we never start a
-            // run that is guaranteed to fail `rad deploy` for a missing
-            // required parameter.
-            let deploySecretError = null;
-            try {
-              let bicepPath = ".radius/app.bicep";
-              let bicepSource = await fetchFileForSelection(
-                entry,
-                repo,
-                branch,
-                ".radius/app.bicep"
-              );
-              if (!bicepSource) {
-                bicepSource = await fetchFileForSelection(
-                  entry,
-                  repo,
-                  branch,
-                  "app.bicep"
-                );
-                if (bicepSource) bicepPath = "app.bicep";
-              }
-              if (bicepSource) {
-                const parsed = appParams(bicepSource);
-                const resolved = resolveDeployParams(parsed);
-                const { public: publicParams, secret: secretParams } =
-                  partitionParams(parsed, resolved);
-                // Capture the app name so the deploy-status reader can prefer
-                // an artifact belonging to this application. It is a tiebreaker
-                // between artifacts in the same environment, never a lookup key
-                // and never a hard filter, so an unresolved name costs nothing.
-                entry.state.deployAppName =
-                  extractAppName(bicepSource) ||
-                  entry.state.deployAppName ||
-                  "";
-                // Ensure the environment carries the secret params the
-                // deployed app.bicep needs (e.g. an @secure() password).
-                // The workflow can ONLY read these from the
-                // RADIUS_DEPLOY_PARAMS secret — unlike the public rad
-                // commands, they can't be passed inline as a dispatch input
-                // — so if the secret is absent the deploy fails for a
-                // missing required parameter. Env creation seeds it, but
-                // that step is skipped when app.bicep isn't present yet, so
-                // reconcile here: provision the secret from the SAME branch
-                // bicep when the environment has none. If one already
-                // exists, leave it untouched so an auto-generated value
-                // stays stable across redeploys (we can't read it back to
-                // compare).
-                if (Object.keys(secretParams).length > 0) {
-                  const deployParamsPresent = async () => {
-                    const r = await runGhDeploy([
-                      "api",
-                      `/repos/${repo}/environments/${encodeURIComponent(
-                        envForDeploy
-                      )}/secrets`,
-                      "--jq",
-                      ".secrets[].name"
-                    ]);
-                    return (r.stdout || "")
-                      .split("\n")
-                      .map((s) => s.trim())
-                      .includes("RADIUS_DEPLOY_PARAMS");
-                  };
-                  if (!(await deployParamsPresent())) {
-                    addLog(
-                      'Provisioning RADIUS_DEPLOY_PARAMS for "' +
-                        envForDeploy +
-                        '" (' +
-                        Object.keys(secretParams).join(", ") +
-                        ")..."
-                    );
-                    const setArgs = [
-                      "secret",
-                      "set",
-                      "RADIUS_DEPLOY_PARAMS",
-                      "--env",
-                      envForDeploy,
-                      "--repo",
-                      repo
-                    ];
-                    let setRes = await runGhDeployStdin(
-                      setArgs,
-                      JSON.stringify(secretParams)
-                    );
-                    if (
-                      setRes.code !== 0 &&
-                      (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
-                    ) {
-                      // The injected OAuth token may lack the scope to
-                      // write environment secrets; retry with it
-                      // stripped so gh falls back to the keyring cred.
-                      const fe = { ...process.env };
-                      delete fe.GH_TOKEN;
-                      delete fe.GITHUB_TOKEN;
-                      const retry = await runGhDeployStdin(
-                        setArgs,
-                        JSON.stringify(secretParams),
-                        fe
-                      );
-                      if (retry.code === 0) setRes = retry;
-                    }
-                    if (setRes.code !== 0) {
-                      deploySecretError =
-                        'Could not provision RADIUS_DEPLOY_PARAMS on environment "' +
-                        envForDeploy +
-                        '": ' +
-                        ((setRes.stderr || "").trim() || "unknown error") +
-                        ". The deploy would fail for a missing required parameter (" +
-                        Object.keys(secretParams).join(", ") +
-                        "), so it was not started.";
-                      addLog("❌ " + deploySecretError);
-                    } else if (!(await deployParamsPresent())) {
-                      deploySecretError =
-                        'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' +
-                        envForDeploy +
-                        '". The deploy would fail for a missing required parameter (' +
-                        Object.keys(secretParams).join(", ") +
-                        "), so it was not started.";
-                      addLog("❌ " + deploySecretError);
-                    } else {
-                      addLog(
-                        '✅ RADIUS_DEPLOY_PARAMS is set on "' +
-                          envForDeploy +
-                          '".'
-                      );
-                    }
-                  }
-                }
-
-                const deployCmd = buildDeployRadCommand(
-                  bicepPath,
-                  envForDeploy,
-                  publicParams
-                );
-                const appName = extractAppName(bicepSource);
-                const commands = [deployCmd];
-                if (appName) commands.push(buildAppGraphRadCommand(appName));
-                const radCommandsInput = JSON.stringify(commands);
-                dispatchArgs.push("-f", "rad_commands=" + radCommandsInput);
-                addLog(
-                  "Deploying with rad commands: " + commands.join("  |  ")
-                );
-              } else {
-                addLog(
-                  "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-                );
-              }
-            } catch (e) {
-              addLog(
-                "⚠ Could not compute rad commands from bicep (" +
-                  errorMessage(e) +
-                  "); falling back to the environment default."
-              );
-            }
-            // Fail fast: a required secret param couldn't be provisioned, so
-            // starting the run would only produce a guaranteed `rad deploy`
-            // failure. Surface the reason and stop before dispatching.
-            if (deploySecretError) {
-              entry.state.deployError = deploySecretError;
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            // Make sure the workflow files exist on the branch we're
-            // about to dispatch on. The env-creation flow only commits
-            // them to the default branch, so a feature/worktree branch
-            // usually needs them published first.
-            try {
-              await ensureDeployWorkflowsOnBranch(
-                repo,
-                deployRef,
-                envForDeploy,
-                addLog
-              );
-            } catch (e) {
-              addLog(
-                '⚠ Could not publish deploy workflows to branch "' +
-                  deployRef +
-                  '": ' +
-                  errorMessage(e) +
-                  ". The dispatch below will fail if the branch has no run-rad-commands workflow."
-              );
-            }
-
-            // With the deploy workflows present, ensure they're in sync
-            // with the upstream Radius templates before running them, so
-            // the deploy never executes a drifted copy. Syncs the deploy
-            // files on both the default branch and the branch being
-            // deployed (deployRef), which a --ref dispatch checks out.
-            await ensureWorkflowsCurrent(
-              repo,
-              envForDeploy,
-              provider,
-              [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
-              deployRef
-            );
-
-            const deployDispatchedAt = Date.now();
-            addLog(
-              "🚀 Dispatching run rad commands workflow (" +
-                deployWorkflowFile +
-                ') on branch "' +
-                deployRef +
-                '" for environment "' +
-                envForDeploy +
-                '"...'
-            );
-            let dispatchDeployRes = await runGhDeploy(dispatchArgs);
-            if (
-              dispatchDeployRes.code !== 0 &&
-              (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
-            ) {
-              // The injected OAuth token may lack the `workflow` scope; retry
-              // with it stripped so gh falls back to the keyring credential.
-              const fallbackEnv = { ...process.env };
-              delete fallbackEnv.GH_TOKEN;
-              delete fallbackEnv.GITHUB_TOKEN;
-              const retry = await runGhDeploy(dispatchArgs, fallbackEnv);
-              if (retry.code === 0) dispatchDeployRes = retry;
-            }
-            if (dispatchDeployRes.code !== 0) {
-              const de = (dispatchDeployRes.stderr || "").trim();
-              addLog(
-                "❌ Failed to dispatch the run rad commands workflow: " + de
-              );
-              // A "No ref found" (or unresolved ref) dispatch error
-              // means the branch isn't on the remote — surface the same
-              // clean, actionable "push the branch" guidance/UI. Every other
-              // dispatch failure is a run of unknown outcome, so the split is
-              // made once, where it can be tested.
-              const dispatchKind = classifyDeployDispatchFailure(de);
-              if (dispatchKind === DEPLOY_BRANCH_NOT_PUSHED_KIND) {
-                const pushCmd = "git push -u origin " + deployRef;
-                addLog("   Push it and redeploy:  " + pushCmd);
-                entry.state.deployError =
-                  'The branch "' +
-                  deployRef +
-                  "\" hasn't been pushed to " +
-                  repo +
-                  " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-                  pushCmd;
-                entry.state.deployErrorKind = dispatchKind;
-                entry.state.deployErrorBranch = deployRef;
-                entry.state.deployStatus = "failed";
-                return;
-              }
-              const scopeHint =
-                /workflow.{0,20}scope/i.test(de) ?
-                  ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-                : " Ensure " +
-                  deployWorkflowFile +
-                  ' exists on branch "' +
-                  deployRef +
-                  '" (push the branch so it carries the app.bicep and workflow files) and that GitHub Actions are enabled for ' +
-                  repo +
-                  ".";
-              entry.state.deployError =
-                "Failed to start the run rad commands workflow (" +
-                deployWorkflowFile +
-                ") on " +
-                repo +
-                ". " +
-                (de || "The dispatch request failed.") +
-                scopeHint;
-              entry.state.deployErrorKind = dispatchKind;
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            addLog("✅ Run rad commands workflow dispatched.");
-            // A new deploy is in flight, so any cached deployments
-            // listing is stale — drop it so the deploy page reflects the
-            // new run on the next poll.
-            deployListCache.delete(repo);
-
-            // ── Phase 2: Monitor the deploy run ─────────────────────
-            addLog("Waiting for the deploy workflow to start...");
-            let dRunId = null;
-            for (let attempt = 0; attempt < 24 && !dRunId; attempt++) {
-              dRunId = await findWorkflowRun(
-                repo,
-                deployWorkflowFile,
-                deployDispatchedAt,
-                null
-              );
-              if (!dRunId) await delay(5000);
-            }
-            if (!dRunId) {
-              addLog("⚠ No deploy run found for " + deployWorkflowFile + ".");
-              entry.state.deployError =
-                "The run rad commands workflow (" +
-                deployWorkflowFile +
-                ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
-                repo +
-                ".";
-              // The dispatch succeeded, so a run was very likely created — it
-              // just never became visible here. Treating that as an ordinary
-              // failure would let a repair redeploy race a run that is queued
-              // or merely slow to surface.
-              entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            entry.state.deployRunId = dRunId;
-            entry.state.deployRunUrl =
-              "https://github.com/" + repo + "/actions/runs/" + dRunId;
-            addLog(
-              "Tracking deploy run: https://github.com/" +
-                repo +
-                "/actions/runs/" +
-                dRunId
-            );
-            if (resources.length > 0 && resources[0].deployStatus === "pending")
-              setStatus(resources[0], "in_progress");
-
-            const seenD = new Set<string>();
-            const startedD = new Set<string>();
-            let deployStepStartedAt = 0;
-            let beatStep = "";
-            let beatStepStartedAt = 0;
-            let lastBeatAt = 0;
-            let deployStarted = false;
-
-            // Deploy status and the deployed graph are published as a workflow
-            // artifact. This reader is scoped to the run we are tracking, so it
-            // reports this deploy's status rather than the previous one's.
-            const statusReader = await deployStatusReaderFromState(
-              entry.state,
-              repo,
-              branch,
-              dRunId
-            );
-            // Artifact uploads take seconds, so polling faster than this just
-            // re-reads the same bytes. The step-lifecycle stream and the
-            // heartbeat below keep the feed moving between refreshes.
-            const STATUS_POLL_MS = 15000;
-            let lastStatusPollAt = 0;
-
-            // Announce only new transitions, not the same status every tick.
-            const statusAnnounced = new Set<string>();
-
-            // pollDeployStatus - fold the newest published status map into the
-            // graph. Merging is conservative (see applyDeployStatusToResources):
-            // a resource missing from the payload keeps its current status, and
-            // a failure is never downgraded within the run.
-            const pollDeployStatus = async (force = false): Promise<void> => {
-              if (resources.length === 0) return;
-              if (!force && Date.now() - lastStatusPollAt < STATUS_POLL_MS)
-                return;
-              lastStatusPollAt = Date.now();
-              let statusMap;
-              let messageMap;
-              try {
-                const progress = await statusReader.progress();
-                statusMap = buildDeployStatusMap(progress);
-                messageMap = buildDeployMessageMap(progress);
-              } catch (e) {
-                addLog(
-                  "    ⚠ Could not read deploy status: " + errorMessage(e)
-                );
-                return;
-              }
-              applyDeployMessages(resources, messageMap);
-              const changes = applyDeployStatusToResources(
-                resources,
-                statusMap
-              );
-              for (const change of changes) {
-                const line =
-                  (change.to === "failed" ? "✗"
-                  : change.to === "success" ? "✓"
-                  : "◐") +
-                  " " +
-                  (change.name || "resource") +
-                  " — " +
-                  change.to;
-                if (statusAnnounced.has(line)) continue;
-                statusAnnounced.add(line);
-                addLog("  " + line);
-              }
-              // Push each new status down onto the resource's outputs (and
-              // generate their portal links on success) the same way the rest
-              // of the deploy flow does.
-              if (changes.length > 0) {
-                for (const resource of resources) {
-                  if (resource.deployStatus)
-                    setStatus(resource, resource.deployStatus);
-                }
-              }
-            };
-
-            // The step that runs `rad deploy`. This must match the step name in
-            // the upstream run-rad-commands composite action exactly — when it
-            // does not, none of the in-flight handling below ever executes.
-            const DEPLOY_STEP = DEPLOY_RAD_COMMANDS_STEP;
-
-            for (let p = 0; p < 240; p++) {
-              const detail = await getRunDetail(repo, dRunId);
-              if (!detail) {
-                await delay(5000);
-                continue;
-              }
-
-              // Stream step lifecycle: announce when a step STARTS
-              // (in_progress) and again when it COMPLETES so the feed
-              // never goes silent during long-running steps.
-              for (const s of detail.steps) {
-                const stepName = s.name || "";
-                if (s.status === "in_progress" && !startedD.has(stepName)) {
-                  startedD.add(stepName);
-                  addLog("  ▶ " + stepName + "…");
-                }
-                if (s.status === "completed" && !seenD.has(stepName)) {
-                  seenD.add(stepName);
-                  addLog(
-                    "  " +
-                      (s.conclusion === "success" ? "✓"
-                      : s.conclusion ? "✗"
-                      : "•") +
-                      " " +
-                      stepName
-                  );
-                }
-              }
-
-              // Heartbeat: emit a "still running" line every ~30s for the
-              // currently-executing step so the user sees continuous activity
-              // even when GitHub provides no intra-step log lines (gh cannot
-              // stream a running job's stdout).
-              const running = detail.steps.find(
-                (s) => s.status === "in_progress"
-              );
-              if (running) {
-                const runningName = running.name || "";
-                if (beatStep !== runningName) {
-                  beatStep = runningName;
-                  beatStepStartedAt = Date.now();
-                  lastBeatAt = Date.now();
-                } else if (Date.now() - lastBeatAt > 30000) {
-                  lastBeatAt = Date.now();
-                  addLog(
-                    "    … " +
-                      runningName +
-                      " still running (" +
-                      Math.round((Date.now() - beatStepStartedAt) / 1000) +
-                      "s)"
-                  );
-                }
-              }
-
-              // While the rad-commands step runs, fold in whatever per-resource
-              // status the deploy has published.
-              const deployStep = detail.steps.find(
-                (s) => s.name === DEPLOY_STEP
-              );
-              if (
-                deployStep &&
-                deployStep.status === "in_progress" &&
-                resources.length > 0
-              ) {
-                if (!deployStarted) {
-                  deployStarted = true;
-                  deployStepStartedAt = Date.now();
-                  entry.state.deployStartedAt = deployStepStartedAt;
-                  addLog("🚀 rad deploy running — provisioning resources...");
-                  addLog(
-                    "  ⏱ Deployment started at " +
-                      new Date(deployStepStartedAt).toISOString()
-                  );
-                  // Leave nodes gray; each flips to yellow when its own
-                  // recipe/operation actually starts (see applyProgress).
-                }
-                // Fold in whatever per-resource status the deploy has
-                // published so far. Nothing arrives mid-run yet: the producer
-                // publishes after `rad deploy` returns, because a composite
-                // step cannot invoke actions/upload-artifact while it runs.
-                // The poll is here regardless so that when the producer starts
-                // uploading during the deploy, this lights up unchanged.
-                await pollDeployStatus();
-                // Fallback: if nothing has advanced past pending ~25s into
-                // the deploy, mark all pending nodes in_progress so the graph
-                // isn't stuck gray for the whole run.
-                if (
-                  Date.now() - deployStepStartedAt > 25000 &&
-                  !resources.some(
-                    (r) => r.deployStatus && r.deployStatus !== "pending"
-                  )
-                ) {
-                  resources.forEach((r) => {
-                    if (!r.deployStatus || r.deployStatus === "pending")
-                      setStatus(r, "in_progress");
-                  });
-                }
-              }
-
-              if (detail.status === "completed") {
-                const conclusion = detail.conclusion;
-
-                // The producer publishes its artifact from a step that runs
-                // after `rad deploy` and before teardown, so by the time the
-                // run reports completed the upload has normally landed. Retry
-                // a few times anyway to absorb upload-finalization lag, since
-                // this read is the whole terminal graph.
-                addLog("🗺  Retrieving deploy status and application graph…");
-                let deployed: unknown = null;
-                let graphStatus: string | null = null;
-                for (let g = 0; g < 3; g++) {
-                  const gr = await statusReader.graph();
-                  graphStatus = gr.status;
-                  // Permission failures will not resolve by retrying.
-                  if (gr.status === "auth") break;
-                  if (gr.graph) {
-                    deployed = gr.graph;
-                    break;
-                  }
-                  if (g < 2) await delay(5000);
-                }
-                // Final status sweep, forced past the poll interval so the
-                // last published state is always folded in.
-                await pollDeployStatus(true);
-
-                // Record stop time + duration.
-                const finishedAt = Date.now();
-                entry.state.deployFinishedAt = finishedAt;
-                if (deployStepStartedAt) {
-                  const secs = Math.round(
-                    (finishedAt - deployStepStartedAt) / 1000
-                  );
-                  addLog(
-                    "  ⏱ Deployment finished at " +
-                      new Date(finishedAt).toISOString() +
-                      " (" +
-                      secs +
-                      "s)"
-                  );
-                }
-
-                // The run's own conclusion is authoritative for the overall
-                // outcome: it decides anything the published status left
-                // unfinished, without overwriting a resource the producer
-                // already reported as terminal.
-                settleDeployStatuses(resources, conclusion);
-                // Propagate onto output resources and generate portal links.
-                for (const resource of resources) {
-                  if (resource.deployStatus)
-                    setStatus(resource, resource.deployStatus);
-                }
-
-                if (deployed) {
-                  entry.state.deployedGraph =
-                    deployed as CanvasState["deployedGraph"];
-                  entry.state.deployedGraphRepo = repo;
-                  addLog("  ✓ Deployed graph saved (from workflow artifact).");
-                } else if (graphStatus === "auth") {
-                  addLog(
-                    "  ⚠ The deploy status artifact could not be read: access denied."
-                  );
-                  addLog(
-                    "    Check that the active gh account can read Actions artifacts for " +
-                      repo +
-                      "."
-                  );
-                } else if (graphStatus === "malformed") {
-                  addLog(
-                    "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
-                  );
-                } else {
-                  addLog(
-                    "  ⚠ Deployed graph not available (the deploy may not have published one)."
-                  );
-                }
-
-                if (conclusion === "success") {
-                  entry.state.deployStatus = "complete";
-                  addLog("");
-                  addLog(
-                    "🎉 Deployment complete! Application deployed to " +
-                      (provider === "aws" ? "AWS" : "Azure") +
-                      "."
-                  );
-                  addLog(
-                    "Click on deployed resources to view them in the " +
-                      (provider === "aws" ? "AWS Console" : "Azure Portal") +
-                      "."
-                  );
-                } else {
-                  entry.state.deployStatus = "failed";
-                  addLog("");
-                  addLog("❌ Deployment failed. Conclusion: " + conclusion);
-                  // Build a user-facing error from the failed step(s) + log.
-                  const failedSteps = detail.steps.filter(
-                    (s) =>
-                      s.conclusion &&
-                      s.conclusion !== "success" &&
-                      s.conclusion !== "skipped"
-                  );
-                  let dErr =
-                    "Deployment failed" +
-                    (conclusion ? " (" + conclusion + ")" : "") +
-                    ".";
-                  if (failedSteps.length)
-                    dErr +=
-                      " Failed step: " +
-                      failedSteps.map((s) => s.name).join(", ") +
-                      ".";
-                  // Surface the FULL detailed rad deploy failure block (root
-                  // cause: recipe/terraform/ARM operation errors). The run is
-                  // complete by now, so its log is readable in full — this is
-                  // the one signal the artifact transport does not carry.
-                  const failLog = await fetchRunLog(repo, dRunId);
-                  // The OIDC "enterprise claim" rejection (AADSTS7002381)
-                  // happens at the Azure Login step, before rad runs, so scope
-                  // the check to that step's log rather than the whole run.
-                  const azureLoginLog = extractGitHubActionsStepLog(
-                    failLog,
-                    "Azure Login (OIDC)"
-                  );
-                  const claimHelp = explainOidcEnterpriseClaim(azureLoginLog);
-                  if (claimHelp)
-                    dErr = claimHelp + "\n\n\u2014 raw error \u2014\n" + dErr;
-                  const detailBlock = extractRadDeployError(failLog);
-                  if (detailBlock) {
-                    dErr += "\n\n" + detailBlock;
-                    addLog("");
-                    addLog("──────── failure details ────────");
-                    detailBlock.split("\n").forEach((l) => addLog("  " + l));
-                    addLog("─────────────────────────────────");
-                  }
-                  // The producer ships a dedicated control-plane/recipe log in
-                  // the status artifact. It carries the precise recipe/terraform
-                  // failure cause, which the summarized run-log block above can
-                  // miss, so surface its tail when present.
-                  let cpLog: string | null = null;
-                  try {
-                    cpLog = await statusReader.controlPlaneLog();
-                  } catch {
-                    // Best-effort: a missing/unreadable control-plane log must
-                    // not mask the run-log failure details above.
-                  }
-                  if (cpLog) {
-                    const cpTail = cpLog
-                      .replace(/\s+$/, "")
-                      .split("\n")
-                      .slice(-40)
-                      .join("\n");
-                    if (cpTail.trim()) {
-                      dErr += "\n\n— control-plane log —\n" + cpTail;
-                      addLog("");
-                      addLog("──────── control-plane log ────────");
-                      cpTail.split("\n").forEach((l) => addLog("  " + l));
-                      addLog("───────────────────────────────────");
-                    }
-                  }
-                  dErr +=
-                    "\n\nView the full run: https://github.com/" +
-                    repo +
-                    "/actions/runs/" +
-                    dRunId;
-                  entry.state.deployError = dErr;
-                }
-                return;
-              }
-              await delay(5000);
-            }
-            addLog("⚠ Timed out waiting for the deploy workflow to complete.");
-            entry.state.deployError =
-              "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/" +
-              repo +
-              "/actions/runs/" +
-              dRunId;
-            // Monitoring gave up; the run itself may still be going. Mark it so
-            // an attempt-bound repair redeploy is refused rather than racing a
-            // second workflow against the same target.
-            entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
-            entry.state.deployStatus = "failed";
-          })()
-            .catch((monErr) => {
-              // Never let the background monitor die silently (which would
-              // leave the page stuck polling an 'in_progress' that never
-              // resolves). Surface the error and settle the status.
-              try {
-                addLog(
-                  "❌ Deploy monitor stopped unexpectedly: " +
-                    (monErr && monErr.message ? monErr.message : monErr)
-                );
-                if (!entry.state.deployError)
-                  entry.state.deployError =
-                    "Deploy monitoring stopped unexpectedly: " +
-                    (monErr && monErr.message ? monErr.message : monErr);
-                // Same reasoning as the timeout above: the monitor died, so
-                // the workflow's real outcome is unknown and a repair redeploy
-                // must not assume the run is over.
-                entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
-                entry.state.deployStatus = "failed";
-              } catch {
-                /* ignore */
-              }
-            })
-            .finally(() => {
-              // The monitor owns every terminal transition of this deploy, so
-              // firing here makes the repair loop independent of the webview.
-              // Previously the only trigger was the /api/deploy-status route,
-              // which the browser polls solely while the deployments page is
-              // mounted: closing the panel, navigating away, or reopening onto
-              // another page left a failed deploy orphaned with the handoff
-              // never attempted. The route keeps its own call as a fallback,
-              // and triggerDeployRepairHandoff is idempotent per repair loop.
-              triggerDeployRepairHandoff(entry, instanceId);
-              // Hold the repo/environment reservation for the whole deploy, not
-              // merely until the background monitor starts. This closes the
-              // deployment-record publication gap within this canvas instance.
-              releaseReservation();
-            });
-        }
-        // Keep this response adjacent to the monitor launch. Once the monitor
-        // owns the reservation, an awaited/throwing step here could enter the
-        // outer catch and release the lock while the deploy is still running.
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        // Report the loop's position back so the agent sees its remaining
-        // budget on every redeploy, instead of having to remember the cap from
-        // the single handoff that opened the loop.
-        res.end(
-          JSON.stringify({
-            ok: true,
-            ...(loop.repairLoop ?
-              {
-                repairAttempt: loop.repairAttempt,
-                repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
-              }
-            : {})
-          })
-        );
-      } catch (e) {
-        releaseReservation();
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
       return;
     }
 
