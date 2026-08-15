@@ -590,9 +590,7 @@ export async function handleCreateEnvironment(
             steps.push("Verify run: " + verifyRunUrl);
           }
         } catch {}
-        steps.push(
-          "Credentials verification dispatched. Deploy your application from the Environments list when ready."
-        );
+        steps.push("✅ Credentials verification dispatched.");
       } else {
         const detail =
           (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||

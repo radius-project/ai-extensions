@@ -791,6 +791,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
+  addLegacyStep: (operation, text) => addLegacyStep(operation, text),
   finish,
   finishSucceeded,
   persistBestEffort,

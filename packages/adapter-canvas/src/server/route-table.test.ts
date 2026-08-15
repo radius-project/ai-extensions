@@ -241,6 +241,7 @@ const productionHandlers = {
     extractErrorLines: () => [],
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
+    addLegacyStep: () => null,
     finish: () => null,
     finishSucceeded: () => null,
     persistBestEffort: () => Promise.resolve(true),

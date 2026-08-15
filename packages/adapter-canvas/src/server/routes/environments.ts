@@ -562,7 +562,15 @@ export async function handleVerifyStatus(
       return;
     }
     if (detail.conclusion === "success") {
-      if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
+      if (
+        verifyOp &&
+        verifyOp.currentStage === dependencies.stageVerify &&
+        verifyOp.state === "running"
+      ) {
+        dependencies.addLegacyStep(
+          verifyOp,
+          "✅ Environment created. Deploy your application from the Environments list when ready."
+        );
         dependencies.finishSucceeded(verifyOp);
         await dependencies.persistBestEffort({
           operation: verifyOp,
