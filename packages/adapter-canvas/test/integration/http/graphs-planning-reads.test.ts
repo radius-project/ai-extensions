@@ -6,8 +6,10 @@ import {
   createGraphsPlanningReadsRoutes,
   type DeployedGraphReaderOptions
 } from "../../../src/server/routes/graphs-planning-reads.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
-import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
+import {
+  createTestRouteTable,
+  fetchResidualRoute
+} from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { DeployProgress } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -316,21 +318,12 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       application: null
     });
 
-    // Unmigrated routes still reach the fallback. The probe target is derived
-    // from the inventory rather than named: a named probe inherits the
-    // migration expiry of the route it names, and silently stops testing the
-    // fallback once that route migrates. Deriving it means the probe follows
-    // whatever is still residual, and fails loudly when nothing is.
-    const [residualKey] = LEGACY_ROUTE_INVENTORY;
-    if (!residualKey) {
-      throw new Error(
-        "No residual route remains, so the legacy fallback can no longer be " +
-          "probed. Delete the fallback and this probe together."
-      );
-    }
-    const [method, path] = residualKey.split(" ");
-    expect(path?.startsWith("/api/")).toBe(true);
-    const residual = await fetch(`${entry.baseUrl}${path}`, { method });
+    // Unmigrated requests still reach the fallback. The probe target is
+    // resolved by the shared helper rather than named: a named probe inherits
+    // the migration expiry of the route it names, and silently stops testing
+    // the fallback once that route migrates. The helper follows whatever the
+    // fallback still owns and fails loudly when its target becomes declared.
+    const residual = await fetchResidualRoute(entry.baseUrl);
     expect(residual.status).toBe(418);
   });
 });

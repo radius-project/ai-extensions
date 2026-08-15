@@ -5,6 +5,7 @@ import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
   handleDeleteDeployment,
+  handleDeploy,
   handleDeployReset,
   handleDeployStatus,
   handleListApplications,
@@ -137,6 +138,11 @@ function dependencies(
       if (ms === 0) callback();
       return {};
     },
+    deployRequest: {
+      deploy: () => {
+        throw new Error("deployRequest.deploy not stubbed");
+      }
+    },
     ...overrides
   };
 }
@@ -210,12 +216,13 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the five routes it owns", () => {
+  it("declares exactly the six routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
       "GET /api/list-applications",
       "GET /api/list-deployments",
+      "POST /api/deploy",
       "POST /api/deploy-reset",
       "POST /api/delete-deployment"
     ]);
@@ -235,7 +242,10 @@ describe("deployments routes (SU-06)", () => {
           delete: () => undefined
         },
         ghOrThrow: () => Promise.resolve(""),
-        resetDeploymentViewState: () => {}
+        resetDeploymentViewState: () => {},
+        deployRequest: {
+          deploy: () => Promise.resolve({ status: 200, body: { ok: true } })
+        }
       })
     );
 
@@ -264,6 +274,10 @@ describe("deployments routes (SU-06)", () => {
     const reset = context("POST", "/api/deploy-reset", "{}");
     await routes["POST /api/deploy-reset"](reset.context);
     expect(JSON.parse(reset.recording.body)).toEqual({ ok: true });
+
+    const deploy = context("POST", "/api/deploy", "{}");
+    await routes["POST /api/deploy"](deploy.context);
+    expect(JSON.parse(deploy.recording.body)).toEqual({ ok: true });
 
     const remove = context("POST", "/api/delete-deployment", "{}");
     await routes["POST /api/delete-deployment"](remove.context);
@@ -966,6 +980,85 @@ describe("deployments routes (SU-06)", () => {
         })
       );
       expect(JSON.parse(recording.body).error).toBe("gh vanished");
+    });
+  });
+
+  describe("POST /api/deploy", () => {
+    it("hands the raw body and instance id to the admission service and serializes its exact result", async () => {
+      const calls: { instanceId: string; body: string }[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/deploy",
+        '{"targetRepo":"octo/todolist","environment":"dev"}'
+      );
+
+      await handleDeploy(
+        ctx,
+        dependencies({
+          deployRequest: {
+            deploy: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 200,
+                body: { ok: true, repairAttempt: 2, repairAttemptCap: 5 }
+              });
+            }
+          }
+        })
+      );
+
+      // The adapter parses nothing: the body reaches the service byte for byte,
+      // so the service owns the single 400 envelope the legacy arm had.
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          body: '{"targetRepo":"octo/todolist","environment":"dev"}'
+        }
+      ]);
+      expect(recording.status).toBe(200);
+      expect(recording.headers).toEqual({
+        "Content-Type": "application/json"
+      });
+      expect(recording.body).toBe(
+        '{"ok":true,"repairAttempt":2,"repairAttemptCap":5}'
+      );
+    });
+
+    it.each([
+      [409, { error: "This repair loop has already used its 5 attempts." }],
+      [503, { error: "Could not verify whether this environment…" }],
+      [400, { error: "targetRepo and environment are required." }]
+    ])("passes a %i refusal through unchanged", async (status, body) => {
+      const { recording, context: ctx } = context("POST", "/api/deploy", "{}");
+
+      await handleDeploy(
+        ctx,
+        dependencies({
+          deployRequest: { deploy: () => Promise.resolve({ status, body }) }
+        })
+      );
+
+      expect(recording.status).toBe(status);
+      expect(JSON.parse(recording.body)).toEqual(body);
+    });
+
+    it("reads an empty body without inventing a default", async () => {
+      const bodies: string[] = [];
+      const { context: ctx } = context("POST", "/api/deploy", "");
+
+      await handleDeploy(
+        ctx,
+        dependencies({
+          deployRequest: {
+            deploy: ({ body }) => {
+              bodies.push(body);
+              return Promise.resolve({ status: 400, body: { error: "bad" } });
+            }
+          }
+        })
+      );
+
+      expect(bodies).toEqual([""]);
     });
   });
 
