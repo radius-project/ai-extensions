@@ -23,6 +23,11 @@ export const DEFAULT_APP_BICEP_PATH = ".radius/app.bicep";
 // entry indirection is kept rather than flattened to a state reader because a
 // missing entry and an entry with empty state must stay distinguishable, and
 // every one of these routes answers 503 on the former.
+//
+// The pipeline is generic over the entry so a composition root can supply a
+// wider entry — `server.ts` passes the live `CanvasServerEntry`, which some of
+// its seams require — without this module widening to match, and without
+// relying on TypeScript's bivariant method parameters to paper over the gap.
 export interface GraphInstanceEntry {
   state: CanvasState;
 }
@@ -64,9 +69,11 @@ export interface GraphCompileOptions {
 // the composition root binds it into `resolveRadArtifactsDir` so this module
 // never holds a GitHub client, and `rad` is reached only through the injected
 // `buildGraphViaRad`.
-export interface GraphPipelineDependencies {
+export interface GraphPipelineDependencies<
+  TEntry extends GraphInstanceEntry = GraphInstanceEntry
+> {
   fetchBicepSelection(
-    entry: GraphInstanceEntry,
+    entry: TEntry,
     repo: string,
     branch: string
   ): Promise<AppBicepSelection>;
@@ -91,8 +98,10 @@ export interface GraphPipelineDependencies {
   removeDirectory(dir: string): void;
 }
 
-export interface StageArtifactsInput {
-  entry: GraphInstanceEntry;
+export interface StageArtifactsInput<
+  TEntry extends GraphInstanceEntry = GraphInstanceEntry
+> {
+  entry: TEntry;
   selection: AppBicepSelection;
   repo: string;
   branch: string;
@@ -106,22 +115,23 @@ export interface CompileResourcesInput {
   saveGraphJsonTo?: string;
 }
 
-export interface GraphPipeline {
+export interface GraphPipeline<
+  TEntry extends GraphInstanceEntry = GraphInstanceEntry
+> {
   selectAppBicep(
-    entry: GraphInstanceEntry,
+    entry: TEntry,
     repo: string,
     branch: string
   ): Promise<AppBicepSelection>;
   bicepPathOf(selection: AppBicepSelection): string;
-  stageArtifacts(input: StageArtifactsInput): Promise<StagedRadArtifacts>;
+  stageArtifacts(
+    input: StageArtifactsInput<TEntry>
+  ): Promise<StagedRadArtifacts>;
   compileResources(
     input: CompileResourcesInput
   ): Promise<CanvasGraphResource[]>;
   toCanvasResources(values: unknown[]): CanvasGraphResource[];
-  graphJsonPathFor(
-    entry: GraphInstanceEntry,
-    selection: AppBicepSelection
-  ): string;
+  graphJsonPathFor(entry: TEntry, selection: AppBicepSelection): string;
   definitionHashFor(
     selection: AppBicepSelection,
     staged: StagedRadArtifacts
@@ -129,9 +139,9 @@ export interface GraphPipeline {
   discardStagedArtifacts(staged: StagedRadArtifacts): void;
 }
 
-export function createGraphPipeline(
-  dependencies: GraphPipelineDependencies
-): GraphPipeline {
+export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
+  dependencies: GraphPipelineDependencies<TEntry>
+): GraphPipeline<TEntry> {
   function bicepPathOf(selection: AppBicepSelection): string {
     // `||` not `??`: an empty `bicepPath` means "not resolved from the
     // workspace" and must fall back, which `??` would not do.

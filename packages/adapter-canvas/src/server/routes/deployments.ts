@@ -29,11 +29,12 @@ export interface DeployListCacheEntry {
   payload: unknown;
 }
 
-// The deploy listing cache is injected, not owned here, because `server.ts`
-// still deletes from the same map when a deploy is dispatched. This family now
-// contains both a reader (`list-deployments`) and one of the invalidators
-// (`delete-deployment`), so the eviction is a within-slice behavior and is
-// tested directly against a real Map rather than assumed.
+// The deploy listing cache is injected, not owned here, because the deploy
+// dispatch service deletes from the same map through its own
+// `invalidateDeployListCache` seam. This family now contains both a reader
+// (`list-deployments`) and one of the invalidators (`delete-deployment`), so the
+// eviction is a within-slice behavior and is tested directly against a real Map
+// rather than assumed.
 export interface DeployListCache {
   get(repo: string): DeployListCacheEntry | undefined;
   set(repo: string, entry: DeployListCacheEntry): unknown;

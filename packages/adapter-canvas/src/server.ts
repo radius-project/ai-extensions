@@ -203,8 +203,9 @@ import {
   createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
 } from "./server/routes/graphs-planning.js";
-import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
+import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
@@ -765,19 +766,19 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 });
 
 // Composition root for the write half of the `graphs-planning` family. The
-// complete dependency object is assembled here and nowhere else; the handlers
-// receive narrow function seams and the shared modeling pipeline receives its
-// own eight, so neither module holds a GitHub client, spawns `rad`, or touches
-// disk directly.
+// complete dependency object is assembled here and nowhere else; the workflow
+// service receives narrow function seams and the shared modeling pipeline
+// receives its own eight, so neither module holds a GitHub client, spawns
+// `rad`, or touches disk directly.
 //
 // `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
 // `resolveRecipeOutputs` here rather than injected, which is what keeps the
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// handlers, matching how the sibling families inject `repoMatchesWorkspace`.
-const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  pipeline: createGraphPipeline({
+  pipeline: createGraphPipeline<CanvasServerEntry>({
     fetchBicepSelection: (entry, repo, branch) =>
       fetchBicepSelection(entry, repo, branch),
     resolveRadArtifactsDir: (request) =>
@@ -811,6 +812,12 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
   record,
   optionalString,
   errorMessage
+});
+
+// The route layer sees exactly one seam: the workflow service above. Parsing
+// and serialization are all it owns.
+const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+  workflows: graphPlanningWorkflows
 });
 
 // The listing TTL and verify-workflow filename are declared here, before the
@@ -1242,8 +1249,9 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched; the deployments route family receives this same map and owns the
-// invalidation points.
+// dispatched: the deployments route family is handed this same map and evicts
+// from there, while the deploy dispatch service evicts through the
+// `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 

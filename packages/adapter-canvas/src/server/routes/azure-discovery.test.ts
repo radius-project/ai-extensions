@@ -11,10 +11,12 @@ import {
   type AzureCommandResult,
   type AzureDiscoveryDependencies
 } from "./azure-discovery.js";
+import type { DiscoveryItem, DiscoveryResult } from "../services/discovery.js";
 import type { CanvasServerEntry } from "../types.js";
 
 interface Recording {
   contentType: string | undefined;
+  headers: Array<[string, string]>;
   status: number;
   body: string;
 }
@@ -22,11 +24,13 @@ interface Recording {
 function recorder() {
   const recording: Recording = {
     contentType: undefined,
+    headers: [],
     status: 0,
     body: ""
   };
   const target = {
     setHeader(name: string, value: string) {
+      recording.headers.push([name, value]);
       if (name === "Content-Type") recording.contentType = value;
       return this;
     },
@@ -131,7 +135,7 @@ async function run(
   return recording;
 }
 
-describe("azure-discovery read routes (SU-06)", () => {
+describe("azure-discovery routes (SU-08)", () => {
   it("declares exactly the three routes it owns", () => {
     expect(Object.keys(createAzureDiscoveryRoutes(dependencies()))).toEqual([
       "GET /api/list-azure-app-registrations",
@@ -195,6 +199,394 @@ describe("azure-discovery read routes (SU-06)", () => {
         code: "app-list-failed",
         azError: "az: not logged in"
       });
+    });
+
+    // Verbatim transcription of the deleted legacy POST /api/discover arm. The
+    // differential cases below drive this independent implementation and the
+    // migrated HTTP adapter with identical scripts, then compare every observable
+    // boundary: status, ordered headers, serialized payload, argv, and timeouts.
+    function legacyDiscoveryItems(value: unknown): DiscoveryItem[] {
+      if (!Array.isArray(value)) return [];
+      return value.map((item) => {
+        const fields =
+          item !== null && typeof item === "object" && !Array.isArray(item) ?
+            Object.fromEntries(Object.entries(item))
+          : {};
+        return {
+          id: typeof fields.id === "string" ? fields.id : "",
+          name: typeof fields.name === "string" ? fields.name : "",
+          resourceGroup:
+            typeof fields.resourceGroup === "string" ? fields.resourceGroup : ""
+        };
+      });
+    }
+
+    function legacyErrorMessage(error: unknown): string {
+      return error instanceof Error ? error.message : String(error);
+    }
+
+    async function legacyDiscover(
+      incoming: IncomingMessage,
+      response: ServerResponse<IncomingMessage>,
+      runCli: AzureDiscoveryDependencies["runCli"]
+    ): Promise<void> {
+      let body = "";
+      for await (const chunk of incoming) body += chunk;
+      try {
+        const data = JSON.parse(body) as {
+          subscriptionId?: string;
+          provider?: string;
+        };
+        const result: DiscoveryResult = {
+          clusters: [],
+          resourceGroups: [],
+          namespaces: [],
+          vpcs: [],
+          subnets: []
+        };
+
+        if (
+          data.subscriptionId &&
+          !isUuid(String(data.subscriptionId).trim())
+        ) {
+          response.setHeader("Content-Type", "application/json");
+          response.writeHead(200);
+          response.end(
+            JSON.stringify({
+              error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
+              clusters: [],
+              resourceGroups: [],
+              namespaces: ["default"],
+              vpcs: [],
+              subnets: []
+            })
+          );
+          return;
+        }
+
+        if (data.provider === "azure") {
+          if (data.subscriptionId) {
+            try {
+              await runCli(
+                "az",
+                ["account", "set", "--subscription", data.subscriptionId],
+                { timeout: 10000 }
+              );
+            } catch {}
+          }
+          const subArgs =
+            data.subscriptionId ? ["--subscription", data.subscriptionId] : [];
+          try {
+            const aksJson = await runCli(
+              "az",
+              [
+                "aks",
+                "list",
+                "--query",
+                "[].{id:name, name:name, resourceGroup:resourceGroup}",
+                "-o",
+                "json",
+                ...subArgs
+              ],
+              { timeout: 30000 }
+            );
+            result.clusters = legacyDiscoveryItems(JSON.parse(aksJson));
+          } catch (error) {
+            result.clusters = [];
+            result.errors = result.errors || {};
+            result.errors.clusters = legacyErrorMessage(error).slice(0, 800);
+          }
+          try {
+            const groupsJson = await runCli(
+              "az",
+              [
+                "group",
+                "list",
+                "--query",
+                "[].{id:name, name:name}",
+                "-o",
+                "json",
+                ...subArgs
+              ],
+              { timeout: 30000 }
+            );
+            result.resourceGroups = legacyDiscoveryItems(
+              JSON.parse(groupsJson)
+            );
+          } catch (error) {
+            result.resourceGroups = [];
+            result.errors = result.errors || {};
+            result.errors.resourceGroups = legacyErrorMessage(error).slice(
+              0,
+              800
+            );
+          }
+          if (result.clusters.length > 0) {
+            try {
+              const resourceGroup =
+                result.resourceGroups.length > 0 ?
+                  result.resourceGroups[0].id
+                : "";
+              const clusterName = result.clusters[0].id;
+              if (resourceGroup && clusterName) {
+                await runCli(
+                  "az",
+                  [
+                    "aks",
+                    "get-credentials",
+                    "--name",
+                    clusterName,
+                    "--resource-group",
+                    resourceGroup,
+                    "--overwrite-existing"
+                  ],
+                  { timeout: 20000 }
+                );
+                const namespacesJson = await runCli(
+                  "kubectl",
+                  [
+                    "get",
+                    "namespaces",
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}"
+                  ],
+                  { timeout: 10000 }
+                );
+                result.namespaces = namespacesJson
+                  .replace(/"/g, "")
+                  .split(" ")
+                  .filter(Boolean);
+              } else {
+                result.namespaces = ["default", "kube-system", "radius-system"];
+              }
+            } catch {
+              result.namespaces = ["default", "kube-system", "radius-system"];
+            }
+          } else {
+            result.namespaces = ["default", "kube-system", "radius-system"];
+          }
+        } else {
+          try {
+            const clustersJson = await runCli(
+              "aws",
+              [
+                "eks",
+                "list-clusters",
+                "--query",
+                "clusters",
+                "--output",
+                "json"
+              ],
+              { timeout: 15000 }
+            );
+            const clusterNames: unknown = JSON.parse(clustersJson);
+            result.clusters =
+              Array.isArray(clusterNames) ?
+                clusterNames
+                  .filter((name): name is string => typeof name === "string")
+                  .map((name) => ({ id: name, name }))
+              : [];
+          } catch (error) {
+            result.clusters = [];
+            result.errors = result.errors || {};
+            result.errors.clusters = legacyErrorMessage(error).slice(0, 800);
+          }
+          try {
+            const vpcsJson = await runCli(
+              "aws",
+              [
+                "ec2",
+                "describe-vpcs",
+                "--query",
+                "Vpcs[].{id:VpcId, name:VpcId}",
+                "--output",
+                "json"
+              ],
+              { timeout: 15000 }
+            );
+            result.vpcs = legacyDiscoveryItems(JSON.parse(vpcsJson));
+          } catch (error) {
+            result.vpcs = [];
+            result.errors = result.errors || {};
+            result.errors.vpcs = legacyErrorMessage(error).slice(0, 800);
+          }
+          try {
+            const subnetsJson = await runCli(
+              "aws",
+              [
+                "ec2",
+                "describe-subnets",
+                "--query",
+                "Subnets[].{id:SubnetId, name:SubnetId}",
+                "--output",
+                "json"
+              ],
+              { timeout: 15000 }
+            );
+            result.subnets = legacyDiscoveryItems(JSON.parse(subnetsJson));
+          } catch (error) {
+            result.subnets = [];
+            result.errors = result.errors || {};
+            result.errors.subnets = legacyErrorMessage(error).slice(0, 800);
+          }
+          result.namespaces = ["default", "kube-system", "radius-system"];
+        }
+
+        response.setHeader("Content-Type", "application/json");
+        response.writeHead(200);
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        response.setHeader("Content-Type", "application/json");
+        response.writeHead(200);
+        response.end(
+          JSON.stringify({
+            error: legacyErrorMessage(error),
+            clusters: [],
+            resourceGroups: [],
+            namespaces: ["default"],
+            vpcs: [],
+            subnets: []
+          })
+        );
+      }
+    }
+
+    interface DifferentialCall {
+      line: string;
+      timeout: number;
+    }
+
+    type DifferentialScript = ReadonlyMap<string, string | { throws: unknown }>;
+
+    function differentialCli(script: DifferentialScript): {
+      calls: DifferentialCall[];
+      runCli: AzureDiscoveryDependencies["runCli"];
+    } {
+      const calls: DifferentialCall[] = [];
+      return {
+        calls,
+        runCli(command, args, options) {
+          const line = [command, ...args].join(" ");
+          calls.push({ line, timeout: options.timeout });
+          const result = script.get(line);
+          if (result === undefined) {
+            throw new Error(`unscripted differential CLI call: ${line}`);
+          }
+          return typeof result === "string" ?
+              Promise.resolve(result)
+            : Promise.reject(result.throws);
+        }
+      };
+    }
+
+    async function differentialDiscover(
+      body: string,
+      script: DifferentialScript
+    ): Promise<{
+      legacy: { recording: Recording; calls: DifferentialCall[] };
+      migrated: { recording: Recording; calls: DifferentialCall[] };
+    }> {
+      const legacyCli = differentialCli(script);
+      const legacy = recorder();
+      await legacyDiscover(
+        request("/api/discover", body),
+        legacy.response,
+        legacyCli.runCli
+      );
+
+      const migratedCli = differentialCli(script);
+      const migrated = await run(
+        "/api/discover",
+        handleDiscover,
+        dependencies({ runCli: migratedCli.runCli }),
+        body
+      );
+      return {
+        legacy: { recording: legacy.recording, calls: legacyCli.calls },
+        migrated: { recording: migrated, calls: migratedCli.calls }
+      };
+    }
+
+    describe("POST /api/discover legacy/migrated differential contract", () => {
+      const aks =
+        "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json";
+      const groups = "az group list --query [].{id:name, name:name} -o json";
+      const credentials =
+        "az aks get-credentials --name aks-1 --resource-group rg-1 --overwrite-existing";
+      const namespaces =
+        "kubectl get namespaces -o jsonpath={.items[*].metadata.name}";
+      const eks = "aws eks list-clusters --query clusters --output json";
+      const vpcs =
+        "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json";
+      const subnets =
+        "aws ec2 describe-subnets --query Subnets[].{id:SubnetId, name:SubnetId} --output json";
+
+      it.each([
+        {
+          label: "Azure success",
+          body: JSON.stringify({ provider: "azure" }),
+          script: new Map([
+            [
+              aks,
+              JSON.stringify([
+                { id: "aks-1", name: "aks-1", resourceGroup: "rg-1" }
+              ])
+            ],
+            [groups, JSON.stringify([{ id: "rg-1", name: "rg-1" }])],
+            [credentials, ""],
+            [namespaces, '"default" "radius-system"']
+          ]),
+          calls: [
+            { line: aks, timeout: 30000 },
+            { line: groups, timeout: 30000 },
+            { line: credentials, timeout: 20000 },
+            { line: namespaces, timeout: 10000 }
+          ]
+        },
+        {
+          label: "AWS success",
+          body: JSON.stringify({ provider: "aws" }),
+          script: new Map([
+            [eks, '["eks-1"]'],
+            [vpcs, JSON.stringify([{ id: "vpc-1", name: "vpc-1" }])],
+            [subnets, JSON.stringify([{ id: "subnet-1", name: "subnet-1" }])]
+          ]),
+          calls: [
+            { line: eks, timeout: 15000 },
+            { line: vpcs, timeout: 15000 },
+            { line: subnets, timeout: 15000 }
+          ]
+        },
+        {
+          label: "malformed input",
+          body: "not json",
+          script: new Map<string, string>(),
+          calls: []
+        },
+        {
+          label: "partial AWS failure",
+          body: JSON.stringify({ provider: "aws" }),
+          script: new Map<string, string | { throws: unknown }>([
+            [eks, '["eks-1"]'],
+            [vpcs, { throws: new Error("vpcs denied") }],
+            [subnets, "[]"]
+          ]),
+          calls: [
+            { line: eks, timeout: 15000 },
+            { line: vpcs, timeout: 15000 },
+            { line: subnets, timeout: 15000 }
+          ]
+        }
+      ])(
+        "matches status, headers, payload, argv, and timeouts for $label",
+        async ({ body, script, calls }) => {
+          const { legacy, migrated } = await differentialDiscover(body, script);
+
+          expect(migrated.recording).toEqual(legacy.recording);
+          expect(legacy.calls).toEqual(calls);
+          expect(migrated.calls).toEqual(calls);
+        }
+      );
     });
 
     it("treats a string exit code as a failure", async () => {
@@ -653,7 +1045,10 @@ describe("azure-discovery read routes (SU-06)", () => {
       const cli = cliFake({
         [CLI.aks()]: JSON.stringify([
           { id: "aks-1", name: "aks-1", resourceGroup: "rg-1" },
-          { id: 7, name: null }
+          { id: 7, name: null },
+          null,
+          7,
+          []
         ]),
         [CLI.groups()]: JSON.stringify([{ id: "rg-1", name: "rg-1" }]),
         [CLI.credentials("aks-1", "rg-1")]: "",
@@ -670,6 +1065,9 @@ describe("azure-discovery read routes (SU-06)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [
           { id: "aks-1", name: "aks-1", resourceGroup: "rg-1" },
+          { id: "", name: "", resourceGroup: "" },
+          { id: "", name: "", resourceGroup: "" },
+          { id: "", name: "", resourceGroup: "" },
           { id: "", name: "", resourceGroup: "" }
         ],
         resourceGroups: [{ id: "rg-1", name: "rg-1", resourceGroup: "" }],

@@ -903,6 +903,14 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+    expect(harness.commitStates).toEqual([
+      {
+        mode: "pull_request",
+        branch: "radius/setup-dev-workflows-1700000000000",
+        baseBranch: "main",
+        pullRequestUrl: "https://github.com/octo/app/pull/7"
+      }
+    ]);
     expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
     expect(harness.finished).toEqual([
       {
@@ -994,6 +1002,14 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       pullRequestUrl: "",
       pullRequestBranch: "radius/setup-dev-workflows-1700000000000"
     });
+    expect(harness.commitStates).toEqual([
+      {
+        mode: "pull_request",
+        branch: "radius/setup-dev-workflows-1700000000000",
+        baseBranch: "main",
+        pullRequestUrl: null
+      }
+    ]);
     expect(
       harness.steps.some((step) =>
         step.includes("could not open a pull request automatically")

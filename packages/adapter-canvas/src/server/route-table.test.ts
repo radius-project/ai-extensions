@@ -24,6 +24,7 @@ import {
 } from "./routes/graphs-planning.js";
 import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
@@ -206,38 +207,41 @@ const productionHandlers = {
     errorMessage: (error) => String(error)
   }),
   ...createGraphsPlanningWritesRoutes({
-    readInstanceEntry: () => undefined,
-    pipeline: createGraphPipeline({
-      fetchBicepSelection: () =>
-        Promise.resolve({
-          content: null,
-          fromWorkspace: false,
-          branch: "",
-          bicepPath: ""
-        }),
-      resolveRadArtifactsDir: () => Promise.resolve({ dir: "", remote: false }),
-      buildGraphViaRad: () => Promise.resolve([]),
-      canvasGraphResources: () => [],
-      workspaceGraphJsonPath: () => "",
-      graphDefinitionHash: () => "",
-      radArtifactsFingerprint: () => "",
-      removeDirectory: () => {}
-    }),
-    triggerAppBicepHandoff: () => {},
-    prepareSourceRefResources: () => ({ view: "graph", token: "" }),
-    setSourceRefResources: () => false,
-    isCurrentSourceRefToken: () => false,
-    defaultBranchForState: () => "main",
-    canReuseModeledGraph: () => false,
-    addGraphProgress: () => false,
-    beginPlannedGraphRequest: () => 1,
-    isCurrentPlannedGraphRequest: () => false,
-    fetchRecipePack: () => Promise.resolve([]),
-    resolveRecipeOutputs: () => Promise.resolve([]),
-    computeGraphDiff: () => [],
-    record: () => ({}),
-    optionalString: () => "",
-    errorMessage: (error) => String(error)
+    workflows: createGraphPlanningWorkflows({
+      readInstanceEntry: () => undefined,
+      pipeline: createGraphPipeline({
+        fetchBicepSelection: () =>
+          Promise.resolve({
+            content: null,
+            fromWorkspace: false,
+            branch: "",
+            bicepPath: ""
+          }),
+        resolveRadArtifactsDir: () =>
+          Promise.resolve({ dir: "", remote: false }),
+        buildGraphViaRad: () => Promise.resolve([]),
+        canvasGraphResources: () => [],
+        workspaceGraphJsonPath: () => "",
+        graphDefinitionHash: () => "",
+        radArtifactsFingerprint: () => "",
+        removeDirectory: () => {}
+      }),
+      triggerAppBicepHandoff: () => {},
+      prepareSourceRefResources: () => ({ view: "graph", token: "" }),
+      setSourceRefResources: () => false,
+      isCurrentSourceRefToken: () => false,
+      defaultBranchForState: () => "main",
+      canReuseModeledGraph: () => false,
+      addGraphProgress: () => false,
+      beginPlannedGraphRequest: () => 1,
+      isCurrentPlannedGraphRequest: () => false,
+      fetchRecipePack: () => Promise.resolve([]),
+      resolveRecipeOutputs: () => Promise.resolve([]),
+      computeGraphDiff: () => [],
+      record: () => ({}),
+      optionalString: () => "",
+      errorMessage: (error) => String(error)
+    })
   }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
