@@ -170,6 +170,7 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/verify-aws-login",
   "GET /api/list-azure-app-registrations",
   "GET /api/azure-app-serves-repos",
+  "POST /api/azure-auto-setup",
   "GET /api/user-repos",
   "POST /api/repo-branches",
   "POST /api/discover-branches",
@@ -185,7 +186,12 @@ export const MIGRATED_ROUTE_KEYS: readonly string[] = [
   "POST /api/app-params",
   "POST /api/delete-environment",
   "GET /api/list-environments",
-  "GET /api/verify-status"
+  "GET /api/verify-status",
+  "POST /api/load-graph",
+  "POST /api/plan-graph",
+  "POST /api/diff-branches",
+  "POST /api/create-environment",
+  "POST /api/discover"
 ];
 
 export function routeKey(
