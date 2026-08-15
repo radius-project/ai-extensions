@@ -1,6 +1,5 @@
 // @ts-nocheck
 import { readdirSync, readFileSync } from "node:fs";
-// @ts-nocheck
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
@@ -1599,66 +1598,14 @@ describe("environment creation boundaries", () => {
     new URL("./server.ts", import.meta.url),
     "utf8"
   );
-  // This suite reads `server.ts` as raw text and slices route bodies out of the
-  // legacy if-chain by their `pathname === ...` markers, so it carries an
-  // undeclared textual coupling to that chain: every slice that migrates a route
-  // onto the route table can delete a delimiter this suite depends on. The
-  // route-table boundary test cannot see that coupling.
-  //
-  // A missing marker must never be allowed to silently resize a slice.
-  // `String.prototype.slice` reads a -1 end as `length - 1`, so a deleted end
-  // delimiter widens a route body to essentially the whole file. The ordering
-  // assertions below then search that widened region for tokens like
-  // `buildAppCreateArgs` that also occur in other routes, and can keep passing
-  // while no longer constraining the route they name.
-  //
-  // Resolving every marker through this helper turns that into an immediate,
-  // self-describing failure naming the marker that needs re-pointing, and it
-  // fails the whole suite rather than only the assertions unlucky enough to
-  // notice.
-  function markerIndex(marker: string, from = 0): number {
-    const at = SERVER_SRC.indexOf(marker, from);
-    if (at < 0) {
-      throw new Error(
-        `No legacy branch matching \`${marker}\` remains in server.ts. That ` +
-          "route has most likely migrated onto the route table; re-point this " +
-          "delimiter at the next legacy branch that still bounds the same route."
-      );
-    }
-    return at;
-  }
-
-  // A named end delimiter inherits the migration expiry of whichever route it
-  // names: when that neighbour migrates, the marker dies and the slice widens.
-  // That has now happened repeatedly on this stack, so the end of the azure
-  // slice is resolved structurally instead — as "the next legacy route of any
-  // kind" — which is exactly what the slice means and cannot be invalidated by
-  // any one route migrating. The pattern matches `pathname.startsWith` arms as
-  // well, so a prefix-matched neighbour still bounds the slice.
-  function nextLegacyRouteIndex(start: number, marker: string): number {
-    const legacyRoute = /(?:pathname === "|pathname\.startsWith\(")\/api\//g;
-    legacyRoute.lastIndex = start + marker.length;
-    const match = legacyRoute.exec(SERVER_SRC);
-    if (!match) {
-      throw new Error(
-        `No legacy route remains after \`${marker}\` in server.ts; remove or ` +
-          "re-scope the raw-text slice that uses this delimiter."
-      );
-    }
-    if (match.index <= start) {
-      throw new Error(
-        `The next legacy route after \`${marker}\` did not produce a bounded slice.`
-      );
-    }
-    return match.index;
-  }
-
-  const azureMarker = 'pathname === "/api/azure-auto-setup"';
-  const azureStart = markerIndex(azureMarker);
-  const azureEnd = nextLegacyRouteIndex(azureStart, azureMarker);
-  const deployStart = markerIndex('pathname === "/api/deploy"');
-  const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
-  const deployRoute = SERVER_SRC.slice(deployStart);
+  const AZURE_SETUP_SRC = readFileSync(
+    new URL("./server/routes/azure-auto-setup.ts", import.meta.url),
+    "utf8"
+  );
+  const AZURE_APPLICATION_SRC = readFileSync(
+    new URL("./server/routes/azure-auto-setup-application.ts", import.meta.url),
+    "utf8"
+  );
 
   it("no longer answers POST /api/operations from the legacy chain", () => {
     // The registration/scheduling arm moved to the operations-status route
@@ -1680,20 +1627,8 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).not.toContain('pathname === "/api/create-environment"');
   });
 
-  it("bounds every sliced route body on markers that still exist", () => {
-    // Pins the coupling itself rather than leaving it to whichever ordering
-    // assertion happens to notice. Each slice must be non-empty and strictly
-    // smaller than the file, so neither a collapsed nor a widened slice can
-    // reach the assertions below.
-    for (const [name, start, end] of [
-      ["azure-auto-setup", azureStart, azureEnd],
-      ["deploy", deployStart, SERVER_SRC.length]
-    ] as const) {
-      expect(start, name).toBeGreaterThan(-1);
-      expect(end, name).toBeGreaterThan(start);
-    }
-    expect(azureRoute.length).toBeLessThan(SERVER_SRC.length);
-    expect(deployRoute.length).toBeLessThan(SERVER_SRC.length);
+  it("no longer answers POST /api/deploy from the legacy chain", () => {
+    expect(SERVER_SRC).not.toContain('pathname === "/api/deploy"');
   });
 
   it("keeps legacy mutation handlers behind the internal server-owned runner", () => {
@@ -1712,17 +1647,21 @@ describe("environment creation boundaries", () => {
     expect(SERVER_SRC).toContain('postInternal("/api/create-environment"');
   });
 
-  it("preflights GHCR package scopes before selecting the Azure subscription", () => {
-    const ghcrPreflight = azureRoute.indexOf("preflightGhcrPackageWriteAccess");
-    const azAccountSet = azureRoute.indexOf(
+  it("moves Azure auto-setup out of the legacy chain and preserves preflight ordering in its typed handler", () => {
+    expect(SERVER_SRC).not.toContain('pathname === "/api/azure-auto-setup"');
+    expect(AZURE_SETUP_SRC).toContain('"POST /api/azure-auto-setup"');
+    const ghcrPreflight = AZURE_SETUP_SRC.indexOf(
+      "await dependencies.external.preflightGhcrPackageWriteAccess()"
+    );
+    const azAccountSet = AZURE_SETUP_SRC.indexOf(
       "steps.push(`Selecting subscription ${subscriptionId}...`);"
     );
-    const appCreate = azureRoute.indexOf("buildAppCreateArgs");
-    expect(azureStart).toBeGreaterThan(-1);
-    expect(azureEnd).toBeGreaterThan(azureStart);
+    const appResolution = AZURE_SETUP_SRC.indexOf(
+      "await resolveAzureAutoSetupApplication"
+    );
     expect(ghcrPreflight).toBeGreaterThan(-1);
     expect(azAccountSet).toBeGreaterThan(ghcrPreflight);
-    expect(appCreate).toBeGreaterThan(azAccountSet);
+    expect(appResolution).toBeGreaterThan(azAccountSet);
   });
 
   // The four assertions that used to slice the `create-environment` legacy arm
@@ -1733,33 +1672,41 @@ describe("environment creation boundaries", () => {
   // the real handler rather than asserted as source text here.
 
   it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
-    const createApp = azureRoute.indexOf("buildAppCreateArgs");
-    const ownerAdd = azureRoute.indexOf(
+    const createApp = AZURE_APPLICATION_SRC.indexOf("buildAppCreateArgs");
+    const ownerAdd = AZURE_APPLICATION_SRC.indexOf(
       "Assigning the signed-in user as an owner of the new App Registration..."
     );
-    const ownerList = azureRoute.indexOf(
+    const ownerList = AZURE_APPLICATION_SRC.indexOf(
       "Verifying the signed-in user owns the new App Registration..."
     );
-    const tagPatch = azureRoute.indexOf(
+    const tagPatch = AZURE_APPLICATION_SRC.indexOf(
       "Applying Radius provenance tags to the new App Registration..."
     );
-    const tagShow = azureRoute.indexOf("Verifying Radius provenance tags...");
-    const servicePrincipal = azureRoute.indexOf(
-      "const spReady = await ensureServicePrincipal"
+    const tagShow = AZURE_APPLICATION_SRC.indexOf(
+      "Verifying Radius provenance tags..."
+    );
+    const applicationCall = AZURE_SETUP_SRC.indexOf(
+      "await resolveAzureAutoSetupApplication"
+    );
+    const credentialCall = AZURE_SETUP_SRC.indexOf(
+      "await configureAzureAutoSetupCredentials"
     );
     expect(createApp).toBeGreaterThan(-1);
     expect(ownerAdd).toBeGreaterThan(createApp);
     expect(ownerList).toBeGreaterThan(ownerAdd);
     expect(tagPatch).toBeGreaterThan(ownerList);
     expect(tagShow).toBeGreaterThan(tagPatch);
-    expect(servicePrincipal).toBeGreaterThan(tagShow);
+    expect(applicationCall).toBeGreaterThan(-1);
+    expect(credentialCall).toBeGreaterThan(applicationCall);
   });
 
-  it("provisions model-specific values when deployment begins", () => {
-    expect(deployRoute).toContain("app.bicep");
-    expect(deployRoute).toContain("RADIUS_DEPLOY_PARAMS");
-    expect(deployRoute).toContain("RADIUS_RAD_COMMANDS");
-  });
+  // The "provisions model-specific values when deployment begins" assertion
+  // that used to slice the `/api/deploy` legacy arm out of `server.ts` moved to
+  // `server/services/deploy-dispatch.test.ts` when that route migrated onto the
+  // route table. Reading `.radius/app.bicep` (and the `app.bicep` fallback),
+  // provisioning `RADIUS_DEPLOY_PARAMS`, and falling back to the environment's
+  // `RADIUS_RAD_COMMANDS` are executed there against the real dispatch service
+  // rather than asserted as source text here.
 });
 
 describe("how finish resolves the stage that was still running", () => {

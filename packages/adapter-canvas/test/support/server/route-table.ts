@@ -41,21 +41,56 @@ export function createTestRouteTable(
 }
 
 /**
- * Exercise whichever declared route is currently still owned by the legacy
- * fallback. The request uses the declaration's method so migrating that route
- * makes the test route table intercept it and fail loudly instead of leaving a
+ * A request the legacy fallback still owns after every declared route has
+ * migrated. `GET /api/operations/` is a migrated prefix route, but it claims
+ * only GET, so this POST sub-route stays undeclared and keeps reaching the
+ * fallback, which still answers it in `src/server.ts`.
+ */
+const UNDECLARED_FALLBACK = {
+  method: "POST",
+  path: "/api/operations/probe-nonexistent/abandon"
+} as const;
+
+/**
+ * Exercise a request the migrated route table does not own, so the dispatcher
+ * has to hand it to the legacy fallback.
+ *
+ * While a declared route is still residual, that route is the target: the
+ * request uses the declaration's own method so migrating it makes the test
+ * route table intercept the request and fail loudly instead of leaving a
  * method-mismatch probe green.
+ *
+ * Once the declared inventory is empty the fallback is still live, because it
+ * owns undeclared dynamic sub-routes such as the operations resume and abandon
+ * paths. The probe then targets one of those. It is not named blindly: the
+ * declarations are checked first, so if that path is ever declared and migrated
+ * the probe fails loudly rather than quietly testing nothing.
  */
 export function fetchResidualRoute(baseUrl: string): Promise<Response> {
   const declaration = SERVER_ROUTE_DECLARATIONS.find(
     (route) => !MIGRATED_ROUTE_KEYS.includes(routeKey(route))
   );
-  if (!declaration) {
+  if (declaration) {
+    return fetch(`${baseUrl}${declaration.path}`, {
+      method: declaration.method === "ANY" ? "GET" : declaration.method
+    });
+  }
+  const claimed = SERVER_ROUTE_DECLARATIONS.some(
+    (route) =>
+      (route.method === "ANY" || route.method === UNDECLARED_FALLBACK.method) &&
+      (route.match === "prefix" ?
+        UNDECLARED_FALLBACK.path.startsWith(route.path)
+      : UNDECLARED_FALLBACK.path === route.path)
+  );
+  if (claimed) {
     throw new Error(
-      "No residual server route remains to exercise the fallback."
+      `The fallback probe target ${UNDECLARED_FALLBACK.method} ` +
+        `${UNDECLARED_FALLBACK.path} is now a declared route, so it no longer ` +
+        "reaches the legacy fallback. Point the probe at a path the fallback " +
+        "still owns, or delete the fallback and this helper together."
     );
   }
-  return fetch(`${baseUrl}${declaration.path}`, {
-    method: declaration.method === "ANY" ? "GET" : declaration.method
+  return fetch(`${baseUrl}${UNDECLARED_FALLBACK.path}`, {
+    method: UNDECLARED_FALLBACK.method
   });
 }
