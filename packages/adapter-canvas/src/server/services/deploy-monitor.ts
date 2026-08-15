@@ -139,17 +139,22 @@ export function createDeployMonitorService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-  // Neither of the two value seams below is function-typed, so the shared assert
-  // cannot reach them. `unconfirmedRunKind` is the load-bearing one: it marks a
-  // run whose real outcome is unknown, and an absent marking would let an
-  // attempt-bound repair redeploy race an in-flight run instead of refusing.
-  for (const name of [
-    "plannedGraph",
-    "dispatch",
-    "outcome",
-    "deployRadCommandsStep",
-    "unconfirmedRunKind"
-  ] as const) {
+  const missingServices = [
+    ["plannedGraph.recover", dependencies.plannedGraph?.recover],
+    ["dispatch.prepareAndDispatch", dependencies.dispatch?.prepareAndDispatch],
+    ["outcome.settle", dependencies.outcome?.settle]
+  ].flatMap(([name, method]) => (typeof method === "function" ? [] : [name]));
+  if (missingServices.length > 0) {
+    throw new Error(
+      "createDeployMonitorService is missing required dependencies: " +
+        missingServices.join(", ")
+    );
+  }
+  // Neither value seam is function-typed, so the shared assert cannot reach
+  // them. `unconfirmedRunKind` is the load-bearing one: it marks a run whose
+  // real outcome is unknown, and an absent marking would let an attempt-bound
+  // repair redeploy race an in-flight run instead of refusing.
+  for (const name of ["deployRadCommandsStep", "unconfirmedRunKind"] as const) {
     if (!dependencies[name]) {
       throw new Error(
         `createDeployMonitorService is missing required dependencies: ${name}`
@@ -408,16 +413,13 @@ export function createDeployMonitorService(
           // so that when the producer starts uploading during the deploy, this
           // lights up unchanged.
           await pollDeployStatus();
-          // Fallback: if nothing has advanced past pending ~25s into the
-          // deploy, mark all pending nodes in_progress so the graph is not
-          // stuck gray for the whole run.
-          if (
-            dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS &&
-            !resources.some(
-              (r) => r.deployStatus && r.deployStatus !== "pending"
-            )
-          ) {
-            resources.forEach((r) => setStatus(r, "in_progress"));
+          // Fallback: after ~25s, mark only nodes that are still pending as
+          // in_progress so the eager first-node transition cannot leave the
+          // rest of a normal request graph stuck gray for the whole run.
+          if (dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS) {
+            resources.forEach((r) => {
+              if (r.deployStatus === "pending") setStatus(r, "in_progress");
+            });
           }
         }
 

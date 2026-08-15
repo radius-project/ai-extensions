@@ -146,14 +146,38 @@ describe("deploy monitor construction", () => {
     );
   });
 
-  it.each(["plannedGraph", "dispatch", "outcome"] as const)(
+  it.each([
+    ["plannedGraph", "plannedGraph.recover"],
+    ["dispatch", "dispatch.prepareAndDispatch"],
+    ["outcome", "outcome.settle"]
+  ] as const)(
     "refuses to construct without the %s service",
-    (name) => {
+    (name, dependencyName) => {
       const incomplete = dependencies();
       delete incomplete[name];
       expect(() => createDeployMonitorService(incomplete)).toThrow(
-        `createDeployMonitorService is missing required dependencies: ${name}`
+        `createDeployMonitorService is missing required dependencies: ${dependencyName}`
       );
+    }
+  );
+
+  it.each([
+    ["plannedGraph", "recover", "plannedGraph.recover"],
+    ["dispatch", "prepareAndDispatch", "dispatch.prepareAndDispatch"],
+    ["outcome", "settle", "outcome.settle"]
+  ] as const)(
+    "refuses to construct when %s.%s is missing or not callable",
+    (serviceName, methodName, dependencyName) => {
+      for (const value of [undefined, "not callable"]) {
+        const incomplete = dependencies();
+        Object.defineProperty(incomplete[serviceName], methodName, {
+          configurable: true,
+          value
+        });
+        expect(() => createDeployMonitorService(incomplete)).toThrow(
+          `createDeployMonitorService is missing required dependencies: ${dependencyName}`
+        );
+      }
     }
   );
 
@@ -787,12 +811,13 @@ describe("deploy monitor progress streaming", () => {
     expect(progressReads).toBe(1);
   });
 
-  it("marks every still-pending node in progress once the deploy has been running a while", async () => {
-    const pending: CanvasGraphResource = {
+  it("advances every node still pending in the request-service graph after the fallback delay", async () => {
+    const first: CanvasGraphResource = {
       id: "r1",
+      deployStatus: "pending",
       outputResources: [{ id: "o1" }]
     };
-    const untracked: CanvasGraphResource = {
+    const second: CanvasGraphResource = {
       id: "r2",
       deployStatus: "pending"
     };
@@ -805,7 +830,7 @@ describe("deploy monitor progress streaming", () => {
     let index = 0;
     const time = clock(30_000);
     const settle = settleRecorder();
-    const { request: input } = request({ resources: [pending, untracked] });
+    const { request: input } = request({ resources: [first, second] });
     const service = createDeployMonitorService(
       dependencies({
         getRunDetail: () => Promise.resolve(details[index++]),
@@ -816,11 +841,12 @@ describe("deploy monitor progress streaming", () => {
 
     await service.run(input);
 
-    expect(pending.deployStatus).toBe("in_progress");
-    expect(untracked.deployStatus).toBe("in_progress");
+    expect(first.deployStatus).toBe("in_progress");
+    expect(first.outputResources?.[0].deployStatus).toBe("in_progress");
+    expect(second.deployStatus).toBe("in_progress");
   });
 
-  it("leaves the graph alone when something already advanced past pending", async () => {
+  it("preserves advanced nodes while applying the fallback to pending nodes", async () => {
     const advanced: CanvasGraphResource = { id: "r1", deployStatus: "success" };
     const pending: CanvasGraphResource = { id: "r2", deployStatus: "pending" };
     const inFlight: DeployRunDetail = {
@@ -843,7 +869,8 @@ describe("deploy monitor progress streaming", () => {
 
     await service.run(input);
 
-    expect(pending.deployStatus).toBe("pending");
+    expect(advanced.deployStatus).toBe("success");
+    expect(pending.deployStatus).toBe("in_progress");
   });
 });
 

@@ -514,6 +514,15 @@ function deployBody(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+function parseError(body: string): string {
+  try {
+    JSON.parse(body);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("expected JSON.parse to fail");
+}
+
 function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
   state.deployStatus = "failed";
   state.deployAttempt = {
@@ -764,10 +773,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   });
 
   it.each([
-    ["malformed JSON", "not json", /JSON/i],
-    ["a null body", "null", /null/i],
-    ["an empty body", "", /JSON/i]
-  ])("answers 400 for %s", async (_name, body, message) => {
+    ["malformed JSON", "not json"],
+    ["an empty body", ""]
+  ])("returns the raw JSON.parse error for %s", async (_name, body) => {
     const harness = startDeploy();
     const entry = await container!.getOrCreate("panel-a");
 
@@ -778,7 +786,22 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(400);
     expect(response.headers.get("content-type")).toBe("application/json");
-    expect(String((await jsonBody(response)).error)).toMatch(message);
+    expect(await response.json()).toEqual({ error: parseError(body) });
+    expect(harness.monitorCalls).toEqual([]);
+  });
+
+  it("answers 400 for a JSON null body", async () => {
+    const harness = startDeploy();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: "null"
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(String((await jsonBody(response)).error)).toMatch(/null/i);
     expect(harness.monitorCalls).toEqual([]);
   });
 
