@@ -304,9 +304,17 @@ interface DiffHarness {
   runDiff: () => void;
   queueDiff: () => void;
   fetchCalls: FetchCall[];
+  pendingResponses: Array<{
+    resolve: (response: Record<string, unknown>) => void;
+    reject: (error: unknown) => void;
+  }>;
   scheduled: ScheduledTimer[];
   cleared: unknown[];
-  win: { __radiusDiffTimeout: unknown };
+  win: {
+    __radiusDiffTimeout: unknown;
+    __radiusDiffGeneration?: number;
+    location: { reload: ReturnType<typeof vi.fn> };
+  };
 }
 
 function diffControls(): {
@@ -328,13 +336,20 @@ function diffControls(): {
 function loadDiffScript(
   html: string,
   elements: Record<string, unknown>,
-  response: Record<string, unknown> = { message: "Diff ready" }
+  options: {
+    response?: Record<string, unknown>;
+    deferResponses?: boolean;
+  } = {}
 ): DiffHarness {
   const src = `${extractBrowserFunction(html, "queueDiff")}\n${extractBrowserFunction(html, "runDiff")}`;
   const fetchCalls: FetchCall[] = [];
+  const pendingResponses: DiffHarness["pendingResponses"] = [];
   const scheduled: ScheduledTimer[] = [];
   const cleared: unknown[] = [];
-  const win: { __radiusDiffTimeout: unknown } = { __radiusDiffTimeout: null };
+  const win: DiffHarness["win"] = {
+    __radiusDiffTimeout: null,
+    location: { reload: vi.fn() }
+  };
   const api = new Function(
     "document",
     "window",
@@ -348,7 +363,21 @@ function loadDiffScript(
     win,
     (url: string, init: { body: string }) => {
       fetchCalls.push({ url, body: JSON.parse(init.body) });
-      return Promise.resolve({ json: () => Promise.resolve(response) });
+      if (!options.deferResponses) {
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve(options.response ?? { message: "Diff ready" })
+        });
+      }
+      return new Promise<{
+        json: () => Promise<Record<string, unknown>>;
+      }>((resolve, reject) => {
+        pendingResponses.push({
+          resolve: (response) =>
+            resolve({ json: () => Promise.resolve(response) }),
+          reject
+        });
+      });
     },
     (value: unknown) => String(value),
     (fn: () => void, delay: number) => {
@@ -359,7 +388,14 @@ function loadDiffScript(
       cleared.push(id);
     }
   ) as Pick<DiffHarness, "runDiff" | "queueDiff">;
-  return { ...api, fetchCalls, scheduled, cleared, win };
+  return {
+    ...api,
+    fetchCalls,
+    pendingResponses,
+    scheduled,
+    cleared,
+    win
+  };
 }
 
 describe.each([
@@ -421,6 +457,71 @@ describe.each([
       ]);
       expect(status.className).toBe("status info");
       await vi.waitFor(() => expect(status.textContent).toBe("Diff ready"));
+    });
+
+    it("ignores an older response that finishes after the latest comparison", async () => {
+      const { elements, status } = diffControls();
+      const harness = loadDiffScript(render(), elements, {
+        deferResponses: true
+      });
+      harness.runDiff();
+      (elements["head-branch"] as { value: string }).value = "feature/latest";
+      harness.runDiff();
+
+      harness.pendingResponses[1].resolve({ message: "Latest diff ready" });
+      await vi.waitFor(() =>
+        expect(status.textContent).toBe("Latest diff ready")
+      );
+
+      harness.pendingResponses[0].resolve({ reload: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.win.location.reload).not.toHaveBeenCalled();
+      expect(status.textContent).toBe("Latest diff ready");
+    });
+
+    it("invalidates the active request as soon as a replacement is queued", async () => {
+      const { elements, status } = diffControls();
+      const harness = loadDiffScript(render(), elements, {
+        deferResponses: true
+      });
+      harness.runDiff();
+      (elements["head-branch"] as { value: string }).value = "feature/latest";
+      harness.queueDiff();
+
+      harness.pendingResponses[0].resolve({ message: "Stale diff ready" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(status.textContent).not.toBe("Stale diff ready");
+
+      harness.scheduled[0].fn();
+      expect(harness.fetchCalls[1]).toEqual({
+        url: "/api/diff-branches",
+        body: { base: "main", head: "feature/latest", repo: "octo/app" }
+      });
+    });
+
+    it("ignores an older request failure after the latest comparison succeeds", async () => {
+      const { elements, status } = diffControls();
+      const harness = loadDiffScript(render(), elements, {
+        deferResponses: true
+      });
+      harness.runDiff();
+      (elements["head-branch"] as { value: string }).value = "feature/latest";
+      harness.runDiff();
+
+      harness.pendingResponses[1].resolve({ message: "Latest diff ready" });
+      await vi.waitFor(() =>
+        expect(status.textContent).toBe("Latest diff ready")
+      );
+
+      harness.pendingResponses[0].reject(new Error("stale failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(status.textContent).toBe("Latest diff ready");
+      expect(status.className).toBe("status info");
     });
 
     it("debounces through the timer the navigation cancel hook clears", () => {

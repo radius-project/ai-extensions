@@ -82,6 +82,7 @@ function escapeHtmlClient(s) {
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
 function queueDiff() {
+    window.__radiusDiffGeneration = (window.__radiusDiffGeneration || 0) + 1;
     if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
     window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
@@ -99,17 +100,20 @@ function runDiff() {
     var head = headEl.value;
     var repo = repoEl.value;
     if (!repo || !base || !head) return;
+    var requestGeneration = (window.__radiusDiffGeneration || 0) + 1;
+    window.__radiusDiffGeneration = requestGeneration;
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            if (window.__radiusDiffGeneration !== requestGeneration) return;
             if (d.needsAppBicep) { statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; statusEl.className = 'status info'; }
             else if (d.error) { statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtmlClient(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
+        .catch(function() { if (window.__radiusDiffGeneration !== requestGeneration) return; statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
 }
 
 document.getElementById('head-branch').addEventListener('change', queueDiff);
@@ -205,6 +209,7 @@ function escapeHtmlClient(s) {
 // Auto-load the diff graph when branch selection changes, but debounce
 // to prevent rapid-fire requests if the user is just browsing the list.
 function queueDiff() {
+    window.__radiusDiffGeneration = (window.__radiusDiffGeneration || 0) + 1;
     if (window.__radiusDiffTimeout) clearTimeout(window.__radiusDiffTimeout);
     window.__radiusDiffTimeout = setTimeout(runDiff, 500);
 }
@@ -222,18 +227,21 @@ function runDiff() {
     var head = headEl.value;
     var repo = repoEl.value;
     if (!repo || !base || !head) return;
+    var requestGeneration = (window.__radiusDiffGeneration || 0) + 1;
+    window.__radiusDiffGeneration = requestGeneration;
     statusEl.style.display = '';
     statusEl.className = 'status info';
     statusEl.innerHTML = 'Comparing <strong>' + escapeHtmlClient(base) + '</strong> &rarr; <strong>' + escapeHtmlClient(head) + '</strong>&hellip;';
     fetch('/api/diff-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({base: base, head: head, repo: repo}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            if (window.__radiusDiffGeneration !== requestGeneration) return;
             if (d.needsAppBicep) { statusEl.innerHTML = 'Copilot is generating <strong>.radius/app.bicep</strong> with the Radius app-bicep skill&hellip; the diff will appear once it is saved.'; statusEl.className = 'status info'; }
             else if (d.error) { statusEl.innerHTML = 'Error computing diff: <strong>' + escapeHtmlClient(d.error) + '</strong>. Please ensure both branches exist and contain a valid <code>.radius/app.bicep</code>.'; statusEl.className = 'status error'; }
             else if (d.reload) { window.location.reload(); }
             else if (d.message) { statusEl.textContent = d.message; }
         })
-        .catch(function() { statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
+        .catch(function() { if (window.__radiusDiffGeneration !== requestGeneration) return; statusEl.innerHTML = 'Failed to compute diff. Please verify network connectivity and that <code>.radius/app.bicep</code> is valid on both branches.'; statusEl.className = 'status error'; });
 }
 
 document.getElementById('head-branch').addEventListener('change', queueDiff);

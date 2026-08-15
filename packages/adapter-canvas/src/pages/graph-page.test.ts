@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { graphPage } from "./graph-page.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts,
   readEmittedValue
 } from "../../test/support/pages/hostile-state.js";
+import { extractBrowserFunction } from "../../test/support/pages/browser-script.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -294,5 +295,93 @@ describe("graphPage — state rendering and escaping", () => {
     // than HTML-escaped, and still reads back as the original text.
     expect(readEmittedValue(html, "CURRENT_BRANCH")).toBe(hostile);
     expectSafeInlineScripts(html);
+  });
+
+  it("renders an API-provided hostile branch as text when the selection changes", async () => {
+    const html = graphPage({
+      graphResources: sampleResources,
+      graphTargetRepo: "octo/app",
+      graphBranch: "main"
+    });
+    const container = { innerHTML: "" };
+    const branchText = { textContent: "" };
+    const branchOptions: Array<{
+      value: string;
+      textContent: string;
+      selected: boolean;
+    }> = [];
+    const branchSelect = {
+      innerHTML: "",
+      appendChild: (option: (typeof branchOptions)[number]) =>
+        branchOptions.push(option)
+    };
+    const fetchCalls: Array<{ url: string; body: unknown }> = [];
+    const browserFunctions = new Function(
+      "document",
+      "fetch",
+      "window",
+      "CONTEXT_REPO",
+      "CURRENT_BRANCH",
+      `${extractBrowserFunction(html, "handleGraphBranchChange")}
+${extractBrowserFunction(html, "populateGraphBranches")}
+return {
+  handleGraphBranchChange: handleGraphBranchChange,
+  populateGraphBranches: populateGraphBranches
+};`
+    )(
+      {
+        getElementById: (id: string) =>
+          ({
+            "graph-container": container,
+            "graph-regeneration-branch": branchText,
+            "graph-branch": branchSelect
+          })[id] ?? null,
+        createElement: () => ({ value: "", textContent: "", selected: false })
+      },
+      (url: string, init: { body: string }) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve(
+              url === "/api/discover-branches" ?
+                {
+                  branches: [{ name: HOSTILE_STATE, sha: "worktree" }]
+                }
+              : {}
+            )
+        });
+      },
+      { location: { reload: () => undefined } },
+      "octo/app",
+      "main"
+    ) as {
+      handleGraphBranchChange: (this: { value: string }) => void;
+      populateGraphBranches: () => void;
+    };
+
+    browserFunctions.populateGraphBranches();
+    await vi.waitFor(() => expect(branchOptions).toHaveLength(1));
+    browserFunctions.handleGraphBranchChange.call({
+      value: branchOptions[0].value
+    });
+
+    expect(branchOptions[0].value).toBe(HOSTILE_STATE);
+    expect(branchOptions[0].textContent).toContain(HOSTILE_STATE);
+    expect(container.innerHTML).not.toContain("<script>alert(1)");
+    expect(container.innerHTML).toContain('id="graph-regeneration-branch"');
+    expect(branchText.textContent).toBe(HOSTILE_STATE);
+    expect(fetchCalls).toEqual([
+      {
+        url: "/api/discover-branches",
+        body: { repo: "octo/app" }
+      },
+      {
+        url: "/api/load-graph",
+        body: { repo: "octo/app", branch: HOSTILE_STATE }
+      }
+    ]);
+    expect(html).toContain(
+      "addEventListener('change', handleGraphBranchChange)"
+    );
   });
 });

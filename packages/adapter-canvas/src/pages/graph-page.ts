@@ -420,7 +420,7 @@ var CURRENT_BRANCH = '${inlineJsString(graphBranch || "main")}';
 })();
 
 // Populate the Branch dropdown, keeping the current branch selected.
-(function() {
+function populateGraphBranches() {
     var branchSel = document.getElementById('graph-branch');
     if (!CONTEXT_REPO) return;
     fetch('/api/discover-branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: CONTEXT_REPO}) })
@@ -438,15 +438,17 @@ var CURRENT_BRANCH = '${inlineJsString(graphBranch || "main")}';
             });
         })
         .catch(function() {});
-})();
+}
+populateGraphBranches();
 
 // Regenerate the graph when a different branch is selected.
-document.getElementById('graph-branch').addEventListener('change', function() {
+function handleGraphBranchChange() {
     var repo = CONTEXT_REPO;
     var branch = this.value.trim();
     if (!repo || !branch) return;
     var container = document.getElementById('graph-container');
-    container.innerHTML = '<div style="padding:20px; color:var(--rad-text-tertiary);">⏳ Regenerating graph for ' + branch + '…</div>';
+    container.innerHTML = '<div style="padding:20px; color:var(--rad-text-tertiary);">⏳ Regenerating graph for <span id="graph-regeneration-branch"></span>…</div>';
+    document.getElementById('graph-regeneration-branch').textContent = branch;
     fetch('/api/load-graph', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({repo: repo, branch: branch}) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -455,7 +457,8 @@ document.getElementById('graph-branch').addEventListener('change', function() {
             else if (d.error) { container.innerHTML = '<div class="status error"></div>'; container.firstChild.textContent = 'Error: ' + d.error; }
         })
         .catch(function() { container.innerHTML = '<div class="status error">Failed to regenerate graph.</div>'; });
-});
+}
+document.getElementById('graph-branch').addEventListener('change', handleGraphBranchChange);
 
 // Primary action → Create Environment or Plan Deployment, depending on setup.
 document.getElementById('deploy-app-btn').addEventListener('click', function(e) {

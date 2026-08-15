@@ -105,6 +105,25 @@ function escapeHtmlClient(s) {
         return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
     });
 }
+function renderAzureOidcResult(resultDiv, res, data) {
+    if (res.validated) {
+        resultDiv.innerHTML = '<div class="status success">' + escapeHtmlClient(res.message) + '</div>' +
+            '<div class="field"><span class="field-label">Tenant</span><div class="field-value">' + escapeHtmlClient(res.tenantId || data.tenantId) + '</div></div>' +
+            '<div class="field"><span class="field-label">Subscription</span><div class="field-value">' + (res.subscriptionName ? escapeHtmlClient(res.subscriptionName) + ' — ' : '') + escapeHtmlClient(res.subscriptionId || data.subscriptionId) + '</div></div>' +
+            (data.clientId ? '<div class="field"><span class="field-label">App Registration</span><div class="field-value">' + escapeHtmlClient(data.clientId) + '</div></div>' : '') +
+            (res.userName ? '<div class="field"><span class="field-label">Signed in as</span><div class="field-value">' + escapeHtmlClient(res.userName) + '</div></div>' : '');
+    } else {
+        resultDiv.innerHTML = '<div class="status error">' + escapeHtmlClient(res.message || 'Authentication failed') + '</div>';
+    }
+}
+function renderAwsOidcResult(resultDiv, res, data) {
+    resultDiv.innerHTML = '<div class="status success">' + escapeHtmlClient(res.message) + '</div>' +
+        '<div class="field"><span class="field-label">Account</span><div class="field-value">' + escapeHtmlClient(data.accountId) + '</div></div>' +
+        '<div class="field"><span class="field-label">Region</span><div class="field-value">' + escapeHtmlClient(data.region) + '</div></div>';
+}
+function renderOidcError(resultDiv, error) {
+    resultDiv.innerHTML = '<div class="status error">Error: ' + escapeHtmlClient(error.message) + '</div>';
+}
 document.getElementById('btn-azure').addEventListener('click', function() {
     var data = {
         provider: 'azure',
@@ -122,17 +141,9 @@ document.getElementById('btn-azure').addEventListener('click', function() {
         .then(function(res) {
             btn.disabled = false;
             btn.textContent = 'Confirm authentication';
-            if (res.validated) {
-                resultDiv.innerHTML = '<div class="status success">' + res.message + '</div>' +
-                    '<div class="field"><span class="field-label">Tenant</span><div class="field-value">' + (res.tenantId || data.tenantId) + '</div></div>' +
-                    '<div class="field"><span class="field-label">Subscription</span><div class="field-value">' + (res.subscriptionName ? res.subscriptionName + ' — ' : '') + (res.subscriptionId || data.subscriptionId) + '</div></div>' +
-                    (data.clientId ? '<div class="field"><span class="field-label">App Registration</span><div class="field-value">' + data.clientId + '</div></div>' : '') +
-                    (res.userName ? '<div class="field"><span class="field-label">Signed in as</span><div class="field-value">' + res.userName + '</div></div>' : '');
-            } else {
-                resultDiv.innerHTML = '<div class="status error">' + (res.message || 'Authentication failed') + '</div>';
-            }
+            renderAzureOidcResult(resultDiv, res, data);
         })
-        .catch(function(e) { btn.disabled = false; btn.textContent = 'Confirm authentication'; resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
+        .catch(function(e) { btn.disabled = false; btn.textContent = 'Confirm authentication'; renderOidcError(resultDiv, e); });
 });
 document.getElementById('btn-aws').addEventListener('click', function() {
     var data = {
@@ -145,11 +156,9 @@ document.getElementById('btn-aws').addEventListener('click', function() {
     fetch('/api/oidc', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
         .then(function(r) { return r.json(); })
         .then(function(res) {
-            resultDiv.innerHTML = '<div class="status success">' + res.message + '</div>' +
-                '<div class="field"><span class="field-label">Account</span><div class="field-value">' + data.accountId + '</div></div>' +
-                '<div class="field"><span class="field-label">Region</span><div class="field-value">' + data.region + '</div></div>';
+            renderAwsOidcResult(resultDiv, res, data);
         })
-        .catch(function(e) { resultDiv.innerHTML = '<div class="status error">Error: ' + e.message + '</div>'; });
+        .catch(function(e) { renderOidcError(resultDiv, e); });
 });
 <\/script>`,
     "environments"

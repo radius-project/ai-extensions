@@ -524,6 +524,7 @@ describe("legacy page renderer compatibility oracle", () => {
     expect(fixture.source.hostileInputs).toContain("PU-02");
     expect(fixture.source.updatePolicy).toContain("reviewed");
     expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#367");
+    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#379");
   });
 
   it("forwards exactly the legacy public export surface", () => {
