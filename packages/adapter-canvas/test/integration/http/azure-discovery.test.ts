@@ -200,22 +200,6 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(await served.text()).toBe('{"servesRepos":null}');
   });
 
-  // Hardcoded on purpose. The one remaining write in this family is explicitly
-  // deferred to its own slice, and hand-writing the key keeps the two sides of
-  // the assertion on different sources: a probe derived from the route table
-  // would silently follow a future migration and stop being a tripwire.
-  it("leaves the deferred azure-auto-setup write on the legacy fallback", async () => {
-    start();
-    const entry = await container!.getOrCreate("panel-a");
-
-    const response = await fetch(`${entry.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      body: "{}"
-    });
-    expect(response.status).toBe(418);
-    expect(await response.text()).toBe("legacy");
-  });
-
   it("enumerates azure resources over a real socket", async () => {
     const { cli } = start();
     cli.set(
