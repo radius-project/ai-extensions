@@ -209,13 +209,10 @@ export async function handleVerifyAzureLogin(
     const tenantId = (data.tenantId || "").trim();
     const subscriptionId = (data.subscriptionId || "").trim();
 
-    // Reject non-GUID credential identifiers before using them in
-    // command guidance or passing the subscription to the az argv.
-    // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
-    // quotes args containing whitespace, so a value like "x&calc" would
-    // be parsed by cmd.exe as a command separator. An empty value is
-    // allowed (fall back to the ambient CLI context). Mirrors the guard
-    // already enforced in /api/azure-auto-setup.
+    // Reject non-GUID credential identifiers before using them in command
+    // guidance or the az argv. The Windows process adapter quotes argv values,
+    // but this remains the domain boundary and defense in depth. Empty falls
+    // back to the ambient CLI context. Mirrors /api/azure-auto-setup.
     const validationError = dependencies.azureCredentialIdValidationError({
       tenantId,
       subscriptionId
