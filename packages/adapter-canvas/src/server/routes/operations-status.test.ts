@@ -1205,6 +1205,45 @@ describe("operation resume and abandon actions", () => {
     });
   });
 
+  it.each([
+    ["missing", undefined],
+    ["missing Azure data", {}],
+    ["null Azure data", { azure: null }]
+  ])(
+    "answers 409 without mutation when the saved request is %s",
+    async (_description, request) => {
+      const operation = actionRecord();
+      Object.defineProperty(operation, "request", {
+        configurable: true,
+        enumerable: true,
+        value: request,
+        writable: true
+      });
+      delete operation.resumeRequest;
+      const inputBefore = structuredClone(operation.inputRequired);
+      const recording = await runAction(
+        "/api/operations/op-action/resume/service-management-reference-required",
+        JSON.stringify({ serviceManagementReference: "new" }),
+        handleResumeOperation,
+        actionDependencies({
+          getOperation: () => operation,
+          canResumeInput: () => true
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "The operation cannot be resumed because its saved request is unavailable.",
+        code: "operation-resume-request-unavailable",
+        operationId: "op-action"
+      });
+      expect(operation.request).toBe(request);
+      expect(operation.inputRequired).toEqual(inputBefore);
+      expect(operation.state).toBe("input_required");
+    }
+  );
+
   it("clones a lazy request, persists it, answers 202, then schedules the same operation", async () => {
     const resumeRequest = {
       azure: { serviceManagementReference: "old" },

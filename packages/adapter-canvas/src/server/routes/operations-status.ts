@@ -31,6 +31,13 @@ interface OperationRequest {
   [key: string]: unknown;
 }
 
+function isOperationRequest(value: unknown): value is OperationRequest {
+  if (typeof value !== "object" || value === null || !("azure" in value)) {
+    return false;
+  }
+  return typeof value.azure === "object" && value.azure !== null;
+}
+
 // The record `createOperation` returns and every seam that touches it. Typed as
 // broadly as `operations.ts` types it (that module is all `any`), so the route
 // stays a pass-through and never reimplements a field the registry owns.
@@ -514,6 +521,15 @@ export async function handleResumeOperation(
   if (!operation.request && operation.resumeRequest) {
     operation.request = structuredClone(operation.resumeRequest);
   }
+  if (!isOperationRequest(operation.request)) {
+    jsonError(context, 409, {
+      error:
+        "The operation cannot be resumed because its saved request is unavailable.",
+      code: "operation-resume-request-unavailable",
+      operationId
+    });
+    return;
+  }
   const resumeSnapshot = {
     inputRequired: structuredClone(operation.inputRequired),
     request: structuredClone(operation.request),
@@ -522,7 +538,7 @@ export async function handleResumeOperation(
         structuredClone(operation.resumeRequest)
       : undefined
   };
-  const request = operation.request as OperationRequest;
+  const request = operation.request;
   if (code === "service-management-reference-required") {
     request.azure.serviceManagementReference =
       data.serviceManagementReference || "";

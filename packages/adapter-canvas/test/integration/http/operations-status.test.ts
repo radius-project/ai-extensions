@@ -422,6 +422,51 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(await asGet.text()).toBe('{"error":"Unknown operation."}');
   });
 
+  it("refuses a persisted resume record with no saved request", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const resumable = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    delete resumable.request;
+    delete resumable.resumeRequest;
+    requireInput(resumable, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(resumable.operationId, resumable);
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: resumable.repo,
+          environment: resumable.environment,
+          provider: resumable.provider,
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "The operation cannot be resumed because its saved request is unavailable.",
+      code: "operation-resume-request-unavailable",
+      operationId: resumable.operationId
+    });
+    expect(resumable.state).toBe("input_required");
+    expect(resumable.request).toBeUndefined();
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
+  });
+
   it("returns 202, then exposes a terminal failure when resumed work cannot be scheduled", async () => {
     const harness = start();
     harness.scheduleAccepted.value = false;
