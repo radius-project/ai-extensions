@@ -909,6 +909,8 @@ describe("deploy monitor progress streaming", () => {
     const service = createDeployMonitorService(
       dependencies({
         getRunDetail: () => {
+          // Push the node back to pending between the two in-flight polls: a
+          // fallback that re-armed would advance it a second time.
           if (index === 1) pending.deployStatus = "pending";
           return Promise.resolve(details[index++]);
         },
