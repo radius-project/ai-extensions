@@ -1,12 +1,13 @@
 // Canvas adapter — reusable UI primitives.
 //
 // Small `props => htmlString` builders that encode the refreshed Radius design
-// system (see the token block in ./pages.ts `pageShell`). Page renderers in
-// ./pages.ts compose these instead of hand-writing inline styles, so the look
+// system (see the token block in ./pages/shell-styles.ts). Page renderers in
+// ./pages/ compose these instead of hand-writing inline styles, so the look
 // stays consistent and Figma components map 1:1 to a function here.
 //
 // No I/O or state — pure string builders. All colors/spacing come from the CSS
-// custom properties defined in pageShell, so these never hard-code hex values.
+// custom properties defined in the page shell, so these never hard-code hex
+// values.
 
 import { escapeHtml } from "./shared.js";
 import { ICON_APP, ICON_ENV, ICON_DEP } from "./navicons.js";
