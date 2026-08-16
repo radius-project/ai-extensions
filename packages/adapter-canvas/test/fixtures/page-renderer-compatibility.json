@@ -10,7 +10,8 @@
     "hostileInputs": "Hostile inputs are excluded on purpose: PU-02 intentionally hardened HTML, JavaScript-string, JSON and URL encoding after this commit, so legacy output for hostile state is a known-bad oracle. Hostile behaviour is covered by the current hostile-input suites instead.",
     "excludedScriptPayloads": [
       "graph — CLIENT_GRAPH_JS changed after this commit by upstream #367 (navigation cancel hook clearing window.__radiusDiffTimeout).",
-      "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields."
+      "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
+      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields."
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
   },
@@ -435,8 +436,7 @@
         "deleteDialog",
         "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Application Graph — Radius",
@@ -497,9 +497,7 @@
           "resources": "[{\"id\":\"app/web\",\"name\":\"web\",\"type\":\"Applications.Core/containers\",\"connections\":[{\"id\":\"app/db\",\"name\":\"db\",\"direction\":\"outbound\"}],\"codeReference\":\"app.bicep:12\"},{\"id\":\"app/db\",\"name\":\"db\",\"type\":\"Applications.Datastores/redisCaches\",\"connections\":[]}]"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "2e4a1d7e4f91e4eb8eeaa77fc84c4e002f6516b875db9021744b5827174b7288"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -540,8 +538,7 @@
         "deleteDialog",
         "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Application Graph — Radius",
@@ -599,9 +596,7 @@
           "resources": "[{\"id\":\"app/web\",\"name\":\"web\",\"type\":\"Applications.Core/containers\",\"connections\":[{\"id\":\"app/db\",\"name\":\"db\",\"direction\":\"outbound\"}],\"codeReference\":\"app.bicep:12\"},{\"id\":\"app/db\",\"name\":\"db\",\"type\":\"Applications.Datastores/redisCaches\",\"connections\":[]}]"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "4b604403fed1806f6be7d6c41b7ae29a7e93b01270f123f7fc3d0a56dbf84b7a"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -622,8 +617,7 @@
         "deleteDialog",
         "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Application Graph — Radius",
@@ -682,9 +676,7 @@
           "resources": "[]"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "ba3c9784b218e8eb074f0f649c025cb0b329c33d0374c5b27898630f4ece0d91"
-        }
+        "scriptDigests": {}
       }
     },
     {
