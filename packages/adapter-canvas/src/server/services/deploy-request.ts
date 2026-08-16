@@ -197,16 +197,7 @@ export function createDeployRequestService(
         reservationOwner = null;
       };
       try {
-        let data: DeployRequestData;
-        try {
-          if (!body.trim()) throw new Error("Empty request body.");
-          data = JSON.parse(body) as DeployRequestData;
-        } catch (e) {
-          throw new Error(
-            "Invalid JSON body: " + dependencies.errorMessage(e),
-            { cause: e }
-          );
-        }
+        const data = JSON.parse(body) as DeployRequestData;
         const entry = dependencies.readInstanceEntry(instanceId);
         if (!entry) throw new Error("Canvas server state is unavailable.");
         // Re-validate the repair-loop attempt before touching any state: the
