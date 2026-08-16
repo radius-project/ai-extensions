@@ -11,10 +11,7 @@ import type {
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import { createAzureAutoSetupTestDependencies } from "../../support/server/azure-auto-setup.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 
 const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -38,9 +35,9 @@ function start(dependencies: AzureAutoSetupDependencies): void {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -76,7 +73,7 @@ const VALID_BODY = {
 };
 
 describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () => {
-  it("preserves method mismatch, malformed-body, refusal, and residual fallback behavior", async () => {
+  it("preserves method mismatch, malformed-body, refusal, and unmatched behavior", async () => {
     const tokens = new Map([
       ["panel-a", "token-a"],
       ["panel-b", "token-b"]
@@ -92,8 +89,8 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     const second = await entry("panel-b");
 
     const wrongMethod = await fetch(`${first.baseUrl}/api/azure-auto-setup`);
-    expect(wrongMethod.status).toBe(418);
-    expect(await wrongMethod.text()).toBe("legacy");
+    expect(wrongMethod.status).toBe(404);
+    expect(await wrongMethod.text()).toBe("unmatched");
 
     const refused = await fetch(`${first.baseUrl}/api/azure-auto-setup`, {
       method: "POST",
@@ -118,10 +115,6 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     });
     expect(malformed.status).toBe(400);
     expect(await malformed.json()).toMatchObject({ code: "setup-unhandled" });
-
-    const residual = await fetchResidualRoute(first.baseUrl);
-    expect(residual.status).toBe(418);
-    expect(await residual.text()).toBe("legacy");
   });
 
   it("surfaces a selected-subscription failure with the legacy status, headers, and body", async () => {
@@ -173,8 +166,8 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     });
   });
 
-  it("completes setup over the typed table without reaching the fallback", async () => {
-    const fallbackCalls: string[] = [];
+  it("completes setup over the typed table without reaching unmatched routing", async () => {
+    const unmatchedCalls: string[] = [];
     const operation: AzureAutoSetupOperation = {
       operationId: "op-http-success",
       repo: "octo/app",
@@ -272,10 +265,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
           instances,
           routes,
           markActivity,
-          legacyFallback: (request, response) => {
-            fallbackCalls.push(request.url || "");
-            response.writeHead(418);
-            response.end("legacy");
+          handleUnmatchedRequest: (request, response) => {
+            unmatchedCalls.push(request.url || "");
+            response.writeHead(404);
+            response.end("unmatched");
           }
         }),
       createState: () => ({}),
@@ -302,6 +295,6 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       tenantId: TENANT,
       subscriptionId: SUBSCRIPTION
     });
-    expect(fallbackCalls).toEqual([]);
+    expect(unmatchedCalls).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 // Canvas adapter — HTTP server host for the webview.
 //
-// Owns the local loopback server that backs each canvas instance: the ~21-route
+// Owns the local loopback server that backs each canvas instance: the 40-route
 // request handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
@@ -195,9 +195,9 @@ import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dep
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
 import {
-  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
-} from "./server/routes/graphs-planning-reads.js";
+} from "./server/routes/graphs-planning.js";
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
@@ -442,17 +442,24 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
-// Composition root for the migrated `operations-status` family. The read routes
-// receive the four narrow lookup and projection functions they call; the POST
-// that registers an environment operation receives its own seams. The registry
-// implementation and the client projection stay in `operations.ts`, and the
-// pure guards and factories stay in their modules and are injected rather than
-// imported by the route so the route spawns nothing and touches no disk.
-//
-// `scheduleEnvironmentOperation` bridges the module-level route back to the
-// per-instance server-owned task runner: the migrated table is built once, but
-// scheduling is closure state on the legacy handler for the instance that
-// received the request, so the instance id is passed through and resolved here.
+function scheduleEnvironmentOperationForInstance(
+  instanceId: string,
+  operation: { operationId: string }
+): boolean {
+  const coordinator = instanceRequestCoordinators.get(instanceId);
+  if (!coordinator) {
+    console.error(
+      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operation.operationId}.`
+    );
+    return false;
+  }
+  coordinator.scheduleEnvironmentOperation(operation);
+  return true;
+}
+
+// Composition root for the migrated `operations-status` family. Reads, creates,
+// and resumable actions each receive only the registry, mutation, persistence,
+// projection, and per-instance scheduling seams they invoke.
 const operationsStatusRoutes = createOperationsStatusRoutes(
   {
     latest: (repo) => operations.latest(repo),
@@ -470,18 +477,21 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
     finish,
-    scheduleEnvironmentOperation: (instanceId, op) => {
-      const legacy = legacyHandlers.get(instanceId);
-      if (!legacy) {
-        console.error(
-          `[radius operations] Missing legacy handler for instance ${instanceId}; cannot schedule operation ${op.operationId}.`
-        );
-        return false;
-      }
-      legacy.scheduleEnvironmentOperation(op);
-      return true;
-    },
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     errorMessage
+  },
+  {
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    persistOperations: () => operations.persist(),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE
   }
 );
 
@@ -569,7 +579,8 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
 const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
   composeAzureAutoSetupDependencies({
     isServerOwnedRequest: (instanceId, request) =>
-      legacyHandlers.get(instanceId)?.isServerOwned(request) ?? false,
+      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+      false,
     lifecycle: {
       get: (operationId) => operations.get(operationId),
       isStale: (operation) => isStale(operation),
@@ -722,7 +733,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
 // message applier, and the record/error/workspace-repo helpers that stay defined
 // here. The reader factory is injected already-cached so the route module owns
 // no cache of its own.
-const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
+const graphsPlanningRoutes = createGraphsPlanningRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   createDeployStatusReader: (options) => cachedDeployStatusReader(options),
   buildDeployStatusMap,
@@ -735,6 +746,82 @@ const graphsPlanningReadsRoutes = createGraphsPlanningReadsRoutes({
   record,
   errorMessage,
   repoMatchesWorkspace
+});
+
+const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  defaultBranchForState,
+  prepareSourceRef: (entry, context) =>
+    prepareSourceRefResources(entry, "graph", context),
+  commitSourceRef: (entry, resources, context, expectedToken) =>
+    setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  triggerAppBicepHandoff: (entry, repo, branch) =>
+    triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry, repo, branch),
+  workspaceGraphJsonPath: (state, bicepRepoPath) =>
+    workspaceGraphJsonPath(state, bicepRepoPath),
+  radArtifactsDirForSelection: (options) =>
+    radArtifactsDirForSelection({ ...options, github }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  canvasGraphResources,
+  errorMessage
+});
+
+// Composition root for the write half of the `graphs-planning` family. The
+// complete dependency object is assembled here and nowhere else; the workflow
+// service receives narrow function seams and the shared modeling pipeline
+// receives its own eight, so neither module holds a GitHub client, spawns
+// `rad`, or touches disk directly.
+//
+// `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
+// `resolveRecipeOutputs` here rather than injected, which is what keeps the
+// route modules free of it. The pure helpers (`defaultBranchForState`,
+// `computeGraphDiff`, `record`, …) are injected rather than imported by the
+// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  pipeline: createGraphPipeline<CanvasServerEntry>({
+    fetchBicepSelection: (entry, repo, branch) =>
+      fetchBicepSelection(entry, repo, branch),
+    resolveRadArtifactsDir: (request) =>
+      radArtifactsDirForSelection({ ...request, github }),
+    buildGraphViaRad: (content, definitionFile, options) =>
+      buildGraphViaRad(content, definitionFile, options),
+    canvasGraphResources,
+    workspaceGraphJsonPath,
+    graphDefinitionHash,
+    radArtifactsFingerprint,
+    removeDirectory: (dir) => {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }),
+  triggerAppBicepHandoff,
+  prepareSourceRefResources: (entry, view, sourceRefInput) =>
+    prepareSourceRefResources(entry, view, sourceRefInput),
+  setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
+    setSourceRefResources(entry, view, resources, sourceRefInput, token),
+  isCurrentSourceRefToken,
+  defaultBranchForState,
+  canReuseModeledGraph,
+  addGraphProgress,
+  beginPlannedGraphRequest,
+  isCurrentPlannedGraphRequest,
+  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+  resolveRecipeOutputs: (resources, recipes, provider) =>
+    resolveRecipeOutputs(github, resources, recipes, provider),
+  computeGraphDiff: (baseResources, headResources) =>
+    computeGraphDiff(baseResources, headResources),
+  record,
+  optionalString,
+  errorMessage
+});
+
+// The route layer sees exactly one seam: the workflow service above. Parsing
+// and serialization are all it owns.
+const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+  workflows: graphPlanningWorkflows
 });
 
 // The listing TTL and verify-workflow filename are declared here, before the
@@ -806,11 +893,12 @@ const environmentsRoutes = createEnvironmentsRoutes({
 // the module spawns no process directly, imports no `node:fs`, and reads no
 // module-level mutable state. `isServerOwnedRequest` is deliberately a
 // per-request function rather than a value: the token is a per-instance
-// `randomUUID()` held by that instance's legacy handler, and this route is
+// `randomUUID()` held by that instance's request coordinator, and this route is
 // reachable only through the internal loopback POST that carries it.
 const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   isServerOwnedRequest: (instanceId, request) =>
-    legacyHandlers.get(instanceId)?.isServerOwned(request) ?? false,
+    instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+    false,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   cliExec: (command, args, options, callback) =>
     cliExec(command, args, options, callback),
@@ -917,90 +1005,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   now: () => Date.now()
 });
 
-// The load-graph-stream SSE route, composed with the same helpers its legacy arm
-// closed over. The entry-consuming seams take the live `CanvasServerEntry` the
-// 503 guard resolved (not an `instanceId`), so every seam sees the object the
-// guard checked — matching the legacy arm, which captured `servers.get(...)`
-// once and reused that reference for the whole stream. `github` is bound into
-// `radArtifactsDirForSelection` here rather than surfaced on the seam.
-const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  defaultBranchForState,
-  prepareSourceRef: (entry, context) =>
-    prepareSourceRefResources(entry, "graph", context),
-  commitSourceRef: (entry, resources, context, expectedToken) =>
-    setSourceRefResources(entry, "graph", resources, context, expectedToken),
-  triggerAppBicepHandoff: (entry, repo, branch) =>
-    triggerAppBicepHandoff(entry, repo, branch, "graph"),
-  fetchBicepSelection: (entry, repo, branch) =>
-    fetchBicepSelection(entry, repo, branch),
-  workspaceGraphJsonPath: (state, bicepRepoPath) =>
-    workspaceGraphJsonPath(state, bicepRepoPath),
-  radArtifactsDirForSelection: (options) =>
-    radArtifactsDirForSelection({ ...options, github }),
-  buildGraphViaRad: (content, bicepPath, options) =>
-    buildGraphViaRad(content, bicepPath, options),
-  canvasGraphResources,
-  errorMessage
-});
-
-// Composition root for the write half of the `graphs-planning` family. The
-// complete dependency object is assembled here and nowhere else; the workflow
-// service receives narrow function seams and the shared modeling pipeline
-// receives its own eight, so neither module holds a GitHub client, spawns
-// `rad`, or touches disk directly.
-//
-// `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
-// `resolveRecipeOutputs` here rather than injected, which is what keeps the
-// route modules free of it. The pure helpers (`defaultBranchForState`,
-// `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
-const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  pipeline: createGraphPipeline<CanvasServerEntry>({
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchBicepSelection(entry, repo, branch),
-    resolveRadArtifactsDir: (request) =>
-      radArtifactsDirForSelection({ ...request, github }),
-    buildGraphViaRad: (content, definitionFile, options) =>
-      buildGraphViaRad(content, definitionFile, options),
-    canvasGraphResources,
-    workspaceGraphJsonPath,
-    graphDefinitionHash,
-    radArtifactsFingerprint,
-    removeDirectory: (dir) => {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }),
-  triggerAppBicepHandoff,
-  prepareSourceRefResources: (entry, view, sourceRefInput) =>
-    prepareSourceRefResources(entry, view, sourceRefInput),
-  setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
-    setSourceRefResources(entry, view, resources, sourceRefInput, token),
-  isCurrentSourceRefToken,
-  defaultBranchForState,
-  canReuseModeledGraph,
-  addGraphProgress,
-  beginPlannedGraphRequest,
-  isCurrentPlannedGraphRequest,
-  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-  resolveRecipeOutputs: (resources, recipes, provider) =>
-    resolveRecipeOutputs(github, resources, recipes, provider),
-  computeGraphDiff: (baseResources, headResources) =>
-    computeGraphDiff(baseResources, headResources),
-  record,
-  optionalString,
-  errorMessage
-});
-
-// The route layer sees exactly one seam: the workflow service above. Parsing
-// and serialization are all it owns.
-const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
-  workflows: graphPlanningWorkflows
-});
-
 // Built once at module initialization so table validation runs a single time
-// and a missing migrated handler fails early rather than per instance.
+// and a missing typed handler fails early rather than per instance.
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
@@ -1010,48 +1016,50 @@ const serverRoutes = createServerRouteTable({
   ...azureAutoSetupRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
-  ...graphsPlanningReadsRoutes,
+  ...graphsPlanningRoutes,
   ...graphsPlanningStreamRoutes,
   ...graphsPlanningWritesRoutes,
   ...environmentsRoutes,
   ...createEnvironmentRoutes
 });
 
-// Legacy handler objects, kept per instance so the start hook can resume
-// recovered verification monitors and the activity gate can recognise the
-// server-owned token. Released by the stopped hook when the instance stops.
-const legacyHandlers = new Map<
+// Per-instance coordinators own the server token, background operation runner,
+// recovered verification monitors, and page/unmatched request handling. They are
+// released by the stopped hook when the instance stops.
+const instanceRequestCoordinators = new Map<
   string,
-  ReturnType<typeof createLegacyRequestHandler>
+  ReturnType<typeof createInstanceRequestCoordinator>
 >();
 
 const canvasServer = createCanvasServer(
   createProductionCanvasServerDependencies({
     createRequestHandler: ({ instanceId, instances, markActivity }) => {
-      const legacy = createLegacyRequestHandler(
+      const coordinator = createInstanceRequestCoordinator(
         instanceId,
         () => instances.get(instanceId)?.baseUrl || ""
       );
-      legacyHandlers.set(instanceId, legacy);
+      instanceRequestCoordinators.set(instanceId, coordinator);
       return createScaffoldRequestHandler({
         instanceId,
         instances,
         routes: serverRoutes,
-        legacyFallback: legacy.handler,
+        handleUnmatchedRequest: coordinator.handleUnmatchedRequest,
         // Server-owned internal calls must not refresh the webview activity
         // clock, or the idle-respawn timer never fires.
         markActivity: (request) => {
-          if (!legacy.isServerOwned(request)) markActivity();
+          if (!coordinator.isServerOwned(request)) markActivity();
         },
         preRoute: preRouteCanvasRequest
       });
     },
     onStarted: (instanceId) => {
       shuttingDownInstances.delete(instanceId);
-      legacyHandlers.get(instanceId)?.startRecoveredVerificationTasks();
+      instanceRequestCoordinators
+        .get(instanceId)
+        ?.startRecoveredVerificationTasks();
     },
     onStopped: (instanceId) => {
-      legacyHandlers.delete(instanceId);
+      instanceRequestCoordinators.delete(instanceId);
     },
     defaultPage: DEFAULT_CANVAS_PAGE,
     preferredPort: preferredPortForInstance
@@ -1246,7 +1254,7 @@ const envListCache = new Map<string, CachedPayload>();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched: the migrated deployments family is handed this same map and evicts
+// dispatched: the deployments route family is handed this same map and evicts
 // from there, while the deploy dispatch service evicts through the
 // `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
@@ -1628,7 +1636,7 @@ export function azureCliAssistMessage(
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
-  entry: CanvasServerEntry | undefined,
+  entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
   page: string
@@ -3214,7 +3222,7 @@ export function getLastWebviewActivityAt(): number {
 }
 
 function accessForSelection(
-  entry: CanvasServerEntry,
+  entry: { state: CanvasState },
   repo: string,
   branch: string
 ) {
@@ -3244,8 +3252,11 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 // supplied the content (not when we fell back to the remote repo), and
 // `bicepPath` is the repo-relative path of the local file so callers can save
 // sibling artifacts next to the exact app.bicep that was graphed.
+// Takes only the state-bearing shape of an instance entry, not the whole
+// `CanvasServerEntry`, so the migrated `graphs-planning` write routes can inject
+// it against their own narrow entry type without a cast.
 async function fetchBicepSelection(
-  entry: CanvasServerEntry,
+  entry: { state: CanvasState },
   repo: string,
   branch: string
 ): Promise<{
@@ -3309,10 +3320,9 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-// Global pre-routing shared by migrated routes and the legacy fallback. It
-// preserves the exact order the legacy dispatcher used at the top of its
-// if-chain: reject cross-site mutations before any routing or body parse, then
-// synchronise the requested page onto the instance entry.
+// Global pre-routing shared by typed routes and unmatched page requests. Reject
+// cross-site mutations before any routing or body parse, then synchronise the
+// requested page onto the instance entry.
 function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   const { request } = context;
   if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
@@ -3329,7 +3339,7 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   return false;
 }
 
-function createLegacyRequestHandler(
+function createInstanceRequestCoordinator(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {
@@ -3527,193 +3537,17 @@ function createLegacyRequestHandler(
     }
   }
 
-  const handler = async (
+  const handleUnmatchedRequest = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
-    const pathname = url.pathname;
     // Cross-site rejection and requested-page synchronisation now run in the
-    // shared pre-routing step so migrated routes cannot bypass them; the page
-    // fallback below still needs the raw value. Webview-activity marking also
+    // shared pre-routing step so typed routes cannot bypass them; the page
+    // handler below still needs the raw value. Webview-activity marking also
     // moved to that seam, where it is gated on isServerOwned so server-owned
     // internal calls still do not count as user activity.
     const requestedPage = url.searchParams.get("page");
-
-    const resumeMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
-    );
-    if (resumeMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(resumeMatch[1]);
-      const code = decodeURIComponent(resumeMatch[2]);
-      const op = operations.get(operationId);
-      if (!op) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(404);
-        res.end(
-          JSON.stringify({
-            error: "Unknown operation.",
-            code: "unknown-operation"
-          })
-        );
-        return;
-      }
-      if (
-        op.state === "failed_partial" &&
-        op.failure?.code === "operation-input-expired"
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(410);
-        res.end(
-          JSON.stringify({
-            error: op.failure.message,
-            code: "operation-input-expired",
-            operation: toClientView(op)
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        data = {};
-      }
-      if (
-        !canResumeInput(op, {
-          code,
-          checkpoint: data.checkpoint,
-          repo: data.repo,
-          environment: data.environment,
-          provider: data.provider
-        })
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: "The operation is not waiting for this input.",
-            code: "operation-resume-mismatch",
-            operationId
-          })
-        );
-        return;
-      }
-      if (!op.request && op.resumeRequest) {
-        op.request = structuredClone(op.resumeRequest);
-      }
-      const resumeSnapshot = {
-        inputRequired: structuredClone(op.inputRequired),
-        request: structuredClone(op.request),
-        resumeRequest:
-          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
-      };
-      if (code === "service-management-reference-required") {
-        op.request.azure.serviceManagementReference =
-          data.serviceManagementReference || "";
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.serviceManagementReference =
-            data.serviceManagementReference || "";
-        }
-      } else if (code === "app-selection-required") {
-        op.request.azure.appId = data.appId || "";
-        op.request.azure.createNew = data.createNew === true;
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.appId = data.appId || "";
-          op.resumeRequest.azure.createNew = data.createNew === true;
-        }
-      } else {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Unsupported resume prompt.",
-            code: "unsupported-resume"
-          })
-        );
-        return;
-      }
-      resumeAfterInput(op);
-      try {
-        await operations.persist();
-      } catch (error) {
-        op.request = resumeSnapshot.request;
-        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
-        else op.resumeRequest = resumeSnapshot.resumeRequest;
-        requireInput(op, resumeSnapshot.inputRequired);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
-            code: "operation-resume-persist-failed",
-            operationId,
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(202);
-      res.end(
-        JSON.stringify({
-          operationId,
-          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
-        })
-      );
-      scheduleServerOwnedTask(operationId, () =>
-        runEnvironmentOperation(operationId)
-      );
-      return;
-    }
-    const abandonMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/abandon$/
-    );
-    if (abandonMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(abandonMatch[1]);
-      const op = operations.get(operationId);
-      if (
-        !op ||
-        op.state !== INPUT_REQUIRED_STATE ||
-        op.executionActive ||
-        isTerminalState(op.state)
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(op ? 409 : 404);
-        res.end(
-          JSON.stringify({
-            error:
-              op ?
-                "The operation is not waiting for input."
-              : "Unknown operation.",
-            code: op ? "operation-abandon-mismatch" : "unknown-operation"
-          })
-        );
-        return;
-      }
-      finish(op, "cancelled");
-      try {
-        await operations.persist();
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error: "Radius could not persist the abandoned operation.",
-            code: "operation-abandon-persist-failed",
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ operation: toClientView(op) }));
-      return;
-    }
 
     // Default: serve the page HTML based on state
     await ensureVendorScripts();
@@ -3758,14 +3592,14 @@ function createLegacyRequestHandler(
   // Exposed so the migrated `POST /api/operations` route, which is composed once
   // at module init, can reach this instance's server-owned task runner. The
   // route registers and persists the operation itself and then hands the record
-  // back here to schedule exactly as the legacy arm did.
+  // back here to preserve the established scheduling order.
   const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
     scheduleServerOwnedTask(op.operationId, () =>
       runEnvironmentOperation(op.operationId)
     );
   };
   return {
-    handler,
+    handleUnmatchedRequest,
     startRecoveredVerificationTasks,
     isServerOwned,
     scheduleEnvironmentOperation

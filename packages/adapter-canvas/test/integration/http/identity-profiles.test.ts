@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createIdentityProfilesRoutes } from "../../../src/server/routes/identity-profiles.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { GitHubIdentity } from "../../../src/gh.js";
 import type { CredentialProfile } from "../../../src/shared.js";
@@ -115,9 +112,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -188,9 +185,9 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     expect(await response.text()).toBe('{"profiles":[]}');
     expect(harness.calls).toEqual([]);
 
-    // Only GET is declared, so POST still falls through to the fallback.
+    // Only GET is declared, so POST reaches unmatched routing.
     const posted = await post(entry.baseUrl, "/api/credential-profiles", "");
-    expect(posted.status).toBe(418);
+    expect(posted.status).toBe(404);
   });
 
   it("keeps save validating and delete unvalidated on the wire", async () => {
@@ -312,10 +309,5 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
       "not json"
     );
     expect(malformed.status).toBe(400);
-
-    // A method-matching route selected from the live residual inventory still
-    // reaches the fallback and will fail loudly when that route migrates.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 });

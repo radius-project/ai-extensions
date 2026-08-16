@@ -151,6 +151,11 @@ export function createDeployDispatchService(
       "createDeployDispatchService is missing required dependencies: deployWorkflowFile"
     );
   }
+  if (!dependencies.branchNotPushedKind) {
+    throw new Error(
+      "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
+    );
+  }
   if (
     !Array.isArray(dependencies.deployWorkflowFiles) ||
     dependencies.deployWorkflowFiles.length === 0
