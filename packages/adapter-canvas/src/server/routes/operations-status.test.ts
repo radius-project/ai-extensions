@@ -3,11 +3,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
+  ABANDON_OPERATION_ROUTE,
   createOperationsStatusRoutes,
+  handleAbandonOperation,
   handleCreateOperation,
   handleLatestOperation,
   handleOperationById,
+  handleResumeOperation,
+  RESUME_OPERATION_ROUTE,
   type CreateOperationDependencies,
+  type OperationActionDependencies,
+  type OperationActionRecord,
   type OperationRecord,
   type OperationsStatusDependencies
 } from "./operations-status.js";
@@ -173,6 +179,61 @@ function createDependencies(
   };
 }
 
+function actionDependencies(
+  overrides: Partial<OperationActionDependencies> = {}
+): OperationActionDependencies {
+  return {
+    getOperation: () => {
+      throw new Error("getOperation not stubbed");
+    },
+    canResumeInput: () => {
+      throw new Error("canResumeInput not stubbed");
+    },
+    resumeAfterInput: () => {
+      throw new Error("resumeAfterInput not stubbed");
+    },
+    requireInput: () => {
+      throw new Error("requireInput not stubbed");
+    },
+    finish: () => {
+      throw new Error("finish not stubbed");
+    },
+    isTerminalState: () => {
+      throw new Error("isTerminalState not stubbed");
+    },
+    persistOperations: () => {
+      throw new Error("persistOperations not stubbed");
+    },
+    toClientView: () => {
+      throw new Error("toClientView not stubbed");
+    },
+    scheduleEnvironmentOperation: () => {
+      throw new Error("scheduleEnvironmentOperation not stubbed");
+    },
+    errorMessage: () => {
+      throw new Error("errorMessage not stubbed");
+    },
+    inputRequiredState: "input_required",
+    ...overrides
+  };
+}
+
+function actionRecord(
+  overrides: Partial<OperationActionRecord> = {}
+): OperationActionRecord {
+  return {
+    operationId: "op-action",
+    currentStage: "configure-environment",
+    state: "input_required",
+    inputRequired: {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference"
+    },
+    request: { azure: {} },
+    ...overrides
+  };
+}
+
 // A create-deps preset that reaches the happy path: repo/azure guards pass, the
 // factory records what it was asked to build, and start/persist/schedule are
 // captured so a test can assert on them. Guards a test wants to fail are
@@ -257,15 +318,18 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the three routes it owns, exact before prefix", () => {
+  it("declares exactly the five routes it owns, exact before prefix", () => {
     const routes = createOperationsStatusRoutes(
       dependencies(),
-      createDependencies()
+      createDependencies(),
+      actionDependencies()
     );
     expect(Object.keys(routes)).toEqual([
       "GET /api/operations",
       "GET /api/operations/",
-      "POST /api/operations"
+      "POST /api/operations",
+      "POST /api/operations/:operationId/resume/:code",
+      "POST /api/operations/:operationId/abandon"
     ]);
   });
 
@@ -966,7 +1030,8 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     const op = newOperationRecord({ operationId: "op-wired" });
     const routes = createOperationsStatusRoutes(
       dependencies(),
-      happyPathCreate(capture, op)
+      happyPathCreate(capture, op),
+      actionDependencies()
     );
     const { recording, response } = recorder();
     await routes["POST /api/operations"](
@@ -988,9 +1053,624 @@ describe("handleCreateOperation (POST /api/operations)", () => {
   });
 });
 
-// Verbatim transcription of the two branches removed from the legacy
-// `createLegacyRequestHandler` if-chain (`/api/operations` at ~2387 and
-// `/api/operations/` at ~2398 before the migration). The differential cases
+type OperationActionHandler = (
+  context: ReturnType<typeof createRequestContext>,
+  dependencies: OperationActionDependencies
+) => Promise<void>;
+
+async function runAction(
+  path: string,
+  body: string,
+  handler: OperationActionHandler,
+  dependencies: OperationActionDependencies,
+  instanceId = "panel-a"
+): Promise<Recording> {
+  const { recording, response } = recorder();
+  await handler(postContext(path, body, response, instanceId), dependencies);
+  return recording;
+}
+
+describe("operation resume and abandon actions", () => {
+  it.each([
+    "getOperation",
+    "canResumeInput",
+    "resumeAfterInput",
+    "requireInput",
+    "finish",
+    "isTerminalState",
+    "persistOperations",
+    "toClientView",
+    "scheduleEnvironmentOperation",
+    "errorMessage"
+  ] as const)(
+    "fails construction when the %s action dependency is missing",
+    (name) => {
+      const invalid = {
+        ...actionDependencies(),
+        [name]: undefined
+      } as OperationActionDependencies;
+      expect(() =>
+        createOperationsStatusRoutes(
+          dependencies(),
+          createDependencies(),
+          invalid
+        )
+      ).toThrow(`Missing operations action dependency: ${name}`);
+    }
+  );
+
+  it("fails construction when the input-required state is missing", () => {
+    expect(() =>
+      createOperationsStatusRoutes(dependencies(), createDependencies(), {
+        ...actionDependencies(),
+        inputRequiredState: ""
+      })
+    ).toThrow("Missing operations action dependency: inputRequiredState");
+  });
+
+  it("rejects a direct action call whose path does not match its template", async () => {
+    await expect(
+      runAction(
+        "/api/operations/op-action/unknown",
+        "{}",
+        handleResumeOperation,
+        actionDependencies()
+      )
+    ).rejects.toThrow(
+      `Operation action path /api/operations/op-action/unknown does not match ${RESUME_OPERATION_ROUTE}`
+    );
+  });
+
+  it("lets malformed percent escapes in either resume segment throw", async () => {
+    for (const path of [
+      "/api/operations/%/resume/service-management-reference-required",
+      "/api/operations/op-action/resume/%"
+    ]) {
+      await expect(
+        runAction(path, "{}", handleResumeOperation, actionDependencies())
+      ).rejects.toThrow(URIError);
+    }
+  });
+
+  it("answers 404 for an unknown resume operation before reading the body", async () => {
+    const recording = await runAction(
+      "/api/operations/missing/resume/service-management-reference-required",
+      "{not json",
+      handleResumeOperation,
+      actionDependencies({ getOperation: () => null })
+    );
+    expect(recording.status).toBe(404);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+  });
+
+  it("answers 410 with the safe projection when requested input expired", async () => {
+    const operation = actionRecord({
+      state: "failed_partial",
+      failure: {
+        code: "operation-input-expired",
+        message: "The requested input expired."
+      }
+    });
+    const recording = await runAction(
+      "/api/operations/op-action/resume/service-management-reference-required",
+      "{not json",
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        toClientView: () => ({ operationId: operation.operationId })
+      })
+    );
+    expect(recording.status).toBe(410);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "The requested input expired.",
+      code: "operation-input-expired",
+      operation: { operationId: "op-action" }
+    });
+  });
+
+  it("turns a malformed resume body into an empty object before the 409 check", async () => {
+    const seen: unknown[] = [];
+    const recording = await runAction(
+      "/api/operations/op%2Faction/resume/app-selection-required",
+      "{not json",
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: (operationId) => {
+          expect(operationId).toBe("op/action");
+          return actionRecord({ operationId });
+        },
+        canResumeInput: (_operation, input) => {
+          seen.push(input);
+          return false;
+        }
+      })
+    );
+    expect(seen).toEqual([
+      {
+        code: "app-selection-required",
+        checkpoint: undefined,
+        repo: undefined,
+        environment: undefined,
+        provider: undefined
+      }
+    ]);
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "The operation is not waiting for this input.",
+      code: "operation-resume-mismatch",
+      operationId: "op/action"
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["missing Azure data", {}],
+    ["null Azure data", { azure: null }]
+  ])(
+    "answers 409 without mutation when the saved request is %s",
+    async (_description, request) => {
+      const operation = actionRecord();
+      Object.defineProperty(operation, "request", {
+        configurable: true,
+        enumerable: true,
+        value: request,
+        writable: true
+      });
+      delete operation.resumeRequest;
+      const inputBefore = structuredClone(operation.inputRequired);
+      const recording = await runAction(
+        "/api/operations/op-action/resume/service-management-reference-required",
+        JSON.stringify({ serviceManagementReference: "new" }),
+        handleResumeOperation,
+        actionDependencies({
+          getOperation: () => operation,
+          canResumeInput: () => true
+        })
+      );
+
+      expect(recording.status).toBe(409);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "The operation cannot be resumed because its saved request is unavailable.",
+        code: "operation-resume-request-unavailable",
+        operationId: "op-action"
+      });
+      expect(operation.request).toBe(request);
+      expect(operation.inputRequired).toEqual(inputBefore);
+      expect(operation.state).toBe("input_required");
+    }
+  );
+
+  it("clones a lazy request, persists it, answers 202, then schedules the same operation", async () => {
+    const resumeRequest = {
+      azure: { serviceManagementReference: "old" },
+      environment: { repo: "octo/app" }
+    };
+    const operation = actionRecord({
+      operationId: "octo/app:setup",
+      request: undefined,
+      resumeRequest
+    });
+    const order: string[] = [];
+    const { recording, response } = recorder();
+    const dependencies = actionDependencies({
+      getOperation: () => operation,
+      canResumeInput: () => true,
+      resumeAfterInput: () => {
+        order.push("resume");
+      },
+      persistOperations: () => {
+        order.push("persist");
+        return Promise.resolve();
+      },
+      scheduleEnvironmentOperation: (instanceId, scheduled) => {
+        expect(recording.status).toBe(202);
+        expect(recording.body).not.toBe("");
+        expect(instanceId).toBe("panel-z");
+        expect(scheduled).toBe(operation);
+        order.push("schedule");
+        return true;
+      }
+    });
+    await handleResumeOperation(
+      postContext(
+        "/api/operations/octo%2Fapp%3Asetup/resume/service-management-reference-required",
+        JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          serviceManagementReference: "new"
+        }),
+        response,
+        "panel-z"
+      ),
+      dependencies
+    );
+    expect(operation.request).not.toBe(resumeRequest);
+    expect(operation.request?.azure.serviceManagementReference).toBe("new");
+    expect(operation.resumeRequest?.azure.serviceManagementReference).toBe(
+      "new"
+    );
+    expect(order).toEqual(["resume", "persist", "schedule"]);
+    expect(JSON.parse(recording.body)).toEqual({
+      operationId: "octo/app:setup",
+      statusUrl: "/api/operations/octo%2Fapp%3Asetup"
+    });
+  });
+
+  it("finishes and re-persists a resumed operation when scheduling finds no runner", async () => {
+    const operation = actionRecord();
+    const order: string[] = [];
+    const { recording, response } = recorder();
+    const dependencies = actionDependencies({
+      getOperation: () => operation,
+      canResumeInput: () => true,
+      resumeAfterInput: () => {
+        order.push("resume");
+      },
+      persistOperations: () => {
+        order.push("persist");
+        return Promise.resolve();
+      },
+      scheduleEnvironmentOperation: () => {
+        expect(recording.status).toBe(202);
+        expect(recording.body).not.toBe("");
+        order.push("schedule");
+        return false;
+      },
+      finish: (finished, state, options?) => {
+        expect(finished).toBe(operation);
+        expect(options).toBeDefined();
+        finished.state = state;
+        finished.failure = options?.failure;
+        order.push("finish");
+      }
+    });
+
+    await handleResumeOperation(
+      postContext(
+        "/api/operations/op-action/resume/service-management-reference-required",
+        JSON.stringify({ serviceManagementReference: "new" }),
+        response,
+        "panel-missing"
+      ),
+      dependencies
+    );
+
+    expect(recording.status).toBe(202);
+    expect(order).toEqual([
+      "resume",
+      "persist",
+      "schedule",
+      "finish",
+      "persist"
+    ]);
+    expect(operation.state).toBe("failed");
+    expect(operation.failure).toEqual({
+      code: "operation-scheduling-failed",
+      stage: "configure-environment",
+      stepSeq: null,
+      message:
+        "Radius accepted the environment operation but could not start any setup work for it.",
+      classification: "unknown",
+      evidence:
+        "No server-owned task runner was available for instance panel-missing."
+    });
+  });
+
+  it("keeps a resumed operation terminal when scheduling repair persistence fails", async () => {
+    const operation = actionRecord();
+    let persistCalls = 0;
+    const seenErrors: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/resume/service-management-reference-required",
+      JSON.stringify({ serviceManagementReference: "new" }),
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => true,
+        resumeAfterInput: () => {},
+        persistOperations: () => {
+          persistCalls += 1;
+          return persistCalls === 1 ?
+              Promise.resolve()
+            : Promise.reject(new Error("disk gone on repair"));
+        },
+        scheduleEnvironmentOperation: () => false,
+        finish: (finished, state, options?) => {
+          finished.state = state;
+          finished.failure = options?.failure;
+        },
+        errorMessage: (error) => {
+          seenErrors.push((error as Error).message);
+          return (error as Error).message;
+        }
+      })
+    );
+
+    expect(recording.status).toBe(202);
+    expect(operation.state).toBe("failed");
+    expect(operation.failure?.code).toBe("operation-scheduling-failed");
+    expect(persistCalls).toBe(2);
+    expect(seenErrors).toEqual(["disk gone on repair"]);
+  });
+
+  it.each([
+    [true, "app-1", true],
+    [false, "", true],
+    [false, "", false]
+  ])(
+    "applies an app-selection answer with createNew=%s and a resume request=%s",
+    async (createNew, appId, hasResumeRequest) => {
+      const operation = actionRecord({
+        request: { azure: {} },
+        resumeRequest: hasResumeRequest ? { azure: {} } : undefined
+      });
+      await runAction(
+        "/api/operations/op-action/resume/app-selection-required",
+        JSON.stringify({ appId, createNew }),
+        handleResumeOperation,
+        actionDependencies({
+          getOperation: () => operation,
+          canResumeInput: () => true,
+          resumeAfterInput: () => {},
+          persistOperations: () => Promise.resolve(),
+          scheduleEnvironmentOperation: () => true
+        })
+      );
+      expect(operation.request?.azure).toMatchObject({ appId, createNew });
+      if (hasResumeRequest) {
+        expect(operation.resumeRequest?.azure).toMatchObject({
+          appId,
+          createNew
+        });
+      } else {
+        expect(operation.resumeRequest).toBeUndefined();
+      }
+    }
+  );
+
+  it("answers 400 for an unsupported prompt without mutating or persisting", async () => {
+    const operation = actionRecord();
+    const original = structuredClone(operation.request);
+    const recording = await runAction(
+      "/api/operations/op-action/resume/not-supported",
+      "{}",
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => true
+      })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Unsupported resume prompt.",
+      code: "unsupported-resume"
+    });
+    expect(operation.request).toEqual(original);
+  });
+
+  it("rolls request, resume request, and input state back when resume persistence fails", async () => {
+    const originalInput = {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference"
+    };
+    const originalRequest = {
+      azure: { serviceManagementReference: "before" }
+    };
+    const requestBefore = structuredClone(originalRequest);
+    const operation = actionRecord({
+      inputRequired: originalInput,
+      request: originalRequest,
+      resumeRequest: undefined
+    });
+    const order: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/resume/service-management-reference-required",
+      JSON.stringify({ serviceManagementReference: "after" }),
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => true,
+        resumeAfterInput: (resumed) => {
+          order.push("resume");
+          resumed.inputRequired = null;
+          resumed.state = "running";
+        },
+        persistOperations: () => {
+          order.push("persist");
+          return Promise.reject(new Error("disk unavailable"));
+        },
+        requireInput: (restored, input) => {
+          order.push("restore");
+          restored.inputRequired = input;
+          restored.state = "input_required";
+        },
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+    expect(order).toEqual(["resume", "persist", "restore"]);
+    expect(operation.request).toEqual(requestBefore);
+    expect(operation.resumeRequest).toBeUndefined();
+    expect(operation.inputRequired).toEqual(originalInput);
+    expect(operation.state).toBe("input_required");
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
+      code: "operation-resume-persist-failed",
+      operationId: "op-action",
+      detail: "disk unavailable"
+    });
+  });
+
+  it("restores a populated resume request when persistence fails", async () => {
+    const operation = actionRecord({
+      request: { azure: { serviceManagementReference: "request-before" } },
+      resumeRequest: {
+        azure: { serviceManagementReference: "resume-before" }
+      }
+    });
+    const requestBefore = structuredClone(operation.request);
+    const resumeRequestBefore = structuredClone(operation.resumeRequest);
+    const recording = await runAction(
+      "/api/operations/op-action/resume/service-management-reference-required",
+      "{}",
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => true,
+        resumeAfterInput: () => {},
+        persistOperations: () => Promise.reject(new Error("persist failed")),
+        requireInput: () => {},
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+    expect(operation.request).toEqual(requestBefore);
+    expect(operation.resumeRequest).toEqual(resumeRequestBefore);
+    expect(recording.status).toBe(500);
+  });
+
+  it.each([
+    ["unknown", null, 404, "unknown-operation"],
+    [
+      "wrong state",
+      actionRecord({ state: "running" }),
+      409,
+      "operation-abandon-mismatch"
+    ],
+    [
+      "active execution",
+      actionRecord({ executionActive: true }),
+      409,
+      "operation-abandon-mismatch"
+    ],
+    [
+      "terminal",
+      actionRecord({ state: "failed" }),
+      409,
+      "operation-abandon-mismatch"
+    ]
+  ])("refuses abandon for %s", async (_label, operation, status, code) => {
+    const recording = await runAction(
+      "/api/operations/op-action/abandon",
+      "",
+      handleAbandonOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        isTerminalState: (state) => state === "failed"
+      })
+    );
+    expect(recording.status).toBe(status);
+    expect(JSON.parse(recording.body).code).toBe(code);
+  });
+
+  it("lets a malformed abandon operation id throw", async () => {
+    await expect(
+      runAction(
+        "/api/operations/%/abandon",
+        "",
+        handleAbandonOperation,
+        actionDependencies()
+      )
+    ).rejects.toThrow(URIError);
+  });
+
+  it("finishes before persistence and leaves the cancelled projection on a persist failure", async () => {
+    const operation = actionRecord();
+    const order: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/abandon",
+      "",
+      handleAbandonOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        isTerminalState: () => false,
+        finish: (finished, state) => {
+          order.push("finish");
+          finished.state = state;
+        },
+        persistOperations: () => {
+          order.push("persist");
+          return Promise.reject(new Error("disk unavailable"));
+        },
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+    expect(order).toEqual(["finish", "persist"]);
+    expect(operation.state).toBe("cancelled");
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Radius could not persist the abandoned operation.",
+      code: "operation-abandon-persist-failed",
+      detail: "disk unavailable"
+    });
+  });
+
+  it("persists an abandoned operation before projecting the 200 response", async () => {
+    const operation = actionRecord();
+    const order: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/abandon",
+      "",
+      handleAbandonOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        isTerminalState: () => false,
+        finish: (finished, state) => {
+          order.push("finish");
+          finished.state = state;
+        },
+        persistOperations: () => {
+          order.push("persist");
+          return Promise.resolve();
+        },
+        toClientView: (projected) => {
+          order.push("project");
+          return { operationId: projected.operationId, state: projected.state };
+        }
+      })
+    );
+    expect(order).toEqual(["finish", "persist", "project"]);
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({
+      operation: { operationId: "op-action", state: "cancelled" }
+    });
+  });
+
+  it("wires both template registry keys to their action handlers", async () => {
+    const operation = actionRecord({ executionActive: true });
+    const routes = createOperationsStatusRoutes(
+      dependencies(),
+      createDependencies(),
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => false,
+        isTerminalState: () => false
+      })
+    );
+    const { recording: resumeRecording, response: resumeResponse } = recorder();
+    await routes[`POST ${RESUME_OPERATION_ROUTE}`](
+      postContext(
+        "/api/operations/op-action/resume/service-management-reference-required",
+        "{}",
+        resumeResponse
+      )
+    );
+    expect(resumeRecording.status).toBe(409);
+
+    const { recording: abandonRecording, response: abandonResponse } =
+      recorder();
+    await routes[`POST ${ABANDON_OPERATION_ROUTE}`](
+      postContext("/api/operations/op-action/abandon", "", abandonResponse)
+    );
+    expect(abandonRecording.status).toBe(409);
+  });
+});
+
+// Verbatim transcription of the two branches removed from the former inline
+// dispatcher. The differential cases
 // below keep the compatibility proof without duplicating the unit-test request
 // harness, and are deleted with the rest of the fallback in the removal slice.
 interface LegacyOperations {
@@ -1263,10 +1943,9 @@ function createWorld(
   };
 }
 
-// Verbatim transcription of the legacy `POST /api/operations` arm removed from
-// `createLegacyRequestHandler` (server.ts ~2966 at merge-base 59b5238). Kept in
-// lockstep with the migrated handler so the differential proves equivalence, and
-// deleted with the rest of the fallback in the removal slice. `res.end` records
+// Verbatim transcription of the former inline `POST /api/operations` arm. Kept
+// in lockstep with the typed handler so the differential proves equivalence.
+// `res.end` records
 // the response event so the ordering assertion sees exactly one interleaving.
 async function legacyCreate(
   req: IncomingMessage,

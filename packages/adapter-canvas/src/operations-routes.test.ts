@@ -230,6 +230,84 @@ describe("POST /api/operations server-owned execution", () => {
     );
   });
 
+  it("preserves the resume refusal ladder over the real loopback server", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+
+    const unknown = await postJson(
+      "/api/operations/op-missing/resume/app-selection-required",
+      {}
+    );
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" }
+    });
+
+    const expired = seed("contoso/expired");
+    finish(expired, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        message: "The requested input expired."
+      }
+    });
+    const expiredResponse = await postJson(
+      `/api/operations/${expired.operationId}/resume/app-selection-required`,
+      {}
+    );
+    expect(expiredResponse).toMatchObject({
+      status: 410,
+      body: {
+        code: "operation-input-expired",
+        operation: { operationId: expired.operationId }
+      }
+    });
+
+    const malformed = seed("contoso/malformed");
+    malformed.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true
+    };
+    requireInput(malformed, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app."
+    });
+    const malformedResponse = await fetch(
+      `${baseUrl}/api/operations/${malformed.operationId}/resume/app-selection-required`,
+      { method: "POST", body: "{not json" }
+    );
+    expect(malformedResponse.status).toBe(409);
+    expect(await malformedResponse.json()).toMatchObject({
+      code: "operation-resume-mismatch"
+    });
+
+    const unsupported = seed("contoso/unsupported");
+    unsupported.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true
+    };
+    requireInput(unsupported, {
+      code: "future-prompt",
+      checkpoint: "future-checkpoint",
+      message: "Supply future input."
+    });
+    const unsupportedResponse = await postJson(
+      `/api/operations/${unsupported.operationId}/resume/future-prompt`,
+      {
+        checkpoint: "future-checkpoint",
+        repo: unsupported.repo,
+        environment: unsupported.environment,
+        provider: unsupported.provider
+      }
+    );
+    expect(unsupportedResponse).toMatchObject({
+      status: 400,
+      body: { code: "unsupported-resume" }
+    });
+  });
+
   it("abandons an input wait and releases the repository lock", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});
@@ -247,6 +325,26 @@ describe("POST /api/operations server-owned execution", () => {
     expect(abandoned.status).toBe(200);
     expect(op.state).toBe("cancelled");
     expect(operations.running(op.repo)).toBeNull();
+  });
+
+  it("refuses abandon for an unknown or non-waiting operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const unknown = await postJson("/api/operations/op-missing/abandon", {});
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" }
+    });
+
+    const running = seed("contoso/not-waiting");
+    const refused = await postJson(
+      `/api/operations/${running.operationId}/abandon`,
+      {}
+    );
+    expect(refused).toMatchObject({
+      status: 409,
+      body: { code: "operation-abandon-mismatch" }
+    });
   });
 });
 

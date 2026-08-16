@@ -2,7 +2,6 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
-import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
 import {
@@ -119,9 +118,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -320,32 +319,24 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     });
   });
 
-  it("leaves a method the migrated declarations do not claim on the legacy fallback", async () => {
+  it("delegates methods the typed declarations do not claim", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
 
     // The three listings are declared GET-only and the two POSTs POST-only, so
-    // the opposite verb on the same path must still reach the fallback rather
-    // than being swallowed by the migrated declaration.
+    // the opposite verb on the same path must reach unmatched routing rather
+    // than being swallowed by a declaration.
     for (const path of [
       "/api/deploy-status",
       "/api/list-applications",
       "/api/list-deployments"
     ]) {
       const posted = await post(entry.baseUrl, path, "");
-      expect(posted.status, path).toBe(418);
+      expect(posted.status, path).toBe(404);
     }
     for (const path of ["/api/deploy-reset", "/api/delete-deployment"]) {
       const got = await fetch(`${entry.baseUrl}${path}`);
-      expect(got.status, path).toBe(418);
-    }
-  });
-
-  it("migrates POST /api/deploy off the legacy fallback", () => {
-    // Written out by hand so the two sides come from different sources: this
-    // fires meaningfully if the route is ever pushed back onto the fallback.
-    for (const key of ["POST /api/deploy"]) {
-      expect(LEGACY_ROUTE_INVENTORY).not.toContain(key);
+      expect(got.status, path).toBe(404);
     }
   });
 });
@@ -462,9 +453,9 @@ function startDeploy(): DeployHarness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -848,14 +839,14 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(activeDeploymentMutation(state)).toBeUndefined();
   });
 
-  it("leaves GET /api/deploy on the legacy fallback", async () => {
+  it("delegates unmatched GET /api/deploy", async () => {
     startDeploy();
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/deploy`);
 
-    expect(response.status).toBe(418);
-    expect(await response.text()).toBe("legacy");
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("unmatched");
   });
 
   it("keeps two canvas instances isolated", async () => {

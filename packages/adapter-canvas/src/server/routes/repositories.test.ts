@@ -643,10 +643,8 @@ describe("repositories routes (SU-05)", () => {
   });
 });
 
-// Verbatim transcription of the three branches removed from the legacy
-// `createLegacyRequestHandler` if-chain (`/api/user-repos` at ~6813,
-// `/api/repo-branches` at ~6898 and `/api/discover-branches` at ~7089 before the
-// migration). These differential cases keep the compatibility proof without
+// Verbatim transcription of the three branches removed from the former inline
+// dispatcher. These differential cases keep the compatibility proof without
 // duplicating the unit-test request harness, and are deleted with the rest of
 // the fallback in the removal slice.
 type LegacyCliExec = RepositoriesDependencies["cliExec"];
