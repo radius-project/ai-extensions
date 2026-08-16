@@ -41,6 +41,7 @@ interface Harness {
   persistError: { value: Error | null };
   persistCalls: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
+  scheduleAccepted: { value: boolean };
 }
 
 const RUNNING: OperationActionRecord = {
@@ -85,6 +86,7 @@ function start(): Harness {
   const persistError: { value: Error | null } = { value: null };
   const persistCalls: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
+  const scheduleAccepted = { value: true };
   const persistOperations = (): Promise<void> => {
     persistCalls.push("persist");
     return persistError.value ?
@@ -94,7 +96,8 @@ function start(): Harness {
   const scheduleEnvironmentOperation = (
     instanceId: string,
     operation: { operationId: string }
-  ): true => {
+  ): boolean => {
+    if (!scheduleAccepted.value) return false;
     scheduled.push({ instanceId, operationId: operation.operationId });
     return true;
   };
@@ -177,6 +180,7 @@ function start(): Harness {
     persistError,
     persistCalls,
     scheduled,
+    scheduleAccepted,
     setLatest(record) {
       latest = record;
     }
@@ -416,6 +420,67 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     );
     expect(asGet.status).toBe(404);
     expect(await asGet.text()).toBe('{"error":"Unknown operation."}');
+  });
+
+  it("returns 202, then exposes a terminal failure when resumed work cannot be scheduled", async () => {
+    const harness = start();
+    harness.scheduleAccepted.value = false;
+    const entry = await container!.getOrCreate("panel-missing");
+    const resumable = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    resumable.request = {
+      azure: {},
+      environment: { repo: "octo/resume" }
+    };
+    requireInput(resumable, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(resumable.operationId, resumable);
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: resumable.repo,
+          environment: resumable.environment,
+          provider: resumable.provider,
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
+    );
+
+    expect(response.status).toBe(202);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual(["persist", "persist"]);
+    expect(resumable.state).toBe("failed");
+    expect(resumable.failure).toMatchObject({
+      code: "operation-scheduling-failed",
+      stage: resumable.currentStage,
+      message:
+        "Radius accepted the environment operation but could not start any setup work for it.",
+      evidence:
+        "No server-owned task runner was available for instance panel-missing."
+    });
+
+    const status = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}`
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      operation: {
+        operationId: resumable.operationId,
+        state: "failed",
+        failure: { code: "operation-scheduling-failed" }
+      }
+    });
   });
 
   it("answers 410 for an expired resume prompt without persisting or scheduling", async () => {

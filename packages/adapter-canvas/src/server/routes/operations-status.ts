@@ -117,14 +117,18 @@ export interface OperationActionDependencies {
   ): boolean;
   resumeAfterInput(operation: OperationActionRecord): void;
   requireInput(operation: OperationActionRecord, input: unknown): void;
-  finish(operation: OperationActionRecord, state: string): void;
+  finish(
+    operation: OperationActionRecord,
+    state: string,
+    options?: { failure: Record<string, unknown> }
+  ): void;
   isTerminalState(state: unknown): boolean;
   persistOperations(): Promise<void>;
   toClientView(operation: OperationActionRecord): unknown;
   scheduleEnvironmentOperation(
     instanceId: string,
     operation: OperationActionRecord
-  ): void;
+  ): boolean;
   errorMessage(error: unknown): string;
   inputRequiredState: string;
 }
@@ -165,6 +169,31 @@ interface ResumeOperationBody extends Record<string, unknown> {
   repo?: string;
   environment?: string;
   provider?: string;
+}
+
+async function finishSchedulingFailure(
+  operation: OperationRecord,
+  instanceId: string,
+  finishOperation: (failure: Record<string, unknown>) => void,
+  persistOperations: () => Promise<void>,
+  errorMessage: (error: unknown) => string
+): Promise<void> {
+  finishOperation({
+    code: "operation-scheduling-failed",
+    stage: operation.currentStage,
+    stepSeq: null,
+    message:
+      "Radius accepted the environment operation but could not start any setup work for it.",
+    classification: "unknown",
+    evidence: `No server-owned task runner was available for instance ${instanceId}.`
+  });
+  try {
+    await persistOperations();
+  } catch (error) {
+    // The in-memory record is already terminal, so polling still reflects the
+    // failure when this best-effort durable repair cannot be written.
+    errorMessage(error);
+  }
 }
 
 // Operation status. The panel polls this instead of waiting on the POST,
@@ -407,24 +436,13 @@ export async function handleCreateOperation(
     // The 202 is already on the wire and cannot be recalled, but the record can
     // be moved to a terminal state and persisted so the failure is observable
     // through the same status endpoint the client is already polling.
-    dependencies.finish(op, "failed", {
-      failure: {
-        code: "operation-scheduling-failed",
-        stage: op.currentStage,
-        stepSeq: null,
-        message:
-          "Radius accepted the environment operation but could not start any setup work for it.",
-        classification: "unknown",
-        evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
-      }
-    });
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      // Best-effort: the in-memory record is already terminal, so polling
-      // reflects the failure even if this durable write does not land.
-      dependencies.errorMessage(error);
-    }
+    await finishSchedulingFailure(
+      op,
+      context.instanceId,
+      (failure) => dependencies.finish(op, "failed", { failure }),
+      dependencies.persistOperations,
+      dependencies.errorMessage
+    );
   }
 }
 
@@ -550,17 +568,18 @@ export async function handleResumeOperation(
     operationId,
     statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
   });
-  const scheduled = (dependencies.scheduleEnvironmentOperation(
+  const scheduled = dependencies.scheduleEnvironmentOperation(
     context.instanceId,
     operation
-  ) as unknown) as boolean | void;
-  if (scheduled === false) {
-    dependencies.finish(operation, "failed");
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      dependencies.errorMessage(error);
-    }
+  );
+  if (!scheduled) {
+    await finishSchedulingFailure(
+      operation,
+      context.instanceId,
+      (failure) => dependencies.finish(operation, "failed", { failure }),
+      dependencies.persistOperations,
+      dependencies.errorMessage
+    );
   }
 }
 

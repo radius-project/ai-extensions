@@ -1233,6 +1233,7 @@ describe("operation resume and abandon actions", () => {
         expect(instanceId).toBe("panel-z");
         expect(scheduled).toBe(operation);
         order.push("schedule");
+        return true;
       }
     });
     await handleResumeOperation(
@@ -1259,6 +1260,103 @@ describe("operation resume and abandon actions", () => {
     });
   });
 
+  it("finishes and re-persists a resumed operation when scheduling finds no runner", async () => {
+    const operation = actionRecord();
+    const order: string[] = [];
+    const { recording, response } = recorder();
+    const dependencies = actionDependencies({
+      getOperation: () => operation,
+      canResumeInput: () => true,
+      resumeAfterInput: () => {
+        order.push("resume");
+      },
+      persistOperations: () => {
+        order.push("persist");
+        return Promise.resolve();
+      },
+      scheduleEnvironmentOperation: () => {
+        expect(recording.status).toBe(202);
+        expect(recording.body).not.toBe("");
+        order.push("schedule");
+        return false;
+      },
+      finish: (finished, state, options?) => {
+        expect(finished).toBe(operation);
+        expect(options).toBeDefined();
+        finished.state = state;
+        finished.failure = options?.failure;
+        order.push("finish");
+      }
+    });
+
+    await handleResumeOperation(
+      postContext(
+        "/api/operations/op-action/resume/service-management-reference-required",
+        JSON.stringify({ serviceManagementReference: "new" }),
+        response,
+        "panel-missing"
+      ),
+      dependencies
+    );
+
+    expect(recording.status).toBe(202);
+    expect(order).toEqual([
+      "resume",
+      "persist",
+      "schedule",
+      "finish",
+      "persist"
+    ]);
+    expect(operation.state).toBe("failed");
+    expect(operation.failure).toEqual({
+      code: "operation-scheduling-failed",
+      stage: "configure-environment",
+      stepSeq: null,
+      message:
+        "Radius accepted the environment operation but could not start any setup work for it.",
+      classification: "unknown",
+      evidence:
+        "No server-owned task runner was available for instance panel-missing."
+    });
+  });
+
+  it("keeps a resumed operation terminal when scheduling repair persistence fails", async () => {
+    const operation = actionRecord();
+    let persistCalls = 0;
+    const seenErrors: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/resume/service-management-reference-required",
+      JSON.stringify({ serviceManagementReference: "new" }),
+      handleResumeOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canResumeInput: () => true,
+        resumeAfterInput: () => {},
+        persistOperations: () => {
+          persistCalls += 1;
+          return persistCalls === 1 ?
+              Promise.resolve()
+            : Promise.reject(new Error("disk gone on repair"));
+        },
+        scheduleEnvironmentOperation: () => false,
+        finish: (finished, state, options?) => {
+          finished.state = state;
+          finished.failure = options?.failure;
+        },
+        errorMessage: (error) => {
+          seenErrors.push((error as Error).message);
+          return (error as Error).message;
+        }
+      })
+    );
+
+    expect(recording.status).toBe(202);
+    expect(operation.state).toBe("failed");
+    expect(operation.failure?.code).toBe("operation-scheduling-failed");
+    expect(persistCalls).toBe(2);
+    expect(seenErrors).toEqual(["disk gone on repair"]);
+  });
+
   it.each([
     [true, "app-1", true],
     [false, "", true],
@@ -1279,7 +1377,7 @@ describe("operation resume and abandon actions", () => {
           canResumeInput: () => true,
           resumeAfterInput: () => {},
           persistOperations: () => Promise.resolve(),
-          scheduleEnvironmentOperation: () => {}
+          scheduleEnvironmentOperation: () => true
         })
       );
       expect(operation.request?.azure).toMatchObject({ appId, createNew });

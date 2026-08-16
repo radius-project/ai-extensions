@@ -79,7 +79,7 @@ const productionHandlers = {
       isTerminalState: () => false,
       persistOperations: () => Promise.resolve(),
       toClientView: () => null,
-      scheduleEnvironmentOperation: () => {},
+      scheduleEnvironmentOperation: () => true,
       errorMessage: (error) => String(error),
       inputRequiredState: "input_required"
     }
