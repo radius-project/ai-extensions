@@ -92,9 +92,9 @@ function start(): {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -127,12 +127,12 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
       '{"apps":[{"appId":"a1","displayName":"App One","createdDateTime":"2024-01-01"}]}'
     );
 
-    // Only GET is declared, so other methods still fall through to legacy.
+    // Only GET is declared, so other methods reach unmatched routing.
     const posted = await fetch(
       `${entry.baseUrl}/api/list-azure-app-registrations`,
       { method: "POST", body: "" }
     );
-    expect(posted.status).toBe(418);
+    expect(posted.status).toBe(404);
   });
 
   it("computes the serves-repos label and rejects a malformed appId", async () => {
@@ -229,9 +229,9 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
         '"namespaces":["default","radius-system"],"vpcs":[],"subnets":[]}'
     );
 
-    // Only POST is declared, so a GET still falls through to legacy.
+    // Only POST is declared, so a GET reaches unmatched routing.
     const got = await fetch(`${entry.baseUrl}/api/discover`);
-    expect(got.status).toBe(418);
+    expect(got.status).toBe(404);
   });
 
   it("answers 200 with the refusal shape for a bad subscriptionId and a bad body", async () => {

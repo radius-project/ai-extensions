@@ -177,9 +177,9 @@ function createControlledEnvironmentServer(
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -940,9 +940,7 @@ describe("environments — registry", () => {
 
 // Real HTTP over an OS-assigned loopback port, driven through the same route
 // table the panel hits. Reuses the shared `getOrCreateServer` fixture rather
-// than standing up a second server. `create-environment` is deliberately NOT
-// exercised here: it stays on the legacy fallback, and this suite pins that it
-// is absent from the migrated registry.
+// than standing up a second server.
 describe("environments — real loopback", () => {
   let baseUrl = "";
   let entry: CanvasServerEntry | undefined;
@@ -963,14 +961,14 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("answers the migrated GET list-environments with no-store and an empty list", async () => {
+  it("answers GET list-environments with no-store and an empty list", async () => {
     const res = await fetch(baseUrl + "/api/list-environments");
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({ environments: [] });
   });
 
-  it("answers the migrated GET verify-status for a missing repo", async () => {
+  it("answers GET verify-status for a missing repo", async () => {
     const res = await fetch(baseUrl + "/api/verify-status");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
@@ -1148,7 +1146,7 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("400s the migrated POST app-params with no repo", async () => {
+  it("400s POST app-params with no repo", async () => {
     const res = await fetch(baseUrl + "/api/app-params", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1161,8 +1159,8 @@ describe("environments — real loopback", () => {
     });
   });
 
-  it("fails closed on the migrated POST delete-environment with missing fields", async () => {
-    // The one destructive migrated route, exercised over the socket. With no
+  it("fails closed on POST delete-environment with missing fields", async () => {
+    // The destructive route is exercised over the socket. With no
     // repo/environment it must refuse at the first rung (400) before any
     // active-app check or DELETE — the fail-closed guard, on the wire.
     const res = await fetch(baseUrl + "/api/delete-environment", {
@@ -1302,11 +1300,9 @@ describe("environments — real loopback", () => {
     expect(body.error).not.toBe("repo and environment are required.");
   });
 
-  it("falls through a wrong method on a migrated path to the legacy dispatcher", async () => {
-    // POST to a GET-only migrated path must NOT be answered by the migrated
-    // handler: the route table only matches the declared method, so the
-    // dispatcher hands the request to the legacy fallback. The tell is that the
-    // no-store list-environments body is absent.
+  it("delegates a wrong method on a typed path to unmatched routing", async () => {
+    // POST to a GET-only path must not be answered by its typed handler. The tell
+    // is that the no-store list-environments body is absent.
     const res = await fetch(baseUrl + "/api/list-environments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1317,11 +1313,9 @@ describe("environments — real loopback", () => {
     expect(text).not.toContain('"environments":[]');
   });
 
-  it("leaves POST /api/create-environment as the sole deferred environments route", async () => {
-    // The residual environments route stays on the legacy fallback. It is
-    // server-owned, so an external POST is refused rather than executed — the
-    // point here is only that the migrated registry does not own it, enumerated
-    // by name rather than by a count.
+  it("keeps create-environment in its sibling module and enforces its server-owned guard", async () => {
+    // The large create action has its own typed module rather than being folded
+    // into this environment read/write registry.
     const registry = createEnvironmentsRoutes(deps({}));
     expect(Object.keys(registry)).not.toContain("POST /api/create-environment");
     const res = await fetch(baseUrl + "/api/create-environment", {
@@ -1329,19 +1323,18 @@ describe("environments — real loopback", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({})
     });
-    // Reaches the legacy server-owned guard rather than a migrated handler.
     expect(res.status).toBe(403);
   });
 });
 
-// A focused check that the dispatcher wiring routes a migrated method-mismatch
-// to the legacy fallback deterministically, without needing a live socket.
+// A focused check that the dispatcher delegates a method mismatch to the
+// explicit unmatched handler without needing a live socket.
 describe("environments — dispatcher method fallthrough", () => {
-  it("hands a POST on a GET-only migrated route to the legacy fallback", async () => {
-    const legacyFallback = vi.fn(
+  it("hands a POST on a GET-only route to the unmatched handler", async () => {
+    const handleUnmatchedRequest = vi.fn(
       (_req: IncomingMessage, res: ServerResponse<IncomingMessage>) => {
         res.writeHead(404);
-        res.end("legacy");
+        res.end("unmatched");
       }
     );
     const routes = createServerRouteTableForTest();
@@ -1349,12 +1342,12 @@ describe("environments — dispatcher method fallthrough", () => {
       instanceId: "panel",
       instances: new Map<string, CanvasServerEntry>(),
       routes,
-      legacyFallback,
+      handleUnmatchedRequest,
       markActivity: () => {}
     });
     const { recording, response } = recorder();
     await handler(request("POST", "/api/list-environments"), response);
-    expect(legacyFallback).toHaveBeenCalledOnce();
+    expect(handleUnmatchedRequest).toHaveBeenCalledOnce();
     expect(recording.status).toBe(404);
   });
 });
@@ -1365,7 +1358,7 @@ describe("environments — dispatcher method fallthrough", () => {
 function createServerRouteTableForTest(): readonly ServerRoute[] {
   // The full production table is validated in route-table.test.ts. Here we only
   // need the environments family wired as real ServerRoutes so the dispatcher's
-  // method-matching and legacy fallthrough can be exercised, so we build a
+  // method-matching and unmatched dispatch can be exercised, so we build a
   // minimal, self-contained table from the environments registry.
   const registry = createEnvironmentsRoutes(deps({}));
   const route = (method: "GET" | "POST", path: string): ServerRoute => ({
@@ -1374,7 +1367,6 @@ function createServerRouteTableForTest(): readonly ServerRoute[] {
     match: "exact",
     bodyPolicy: method === "POST" ? "json" : "none",
     owner: "environments",
-    migration: "migrated",
     handler: registry[`${method} ${path}`]
   });
   return [

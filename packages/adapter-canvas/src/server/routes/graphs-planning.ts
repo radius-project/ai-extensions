@@ -271,7 +271,7 @@ export async function handleDeployedGraph(
   );
 }
 
-export function createGraphsPlanningReadsRoutes(
+export function createGraphsPlanningRoutes(
   dependencies: GraphsPlanningReadsDependencies
 ): RouteHandlerRegistry {
   return {

@@ -3,13 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
-  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningRoutes,
   type DeployedGraphReaderOptions
-} from "../../../src/server/routes/graphs-planning-reads.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+} from "../../../src/server/routes/graphs-planning.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { DeployProgress } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -50,7 +47,7 @@ function start(): Harness {
   let entryMissing = false;
 
   const routes = createTestRouteTable(
-    createGraphsPlanningReadsRoutes({
+    createGraphsPlanningRoutes({
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       createDeployStatusReader: (options) => {
         readerOptions.push(options);
@@ -127,9 +124,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -166,7 +163,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     const posted = await fetch(`${entry.baseUrl}/api/deployed-graph`, {
       method: "POST"
     });
-    expect(posted.status).toBe(418);
+    expect(posted.status).toBe(404);
   });
 
   it("paints the published topology with artifact status over a real socket", async () => {
@@ -317,13 +314,5 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       updatedAt: null,
       application: null
     });
-
-    // Unmigrated requests still reach the fallback. The probe target is
-    // resolved by the shared helper rather than named: a named probe inherits
-    // the migration expiry of the route it names, and silently stops testing
-    // the fallback once that route migrates. The helper follows whatever the
-    // fallback still owns and fails loudly when its target becomes declared.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 });

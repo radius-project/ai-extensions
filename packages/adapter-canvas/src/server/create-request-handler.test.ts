@@ -58,8 +58,8 @@ function entry(): CanvasServerEntry {
 type HttpServer = import("node:http").Server;
 
 describe("createRequestHandler (SU-03)", () => {
-  it("dispatches a migrated route once and leaves method mismatches on the legacy fallback", async () => {
-    const migrated = vi.fn((context) =>
+  it("dispatches a typed route once and delegates method mismatches without reading their body", async () => {
+    const typedHandler = vi.fn((context) =>
       context.json(200, { path: context.pathname })
     );
     const route: ServerRoute = {
@@ -68,31 +68,32 @@ describe("createRequestHandler (SU-03)", () => {
       match: "exact",
       bodyPolicy: "json",
       owner: "liveness-source",
-      migration: "migrated",
-      handler: migrated
+      handler: typedHandler
     };
-    const legacyFallback = vi.fn();
+    const handleUnmatchedRequest = vi.fn();
     const markActivity = vi.fn();
     const instances = new Map([["panel", entry()]]);
     const handler = createRequestHandler({
       instanceId: "panel",
       instances,
       routes: [route],
-      legacyFallback,
+      handleUnmatchedRequest,
       markActivity
     }) as (
       request: IncomingMessage,
       response: ServerResponse<IncomingMessage>
     ) => Promise<void>;
 
-    const migratedResponse = responseRecorder();
-    await handler(request("/api/example", "POST"), migratedResponse.response);
-    await handler(request("/api/example", "GET"), responseRecorder().response);
+    const typedResponse = responseRecorder();
+    await handler(request("/api/example", "POST"), typedResponse.response);
+    const unmatchedRequest = request("/api/example", "GET", '{"ignored":true}');
+    await handler(unmatchedRequest, responseRecorder().response);
 
-    expect(migrated).toHaveBeenCalledTimes(1);
-    expect(migratedResponse.recorder.status).toBe(200);
-    expect(migratedResponse.recorder.body).toBe('{"path":"/api/example"}');
-    expect(legacyFallback).toHaveBeenCalledTimes(1);
+    expect(typedHandler).toHaveBeenCalledTimes(1);
+    expect(typedResponse.recorder.status).toBe(200);
+    expect(typedResponse.recorder.body).toBe('{"path":"/api/example"}');
+    expect(handleUnmatchedRequest).toHaveBeenCalledTimes(1);
+    expect(unmatchedRequest.readableDidRead).toBe(false);
     expect(markActivity).toHaveBeenCalledTimes(2);
   });
 
@@ -131,25 +132,24 @@ describe("createRequestHandler (SU-03)", () => {
     await expect(malformed.readJsonBody()).rejects.toBeInstanceOf(SyntaxError);
   });
 
-  it("applies global pre-routing before migrated handlers and the legacy fallback", async () => {
-    const migrated = vi.fn();
+  it("applies global pre-routing before typed and unmatched handlers", async () => {
+    const typedHandler = vi.fn();
     const route: ServerRoute = {
       method: "POST",
       path: "/api/example",
       match: "exact",
       bodyPolicy: "json",
       owner: "liveness-source",
-      migration: "migrated",
-      handler: migrated
+      handler: typedHandler
     };
-    const legacyFallback = vi.fn();
+    const handleUnmatchedRequest = vi.fn();
     const canvasEntry = entry();
     const instances = new Map([["panel", canvasEntry]]);
     const handler = createRequestHandler({
       instanceId: "panel",
       instances,
       routes: [route],
-      legacyFallback,
+      handleUnmatchedRequest,
       markActivity: vi.fn(),
       preRoute: (context) => {
         if (context.request.headers["sec-fetch-site"] === "cross-site") {
@@ -175,27 +175,27 @@ describe("createRequestHandler (SU-03)", () => {
       rejected.response
     );
     expect(rejected.recorder.status).toBe(403);
-    expect(migrated).not.toHaveBeenCalled();
-    expect(legacyFallback).not.toHaveBeenCalled();
+    expect(typedHandler).not.toHaveBeenCalled();
+    expect(handleUnmatchedRequest).not.toHaveBeenCalled();
     // A rejected cross-site mutation must not mutate instance page state. The
     // legacy dispatcher rejected before reading ?page, so building the request
     // context must stay free of that side effect.
     expect(canvasEntry.page).toBe("graph");
     expect(canvasEntry.state.activeGraphView).toBeUndefined();
 
-    const rejectedLegacy = responseRecorder();
+    const rejectedUnmatched = responseRecorder();
     await handler(
       request("/api/other", "POST", "", { "sec-fetch-site": "cross-site" }),
-      rejectedLegacy.response
+      rejectedUnmatched.response
     );
-    expect(rejectedLegacy.recorder.status).toBe(403);
-    expect(legacyFallback).not.toHaveBeenCalled();
+    expect(rejectedUnmatched.recorder.status).toBe(403);
+    expect(handleUnmatchedRequest).not.toHaveBeenCalled();
 
     await handler(
       request("/api/example?page=planned", "POST"),
       responseRecorder().response
     );
-    expect(migrated).toHaveBeenCalledTimes(1);
+    expect(typedHandler).toHaveBeenCalledTimes(1);
     expect(canvasEntry.page).toBe("planned");
     expect(canvasEntry.state.activeGraphView).toBe("planned");
   });

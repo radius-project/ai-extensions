@@ -1,7 +1,7 @@
 import type { CanvasRequestContext } from "./request-context.js";
 
 export type RouteMethod = "ANY" | "GET" | "POST";
-export type RouteMatcher = "exact" | "prefix";
+export type RouteMatcher = "exact" | "prefix" | "template";
 export type RouteBodyPolicy = "none" | "json";
 export type RouteOwner =
   | "liveness-source"
@@ -27,15 +27,9 @@ export interface RouteDeclaration {
   owner: RouteOwner;
 }
 
-export type ServerRoute =
-  | (RouteDeclaration & {
-      migration: "legacy";
-      handler: null;
-    })
-  | (RouteDeclaration & {
-      migration: "migrated";
-      handler: RouteHandler;
-    });
+export type ServerRoute = RouteDeclaration & {
+  handler: RouteHandler;
+};
 
 function declare(
   method: RouteMethod,
@@ -46,6 +40,63 @@ function declare(
 ): RouteDeclaration {
   return { method, path, match, bodyPolicy, owner };
 }
+
+interface CompiledRouteTemplate {
+  pattern: RegExp;
+  parameterNames: readonly string[];
+}
+
+const TEMPLATE_PARAMETER = /^:([A-Za-z][A-Za-z0-9]*)$/;
+
+function compileRouteTemplate(template: string): CompiledRouteTemplate {
+  const parameterNames: string[] = [];
+  const pattern = template
+    .split("/")
+    .map((segment) => {
+      if (!segment.startsWith(":")) {
+        return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+      const parameter = TEMPLATE_PARAMETER.exec(segment);
+      if (!parameter) {
+        throw new Error(`Invalid server route template segment: ${segment}`);
+      }
+      const name = parameter[1];
+      if (parameterNames.includes(name)) {
+        throw new Error(`Duplicate server route template parameter: ${name}`);
+      }
+      parameterNames.push(name);
+      return "([^/]+)";
+    })
+    .join("/");
+  if (parameterNames.length === 0) {
+    throw new Error(`Server route template has no parameters: ${template}`);
+  }
+  return {
+    pattern: new RegExp(`^${pattern}$`),
+    parameterNames
+  };
+}
+
+export const templatePathParameters = (() => {
+  const cache = new Map<string, CompiledRouteTemplate>();
+  return (
+    template: string,
+    pathname: string
+  ): Readonly<Record<string, string>> | undefined => {
+    let compiled = cache.get(template);
+    if (!compiled) {
+      compiled = compileRouteTemplate(template);
+      cache.set(template, compiled);
+    }
+    const match = compiled.pattern.exec(pathname);
+    if (!match) return undefined;
+    return Object.freeze(
+      Object.fromEntries(
+        compiled.parameterNames.map((name, index) => [name, match[index + 1]])
+      )
+    );
+  };
+})();
 
 // Single source of truth for route ownership. Every method and path the canvas
 // server answers is declared exactly once, in the order the legacy dispatcher
@@ -148,51 +199,21 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("POST", "/api/diff-branches", "exact", "json", "graphs-planning"),
   declare("POST", "/api/deploy", "exact", "json", "deployments"),
   declare("POST", "/api/deploy-reset", "exact", "none", "deployments"),
-  declare("POST", "/api/discover", "exact", "json", "azure-discovery")
-];
-
-// Routes whose owner module already answers the request. Everything else is
-// still served by the temporary legacy fallback in `server.ts`; this list is the
-// migration ledger the boundary test enforces after every slice.
-export const MIGRATED_ROUTE_KEYS: readonly string[] = [
-  "ANY /api/ping",
-  "GET /api/operations",
-  "GET /api/operations/",
-  "POST /api/open-source",
-  "GET /api/credential-profiles",
-  "GET /api/github-identity",
-  "POST /api/github-account",
-  "POST /api/save-credential-profile",
-  "POST /api/delete-credential-profile",
-  "POST /api/oidc",
-  "POST /api/verify-azure-login",
-  "POST /api/azure-cli-assist",
-  "POST /api/verify-aws-login",
-  "GET /api/list-azure-app-registrations",
-  "GET /api/azure-app-serves-repos",
-  "POST /api/azure-auto-setup",
-  "GET /api/user-repos",
-  "POST /api/repo-branches",
-  "POST /api/discover-branches",
-  "GET /api/load-graph-stream",
-  "POST /api/operations",
-  "GET /api/deploy-status",
-  "GET /api/list-applications",
-  "GET /api/list-deployments",
-  "POST /api/deploy",
-  "POST /api/deploy-reset",
-  "POST /api/delete-deployment",
-  "GET /api/progress",
-  "GET /api/deployed-graph",
-  "POST /api/app-params",
-  "POST /api/delete-environment",
-  "GET /api/list-environments",
-  "GET /api/verify-status",
-  "POST /api/load-graph",
-  "POST /api/plan-graph",
-  "POST /api/diff-branches",
-  "POST /api/create-environment",
-  "POST /api/discover"
+  declare("POST", "/api/discover", "exact", "json", "azure-discovery"),
+  declare(
+    "POST",
+    "/api/operations/:operationId/resume/:code",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/abandon",
+    "template",
+    "none",
+    "operations-status"
+  )
 ];
 
 export function routeKey(
@@ -201,25 +222,22 @@ export function routeKey(
   return `${route.method} ${route.path}`;
 }
 
-export const LEGACY_ROUTE_INVENTORY = Object.freeze(
-  SERVER_ROUTE_DECLARATIONS.map(routeKey).filter(
-    (key) => !MIGRATED_ROUTE_KEYS.includes(key)
-  )
-);
-
 export function createServerRouteTable(
   handlers: RouteHandlerRegistry
 ): readonly ServerRoute[] {
+  const declarationKeys = new Set(SERVER_ROUTE_DECLARATIONS.map(routeKey));
+  for (const key of Object.keys(handlers)) {
+    if (!declarationKeys.has(key)) {
+      throw new Error(`Handler registered for undeclared server route: ${key}`);
+    }
+  }
   const routes = SERVER_ROUTE_DECLARATIONS.map<ServerRoute>((declaration) => {
     const key = routeKey(declaration);
-    if (!MIGRATED_ROUTE_KEYS.includes(key)) {
-      return { ...declaration, migration: "legacy", handler: null };
-    }
     const handler = handlers[key];
     if (!handler) {
-      throw new Error(`Missing handler for migrated server route: ${key}`);
+      throw new Error(`Missing handler for server route: ${key}`);
     }
-    return { ...declaration, migration: "migrated", handler };
+    return { ...declaration, handler };
   });
   assertRouteTable(routes);
   return routes;
@@ -234,8 +252,9 @@ export function matchRoute(
   return routes.find(
     (route) =>
       (route.method === "ANY" || route.method === normalizedMethod) &&
-      (route.match === "prefix" ?
-        pathname.startsWith(route.path)
+      (route.match === "prefix" ? pathname.startsWith(route.path)
+      : route.match === "template" ?
+        templatePathParameters(route.path, pathname) !== undefined
       : pathname === route.path)
   );
 }
@@ -266,12 +285,10 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
+    if (route.match === "template") compileRouteTemplate(route.path);
     if (!route.owner) throw new Error(`Unowned server route: ${key}`);
-    if (route.migration === "migrated" && !route.handler) {
-      throw new Error(`Migrated server route has no handler: ${key}`);
-    }
-    if (route.migration === "legacy" && route.handler) {
-      throw new Error(`Legacy server route unexpectedly has a handler: ${key}`);
+    if (typeof route.handler !== "function") {
+      throw new Error(`Server route has no handler: ${key}`);
     }
   }
 }

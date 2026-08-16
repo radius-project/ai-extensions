@@ -4,11 +4,11 @@ import { describe, expect, it } from "vitest";
 import type { DeployStatus } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import {
-  createGraphsPlanningReadsRoutes,
+  createGraphsPlanningRoutes,
   handleDeployedGraph,
   handleProgress,
   type GraphsPlanningReadsDependencies
-} from "./graphs-planning-reads.js";
+} from "./graphs-planning.js";
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -368,7 +368,7 @@ function payloadOf(recording: Recording): DeployedGraphPayload {
 
 describe("graphs-planning read routes (SU-09)", () => {
   it("declares exactly the two routes it owns", () => {
-    const routes = createGraphsPlanningReadsRoutes(dependencies());
+    const routes = createGraphsPlanningRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/progress",
       "GET /api/deployed-graph"
@@ -378,7 +378,7 @@ describe("graphs-planning read routes (SU-09)", () => {
   it("dispatches both registry entries to their handlers", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, { state: { progressMessages: ["hello"] } });
-    const routes = createGraphsPlanningReadsRoutes(deps);
+    const routes = createGraphsPlanningRoutes(deps);
     const first = recorder();
     await routes["GET /api/progress"](
       createRequestContext(

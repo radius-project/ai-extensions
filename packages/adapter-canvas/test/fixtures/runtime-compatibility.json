@@ -226,6 +226,16 @@
       "method": "POST",
       "path": "/api/discover",
       "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations/:operationId/resume/:code",
+      "match": "template"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations/:operationId/abandon",
+      "match": "template"
     }
   ],
   "htmlMarkers": {
