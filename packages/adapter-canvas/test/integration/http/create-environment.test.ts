@@ -574,8 +574,12 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { steps: string[] };
 
     expect(payload.steps).toContain("✅ Credentials verification dispatched.");
-    expect(payload.steps).not.toContain(
-      "Environment created. Deploy your application from the Environments list when ready."
+    expect(payload.steps).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Environment created. Deploy your application from the Environments list when ready."
+        )
+      ])
     );
     expect(harness.steps).toContain("✅ Credentials verification dispatched.");
   });
