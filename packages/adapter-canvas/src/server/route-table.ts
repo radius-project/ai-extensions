@@ -77,19 +77,26 @@ function compileRouteTemplate(template: string): CompiledRouteTemplate {
   };
 }
 
-export function templatePathParameters(
-  template: string,
-  pathname: string
-): Readonly<Record<string, string>> | undefined {
-  const compiled = compileRouteTemplate(template);
-  const match = compiled.pattern.exec(pathname);
-  if (!match) return undefined;
-  return Object.freeze(
-    Object.fromEntries(
-      compiled.parameterNames.map((name, index) => [name, match[index + 1]])
-    )
-  );
-}
+export const templatePathParameters = (() => {
+  const cache = new Map<string, CompiledRouteTemplate>();
+  return (
+    template: string,
+    pathname: string
+  ): Readonly<Record<string, string>> | undefined => {
+    let compiled = cache.get(template);
+    if (!compiled) {
+      compiled = compileRouteTemplate(template);
+      cache.set(template, compiled);
+    }
+    const match = compiled.pattern.exec(pathname);
+    if (!match) return undefined;
+    return Object.freeze(
+      Object.fromEntries(
+        compiled.parameterNames.map((name, index) => [name, match[index + 1]])
+      )
+    );
+  };
+})();
 
 // Single source of truth for route ownership. Every method and path the canvas
 // server answers is declared exactly once, in the order the legacy dispatcher
