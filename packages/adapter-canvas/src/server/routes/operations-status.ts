@@ -550,7 +550,18 @@ export async function handleResumeOperation(
     operationId,
     statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
   });
-  dependencies.scheduleEnvironmentOperation(context.instanceId, operation);
+  const scheduled = (dependencies.scheduleEnvironmentOperation(
+    context.instanceId,
+    operation
+  ) as unknown) as boolean | void;
+  if (scheduled === false) {
+    dependencies.finish(operation, "failed");
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      dependencies.errorMessage(error);
+    }
+  }
 }
 
 export async function handleAbandonOperation(
