@@ -131,6 +131,14 @@ const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_MS = 30000;
 const PENDING_FALLBACK_MS = 25000;
 
+function advancePendingNodes(resources: CanvasGraphResource[]): void {
+  for (const resource of resources) {
+    if ((resource.deployStatus ?? "pending") === "pending")
+      resource.deployStatus = "in_progress";
+    if (resource.outputResources) advancePendingNodes(resource.outputResources);
+  }
+}
+
 export function createDeployMonitorService(
   dependencies: DeployMonitorDependencies
 ): DeployMonitorService {
@@ -273,6 +281,8 @@ export function createDeployMonitorService(
       let beatStepStartedAt = 0;
       let lastBeatAt = 0;
       let deployStarted = false;
+      let artifactProgressObserved = false;
+      let pendingFallbackApplied = false;
 
       // Deploy status and the deployed graph are published as a workflow
       // artifact. This reader is scoped to the run being tracked, so it reports
@@ -308,6 +318,8 @@ export function createDeployMonitorService(
           );
           return;
         }
+        if (statusMap.size > 0 || messageMap.size > 0)
+          artifactProgressObserved = true;
         dependencies.applyDeployMessages(resources, messageMap);
         const changes = dependencies.applyDeployStatusToResources(
           resources,
@@ -413,13 +425,15 @@ export function createDeployMonitorService(
           // so that when the producer starts uploading during the deploy, this
           // lights up unchanged.
           await pollDeployStatus();
-          // Fallback: after ~25s, mark only nodes that are still pending as
-          // in_progress so the eager first-node transition cannot leave the
-          // rest of a normal request graph stuck gray for the whole run.
-          if (dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS) {
-            resources.forEach((r) => {
-              if (r.deployStatus === "pending") setStatus(r, "in_progress");
-            });
+          // Run this only when the producer has published no progress. This
+          // cannot use setStatus because advanced output nodes must be kept.
+          if (
+            !artifactProgressObserved &&
+            !pendingFallbackApplied &&
+            dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS
+          ) {
+            pendingFallbackApplied = true;
+            advancePendingNodes(resources);
           }
         }
 
