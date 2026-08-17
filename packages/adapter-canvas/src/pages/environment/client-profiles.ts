@@ -193,7 +193,7 @@ function renderGitHubIdentity() {
         if (envGhRecheck) envGhRecheck.style.display = (scopeWarn || repoWarn) ? '' : 'none';
         if (warn) {
             envGhNote.textContent = warn;
-            envGhNote.style.color = 'var(--rad-warning, #9a6700)';
+            envGhNote.style.color = 'var(--rad-warning)';
             envGhNote.style.display = '';
         } else {
             envGhNote.innerHTML = 'Acts as <strong>@' + id.actingLogin + '</strong> to commit the deploy workflow to your repo and publish the state package. Needs the <code>workflow</code> and <code>write:packages</code> scopes.';

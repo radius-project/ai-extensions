@@ -126,7 +126,7 @@ function renderCredGitHubAccess(id) {
             ' && gh auth refresh -h github.com -s read:packages -s write:packages';
         status.innerHTML = 'The active account <strong>@' + escapeHtmlClient(id.actingLogin) +
             '</strong> cannot publish packages. Run the command below, complete the GitHub authorization, then retry. <strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.';
-        status.style.color = 'var(--rad-warning, #9a6700)';
+        status.style.color = 'var(--rad-warning)';
         command.textContent = refreshCmd;
         commandRow.style.display = 'flex';
         retry.style.display = '';

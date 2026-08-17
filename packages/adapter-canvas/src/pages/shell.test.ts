@@ -35,9 +35,18 @@ describe("pageShell", () => {
     );
     expect(html).toContain("--rad-neutral-bg: var(--rad-bg-subtle)");
     expect(html).toContain("--rad-node-bg: var(--rad-surface)");
-    expect(html).toContain("--rad-success: var(--text-color-success");
-    expect(html).toContain("--rad-warning: var(--text-color-warning");
-    expect(html).toContain("--rad-danger: var(--text-color-danger");
+    // Status colors still flow from the host, but are mixed toward the active
+    // text color so a host palette that does not follow the canvas theme cannot
+    // leave them unreadable (see shell-styles.test.ts for the contrast ratios).
+    expect(html).toContain(
+      "--rad-success: color-mix(in srgb, var(--text-color-success"
+    );
+    expect(html).toContain(
+      "--rad-warning: color-mix(in srgb, var(--text-color-warning"
+    );
+    expect(html).toContain(
+      "--rad-danger: color-mix(in srgb, var(--text-color-danger"
+    );
     expect(html).not.toContain("localStorage");
     expect(html).not.toContain("matchMedia");
     expect(html).not.toContain("prefers-color-scheme");
