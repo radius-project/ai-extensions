@@ -239,14 +239,12 @@ describe("pageShell document structure", () => {
   });
 
   it("ships the shared client scripts before the page body that calls them", () => {
-    const repoBranch = html.indexOf("function radiusSetupRepoBranch");
-    const graph = html.indexOf("function radiusRenderGraph");
+    const graph = html.indexOf(browserEntryMarker("graph"));
     const deleteDialog = html.indexOf(
       "function radiusCreateDeleteDeploymentDialog"
     );
     const body = html.indexOf('<div class="main-content">');
-    expect(repoBranch).toBeGreaterThan(-1);
-    expect(graph).toBeGreaterThan(repoBranch);
+    expect(graph).toBeGreaterThan(-1);
     expect(deleteDialog).toBeGreaterThan(graph);
     expect(body).toBeGreaterThan(deleteDialog);
   });
@@ -268,6 +266,17 @@ describe("pageShell document structure", () => {
       html.indexOf('id="radius-reconnect-overlay"')
     );
   });
+
+  it.each(["graph"] as const)(
+    "injects the compiled %s entry inline exactly once",
+    (name) => {
+      const marker = browserEntryMarker(name);
+      expect(html.split(marker).length - 1).toBe(1);
+      expect(html.indexOf(marker)).toBeLessThan(
+        html.indexOf('<div class="main-content">')
+      );
+    }
+  );
 
   it("renders the feedback widget with both destinations on every page", () => {
     expect(html).toContain('id="rad-feedback-btn"');

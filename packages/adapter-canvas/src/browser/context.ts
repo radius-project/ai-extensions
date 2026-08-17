@@ -9,13 +9,17 @@ import type {
   DomDocument,
   DomElement,
   DomEventTarget,
+  DomInputElement,
+  DomOptionElement,
   DomPort,
+  DomSelectElement,
   ExternalOpenPort,
   FocusPort,
   HttpResponse,
   LoggerPort,
   NavigationPort,
   NetworkPort,
+  OptionSpec,
   StoragePort
 } from "./ports.js";
 
@@ -38,15 +42,62 @@ function isDomEventTargetLike(value: unknown): boolean {
 
 export function isDomElement(value: unknown): value is DomElement {
   const style = readMember(value, "style");
+  const classList = readMember(value, "classList");
+  const dataset = readMember(value, "dataset");
+  const textContent = readMember(value, "textContent");
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
+    typeof value.className === "string" &&
+    typeof value.innerHTML === "string" &&
+    (typeof textContent === "string" || textContent === null) &&
+    typeof value.hidden === "boolean" &&
     isRecord(style) &&
     typeof style.display === "string" &&
+    isRecord(classList) &&
+    isCallable(classList.add) &&
+    isCallable(classList.remove) &&
+    isCallable(classList.toggle) &&
+    isCallable(classList.contains) &&
+    isRecord(dataset) &&
     isDomEventTargetLike(value) &&
     isCallable(value.setAttribute) &&
+    isCallable(value.getAttribute) &&
     isCallable(value.removeAttribute) &&
-    isCallable(value.focus)
+    isCallable(value.focus) &&
+    isCallable(value.scrollIntoView) &&
+    isCallable(value.querySelector) &&
+    isCallable(value.querySelectorAll) &&
+    isCallable(value.closest) &&
+    isCallable(value.appendChild) &&
+    isCallable(value.removeChild) &&
+    isCallable(value.replaceChildren) &&
+    isCallable(value.remove)
+  );
+}
+
+export function isDomOptionElement(value: unknown): value is DomOptionElement {
+  return (
+    isDomElement(value) &&
+    typeof readMember(value, "value") === "string" &&
+    typeof readMember(value, "selected") === "boolean"
+  );
+}
+
+export function isDomInputElement(value: unknown): value is DomInputElement {
+  return (
+    isDomElement(value) &&
+    typeof readMember(value, "value") === "string" &&
+    typeof readMember(value, "disabled") === "boolean"
+  );
+}
+
+export function isDomSelectElement(value: unknown): value is DomSelectElement {
+  const options = readMember(value, "options");
+  return (
+    isDomInputElement(value) &&
+    (isRecord(options) || Array.isArray(options)) &&
+    typeof readMember(value, "selectedIndex") === "number"
   );
 }
 
@@ -73,6 +124,8 @@ export function isDomDocument(value: unknown): value is DomDocument {
     typeof value.visibilityState === "string" &&
     isDomEventTargetLike(value) &&
     isCallable(value.getElementById) &&
+    isCallable(value.querySelector) &&
+    isCallable(value.querySelectorAll) &&
     isCallable(value.createElement)
   );
 }
@@ -91,12 +144,55 @@ export function isHttpResponse(value: unknown): value is HttpResponse {
   );
 }
 
-export function createDomPort(document: DomDocument): DomPort {
+function optionElement(
+  document: DomDocument,
+  option: OptionSpec
+): DomOptionElement {
+  const element = document.createElement("option");
+  if (!isDomOptionElement(element)) {
+    throw new Error("Radius browser context cannot create an option.");
+  }
+  element.value = option.value;
+  element.textContent = option.label;
+  element.selected = option.selected === true;
+  return element;
+}
+
+export function createDomPort(
+  document: DomDocument,
+  eventConstructor?: unknown
+): DomPort {
   return {
     document,
     byId(elementId) {
       const element = document.getElementById(elementId);
       return isDomElement(element) ? element : null;
+    },
+    inputById(elementId) {
+      const element = document.getElementById(elementId);
+      return isDomInputElement(element) ? element : null;
+    },
+    selectById(elementId) {
+      const element = document.getElementById(elementId);
+      return isDomSelectElement(element) ? element : null;
+    },
+    setOptions(select, options) {
+      select.replaceChildren();
+      for (const option of options) {
+        select.appendChild(optionElement(document, option));
+      }
+      const selectedIndex = options.findIndex(
+        (option) => option.selected === true
+      );
+      const effectiveIndex =
+        selectedIndex >= 0 ? selectedIndex
+        : options.length > 0 ? 0
+        : -1;
+      select.selectedIndex = effectiveIndex;
+      select.value = effectiveIndex >= 0 ? options[effectiveIndex].value : "";
+    },
+    createOption(option) {
+      return optionElement(document, option);
     },
     createElement(tagName) {
       const element = document.createElement(tagName);
@@ -106,6 +202,27 @@ export function createDomPort(document: DomDocument): DomPort {
         );
       }
       return element;
+    },
+    all(root, selectors) {
+      if (root === null) return [];
+      return Array.from(root.querySelectorAll(selectors)).filter(isDomElement);
+    },
+    dispatch(target, type) {
+      const dispatchEvent = readMember(target, "dispatchEvent");
+      if (!isCallable(dispatchEvent) || !isCallable(eventConstructor)) {
+        throw new Error(
+          `Radius browser context cannot dispatch the "${type}" event.`
+        );
+      }
+      dispatchEvent.call(target, Reflect.construct(eventConstructor, [type]));
+    },
+    scrollToEnd(element) {
+      const height = readMember(element, "scrollHeight");
+      return (
+        typeof height === "number" &&
+        Number.isFinite(height) &&
+        Reflect.set(element, "scrollTop", height)
+      );
     }
   };
 }
@@ -150,6 +267,7 @@ function createNavigationPort(scope: unknown): NavigationPort {
     throw new Error("Radius browser context is missing location.");
   }
   const history = readMember(scope, "history");
+  const parserConstructor = readMember(scope, "DOMParser");
 
   function writeHistory(method: "pushState" | "replaceState", url: string) {
     const write = readMember(history, method);
@@ -177,6 +295,21 @@ function createNavigationPort(scope: unknown): NavigationPort {
     },
     replaceState(url) {
       writeHistory("replaceState", url);
+    },
+    parseDocument(html) {
+      if (!isCallable(parserConstructor)) {
+        throw new Error("Radius browser context is missing DOMParser.");
+      }
+      const parser: unknown = Reflect.construct(parserConstructor, []);
+      const parse = readMember(parser, "parseFromString");
+      if (!isCallable(parse)) {
+        throw new Error("Radius browser context is missing DOMParser.");
+      }
+      const parsed: unknown = parse.call(parser, html, "text/html");
+      if (!isDomDocument(parsed)) {
+        throw new Error("Radius browser context could not parse a document.");
+      }
+      return parsed;
     }
   };
 }
@@ -367,7 +500,7 @@ export function resolveBrowserContext(
     throw new Error("Radius browser context is missing window.");
   }
   return {
-    dom: createDomPort(document),
+    dom: createDomPort(document, readMember(scope, "Event")),
     page,
     net: createNetworkPort(scope),
     nav: createNavigationPort(scope),
