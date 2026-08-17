@@ -42,22 +42,25 @@ Phase 4 is complete and meets BU-01–BU-14 in #395.
 
 ## Required checks
 
-| Check                      | Required when                                                                    | What it protects                                                       |
-|----------------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------------|
-| Focused module tests       | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling         |
-| Extension setup tests      | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change    | Registration, open, reopen, close, reconnect, and cleanup              |
-| Local API tests            | A page route, API route, cache, stream, or destructive action changes            | Requests, responses, errors, state, cleanup, and safe failure          |
-| Cancellation tests         | Async work, external calls, subprocesses, navigation, close, or shutdown changes | Leaked work, late mutation, false cancellation, and duplicate cleanup  |
-| Packaged-extension test    | Runtime, page, browser, dependency, build, or packaging changes                  | Missing code, duplicate setup, broken startup, and broken shutdown     |
-| Chromium behavior tests    | Browser behavior changes after Phase 6 begins                                    | Real events, focus, forms, polling, navigation, and browser rendering  |
-| End-to-end workflow tests  | A supported workflow crosses the browser and server                              | Regressions that smaller tests cannot see                              |
-| Accessibility and keyboard | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG   |
-| Screenshot review          | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                |
-| Real-host check            | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect |
+| Check                       | Required when                                                                    | What it protects                                                        |
+|-----------------------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------------|
+| Focused module tests        | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling          |
+| Extension setup tests       | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change    | Registration, open, reopen, close, reconnect, and cleanup               |
+| Local API tests             | A page route, API route, cache, stream, or destructive action changes            | Requests, responses, errors, state, cleanup, and safe failure           |
+| Cancellation tests          | Async work, external calls, subprocesses, navigation, close, or shutdown changes | Leaked work, late mutation, false cancellation, and duplicate cleanup   |
+| GitHub authentication tests | Token, account, scope, package, or `gh` command behavior changes                 | Wrong identity, unsafe fallback, leaked token, and unclear auth failure |
+| Packaged-extension test     | Runtime, page, browser, dependency, build, or packaging changes                  | Missing code, duplicate setup, broken startup, and broken shutdown      |
+| Chromium behavior tests     | Browser behavior changes after Phase 6 begins                                    | Real events, focus, forms, polling, navigation, and browser rendering   |
+| End-to-end workflow tests   | A supported workflow crosses the browser and server                              | Regressions that smaller tests cannot see                               |
+| Accessibility and keyboard  | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG    |
+| Screenshot review           | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                 |
+| Real-host check             | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect  |
 
 Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
 
 Cancellation is not a separate implementation phase. Add each test at the lowest boundary that owns the work, and add any missing production behavior in the same pull request. Phase 5 covers runtime, server, adapter, subprocess, and HTTP cancellation. Phase 6 covers browser abort, teardown, navigation, and stale results. Phase 7 adds bounded repeated races, timeouts, and cleanup checks. Phase 8 confirms close, reopen, and reconnect behavior in a supported host.
+
+GitHub authentication follows the same approach rather than becoming a separate phase. Phase 5 covers injected `GH_TOKEN` and `GITHUB_TOKEN`, stored `gh` accounts, precedence, explicit account selection, required scopes, package credentials, redaction, and failures. Phase 6 covers the identity and account-selection UI. Phase 7 repeats the fake-credential matrix on supported operating systems. Phase 8 verifies a real secure credential store with disposable accounts and cleanup.
 
 ## Standard local check
 
@@ -101,25 +104,25 @@ Completion evidence: BU-01–BU-14 pass; all 12 entries build safely and appear 
 
 ### Phase 5: permanent extension and server test gates
 
-Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, package, and cancellation cases. Cover close or shutdown during startup, external calls, mutations, and subprocess execution; prove that late results cannot change newer state. Make the complete checks required for pull requests and publishing.
+Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, package, cancellation, and GitHub authentication cases. Cover close or shutdown during startup, external calls, mutations, and subprocess execution; prove that late results cannot change newer state. Test injected tokens, stored accounts, scope-based fallback, explicit account choice, package credentials, redaction, and authentication failures without using real secrets. Make the complete checks required for pull requests and publishing.
 
 Complete when all three suites run without live GitHub or cloud access, produce short logs with no secrets, and block regressions in CI.
 
 ### Phase 6: real browser behavior
 
-Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility. Prove that navigation and teardown abort browser-owned work, ignore late callbacks, and do not falsely report durable server work as cancelled.
+Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, GitHub identity and account selection, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility. Prove that authentication errors and account mismatches are clear without exposing tokens. Prove that navigation and teardown abort browser-owned work, ignore late callbacks, and do not falsely report durable server work as cancelled.
 
 Complete when these checks are repeatable without a public content network, personal login, or mutable repository, and useful traces are saved when they fail.
 
 ### Phase 7: screenshots and reliability
 
-Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, cancellation races, timeouts, multiple instances, cleanup, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
+Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, cancellation races, timeouts, multiple instances, cleanup, GitHub authentication command behavior on supported operating systems, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
 
 Complete when screenshots are stable, changed paths pass their reliability checks, and retry-only passes are recorded.
 
 ### Phase 8: supported-host qualification
 
-Use a controlled Copilot host, non-personal authentication, and a disposable workspace to run HOST-01–HOST-07. Confirm that closing, reopening, and reconnecting follow the documented cancel-or-continue policy. The harness must distinguish a test-system failure from a product failure and prove cleanup.
+Use a controlled Copilot host, non-personal authentication, disposable GitHub accounts, an isolated `GH_CONFIG_DIR`, and a disposable workspace to run HOST-01–HOST-07. Confirm host-injected-token and real `gh` secure-store behavior without reading or changing a developer credential. Confirm that closing, reopening, and reconnecting follow the documented cancel-or-continue policy. The harness must distinguish a test-system failure from a product failure and prove cleanup.
 
 Complete when every host case passes before release. Skipped, simulated, or cleanup-incomplete runs do not count.
 
@@ -130,6 +133,7 @@ Complete when every host case passes before release. Skipped, simulated, or clea
 - Tests bind local servers to `127.0.0.1` on operating-system-assigned ports.
 - Logs and saved failure files remove credentials and inherited environment values.
 - Browser tests provide vendor code locally instead of downloading it from unpkg.
+- Pull-request tests use a fake `gh`, placeholder tokens, and an isolated `GH_CONFIG_DIR`; only controlled host qualification may use a real secure credential store.
 - Coverage for a package may not fall below its checked-in baseline. New modules target at least 80% line coverage, 80% function coverage, and 70% branch coverage. Named safety and error cases remain required regardless of the percentage.
 
 ## Completion
@@ -257,6 +261,21 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | CN-06 | Cancelling command-line work terminates only its child process tree and waits for bounded cleanup                                                    |
 | CN-07 | Instance generation, operation identity, and graph context tokens prevent closed or superseded work from committing late results                     |
 | CN-08 | Completion, cancellation, close, and shutdown races produce one terminal outcome and exactly-once cleanup                                            |
+
+#### GitHub CLI authentication
+
+| ID    | Requirement                                                                                                                                                     |
+|-------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| GA-01 | `GH_TOKEN` and `GITHUB_TOKEN` work independently and follow explicit precedence when both are present                                                           |
+| GA-02 | An injected token with required scopes remains the acting identity; scope-based fallback occurs only when a suitable stored account exists                      |
+| GA-03 | With no injected token, `gh` uses the active stored account without reading the keychain or `hosts.yml` directly                                                |
+| GA-04 | Explicit account selection wins across injected-token, keyring, multi-account, and enterprise-managed-user cases                                                |
+| GA-05 | Package authentication requests the acting login's stored token before falling back to its injected token and surfaces missing package scopes                   |
+| GA-06 | Missing, expired, revoked, malformed, unrecognized, insufficient-scope, timeout, token-read, status, and account-switch failures remain distinct and actionable |
+| GA-07 | GitHub.com and unsupported GitHub Enterprise Server package paths cannot silently redirect credentials between hosts                                            |
+| GA-08 | Tokens never appear in arguments, logs, snapshots, reports, browser state, or error text                                                                        |
+| GA-09 | Pull-request tests use fake `gh` output, placeholder tokens, and isolated configuration; they never inspect or mutate a developer credential store              |
+| GA-10 | Controlled host qualification verifies secure-store lookup and cleanup with disposable accounts separately from environment-token behavior                      |
 
 #### Critical journeys
 
@@ -407,6 +426,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | QR-13 | Unknown consumer of removed declaration                  | Phase 0 audit/history                    |
 | QR-14 | Setup becomes stale/non-resumable or leaks raw errors    | LC-17, RF-08, J-11                       |
 | QR-15 | Closed or superseded work leaks or mutates newer state   | CN-01–CN-08 across Phases 5–8            |
+| QR-16 | Wrong GitHub identity, unsafe fallback, or leaked token  | GA-01–GA-10 across Phases 5–8            |
 
 ### Appendix F: priority suite identifiers
 
