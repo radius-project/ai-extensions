@@ -44,6 +44,12 @@ interface Harness {
   resets: unknown[];
   dispatches: string[][];
   setEntryMissing(missing: boolean): void;
+  // The credential context the workflow-scope fallback reads, plus the gh
+  // results the dispatch sees. Mutable so a scenario can model an injected
+  // session token and an explicitly selected account.
+  processEnv: NodeJS.ProcessEnv;
+  timeOutDispatch(): void;
+  failDispatchWith(stderr: string): void;
 }
 
 function row(environment: string): DeploymentRow {
@@ -63,7 +69,10 @@ function start(): Harness {
   const environments: string[] = [];
   const resets: unknown[] = [];
   const dispatches: string[][] = [];
+  const processEnv: NodeJS.ProcessEnv = {};
   let entryMissing = false;
+  let dispatchTimedOut = false;
+  let dispatchStderr = "";
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
@@ -102,9 +111,18 @@ function start(): Harness {
       findWorkflowRun: () => Promise.resolve(7),
       runGh: (args) => {
         dispatches.push(args);
-        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+        return Promise.resolve(
+          dispatchStderr ?
+            {
+              code: 1,
+              stdout: "",
+              stderr: dispatchStderr,
+              timedOut: dispatchTimedOut
+            }
+          : { code: 0, stdout: "", stderr: "" }
+        );
       },
-      readProcessEnv: () => ({}),
+      readProcessEnv: () => processEnv,
       setTimer: () => ({}),
       // The deploy route has its own harness below, which drives the real
       // admission service. Reaching it from this one is a wiring bug.
@@ -144,6 +162,13 @@ function start(): Harness {
     dispatches,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    processEnv,
+    timeOutDispatch() {
+      dispatchTimedOut = true;
+    },
+    failDispatchWith(stderr) {
+      dispatchStderr = stderr;
     }
   };
 }
@@ -307,6 +332,35 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     // The within-slice invalidation: the reader and the invalidator now live in
     // the same module, so this is proven rather than assumed.
     expect(harness.cache.has("octo/todo")).toBe(false);
+  });
+
+  it("does not re-dispatch a delete whose first attempt timed out", async () => {
+    // End to end over a real socket: a timed-out dispatch may already have been
+    // accepted by GitHub, so the scope failure must surface instead of starting
+    // a second delete run under the machine-wide account.
+    const harness = start();
+    harness.environments.push("dev");
+    harness.processEnv.GH_TOKEN = "injected";
+    harness.timeOutDispatch();
+    harness.failDispatchWith(
+      "HTTP 403: refusing to allow an OAuth App to dispatch without `workflow` scope"
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(harness.dispatches).toHaveLength(1);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain('missing the "workflow" scope');
   });
 
   it("refuses an incomplete delete over a real socket", async () => {

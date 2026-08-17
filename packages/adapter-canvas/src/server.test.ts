@@ -66,6 +66,7 @@ import type {
   DeployRepairHandoffInput,
   DeployFailureNoticeInput
 } from "./server.js";
+import type { GitHubIdentity, GitHubIdentityAccount } from "./gh.js";
 
 describe("DEPLOY_RAD_COMMANDS_STEP", () => {
   it("matches the step name in the upstream run-rad-commands action", () => {
@@ -92,21 +93,38 @@ describe("endChildInput", () => {
 });
 
 describe("preflightGhcrPackageWriteAccess", () => {
+  const account = (
+    login: string,
+    overrides: Partial<GitHubIdentityAccount> = {}
+  ): GitHubIdentityAccount => ({
+    login,
+    hasWorkflow: true,
+    hasPackages: false,
+    switchable: true,
+    acting: false,
+    ...overrides
+  });
+
+  const identity = (
+    overrides: Partial<GitHubIdentity> = {}
+  ): GitHubIdentity => ({
+    actingLogin: "emuuser",
+    displayLogin: "emuuser",
+    mismatch: false,
+    actingHasWorkflow: true,
+    actingHasPackages: true,
+    packagesLogin: "octocat",
+    packagesHasWrite: true,
+    packagesCredentialSource: "keyring",
+    reason: "user-selected-keyring-account",
+    accounts: [],
+    ...overrides
+  });
+
   it("fails closed when the package credential username is blank", async () => {
     const result = await preflightGhcrPackageWriteAccess(
-      async () => ({ token: "ghcr-token", username: "   " }),
-      async () => ({
-        actingLogin: "emuuser",
-        displayLogin: "emuuser",
-        mismatch: false,
-        actingHasWorkflow: true,
-        actingHasPackages: true,
-        packagesLogin: "octocat",
-        packagesHasWrite: true,
-        packagesCredentialSource: "keyring",
-        reason: "user-selected-keyring-account",
-        accounts: []
-      })
+      async () => ({ token: "ghcr-token", username: "   ", source: "keyring" }),
+      async () => identity()
     );
 
     expect(result.ok).toBe(false);
@@ -117,34 +135,18 @@ describe("preflightGhcrPackageWriteAccess", () => {
 
   it("checks the specific GHCR credential login for write:packages", async () => {
     const result = await preflightGhcrPackageWriteAccess(
-      async () => ({ token: "ghcr-token", username: "pubuser" }),
       async () => ({
-        actingLogin: "emuuser",
-        displayLogin: "emuuser",
-        mismatch: false,
-        actingHasWorkflow: true,
-        actingHasPackages: true,
-        packagesLogin: "octocat",
-        packagesHasWrite: true,
-        packagesCredentialSource: "keyring",
-        reason: "user-selected-keyring-account",
-        accounts: [
-          {
-            login: "pubuser",
-            hasWorkflow: true,
-            hasPackages: false,
-            switchable: true,
-            acting: false
-          },
-          {
-            login: "emuuser",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true,
-            acting: true
-          }
-        ]
-      })
+        token: "ghcr-token",
+        username: "pubuser",
+        source: "keyring"
+      }),
+      async () =>
+        identity({
+          accounts: [
+            account("pubuser"),
+            account("emuuser", { hasPackages: true, acting: true })
+          ]
+        })
     );
 
     expect(result.ok).toBe(false);
@@ -152,12 +154,128 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.code).toBe("ghcr-scope-required");
     expect(result.error).toContain("@pubuser");
     expect(result.error).toContain(
-      "gh auth refresh --hostname github.com --scopes read:packages,write:packages"
-    );
-    expect(result.error).toContain(
-      "gh auth switch --hostname github.com --user pubuser"
+      "gh auth switch -h github.com -u pubuser && gh auth refresh -h github.com -s read:packages -s write:packages"
     );
     expect(result.error).not.toContain("previous-login");
+  });
+
+  it("reads the scope from the identity when it describes the very credential resolved", async () => {
+    // The identity resolved the same login through the same source, so its
+    // scope answer is the one for the credential GHCR will present — even when
+    // the de-duplicated account list still carries the other credential's
+    // prediction for that login.
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({
+        token: "ghcr-token",
+        username: "dupuser",
+        source: "keyring"
+      }),
+      async () =>
+        identity({
+          actingLogin: "dupuser",
+          packagesLogin: "dupuser",
+          packagesHasWrite: true,
+          packagesCredentialSource: "keyring",
+          accounts: [account("dupuser", { hasPackages: false, acting: true })]
+        })
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected GHCR preflight to pass");
+    expect(result.login).toBe("dupuser");
+    expect(result.credentials.source).toBe("keyring");
+  });
+
+  it("does not tell the user to refresh a session token that cannot be refreshed", async () => {
+    // The resolved credential is the injected session token: gh auth refresh
+    // cannot change it, and no stored account can publish packages either.
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({
+        token: "ghcr-token",
+        username: "tokuser",
+        source: "injected-token"
+      }),
+      async () =>
+        identity({
+          actingLogin: "tokuser",
+          packagesLogin: "tokuser",
+          packagesHasWrite: false,
+          packagesCredentialSource: "injected-token",
+          accounts: [account("tokuser", { switchable: false, acting: true })]
+        })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.code).toBe("ghcr-scope-required");
+    expect(result.error).toContain(
+      "gh auth login -h github.com -s read:packages -s write:packages"
+    );
+    expect(result.error).not.toContain("gh auth switch -h github.com");
+    expect(result.error).not.toContain("gh auth refresh -h github.com");
+  });
+
+  it("names the stored account to select when the session token lacks the scope", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({
+        token: "ghcr-token",
+        username: "tokuser",
+        source: "injected-token"
+      }),
+      async () =>
+        identity({
+          actingLogin: "tokuser",
+          packagesLogin: "tokuser",
+          packagesHasWrite: false,
+          packagesCredentialSource: "injected-token",
+          accounts: [
+            account("tokuser", { switchable: false, acting: true }),
+            account("storeduser", { hasPackages: true })
+          ]
+        })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.error).toContain("Select the stored account @storeduser");
+    expect(result.error).not.toContain("gh auth login");
+  });
+
+  it("falls back to the acting account when the credential login is absent from the account list", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({
+        token: "ghcr-token",
+        username: "loneuser",
+        source: "injected-token"
+      }),
+      async () =>
+        identity({
+          actingLogin: "loneuser",
+          actingHasPackages: true,
+          packagesLogin: "someone-else",
+          packagesCredentialSource: "keyring",
+          accounts: []
+        })
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected GHCR preflight to pass");
+    expect(result.login).toBe("loneuser");
+  });
+
+  it("fails closed when nothing describes the credential login", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({
+        token: "ghcr-token",
+        username: "stranger",
+        source: "keyring"
+      }),
+      async () => identity({ accounts: [] })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.code).toBe("ghcr-scope-required");
   });
 });
 

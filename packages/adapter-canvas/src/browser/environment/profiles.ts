@@ -206,6 +206,26 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
 }
 
 /**
+ * A stored account that could publish the package instead of the credential
+ * that cannot. Only a switchable account already holding `write:packages`
+ * qualifies: pointing at the picker when nothing there helps is worse than
+ * saying no account can.
+ */
+export function packagesAlternativeAccount(
+  identity: GithubIdentity,
+  publishingLogin: string
+): GithubAccountSummary | null {
+  return (
+    identity.accounts.find(
+      (account) =>
+        account.switchable &&
+        account.hasPackages &&
+        account.login !== publishingLogin
+    ) ?? null
+  );
+}
+
+/**
  * Whether the credential that will publish the state package can write
  * packages. The server reports the publishing credential explicitly when it
  * knows it; only a record from before that field existed falls back to the
@@ -267,19 +287,30 @@ export function githubIdentityNote(
       packagesMissing &&
       identity.packagesCredentialSource === "injected-token"
     ) {
-      // Naming a `gh` command here would send the customer down a dead end:
-      // the injected token overrides stored logins, so neither refreshing nor
-      // switching a keyring credential changes it.
-      return {
-        specs: textNote(
-          `The Copilot session token for @${identity.packagesLogin || identity.actingLogin} ` +
-            "is missing the write:packages scope. It overrides stored gh credentials, so refreshing or " +
-            "switching a keyring login does not change this token. Select a stored account, or restart " +
-            "the session with package write access."
-        ),
-        tone: "warning",
-        showRecheck: true
-      };
+      // Naming a `gh auth refresh` here would send the customer down a dead
+      // end: the injected token overrides stored logins, so neither refreshing
+      // nor switching a keyring credential changes it. Only offer the account
+      // picker when a stored account can actually publish.
+      const publishingLogin = identity.packagesLogin || identity.actingLogin;
+      const alternative = packagesAlternativeAccount(identity, publishingLogin);
+      let message =
+        `The Copilot session token for @${publishingLogin} is missing the write:packages scope. ` +
+        "It overrides stored gh credentials, so refreshing or switching a keyring login does not " +
+        "change this token. " +
+        (alternative ?
+          `Select the stored account @${alternative.login} below, or restart the session with package write access.`
+        : 'No stored GitHub CLI account can publish packages either, so run "gh auth login -h github.com -s read:packages -s write:packages" and re-check, or restart the session with package write access.');
+      // The workflow scope lives on the credential gh commands use, which is
+      // not the packages credential — so its guidance still applies and must
+      // not be dropped with the packages warning.
+      if (!identity.actingHasWorkflow) {
+        message +=
+          ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope ` +
+          `environment setup needs: run "gh auth switch -h github.com -u ${identity.actingLogin} && ` +
+          'gh auth refresh -h github.com -s workflow". Note: gh auth switch changes your active GitHub ' +
+          "account machine-wide for every tool in this terminal until you switch back.";
+      }
+      return { specs: textNote(message), tone: "warning", showRecheck: true };
     }
     const missNames: string[] = [];
     const refreshScopes: string[] = [];

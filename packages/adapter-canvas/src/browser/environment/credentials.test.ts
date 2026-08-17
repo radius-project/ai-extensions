@@ -240,6 +240,7 @@ describe("credential profile parsing and markup", () => {
 });
 
 const LEGACY_IDENTITY = {
+  accounts: [],
   packagesLogin: "",
   packagesHasWrite: undefined,
   packagesCredentialSource: ""
@@ -253,12 +254,18 @@ describe("GitHub Packages identity parsing and rendering", () => {
         actingHasPackages: true,
         packagesLogin: "publisher",
         packagesHasWrite: true,
-        packagesCredentialSource: "keyring"
+        packagesCredentialSource: "keyring",
+        accounts: [
+          { login: "publisher", hasPackages: true, switchable: true },
+          { login: "", hasPackages: true, switchable: true },
+          "not-an-object"
+        ]
       })
     ).toEqual({
       error: "",
       actingLogin: "octocat",
       actingHasPackages: true,
+      accounts: [{ login: "publisher", hasPackages: true, switchable: true }],
       packagesLogin: "publisher",
       packagesHasWrite: true,
       packagesCredentialSource: "keyring"
@@ -288,6 +295,7 @@ describe("GitHub Packages identity parsing and rendering", () => {
       error: "",
       actingLogin: "octocat",
       actingHasPackages: false,
+      accounts: [],
       packagesLogin: "publisher",
       packagesHasWrite: true,
       packagesCredentialSource: "keyring"
@@ -297,20 +305,62 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(view.statusHtml).toContain("using the stored GitHub CLI credential");
   });
 
+  it("points at a stored account that can publish instead", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: true,
+      accounts: [
+        { login: "octocat", hasPackages: false, switchable: true },
+        { login: "no-switch", hasPackages: true, switchable: false },
+        { login: "publisher", hasPackages: true, switchable: true }
+      ],
+      packagesLogin: "octocat",
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token"
+    });
+    expect(view.statusHtml).toContain(
+      "Select the stored account <strong>@publisher</strong>"
+    );
+    expect(view.commandVisible).toBe(false);
+    expect(view.command).toBe("");
+  });
+
+  it("says the session token is verified when it is the credential that publishes", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: false,
+      accounts: [],
+      packagesLogin: "octocat",
+      packagesHasWrite: true,
+      packagesCredentialSource: "injected-token"
+    });
+    expect(view.packagesVerified).toBe(true);
+    expect(view.statusHtml).toContain("using the Copilot session token");
+  });
+
   it("offers no gh command for a session token that gh cannot repair", () => {
     const view = renderGitHubAccessView({
       error: "",
       actingLogin: "octocat",
       actingHasPackages: true,
+      accounts: [],
       packagesLogin: "octocat",
       packagesHasWrite: false,
       packagesCredentialSource: "injected-token"
     });
     expect(view.packagesVerified).toBe(false);
     expect(view.statusHtml).toContain("The Copilot session token for");
-    // A switch/refresh command here would be a dead end.
-    expect(view.commandVisible).toBe(false);
-    expect(view.command).toBe("");
+    expect(view.statusHtml).toContain(
+      "No stored GitHub CLI account can publish packages either"
+    );
+    // A switch/refresh command here would be a dead end; a fresh sign-in is
+    // the only thing that helps.
+    expect(view.commandVisible).toBe(true);
+    expect(view.command).toBe(
+      "gh auth login -h github.com -s read:packages -s write:packages"
+    );
     expect(view.retryVisible).toBe(true);
   });
 
@@ -319,6 +369,7 @@ describe("GitHub Packages identity parsing and rendering", () => {
       error: "",
       actingLogin: "octocat",
       actingHasPackages: true,
+      accounts: [],
       packagesLogin: "publisher",
       packagesHasWrite: false,
       packagesCredentialSource: "keyring"
