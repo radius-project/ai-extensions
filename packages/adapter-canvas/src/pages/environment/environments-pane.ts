@@ -188,7 +188,7 @@ export function environmentsPaneMarkup(
     <!-- 2 · Connect GitHub to a cloud -->
     <div class="rad-section">
       <div class="rad-section__title">2 · Connect GitHub to a cloud</div>
-      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo.</div>
+      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo. Both sides are required: confirm the GitHub account in 2a, then the cloud credentials it deploys with in 2b.</div>
 
       <div class="rad-conn">
         <!-- GitHub side of the trust. The account combo is populated by
@@ -197,6 +197,7 @@ export function environmentsPaneMarkup(
              workflow scope needed to write the deploy workflow file. -->
         <div class="rad-conn__side">
           <div class="rad-conn__badge">
+            <span class="rad-conn__ord">2a</span>
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
             GitHub
           </div>
@@ -225,6 +226,7 @@ export function environmentsPaneMarkup(
              to step 1 to change it. -->
         <div class="rad-conn__side">
           <div class="rad-conn__badge">
+            <span class="rad-conn__ord">2b</span>
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 13a3.5 3.5 0 01-.36-6.98A4 4 0 0111.9 6.1 3 3 0 0111.5 13h-7z"/></svg>
             Cloud credentials
           </div>

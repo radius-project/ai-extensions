@@ -110,3 +110,29 @@ describe("status color tokens", () => {
     );
   });
 });
+
+describe("connection ordinal chip", () => {
+  const declaration = /\.rad-conn__ord \{([^}]*)\}/.exec(SHELL_STYLE_CSS);
+
+  it("is styled from theme-following tokens rather than fixed colors", () => {
+    expect(declaration).not.toBeNull();
+    const body = (declaration as RegExpExecArray)[1];
+    expect(body).toContain("color: var(--rad-text-secondary)");
+    expect(body).toContain("background: var(--rad-surface)");
+    expect(body).toContain("border: 1px solid var(--rad-stroke)");
+    // A literal color here would pin the chip to one theme, which is exactly
+    // what the host-injected palette breaks.
+    expect(body).not.toMatch(/#[0-9a-f]{3,6}/i);
+  });
+
+  it.each(Object.entries(palettes))(
+    "reads its label against the %s canvas surface",
+    (_canvas, palette) => {
+      // Both tokens resolve to the host's default text and background, so the
+      // chip inherits the canvas's own guaranteed body contrast.
+      expect(
+        contrast(parseHex(palette.text), parseHex(palette.bg))
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  );
+});

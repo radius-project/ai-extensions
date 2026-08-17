@@ -155,4 +155,22 @@ describe("environmentsPaneMarkup", () => {
     }
     expect(stepTwo).toContain('id="deploy-btn"');
   });
+
+  it("numbers the two connection sides as one sequence under section 2", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const conn = html.slice(html.indexOf('class="rad-conn"'));
+    const github = conn.indexOf('<span class="rad-conn__ord">2a</span>');
+    const cloud = conn.indexOf('<span class="rad-conn__ord">2b</span>');
+    expect(github).toBeGreaterThan(-1);
+    expect(cloud).toBeGreaterThan(github);
+    expect(conn.slice(github, cloud)).toContain("GitHub");
+    expect(conn.slice(cloud)).toContain("Cloud credentials");
+  });
+
+  it("says both connection sides are required rather than alternatives", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      "Both sides are required: confirm the GitHub account in 2a, then the cloud credentials it deploys with in 2b."
+    );
+  });
 });

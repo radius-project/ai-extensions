@@ -284,6 +284,14 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     color: var(--rad-text-tertiary);
   }
   .rad-conn__badge svg { width: 15px; height: 15px; display: block; }
+  /* Ordinal chip marking each side as a step in one sequence rather than an
+     either-or choice. Nested under the numbered section that contains it. */
+  .rad-conn__ord {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 20px; padding: 1px 5px; border-radius: 999px;
+    border: 1px solid var(--rad-stroke); background: var(--rad-surface);
+    color: var(--rad-text-secondary); letter-spacing: 0.02em;
+  }
   .rad-conn__arrow {
     display: flex; align-items: center; justify-content: center;
     color: var(--rad-text-tertiary); font-size: 20px; line-height: 1; padding: 0 2px;
