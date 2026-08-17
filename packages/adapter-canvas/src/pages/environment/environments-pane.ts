@@ -105,12 +105,66 @@ export function environmentsPaneMarkup(
   </div>
 </div>
 
-<!-- Create Environment form (revealed by New Environment / Deploy Apps / edit) -->
+<!-- Create Environment wizard (revealed by New Environment / Deploy Apps / edit).
+     Two steps, because a credential profile only ever exists in service of an
+     environment: pick or create the cloud credential first, then describe the
+     environment that uses it. -->
 <div id="env-form" style="display:none;">
+  <div class="rad-wizard-head">
+    <ol class="rad-wizard" id="env-wizard-steps">
+      <li class="rad-wizard__step rad-wizard__step--active" id="env-wizard-step-1" data-step="1" aria-current="step">
+        <span class="rad-wizard__num">1</span><span class="rad-wizard__label">Cloud credentials</span>
+      </li>
+      <li class="rad-wizard__sep" aria-hidden="true"></li>
+      <li class="rad-wizard__step" id="env-wizard-step-2" data-step="2">
+        <span class="rad-wizard__num">2</span><span class="rad-wizard__label">Environment</span>
+      </li>
+    </ol>
+    <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
+  </div>
+
+  <!-- ── Step 1 · Cloud credentials ── -->
+  <div id="env-step-credentials">
+    <div class="rad-card" id="env-step-credentials-card">
+      <div class="rad-card__title" style="margin:0;">Step 1 · Choose cloud credentials</div>
+      <div class="rad-section">
+        <div class="rad-section__desc">Select the verified cloud account this environment deploys into, or create a new credential profile for it.</div>
+        <div class="rad-field" style="max-width:520px; margin-top:14px;">
+          <label>Credential profile</label>
+          <div class="rad-combo" id="env-profile-combo">
+            <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
+              <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
+              <span class="rad-combo__chevron" aria-hidden="true"></span>
+            </button>
+            <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
+              <div class="rad-combo__options" id="env-profile-options"></div>
+              <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
+              <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
+            </div>
+          </div>
+          <!-- Holds the selected profile name; read by the create flow. -->
+          <input type="hidden" id="env-profile-select" value="" />
+          <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+        </div>
+      </div>
+      <div class="rad-section" id="env-step1-actions">
+        <div style="display:flex; align-items:center; gap:16px;">
+          <button id="env-step1-next" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Continue</button>
+          <span id="env-step1-hint" style="font-size:12px; color:var(--rad-text-tertiary);">Select or create a credential profile to continue.</span>
+        </div>
+      </div>
+    </div>
+    <!-- The shared credential form docks here while the wizard is creating or
+         editing a profile; #env-step-credentials-card hides in that mode. -->
+    <div id="env-cred-form-host" style="display:none;"></div>
+  </div>
+
+  <!-- ── Step 2 · Environment ── -->
+  <div id="env-step-details" style="display:none;">
   <div class="rad-card">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-      <div class="rad-card__title" style="margin:0;">Create Environment</div>
-      <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
+      <div class="rad-card__title" style="margin:0;">Step 2 · Create Environment</div>
+      <button id="env-step2-back" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to credentials</button>
     </div>
     <!-- 1 · Name this environment -->
     <div class="rad-section">
@@ -166,9 +220,9 @@ export function environmentsPaneMarkup(
 
         <div class="rad-conn__arrow" aria-hidden="true">→</div>
 
-        <!-- Cloud side of the trust. The provider (Azure/AWS) comes from the
-             selected credential profile; the profile detail below the combo
-             reflects what the connection does and where deploys land. -->
+        <!-- Cloud side of the trust. The profile itself is chosen in step 1;
+             this is the read-only confirmation of that choice, with a way back
+             to step 1 to change it. -->
         <div class="rad-conn__side">
           <div class="rad-conn__badge">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 13a3.5 3.5 0 01-.36-6.98A4 4 0 0111.9 6.1 3 3 0 0111.5 13h-7z"/></svg>
@@ -176,20 +230,11 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label>Credential profile</label>
-            <div class="rad-combo" id="env-profile-combo">
-              <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
-                <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
-                <span class="rad-combo__chevron" aria-hidden="true"></span>
-              </button>
-              <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
-                <div class="rad-combo__options" id="env-profile-options"></div>
-                <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
-                <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
-              </div>
+            <div class="rad-chosen">
+              <span class="rad-chosen__value" id="env-profile-summary">No credential profile selected</span>
+              <button type="button" class="rad-link" id="env-change-profile-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">Change</button>
             </div>
-            <!-- Holds the selected profile name; read by the create flow. -->
-            <input type="hidden" id="env-profile-select" value="" />
-            <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+            <div id="env-profile-detail" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
           </div>
         </div>
       </div>
@@ -285,6 +330,7 @@ export function environmentsPaneMarkup(
     <div class="rad-section">
       <button id="deploy-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Create Environment</button>
     </div>
+  </div>
   </div>
 </div>
 </section>`;

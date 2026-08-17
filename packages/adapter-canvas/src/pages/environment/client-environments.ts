@@ -22,14 +22,14 @@ function switchSubtab(name) {
         loadCredTable();
     } else {
         loadEnvTable();
-        // If the user is returning to an already-open Create Environment form
-        // (e.g. they opened it, hit the combo's "+ Create new profile" action to
-        // add a profile on the Credentials subtab, then came back), the combo
-        // still holds the PROFILES snapshot from when the form opened — so a
-        // just-created profile is missing until a full canvas reload. Re-sync it
-        // here, preserving the current selection. Skipped on the landing view:
-        // the combo is hidden there, New Environment re-fetches via showEnvForm(),
-        // and refreshing would fire resource discovery on a hidden form.
+        // If the user is returning to an already-open wizard (e.g. they opened
+        // it, then went to the Credentials sub-tab to edit or delete a profile),
+        // the combo still holds the PROFILES snapshot from when the wizard
+        // opened — so an edited or removed profile is stale until a full canvas
+        // reload. Re-sync it here, preserving the current selection. Skipped on
+        // the landing view: the combo is hidden there, New Environment re-fetches
+        // via showEnvForm(), and refreshing would fire resource discovery on a
+        // hidden form.
         if (envForm && envForm.style.display !== 'none') loadProfilesIntoEnvSelect(envProfileSelect.value);
     }
 }
@@ -137,6 +137,9 @@ function wireRowActions() {
     });
 }
 
+// Opens the two-step wizard. A preset profile (e.g. "Create Env" from the
+// credentials listing) satisfies step 1, so the wizard advances straight to the
+// environment details unless the caller is about to create a profile instead.
 function showEnvForm(preset) {
     preset = preset || {};
     hideEnvTerminalBanners();
@@ -146,11 +149,23 @@ function showEnvForm(preset) {
     document.getElementById('deploy-status').style.display = 'none';
     envLanding.style.display = 'none';
     envForm.style.display = '';
-    loadProfilesIntoEnvSelect(preset.profile);
+    endCredentialCreation();
+    showEnvWizardStep(1);
+    loadProfilesIntoEnvSelect(preset.profile, function(selected) {
+        if (!selected || preset.advance === false) return;
+        showEnvWizardStep(2);
+        envNameInput.focus();
+    });
     loadGitHubIdentity();
-    envNameInput.focus();
+    envProfileButtonFocus();
+}
+// Step 1 opens on the credential profile combo, the only control there.
+function envProfileButtonFocus() {
+    var btn = document.getElementById('env-profile-button');
+    if (btn) btn.focus();
 }
 function showEnvLanding() {
+    endCredentialCreation();
     envForm.style.display = 'none';
     envLanding.style.display = '';
     loadEnvTable();

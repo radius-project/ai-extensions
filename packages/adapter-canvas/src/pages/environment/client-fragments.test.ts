@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { environmentPage } from "../environment-page.js";
 import { ENVIRONMENT_TABLE_CLIENT_JS } from "./client-environments.js";
 import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./client-operations.js";
 import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./client-profiles.js";
 import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./client-discovery.js";
+import { ENVIRONMENT_WIZARD_CLIENT_JS } from "./client-wizard.js";
 import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./client-credentials.js";
 
 const fragments: Array<[string, string, string[]]> = [
@@ -40,6 +42,19 @@ const fragments: Array<[string, string, string[]]> = [
       "discoverResources",
       "findAzureClusterResourceGroup",
       "showAppPicker"
+    ]
+  ],
+  [
+    "client-wizard",
+    ENVIRONMENT_WIZARD_CLIENT_JS,
+    [
+      "moveCredFormTo",
+      "showEnvWizardStep",
+      "updateEnvStep1State",
+      "renderEnvProfileSummary",
+      "startCredentialCreation",
+      "endCredentialCreation",
+      "showCredEditor"
     ]
   ],
   [
@@ -111,5 +126,27 @@ describe("environment page client fragments", () => {
     expect(ENVIRONMENT_DISCOVERY_CLIENT_JS).not.toContain(
       "formatServesReposLabelClient"
     );
+  });
+
+  it("addresses only elements the page actually renders", () => {
+    // The fragments reach the DOM exclusively by id, so a renamed or relocated
+    // element silently breaks behaviour that no page-markup test would notice.
+    const rendered = environmentPage({ contextRepo: "octo/app" });
+    const renderedIds = new Set(
+      [...rendered.matchAll(/id="([^"]+)"/g)].map((match) => match[1])
+    );
+    for (const [name, source] of fragments) {
+      const referenced = new Set(
+        [...source.matchAll(/getElementById\('([^']+)'\)/g)].map(
+          (match) => match[1]
+        )
+      );
+      expect(referenced.size, name).toBeGreaterThan(0);
+      for (const id of referenced) {
+        expect(renderedIds.has(id), `${name} addresses missing #${id}`).toBe(
+          true
+        );
+      }
+    }
   });
 });

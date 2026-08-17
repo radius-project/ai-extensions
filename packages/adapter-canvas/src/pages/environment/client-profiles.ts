@@ -49,18 +49,24 @@ document.addEventListener('click', function(e) {
     if (combo && !combo.contains(e.target)) openProfileMenu(false);
 });
 
-function loadProfilesIntoEnvSelect(preselectName) {
+function loadProfilesIntoEnvSelect(preselectName, afterSelect) {
+    var done = function(selectedName) {
+        if (typeof afterSelect === 'function') afterSelect(selectedName);
+    };
     fetch('/api/credential-profiles?repo=' + encodeURIComponent(CTX_REPO))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             PROFILES = (d && d.profiles) || [];
             renderProfileOptions();
-            setProfileValue(preselectName && findProfile(preselectName) ? preselectName : '');
+            var selected = preselectName && findProfile(preselectName) ? preselectName : '';
+            setProfileValue(selected);
+            done(selected);
         })
         .catch(function() {
             PROFILES = [];
             renderProfileOptions();
             setProfileValue('');
+            done('');
         });
 }
 
@@ -268,10 +274,14 @@ function onEnvProfileSelected() {
     // shared-identity pin from a previous context silently carry over.
     selectedProfile = findProfile(envProfileSelect.value);
     var statusEl = document.getElementById('env-profile-status');
+    var detailEl = document.getElementById('env-profile-detail');
     var idAz = document.getElementById('env-identity-azure');
     var idAws = document.getElementById('env-identity-aws');
+    renderEnvProfileSummary(selectedProfile);
+    updateEnvStep1State();
     if (!selectedProfile) {
         statusEl.style.display = 'none';
+        if (detailEl) { detailEl.style.display = 'none'; detailEl.innerHTML = ''; }
         deployBtn.disabled = true;
         var azRb0 = document.getElementById('azure-refresh-btn'); if (azRb0) azRb0.disabled = true;
         var awsRb0 = document.getElementById('aws-refresh-btn'); if (awsRb0) awsRb0.disabled = true;
@@ -295,6 +305,7 @@ function onEnvProfileSelected() {
     else detail += '<div><span style="color:var(--rad-primary);font-weight:600;">✓ Verified</span></div>';
     statusEl.style.display = '';
     statusEl.innerHTML = detail;
+    if (detailEl) { detailEl.style.display = ''; detailEl.innerHTML = detail; }
     if (idAz) idAz.style.display = prov === 'azure' ? '' : 'none';
     if (idAws) idAws.style.display = prov === 'aws' ? '' : 'none';
     document.getElementById('panel-azure').style.display = prov === 'azure' ? '' : 'none';

@@ -48,7 +48,7 @@ function wireCredRowActions(profiles) {
         btn.addEventListener('click', function() { switchSubtab('environments'); showEnvForm({ name: '', profile: this.getAttribute('data-name') }); });
     });
     document.querySelectorAll('.js-cred-edit').forEach(function(a) {
-        a.addEventListener('click', function(e) { e.preventDefault(); showCredForm(find(this.getAttribute('data-name'))); });
+        a.addEventListener('click', function(e) { e.preventDefault(); showCredEditor(find(this.getAttribute('data-name'))); });
     });
     document.querySelectorAll('.js-cred-delete').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -126,6 +126,9 @@ function loadCredGitHubAccess(fresh) {
 function showCredForm(profile) {
     document.getElementById('cred-success-banner').style.display = 'none';
     var editing = profile && profile.name;
+    document.getElementById('cred-form-title').textContent = editing ? 'Edit Credential Profile' : 'Create Credential Profile';
+    document.getElementById('save-cred-btn').textContent = credSaveLabel();
+    document.getElementById('cancel-cred-btn').textContent = CRED_FORM_CONTEXT === 'wizard' ? 'Cancel' : '← Back to credentials';
     document.getElementById('cred-name-input').value = editing ? profile.name : '';
     credProviderSelect.value = editing ? (profile.provider || 'azure') : 'azure';
     applyCredProvider(credProviderSelect.value);
@@ -137,10 +140,12 @@ function showCredForm(profile) {
     resetCredVerify();
     credPackagesVerified = false;
     updateCredSaveState();
-    credLanding.style.display = 'none';
-    credForm.style.display = '';
     loadCredGitHubAccess(true);
     document.getElementById('cred-name-input').focus();
+}
+// In the wizard the save continues the environment flow, so the button says so.
+function credSaveLabel() {
+    return CRED_FORM_CONTEXT === 'wizard' ? 'Save & Continue' : 'Save Credential Profile';
 }
 function showCredLanding() {
     credForm.style.display = 'none';
@@ -152,8 +157,17 @@ function showCredSuccessBanner(name) {
     document.getElementById('cred-success-banner-text').innerHTML = 'Successfully created credential profile ' + escapeHtmlClient(name);
     banner.style.display = 'flex';
 }
-document.getElementById('new-cred-btn').addEventListener('click', function() { showCredForm(); });
-document.getElementById('cancel-cred-btn').addEventListener('click', showCredLanding);
+// Creating a credential always runs inside the environment wizard: a profile
+// only ever exists in service of an environment, so there is one creation path.
+document.getElementById('new-cred-btn').addEventListener('click', function() {
+    switchSubtab('environments');
+    showEnvForm({ name: '', advance: false });
+    startCredentialCreation();
+});
+document.getElementById('cancel-cred-btn').addEventListener('click', function() {
+    if (CRED_FORM_CONTEXT === 'wizard') { endCredentialCreation(); return; }
+    showCredLanding();
+});
 var credSuccessClose = document.getElementById('cred-success-banner-close');
 if (credSuccessClose) credSuccessClose.addEventListener('click', function() { document.getElementById('cred-success-banner').style.display = 'none'; });
 
@@ -315,14 +329,26 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
     var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
     if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; profile.subscriptionName = credVerified.subscriptionName || ''; }
     else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
+    var wizard = CRED_FORM_CONTEXT === 'wizard';
     btn.disabled = true; btn.textContent = 'Saving…';
     fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
         .then(function(r) { return r.json(); }).then(function(d) {
-            btn.disabled = false; btn.textContent = 'Save Credential Profile';
+            btn.disabled = false; btn.textContent = credSaveLabel();
             if (d && d.error) { alert('Could not save profile: ' + d.error); return; }
+            if (wizard) {
+                // The profile was created for the environment being set up:
+                // select it and carry the user straight into step 2.
+                endCredentialCreation();
+                loadProfilesIntoEnvSelect(name, function(selected) {
+                    if (!selected) return;
+                    showEnvWizardStep(2);
+                    envNameInput.focus();
+                });
+                return;
+            }
             showCredLanding(); showCredSuccessBanner(name);
         }).catch(function(err) {
-            btn.disabled = false; btn.textContent = 'Save Credential Profile';
+            btn.disabled = false; btn.textContent = credSaveLabel();
             alert('Could not save profile: ' + err.message);
         });
 });

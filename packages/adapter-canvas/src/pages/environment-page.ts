@@ -12,6 +12,7 @@ import { ENVIRONMENT_TABLE_CLIENT_JS } from "./environment/client-environments.j
 import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./environment/client-operations.js";
 import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./environment/client-profiles.js";
 import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./environment/client-discovery.js";
+import { ENVIRONMENT_WIZARD_CLIENT_JS } from "./environment/client-wizard.js";
 import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./environment/client-credentials.js";
 
 export function environmentPage(state: CanvasState = {}): string {
@@ -272,6 +273,18 @@ ${credentialsPaneMarkup(activeSubtab)}
 .rad-combo__empty { padding:14px; font-size:13px; color:var(--rad-text-tertiary); }
 .rad-combo__action { display:block; width:100%; text-align:left; margin:0; padding:12px 14px; background:none; border:none; border-top:1px solid var(--rad-stroke); font-size:13px; font-weight:600; color:var(--rad-primary); font-family:var(--rad-font); cursor:pointer; }
 .rad-combo__action:hover { background:var(--rad-bg-subtle); }
+/* Two-step New Environment wizard: credentials, then the environment itself. */
+.rad-wizard-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 14px; }
+.rad-wizard { display:flex; align-items:center; gap:10px; list-style:none; margin:0; padding:0; }
+.rad-wizard__step { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500; color:var(--rad-text-tertiary); }
+.rad-wizard__num { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; border:1px solid var(--rad-stroke); font-size:12px; font-weight:600; }
+.rad-wizard__step--active { color:var(--rad-text); }
+.rad-wizard__step--active .rad-wizard__num { background:var(--rad-primary); border-color:var(--rad-primary); color:#fff; }
+.rad-wizard__step--done .rad-wizard__num { border-color:var(--rad-primary); color:var(--rad-primary); }
+.rad-wizard__sep { width:28px; height:1px; background:var(--rad-stroke); }
+/* Read-only echo of a choice made in an earlier step. */
+.rad-chosen { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:8px; }
+.rad-chosen__value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; color:var(--rad-text); }
 </style>
 
 <script>
@@ -282,6 +295,7 @@ ${ENVIRONMENT_TABLE_CLIENT_JS}
 ${ENVIRONMENT_OPERATION_CLIENT_JS}
 ${ENVIRONMENT_PROFILE_CLIENT_JS}
 ${ENVIRONMENT_DISCOVERY_CLIENT_JS}
+${ENVIRONMENT_WIZARD_CLIENT_JS}
 ${ENVIRONMENT_CREDENTIAL_CLIENT_JS}
 <\/script>`
   );

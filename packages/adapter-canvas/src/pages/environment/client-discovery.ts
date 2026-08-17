@@ -74,7 +74,9 @@ function clearSharedAppPin() {
 document.getElementById('new-env-btn').addEventListener('click', function() { showEnvForm({ name: '' }); });
 document.getElementById('cancel-env-btn').addEventListener('click', showEnvLanding);
 document.getElementById('env-create-profile-link').addEventListener('click', function(e) {
-    e.preventDefault(); openProfileMenu(false); switchSubtab('credentials'); showCredForm();
+    // Creating a profile now happens inline in wizard step 1 rather than by
+    // sending the user to the Credentials sub-tab and back.
+    e.preventDefault(); openProfileMenu(false); startCredentialCreation();
 });
 
 // combo select: reveal custom input on "__custom__"

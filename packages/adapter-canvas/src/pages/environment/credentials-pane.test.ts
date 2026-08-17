@@ -24,6 +24,13 @@ describe("credentialsPaneMarkup", () => {
     expect(html).toContain('id="cred-success-banner"');
   });
 
+  it("hosts the shared credential form for editing an existing profile", () => {
+    const html = credentialsPaneMarkup("credentials");
+    expect(html).toContain('<div id="cred-form" style="display:none;">');
+    expect(html).toContain('id="cred-form-card"');
+    expect(html).toContain('id="cred-form-title"');
+  });
+
   it("offers both provider forms with the save action disabled until verified", () => {
     const html = credentialsPaneMarkup("credentials");
     expect(html).toContain('id="cred-panel-azure"');
