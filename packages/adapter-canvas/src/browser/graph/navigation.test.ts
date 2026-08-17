@@ -90,7 +90,9 @@ describe("graph navigation", () => {
   it("tears down the outgoing page, swaps content, focuses, and pushes once", async () => {
     const harness = setup();
     harness.browser.net.handle("/?page=planned", () => {
-      expect(harness.pageTeardowns).toBe(0);
+      // The outgoing page is torn down before the request goes out, so its
+      // timers cannot fire against a page the user has already left.
+      expect(harness.pageTeardowns).toBe(1);
       return textResponse("<html>planned</html>");
     });
     const parsed = parsedPage(
@@ -292,7 +294,9 @@ describe("graph navigation", () => {
     harness.navigation.cancelPendingWork();
 
     expect(harness.browser.net.aborted).toBe(1);
-    expect(harness.pageTeardowns).toBe(1);
+    // Once for the navigation itself, once for the explicit cancel: tearing a
+    // page down twice is a no-op rather than an error.
+    expect(harness.pageTeardowns).toBe(2);
   });
 });
 

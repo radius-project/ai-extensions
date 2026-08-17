@@ -5,6 +5,7 @@ import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { readArray, readBoolean, readString } from "../json.js";
 import {
   applyPlanEnvState,
+  createPlanScheduler,
   createPlanState,
   deployPlannedApp,
   populatePlannedSelectors
@@ -80,9 +81,6 @@ export function initializePlannedGraphPage(
   const branch = context.dom.selectById("planned-branch");
   const environment = context.dom.selectById("planned-env");
   const button = context.dom.inputById("plan-btn");
-  let generation = 0;
-  let activeGeneration: number | null = null;
-  let pending: TimerHandle | null = null;
   let progress: TimerHandle | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
@@ -92,18 +90,15 @@ export function initializePlannedGraphPage(
     progress = null;
   };
 
-  const run = (): void => {
-    pending = null;
-    const requestGeneration = generation;
-    activeGeneration = requestGeneration;
+  const run = (isCurrent: () => boolean): Promise<void> => {
+    if (!entry.active) return Promise.resolve();
     const selectedBranch = branch?.value.trim() || page.branch;
     const selectedEnvironment = environment?.value ?? "";
     const selectedProvider =
       typeof providers[selectedEnvironment] === "string" ?
         providers[selectedEnvironment]
       : page.provider;
-    const current = (): boolean =>
-      entry.active && requestGeneration === generation;
+    const current = (): boolean => entry.active && isCurrent();
 
     if (plan.envsStale) {
       status(
@@ -113,8 +108,7 @@ export function initializePlannedGraphPage(
         : "Environments could not be loaded. Try again before planning a deployment.",
         "error"
       );
-      activeGeneration = null;
-      return;
+      return Promise.resolve();
     }
     if (!page.repo || !selectedBranch) {
       status(
@@ -122,8 +116,7 @@ export function initializePlannedGraphPage(
         "Select a branch to preview the planned deployment.",
         "info"
       );
-      activeGeneration = null;
-      return;
+      return Promise.resolve();
     }
     if (!plan.hasEnv || !selectedEnvironment) {
       status(
@@ -133,8 +126,7 @@ export function initializePlannedGraphPage(
       );
       const container = context.dom.byId("graph-container");
       if (container) container.innerHTML = "";
-      activeGeneration = null;
-      return;
+      return Promise.resolve();
     }
 
     plan.requestFailed = false;
@@ -145,7 +137,8 @@ export function initializePlannedGraphPage(
     const containerId = graphContainer(context);
     setLoading(containerId);
     stopProgress();
-    requestAbort = context.net.createAbort();
+    const abort = context.net.createAbort();
+    requestAbort = abort;
     progress = entry.every(PLAN_PROGRESS_MS, () => {
       void context.net
         .fetch("/api/progress")
@@ -163,7 +156,7 @@ export function initializePlannedGraphPage(
           context.logger.error("Radius planned graph progress failed.", error);
         });
     });
-    void context.net
+    return context.net
       .fetch("/api/plan-graph", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -173,11 +166,11 @@ export function initializePlannedGraphPage(
           provider: selectedProvider,
           environment: selectedEnvironment
         }),
-        signal: requestAbort?.signal
+        signal: abort?.signal
       })
       .then((response) => response.json())
       .then((payload) => {
-        if (requestGeneration !== generation) return;
+        if (!current()) return;
         if (readBoolean(payload, "reload")) {
           context.nav.reload();
           return;
@@ -211,26 +204,31 @@ export function initializePlannedGraphPage(
         );
       })
       .then(() => {
-        if (activeGeneration !== requestGeneration) return;
         stopProgress();
-        activeGeneration = null;
-        requestAbort = null;
-        applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+        if (requestAbort === abort) requestAbort = null;
       });
   };
 
+  // Serialize plan requests. Aborting the browser fetch does not stop the
+  // server's compile, so starting a replacement before the previous response
+  // arrives duplicates that work and mixes its progress into the new selection.
+  const schedule = createPlanScheduler(
+    context,
+    run,
+    () => {
+      if (entry.active) {
+        applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+      }
+    },
+    PLAN_DEBOUNCE_MS
+  );
+
+  // Hold the deploy action closed while a plan is pending: the preview it would
+  // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
-    generation++;
     plan.requestFailed = false;
-    if (pending !== null) entry.cancel(pending);
-    pending = null;
-    if (activeGeneration !== null) {
-      requestAbort?.abort();
-      requestAbort = null;
-      activeGeneration = null;
-      stopProgress();
-    }
-    pending = entry.after(immediate ? 0 : PLAN_DEBOUNCE_MS, run);
+    if (button && button.dataset.mode === "deploy") button.disabled = true;
+    schedule(immediate);
   };
 
   for (const selector of [app, branch, environment]) {
@@ -285,10 +283,8 @@ export function initializePlannedGraphPage(
   });
 
   entry.onTeardown(() => {
-    generation++;
     requestAbort?.abort();
     requestAbort = null;
-    activeGeneration = null;
     stopProgress();
     controller?.destroy();
     controller = null;
