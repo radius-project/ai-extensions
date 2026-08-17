@@ -93,6 +93,10 @@ function deploymentKey(application: string, environment: string): string {
   return `${encodeURIComponent(application)}|${encodeURIComponent(environment)}`;
 }
 
+function isTerminalDeployStatus(value: string): boolean {
+  return value === "complete" || value === "success" || value === "failed";
+}
+
 function parseDeployments(payload: unknown): DeploymentState[] {
   return readArray(payload, "deployments")
     .map((deployment) => ({
@@ -143,6 +147,7 @@ export function initializeDeployedGraphPage(
   let stateTimer: TimerHandle | null = null;
   let graphTimer: TimerHandle | null = null;
   let logTimer: TimerHandle | null = null;
+  let logStreamStarted = false;
   let graphAbort: AbortHandle | null = null;
   let graphGeneration = 0;
   let logTotal = 0;
@@ -383,40 +388,71 @@ export function initializeDeployedGraphPage(
   const stopLogStream = (): void => {
     if (logTimer !== null) entry.cancel(logTimer);
     logTimer = null;
+    logStreamStarted = false;
   };
 
-  const pollLogs = (): void => {
-    void context.net
+  const appendLogLines = (lines: readonly string[]): void => {
+    if (!logOutput || lines.length === 0) return;
+    logOutput.textContent = `${logOutput.textContent ?? ""}${lines.join("\n")}\n`;
+    context.dom.scrollToEnd(logOutput);
+  };
+
+  const fetchLogs = (): Promise<void> =>
+    context.net
       .fetch(`/api/deploy-status?since=${logTotal}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active) return;
         const lines = readStringArray(payload, "logsNew");
-        if (logOutput && lines.length > 0) {
-          logOutput.textContent = `${logOutput.textContent ?? ""}${lines.join("\n")}\n`;
-          context.dom.scrollToEnd(logOutput);
-        }
-        logTotal = readNumber(payload, "logTotal") ?? logTotal;
-        const deployStatus = readString(payload, "status");
-        if (
-          deployStatus === "complete" ||
-          deployStatus === "success" ||
-          deployStatus === "failed"
-        ) {
+        appendLogLines(lines);
+        logTotal = readNumber(payload, "logTotal") ?? logTotal + lines.length;
+        if (isTerminalDeployStatus(readString(payload, "status"))) {
           stopLogStream();
         }
       })
       .catch((error: unknown) => {
         context.logger.error("Radius deployment log request failed.", error);
       });
+
+  const pollLogs = (): void => {
+    void fetchLogs();
   };
 
+  // Pull the retained buffer once, then stream incrementally. The interval is
+  // armed only after that first response resolves, because two requests sharing
+  // the same cursor would each append the whole buffer. `stopLogStream` clears
+  // the latch, so a later deployment can reopen the feed from its own cursor.
   const startLogStream = (): void => {
-    if (logTimer !== null) return;
+    if (logStreamStarted) return;
+    logStreamStarted = true;
     if (logSection) logSection.style.display = "block";
-    pollLogs();
-    logTimer = entry.every(DEPLOYED_LOG_POLL_MS, pollLogs);
+    void fetchLogs().then(() => {
+      if (!entry.active || !logStreamStarted) return;
+      logTimer = entry.every(DEPLOYED_LOG_POLL_MS, pollLogs);
+    });
   };
+
+  // Show the deploy feed whenever this session produced one, including after the
+  // run finished — a failed deployment explains itself in that log, and its
+  // graph is never "live".
+  const maybeStartLogStream = (): Promise<void> =>
+    context.net
+      .fetch("/api/deploy-status")
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!entry.active) return;
+        const deployStatus = readString(payload, "status");
+        if (
+          deployStatus === "in_progress" ||
+          isTerminalDeployStatus(deployStatus) ||
+          (readNumber(payload, "logTotal") ?? 0) > 0
+        ) {
+          startLogStream();
+        }
+      })
+      .catch((error: unknown) => {
+        context.logger.error("Radius deployment status could not load.", error);
+      });
 
   const loadApplications = (): Promise<void> =>
     context.net
@@ -586,6 +622,7 @@ export function initializeDeployedGraphPage(
   ]).then(() => {
     if (!entry.active) return;
     refreshControls();
+    void maybeStartLogStream();
     loadGraph();
   });
 

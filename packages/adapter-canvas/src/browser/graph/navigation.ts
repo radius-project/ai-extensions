@@ -117,7 +117,10 @@ export function createGraphNavigation(
       return;
     }
 
-    cancelRequest();
+    // Tear the outgoing page down before fetching, not after the response
+    // arrives: its debounced timers can otherwise fire mid-navigation and act
+    // on a page the user has already left.
+    cancelPendingWork();
     const requestGeneration = generation;
     request = context.net.createAbort();
     void context.net
@@ -136,7 +139,6 @@ export function createGraphNavigation(
           throw new Error("Graph page response had no content region.");
         }
         const newNavValue = parsed.getElementById(GRAPH_NAV_ID);
-        registry.teardownPage();
         content.innerHTML = newContentValue.innerHTML;
         runInlineScripts(context, content);
         if (isDomElement(newNavValue)) {
