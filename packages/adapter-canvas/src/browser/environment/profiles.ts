@@ -80,6 +80,12 @@ export interface GithubIdentity {
   readonly repoAccess: string;
   readonly actingHasWorkflow: boolean;
   readonly actingHasPackages: boolean;
+  // The credential that will actually publish the state package, which is not
+  // always the acting login: a Copilot session token overrides stored `gh`
+  // logins and cannot be repaired with `gh auth switch`/`refresh`.
+  readonly packagesLogin: string;
+  readonly packagesHasWrite: boolean | undefined;
+  readonly packagesCredentialSource: string;
   readonly accounts: readonly GithubAccountSummary[];
 }
 
@@ -157,7 +163,8 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
     const account = parseGithubAccount(entry);
     if (account) accounts.push(account);
   }
-
+  const packagesHasWrite =
+    isRecord(payload) ? payload["packagesHasWrite"] : undefined;
   return {
     error: readString(payload, "error"),
     actingLogin: readString(payload, "actingLogin"),
@@ -166,6 +173,10 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
     repoAccess: readString(payload, "repoAccess"),
     actingHasWorkflow: readBoolean(payload, "actingHasWorkflow"),
     actingHasPackages: readBoolean(payload, "actingHasPackages"),
+    packagesLogin: readString(payload, "packagesLogin"),
+    packagesHasWrite:
+      typeof packagesHasWrite === "boolean" ? packagesHasWrite : undefined,
+    packagesCredentialSource: readString(payload, "packagesCredentialSource"),
     accounts
   };
 }
@@ -192,6 +203,19 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
     selectionHandle: readString(payload, "selectionHandle"),
     checks
   };
+}
+
+/**
+ * Whether the credential that will publish the state package can write
+ * packages. The server reports the publishing credential explicitly when it
+ * knows it; only a record from before that field existed falls back to the
+ * acting account's scope.
+ */
+export function githubPackagesWriteAvailable(
+  identity: GithubIdentity
+): boolean {
+  if (identity.packagesHasWrite === true) return true;
+  return identity.packagesCredentialSource === "" && identity.actingHasPackages;
 }
 
 export function findProfile(
@@ -237,14 +261,33 @@ export function githubIdentityNote(
       showRecheck: false
     };
   }
-  if (!identity.actingHasWorkflow || !identity.actingHasPackages) {
+  const packagesMissing = !githubPackagesWriteAvailable(identity);
+  if (!identity.actingHasWorkflow || packagesMissing) {
+    if (
+      packagesMissing &&
+      identity.packagesCredentialSource === "injected-token"
+    ) {
+      // Naming a `gh` command here would send the customer down a dead end:
+      // the injected token overrides stored logins, so neither refreshing nor
+      // switching a keyring credential changes it.
+      return {
+        specs: textNote(
+          `The Copilot session token for @${identity.packagesLogin || identity.actingLogin} ` +
+            "is missing the write:packages scope. It overrides stored gh credentials, so refreshing or " +
+            "switching a keyring login does not change this token. Select a stored account, or restart " +
+            "the session with package write access."
+        ),
+        tone: "warning",
+        showRecheck: true
+      };
+    }
     const missNames: string[] = [];
     const refreshScopes: string[] = [];
     if (!identity.actingHasWorkflow) {
       missNames.push("workflow");
       refreshScopes.push("workflow");
     }
-    if (!identity.actingHasPackages) {
+    if (packagesMissing) {
       missNames.push("write:packages");
       refreshScopes.push("read:packages");
       refreshScopes.push("write:packages");
@@ -257,7 +300,7 @@ export function githubIdentityNote(
       `gh auth refresh -h github.com${refreshScopeFlags}`;
     return {
       specs: textNote(
-        `The active account @${identity.actingLogin} is missing the ${missNames.join(" and ")} ` +
+        `The stored GitHub CLI credential for @${identity.actingLogin} is missing the ${missNames.join(" and ")} ` +
           `scope${missNames.length > 1 ? "s" : ""} environment setup needs. Run "${refreshCmd}" or switch accounts. ` +
           "Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back."
       ),

@@ -3422,6 +3422,15 @@ export async function preflightGhcrPackageWriteAccess(
           mismatch: false,
           actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
           actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
+          // The selected executor *is* the credential GHCR writes will use, so
+          // the packages fields describe it directly rather than whichever
+          // account happens to be active in the CLI.
+          packagesLogin: selectedExecutor.login,
+          packagesHasWrite: selectedExecutor.scopes.includes("write:packages"),
+          packagesCredentialSource:
+            selectedExecutor.credentialSource === "keyring" ?
+              "keyring"
+            : "injected-token",
           reason: "selected-account-executor",
           accounts: [
             {

@@ -114,6 +114,9 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
+        packagesLogin: "octocat",
+        packagesHasWrite: true,
+        packagesCredentialSource: "keyring",
         reason: "user-selected-keyring-account",
         accounts: []
       })
@@ -134,6 +137,9 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
+        packagesLogin: "octocat",
+        packagesHasWrite: true,
+        packagesCredentialSource: "keyring",
         reason: "user-selected-keyring-account",
         accounts: [
           {

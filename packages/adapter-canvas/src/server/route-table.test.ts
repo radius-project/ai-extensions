@@ -181,6 +181,9 @@ const productionHandlers = {
         mismatch: false,
         actingHasWorkflow: false,
         actingHasPackages: false,
+        packagesLogin: "",
+        packagesHasWrite: false,
+        packagesCredentialSource: "unavailable",
         reason: "",
         accounts: []
       }),
@@ -458,6 +461,8 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/stop",
+      "POST /api/operations/:operationId/continue",
+      "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/retry/:retryKind"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();

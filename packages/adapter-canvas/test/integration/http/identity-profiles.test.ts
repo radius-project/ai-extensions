@@ -31,6 +31,9 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: false,
     actingHasWorkflow: true,
     actingHasPackages: false,
+    packagesLogin: "octo",
+    packagesHasWrite: false,
+    packagesCredentialSource: "keyring",
     reason: `reason-${login}`,
     accounts: []
   };

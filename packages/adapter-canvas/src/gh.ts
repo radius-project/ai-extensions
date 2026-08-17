@@ -52,6 +52,9 @@ export interface GitHubIdentity {
   mismatch: boolean;
   actingHasWorkflow: boolean;
   actingHasPackages: boolean;
+  packagesLogin: string;
+  packagesHasWrite: boolean;
+  packagesCredentialSource: "keyring" | "injected-token" | "unavailable";
   reason: string;
   accounts: GitHubIdentityAccount[];
   repoAccess?: string;
@@ -458,12 +461,19 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     });
   }
   const actingAcct = accounts.find((a) => a.login === actingLogin) || null;
+  const packagesAccount = actingAcct;
   return {
     actingLogin,
     displayLogin,
     mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
     actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
     actingHasPackages: !!(actingAcct && actingAcct.hasPackages),
+    packagesLogin: actingLogin,
+    packagesHasWrite: !!(packagesAccount && packagesAccount.hasPackages),
+    packagesCredentialSource:
+      packagesAccount?.switchable ? "keyring"
+      : s.hasToken ? "injected-token"
+      : "unavailable",
     reason: strat.reason,
     accounts
   };
