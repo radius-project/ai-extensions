@@ -243,12 +243,8 @@ Each pull request is independently green and includes tests, controlled data, ha
 
 ## Open decisions
 
-1. Should real-host qualification run for every release automatically, or run on a schedule and manual controlled runner with an explicit release approval?
-2. Should production continue fetching pinned vendor assets from unpkg, or should a later design bundle them? Tests remain network-independent either way.
-3. What retention period should coverage and failure artifacts use?
-4. Does the supported host expose automation for every required lifecycle case? Missing host support blocks qualification and cannot be replaced by an emulated pass.
-5. What request-body limit and centralized HTTP error shape, if any, should be approved after route parity?
-6. Should the Windows/macOS path-sensitive job block affected pull requests or remain scheduled and advisory?
+1. Should production continue fetching pinned vendor assets from unpkg, or should a later design bundle them? Tests remain network-independent either way.
+2. What request-body limit and centralized HTTP error shape, if any, should be approved after route parity?
 
 ## Design review findings
 
