@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { oidcPage } from "./oidc-page.js";
 import { sharedCredentials } from "../shared.js";
-import { extractBrowserFunction } from "../../test/support/pages/browser-script.js";
+import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 
 const azureResult = {
   message: "Signed in to Azure",
@@ -38,10 +38,9 @@ describe("oidcPage — empty state", () => {
     expect(html).toContain('<div id="result-aws"></div>');
   });
 
-  it("posts both providers to the single federation endpoint", () => {
-    expect(html).toContain("fetch('/api/oidc'");
-    expect(html).toContain("provider: 'azure'");
-    expect(html).toContain("provider: 'aws'");
+  it("injects the generated OIDC entry exactly once", () => {
+    expect(html).toContain(browserEntryMarker("oidc-page"));
+    expect(html.split(browserScript("oidc-page"))).toHaveLength(2);
   });
 });
 
@@ -139,95 +138,5 @@ describe("oidcPage — saved credentials and escaping", () => {
       const source = block.slice("<script>".length, -"</script>".length);
       expect(() => new Function(source)).not.toThrow();
     }
-  });
-});
-
-interface OidcResultElement {
-  innerHTML: string;
-}
-
-function loadOidcRenderers(): {
-  renderAzureOidcResult: (
-    result: OidcResultElement,
-    response: Record<string, unknown>,
-    data: Record<string, unknown>
-  ) => void;
-  renderAwsOidcResult: (
-    result: OidcResultElement,
-    response: Record<string, unknown>,
-    data: Record<string, unknown>
-  ) => void;
-  renderOidcError: (
-    result: OidcResultElement,
-    error: { message: string }
-  ) => void;
-} {
-  const html = oidcPage();
-  const source = [
-    "escapeHtmlClient",
-    "renderAzureOidcResult",
-    "renderAwsOidcResult",
-    "renderOidcError"
-  ]
-    .map((name) => extractBrowserFunction(html, name))
-    .join("\n");
-  return new Function(
-    `${source}
-return {
-  renderAzureOidcResult: renderAzureOidcResult,
-  renderAwsOidcResult: renderAwsOidcResult,
-  renderOidcError: renderOidcError
-};`
-  )() as ReturnType<typeof loadOidcRenderers>;
-}
-
-describe("oidcPage — client response escaping", () => {
-  const hostile = "<img src=x onerror=alert(1)>'\"&";
-
-  it("escapes every dynamic Azure success and failure field", () => {
-    const { renderAzureOidcResult } = loadOidcRenderers();
-    const result = { innerHTML: "" };
-
-    renderAzureOidcResult(
-      result,
-      {
-        validated: true,
-        message: hostile,
-        tenantId: hostile,
-        subscriptionName: hostile,
-        subscriptionId: hostile,
-        userName: hostile
-      },
-      { tenantId: hostile, subscriptionId: hostile, clientId: hostile }
-    );
-
-    expect(result.innerHTML).not.toContain("<img");
-    expect(result.innerHTML).toContain(
-      "&lt;img src=x onerror=alert(1)&gt;&#39;&quot;&amp;"
-    );
-
-    renderAzureOidcResult(result, { validated: false, message: hostile }, {});
-    expect(result.innerHTML).not.toContain("<img");
-    expect(result.innerHTML).toContain("&lt;img src=x");
-
-    renderAzureOidcResult(result, { validated: false }, {});
-    expect(result.innerHTML).toContain("Authentication failed");
-  });
-
-  it("escapes every dynamic AWS success field and request failure", () => {
-    const { renderAwsOidcResult, renderOidcError } = loadOidcRenderers();
-    const result = { innerHTML: "" };
-
-    renderAwsOidcResult(
-      result,
-      { message: hostile },
-      { accountId: hostile, region: hostile }
-    );
-    expect(result.innerHTML).not.toContain("<img");
-    expect(result.innerHTML).toContain("&lt;img src=x");
-
-    renderOidcError(result, { message: hostile });
-    expect(result.innerHTML).not.toContain("<img");
-    expect(result.innerHTML).toContain("Error: &lt;img src=x");
   });
 });

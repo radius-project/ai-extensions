@@ -135,20 +135,52 @@ describe("canvas pages over real loopback HTTP", () => {
     ["graph", "graph-page"],
     ["planned", "planned-graph-page"],
     ["graph-diff", "graph-diff-page"],
-    ["deployed", "deployed-graph-page"]
+    ["deployed", "deployed-graph-page"],
+    ["credentials", "environment-page"],
+    ["environment", "environment-page"],
+    ["deploying", "deploying-page"]
   ] as const)(
     "serves ?page=%s with one page entry and one copy of each shared entry",
     async (page, pageEntry) => {
       resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
       const response = await get(`/?page=${page}`);
 
-      for (const entry of ["graph", "heartbeat", pageEntry] as const) {
+      for (const entry of [
+        "graph",
+        "delete-dialog",
+        "heartbeat",
+        "operation-chip",
+        pageEntry
+      ] as const) {
         expect(
           response.body.split(`\n${browserEntryMarker(entry)}\n`)
         ).toHaveLength(2);
       }
     }
   );
+
+  it("serves a deployment result with one result entry and shared entries", async () => {
+    resetState({
+      contextRepo: "octo/app",
+      contextBranch: "feature/x",
+      deployResult: { message: "Deployment started" },
+      deployAttempt: { id: "attempt-1" }
+    });
+
+    const response = await get("/?page=environment");
+
+    for (const entry of [
+      "graph",
+      "delete-dialog",
+      "heartbeat",
+      "operation-chip",
+      "deploy-result-page"
+    ] as const) {
+      expect(
+        response.body.split(`\n${browserEntryMarker(entry)}\n`)
+      ).toHaveLength(2);
+    }
+  });
 
   it("falls back to the environment page for a page value it does not know", async () => {
     resetState({ contextRepo: "octo/app" });
