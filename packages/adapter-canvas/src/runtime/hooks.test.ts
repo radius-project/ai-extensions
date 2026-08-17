@@ -657,9 +657,7 @@ describe("deployFailureNoticePrompt", () => {
 
   it("points the user at the run when one is known", () => {
     const out = deployFailureNoticePrompt("octo/app", "main", failure);
-    expect(out).toContain(
-      "check the Actions tab for its real outcome"
-    );
+    expect(out).toContain("check the Actions tab for its real outcome");
   });
 
   it("guides a dispatch failure with no run toward the Actions tab", () => {

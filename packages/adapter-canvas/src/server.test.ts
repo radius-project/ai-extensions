@@ -1994,7 +1994,9 @@ describe("triggerDeployFailureNotice", () => {
       calls.push(payload);
     });
     expect(
-      triggerDeployFailureNotice(unconfirmedEntry({ deployStatus: "in_progress" }))
+      triggerDeployFailureNotice(
+        unconfirmedEntry({ deployStatus: "in_progress" })
+      )
     ).toBe(false);
     expect(triggerDeployFailureNotice(undefined)).toBe(false);
     expect(calls).toHaveLength(0);
