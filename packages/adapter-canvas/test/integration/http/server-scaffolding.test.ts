@@ -5,14 +5,14 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { syncRequestedPage } from "../../../src/server/request-context.js";
 import {
   createServerRouteTable,
-  MIGRATED_ROUTE_KEYS,
-  routeKey
+  routeKey,
+  SERVER_ROUTE_DECLARATIONS
 } from "../../../src/server/route-table.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
-// This scaffolding HIT only exercises the fallback path, so every migrated
-// route is stubbed to fail loudly if the dispatcher ever reaches one.
+// This scaffolding HIT exercises page/unmatched routing, so every typed route is
+// stubbed to fail loudly if the dispatcher reaches one unexpectedly.
 const unreachableRoutes = createTestRouteTable();
 
 let container: CanvasServerContainer | undefined;
@@ -23,24 +23,19 @@ afterEach(async () => {
 });
 
 describe("server scaffolding real-loopback HIT", () => {
-  it("stubs every migrated route without relaxing table validation", () => {
+  it("stubs every declared route without relaxing table validation", () => {
     // The helper exists so a test that ignores a family stops needing a manual
     // stub edit each slice. It must stay test-support only: supplying handlers
-    // is all it does, and the real validation still rejects a migrated key with
+    // is all it does, and the real validation still rejects a declared key with
     // no handler so a production composition root cannot omit one.
+    expect(unreachableRoutes.map(routeKey)).toEqual(
+      SERVER_ROUTE_DECLARATIONS.map(routeKey)
+    );
     expect(
-      unreachableRoutes
-        .filter((route) => route.migration === "migrated")
-        .map(routeKey)
-        .sort()
-    ).toEqual([...MIGRATED_ROUTE_KEYS].sort());
-    expect(
-      unreachableRoutes
-        .filter((route) => route.migration === "migrated")
-        .every((route) => typeof route.handler === "function")
+      unreachableRoutes.every((route) => typeof route.handler === "function")
     ).toBe(true);
     expect(() => createServerRouteTable({})).toThrow(
-      /^Missing handler for migrated server route: /
+      /^Missing handler for server route: /
     );
     // A caller-supplied handler wins over the stub.
     const supplied = () => {};
@@ -75,7 +70,7 @@ describe("server scaffolding real-loopback HIT", () => {
             );
             return false;
           },
-          legacyFallback: (_request, response) => {
+          handleUnmatchedRequest: (_request, response) => {
             const entry = instances.get(instanceId);
             response.setHeader("Content-Type", "application/json");
             response.writeHead(200);

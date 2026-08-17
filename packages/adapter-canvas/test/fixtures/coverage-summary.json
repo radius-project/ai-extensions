@@ -1,28 +1,28 @@
 {
   "total": {
     "lines": {
-      "total": 40,
-      "covered": 30,
+      "total": 50,
+      "covered": 40,
       "skipped": 0,
-      "pct": 75
+      "pct": 80
     },
     "statements": {
-      "total": 40,
-      "covered": 30,
+      "total": 50,
+      "covered": 40,
       "skipped": 0,
-      "pct": 75
+      "pct": 80
     },
     "functions": {
-      "total": 20,
-      "covered": 15,
+      "total": 25,
+      "covered": 20,
       "skipped": 0,
-      "pct": 75
+      "pct": 80
     },
     "branches": {
-      "total": 20,
-      "covered": 15,
+      "total": 25,
+      "covered": 20,
       "skipped": 0,
-      "pct": 75
+      "pct": 80
     }
   },
   "/repo/packages/adapter-canvas/src/runtime/a.ts": {
@@ -49,6 +49,32 @@
       "covered": 4,
       "skipped": 0,
       "pct": 80
+    }
+  },
+  "/repo/packages/adapter-canvas/src/browser/a.ts": {
+    "lines": {
+      "total": 10,
+      "covered": 10,
+      "skipped": 0,
+      "pct": 100
+    },
+    "statements": {
+      "total": 10,
+      "covered": 10,
+      "skipped": 0,
+      "pct": 100
+    },
+    "functions": {
+      "total": 5,
+      "covered": 5,
+      "skipped": 0,
+      "pct": 100
+    },
+    "branches": {
+      "total": 5,
+      "covered": 5,
+      "skipped": 0,
+      "pct": 100
     }
   },
   "/repo/packages/adapter-shared/src/a.ts": {

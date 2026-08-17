@@ -14,14 +14,13 @@ export interface CreateRequestHandlerInput {
   instanceId: string;
   instances: ReadonlyMap<string, CanvasServerEntry>;
   routes: readonly ServerRoute[];
-  legacyFallback: RequestListener;
+  handleUnmatchedRequest: RequestListener;
   // Receives the request so the caller can exclude traffic that must not count
-  // as user activity (server-owned internal calls), which the legacy handler
-  // gated on the X-Radius-Server-Owned token.
+  // as user activity (server-owned internal calls).
   markActivity(request: IncomingMessage): void;
   // Global pre-routing applied to every request. It runs before route
-  // selection and before any body read so migrated routes cannot bypass the
-  // checks the legacy dispatcher performed at the top of its if-chain.
+  // selection and before any body read so typed routes cannot bypass the
+  // checks required before typed dispatch.
   // Returning true means the request was fully answered.
   preRoute?(context: CanvasRequestContext): boolean;
 }
@@ -30,7 +29,7 @@ export function createRequestHandler({
   instanceId,
   instances,
   routes,
-  legacyFallback,
+  handleUnmatchedRequest,
   markActivity,
   preRoute
 }: CreateRequestHandlerInput): RequestListener {
@@ -45,10 +44,10 @@ export function createRequestHandler({
     );
     if (preRoute?.(context)) return;
     const route = matchRoute(routes, request.method, context.pathname);
-    if (route?.migration === "migrated") {
+    if (route) {
       await route.handler(context);
       return;
     }
-    await Promise.resolve(legacyFallback(request, response));
+    await Promise.resolve(handleUnmatchedRequest(request, response));
   };
 }

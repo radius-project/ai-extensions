@@ -10,7 +10,6 @@ import type {
   GraphPipeline
 } from "../../../src/server/routes/graph-pipeline.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
-import { LEGACY_ROUTE_INVENTORY } from "../../../src/server/route-table.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -143,9 +142,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -327,38 +326,14 @@ describe("graphs-planning writes real-loopback HIT", () => {
   });
 
   it.each([["/api/load-graph"], ["/api/plan-graph"], ["/api/diff-branches"]])(
-    "falls through to the legacy handler for GET %s",
+    "delegates unmatched GET %s",
     async (path) => {
       start();
       const entry = await container!.getOrCreate("panel-a");
       // Only POST is declared, so the method flip must not reach the new handler.
       const response = await fetch(`${entry.baseUrl}${path}`);
-      expect(response.status).toBe(418);
-      expect(await response.text()).toBe("legacy");
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("unmatched");
     }
   );
-
-  it("still routes an unmigrated path to the legacy fallback", async () => {
-    // Resolved from the inventory rather than named. A named probe inherits the
-    // migration expiry of the route it names: once that route migrates, the
-    // probe stops proving the fallback is reachable and starts asserting
-    // against a migrated handler. Deriving it means the probe follows whatever
-    // is still residual, and fails loudly when nothing is.
-    const [residualKey] = LEGACY_ROUTE_INVENTORY;
-    if (!residualKey) {
-      throw new Error(
-        "No residual route remains, so the legacy fallback can no longer be " +
-          "probed. Delete the fallback and this probe together."
-      );
-    }
-    const [method, path] = residualKey.split(" ");
-    expect(method).toBeTruthy();
-    expect(path?.startsWith("/api/")).toBe(true);
-
-    start();
-    const entry = await container!.getOrCreate("panel-a");
-    const response = await fetch(`${entry.baseUrl}${path}`, { method });
-    expect(response.status).toBe(418);
-    expect(await response.text()).toBe("legacy");
-  });
 });

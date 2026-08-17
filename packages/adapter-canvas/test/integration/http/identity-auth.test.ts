@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createIdentityAuthRoutes } from "../../../src/server/routes/identity-auth.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 
@@ -139,9 +136,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     // The instance state the container hands out is the same object the
@@ -251,9 +248,9 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(empty.status).toBe(400);
     expect(empty.headers.get("content-type")).toBe("application/json");
 
-    // GET is not declared for this path, so it still reaches the fallback.
+    // GET is not declared for this path, so it reaches unmatched routing.
     const wrongMethod = await fetch(`${entry.baseUrl}/api/oidc`);
-    expect(wrongMethod.status).toBe(418);
+    expect(wrongMethod.status).toBe(404);
   });
 
   it("verifies an azure session and reports mismatches and missing CLIs as 200", async () => {
@@ -381,10 +378,5 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     const body = await absent.text();
     expect(body).toContain("No active AWS CLI session.");
     expect(body).not.toContain("ENOENT");
-
-    // A method-matching route selected from the live residual inventory still
-    // reaches the fallback and will fail loudly when that route migrates.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 });
