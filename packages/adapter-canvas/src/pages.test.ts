@@ -508,11 +508,7 @@ describe("compiled graph page network contracts", () => {
     ],
     [
       "graph-diff-page",
-      [
-        "/api/discover-branches",
-        "/api/list-applications",
-        "/api/diff-branches"
-      ]
+      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
     ],
     [
       "deployed-graph-page",
@@ -526,16 +522,19 @@ describe("compiled graph page network contracts", () => {
         "/api/delete-deployment"
       ]
     ]
-  ] as const)("%s exposes exactly its reviewed API path set", (entry, expected) => {
-    const paths = [
-      ...new Set(
-        [...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)].map(
-          (match) => match[1]
+  ] as const)(
+    "%s exposes exactly its reviewed API path set",
+    (entry, expected) => {
+      const paths = [
+        ...new Set(
+          [...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)].map(
+            (match) => match[1]
+          )
         )
-      )
-    ];
-    expect(paths).toEqual(expected);
-  });
+      ];
+      expect(paths).toEqual(expected);
+    }
+  );
 });
 
 describe("legacy page renderer compatibility oracle", () => {

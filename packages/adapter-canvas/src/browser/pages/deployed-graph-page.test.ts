@@ -1574,9 +1574,7 @@ describe("initializeDeployedGraphPage", () => {
       calls++;
       return calls === 1 ?
           jsonResponse({
-            deployments: [
-              { app: "app", environment: "dev", status: "pending" }
-            ]
+            deployments: [{ app: "app", environment: "dev", status: "pending" }]
           })
         : statePoll.promise;
     });

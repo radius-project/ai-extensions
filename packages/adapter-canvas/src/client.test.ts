@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  CLIENT_DELETE_DIALOG_JS,
-  CLIENT_OPCHIP_JS
-} from "./client.js";
+import { CLIENT_DELETE_DIALOG_JS, CLIENT_OPCHIP_JS } from "./client.js";
 
 describe("client compatibility facade", () => {
   it("keeps every deferred 4C script parseable", () => {
