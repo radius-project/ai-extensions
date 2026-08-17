@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createRepositoriesRoutes } from "../../../src/server/routes/repositories.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 
@@ -87,9 +84,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -132,7 +129,7 @@ describe("repositories real-loopback HIT (RF-04)", () => {
 
     // Only GET is declared, so other methods still fall through.
     const posted = await post(entry.baseUrl, "/api/user-repos", "");
-    expect(posted.status).toBe(418);
+    expect(posted.status).toBe(404);
   });
 
   it("answers 200 with an empty list when gh is unauthenticated", async () => {
@@ -257,10 +254,5 @@ describe("repositories real-loopback HIT (RF-04)", () => {
     expect(await response.text()).toBe(
       '{"error":"Canvas server state is unavailable."}'
     );
-
-    // A method-matching route selected from the live residual inventory still
-    // reaches the fallback and will fail loudly when that route migrates.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 });

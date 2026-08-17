@@ -43,6 +43,12 @@ const baseline = {
       branches: 70,
       functions: 80,
       lines: 80
+    },
+    browser: {
+      statements: 100,
+      branches: 100,
+      functions: 100,
+      lines: 100
     }
   }
 };
@@ -55,19 +61,19 @@ describe("coverage summary", () => {
       {
         scope: "aggregate",
         metrics: {
-          statements: { current: 75, baseline: 70, delta: 5 },
-          branches: { current: 75, baseline: 70, delta: 5 },
-          functions: { current: 75, baseline: 70, delta: 5 },
-          lines: { current: 75, baseline: 70, delta: 5 }
+          statements: { current: 80, baseline: 70, delta: 10 },
+          branches: { current: 80, baseline: 70, delta: 10 },
+          functions: { current: 80, baseline: 70, delta: 10 },
+          lines: { current: 80, baseline: 70, delta: 10 }
         }
       },
       {
         scope: "adapter-canvas",
         metrics: {
-          statements: { current: 80, baseline: 75, delta: 5 },
-          branches: { current: 80, baseline: 75, delta: 5 },
-          functions: { current: 80, baseline: 75, delta: 5 },
-          lines: { current: 80, baseline: 75, delta: 5 }
+          statements: { current: 90, baseline: 75, delta: 15 },
+          branches: { current: 90, baseline: 75, delta: 15 },
+          functions: { current: 90, baseline: 75, delta: 15 },
+          lines: { current: 90, baseline: 75, delta: 15 }
         }
       },
       {
@@ -96,6 +102,15 @@ describe("coverage summary", () => {
           functions: { current: 80, baseline: 80, delta: 0 },
           lines: { current: 80, baseline: 80, delta: 0 }
         }
+      },
+      {
+        scope: "browser",
+        metrics: {
+          statements: { current: 100, baseline: 100, delta: 0 },
+          branches: { current: 100, baseline: 100, delta: 0 },
+          functions: { current: 100, baseline: 100, delta: 0 },
+          lines: { current: 100, baseline: 100, delta: 0 }
+        }
       }
     ]);
   });
@@ -107,13 +122,16 @@ describe("coverage summary", () => {
 
     expect(markdown).toContain("## Coverage");
     expect(markdown).toContain(
-      "| Aggregate | 75.00% | +5.00 pp | 75.00% | +5.00 pp |"
+      "| Aggregate | 80.00% | +10.00 pp | 80.00% | +10.00 pp |"
     );
     expect(markdown).toContain(
       "| `adapter-shared` | 70.00% | +5.00 pp | 60.00% | -5.00 pp |"
     );
     expect(markdown).toContain(
       "| `runtime` | 80.00% | — | 80.00% | +10.00 pp |"
+    );
+    expect(markdown).toContain(
+      "| `browser` | 100.00% | +0.00 pp | 100.00% | +0.00 pp |"
     );
   });
 });

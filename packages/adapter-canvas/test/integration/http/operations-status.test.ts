@@ -2,15 +2,20 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
-import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
 import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+  createOperationsStatusRoutes,
+  type OperationActionRecord
+} from "../../../src/server/routes/operations-status.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
   buildStages,
+  canResumeInput,
   createOperation,
   finish,
+  INPUT_REQUIRED_STATE,
+  isTerminalState,
+  requireInput,
+  resumeAfterInput,
   toClientView
 } from "../../../src/operations.js";
 import {
@@ -29,16 +34,17 @@ afterEach(async () => {
 });
 
 interface Harness {
-  records: Map<string, unknown>;
+  records: Map<string, OperationActionRecord>;
   setLatest(record: unknown): void;
   latestCalls: string[];
   running: Map<string, { operationId: string }>;
   persistError: { value: Error | null };
   persistCalls: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
+  scheduleAccepted: { value: boolean };
 }
 
-const RUNNING = {
+const RUNNING: OperationActionRecord = {
   operationId: "op-running",
   schemaVersion: 1,
   provider: "azure",
@@ -63,7 +69,9 @@ const RUNNING = {
 };
 
 function start(): Harness {
-  const records = new Map<string, unknown>([["op-running", RUNNING]]);
+  const records = new Map<string, OperationActionRecord>([
+    ["op-running", RUNNING]
+  ]);
   const latestCalls: string[] = [];
   let latest: unknown = null;
 
@@ -78,6 +86,21 @@ function start(): Harness {
   const persistError: { value: Error | null } = { value: null };
   const persistCalls: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
+  const scheduleAccepted = { value: true };
+  const persistOperations = (): Promise<void> => {
+    persistCalls.push("persist");
+    return persistError.value ?
+        Promise.reject(persistError.value)
+      : Promise.resolve();
+  };
+  const scheduleEnvironmentOperation = (
+    instanceId: string,
+    operation: { operationId: string }
+  ): boolean => {
+    if (!scheduleAccepted.value) return false;
+    scheduled.push({ instanceId, operationId: operation.operationId });
+    return true;
+  };
 
   const routes = createTestRouteTable(
     createOperationsStatusRoutes(
@@ -104,22 +127,28 @@ function start(): Harness {
           const existing = running.get(op.repo as string);
           if (existing) return { ok: false, conflict: existing };
           running.set(op.repo as string, { operationId: op.operationId });
-          records.set(op.operationId, op);
+          records.set(op.operationId, op as OperationActionRecord);
           return { ok: true, operation: op };
         },
-        persistOperations: () => {
-          persistCalls.push("persist");
-          return persistError.value ?
-              Promise.reject(persistError.value)
-            : Promise.resolve();
-        },
+        persistOperations,
         finish,
-        scheduleEnvironmentOperation: (instanceId, op) => {
-          scheduled.push({ instanceId, operationId: op.operationId });
-          return true;
-        },
+        scheduleEnvironmentOperation,
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error)
+      },
+      {
+        getOperation: (operationId) => records.get(operationId),
+        canResumeInput,
+        resumeAfterInput,
+        requireInput,
+        finish,
+        isTerminalState,
+        persistOperations,
+        toClientView,
+        scheduleEnvironmentOperation,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error),
+        inputRequiredState: INPUT_REQUIRED_STATE
       }
     )
   );
@@ -132,9 +161,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -151,6 +180,7 @@ function start(): Harness {
     persistError,
     persistCalls,
     scheduled,
+    scheduleAccepted,
     setLatest(record) {
       latest = record;
     }
@@ -209,11 +239,6 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     // The exact route is not swallowed by the by-id prefix rule.
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
-
-    // A method-matching route selected from the live residual inventory still
-    // reaches the fallback and will fail loudly when that route migrates.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 
   it("registers a POST /api/operations over the socket, returns 202, and schedules setup", async () => {
@@ -312,34 +337,224 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(harness.scheduled).toEqual([]);
   });
 
-  it("leaves main's undeclared POST sub-routes to the legacy fallback", async () => {
-    start();
+  it("resumes and abandons operation input through the two typed templates", async () => {
+    const harness = start();
     const entry = await container!.getOrCreate("panel-a");
 
-    // `main` matches these two with regexes in the legacy chain rather than
-    // declaring them, and they sit under this family's migrated GET prefix.
-    // Over a real socket they must still reach the fallback: the dispatcher
-    // consults the route table before the legacy chain, so GET/POST
-    // disjointness is now the only thing keeping them reachable.
-    for (const path of [
-      "/api/operations/op-running/resume/abc",
-      "/api/operations/op-running/abandon"
-    ]) {
-      const response = await fetch(`${entry.baseUrl}${path}`, {
-        method: "POST"
-      });
-      expect(response.status).toBe(418);
-      expect(await response.text()).toBe("legacy");
-    }
+    const resumable = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    resumable.request = {
+      azure: {},
+      environment: { repo: "octo/resume" }
+    };
+    requireInput(resumable, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(resumable.operationId, resumable);
 
-    // The same paths as GET are claimed by the migrated prefix route and 404 on
-    // the composite tail read as an operation id. That matches legacy, whose
-    // GET prefix branch also claimed them, so it is pinned rather than fixed.
+    const resumed = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: resumable.repo,
+          environment: resumable.environment,
+          provider: resumable.provider,
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
+    );
+    expect(resumed.status).toBe(202);
+    expect(resumable.state).toBe("running");
+    expect(resumable.request.azure.serviceManagementReference).toBe(
+      "11111111-1111-1111-1111-111111111111"
+    );
+    expect(harness.scheduled).toContainEqual({
+      instanceId: "panel-a",
+      operationId: resumable.operationId
+    });
+
+    const abandonable = createOperation({
+      provider: "azure",
+      repo: "octo/abandon",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    requireInput(abandonable, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app."
+    });
+    harness.records.set(abandonable.operationId, abandonable);
+    const abandoned = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(abandonable.operationId)}/abandon`,
+      { method: "POST" }
+    );
+    expect(abandoned.status).toBe(200);
+    expect(abandonable.state).toBe("cancelled");
+    expect(
+      ((await abandoned.json()) as { operation: { state: string } }).operation
+        .state
+    ).toBe("cancelled");
+
+    // The templates are anchored. An unknown POST subpath still falls through
+    // exactly as before instead of being swallowed by a broad operations prefix.
+    const unknownPost = await fetch(
+      `${entry.baseUrl}/api/operations/${resumable.operationId}/unknown`,
+      { method: "POST" }
+    );
+    expect(unknownPost.status).toBe(404);
+    expect(await unknownPost.text()).toBe("unmatched");
+
+    // The same paths as GET are claimed by the typed prefix route and 404 on the
+    // composite tail read as an operation id, preserving established behavior.
     const asGet = await fetch(
       `${entry.baseUrl}/api/operations/op-running/abandon`
     );
     expect(asGet.status).toBe(404);
     expect(await asGet.text()).toBe('{"error":"Unknown operation."}');
+  });
+
+  it("refuses a persisted resume record with no saved request", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const resumable = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    delete resumable.request;
+    delete resumable.resumeRequest;
+    requireInput(resumable, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(resumable.operationId, resumable);
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: resumable.repo,
+          environment: resumable.environment,
+          provider: resumable.provider,
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "The operation cannot be resumed because its saved request is unavailable.",
+      code: "operation-resume-request-unavailable",
+      operationId: resumable.operationId
+    });
+    expect(resumable.state).toBe("input_required");
+    expect(resumable.request).toBeUndefined();
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("returns 202, then exposes a terminal failure when resumed work cannot be scheduled", async () => {
+    const harness = start();
+    harness.scheduleAccepted.value = false;
+    const entry = await container!.getOrCreate("panel-missing");
+    const resumable = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    resumable.request = {
+      azure: {},
+      environment: { repo: "octo/resume" }
+    };
+    requireInput(resumable, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(resumable.operationId, resumable);
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: resumable.repo,
+          environment: resumable.environment,
+          provider: resumable.provider,
+          serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+        })
+      }
+    );
+
+    expect(response.status).toBe(202);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual(["persist", "persist"]);
+    expect(resumable.state).toBe("failed");
+    expect(resumable.failure).toMatchObject({
+      code: "operation-scheduling-failed",
+      stage: resumable.currentStage,
+      message:
+        "Radius accepted the environment operation but could not start any setup work for it.",
+      evidence:
+        "No server-owned task runner was available for instance panel-missing."
+    });
+
+    const status = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}`
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      operation: {
+        operationId: resumable.operationId,
+        state: "failed",
+        failure: { code: "operation-scheduling-failed" }
+      }
+    });
+  });
+
+  it("answers 410 for an expired resume prompt without persisting or scheduling", async () => {
+    const harness = start();
+    const expired = {
+      ...RUNNING,
+      operationId: "op-expired",
+      state: "failed_partial",
+      failure: {
+        ...RUNNING.failure,
+        code: "operation-input-expired",
+        message: "The requested input expired."
+      }
+    };
+    harness.records.set(expired.operationId, expired);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/op-expired/resume/app-selection-required`,
+      { method: "POST", body: "{not json" }
+    );
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({
+      error: "The requested input expired.",
+      code: "operation-input-expired",
+      operation: { operationId: "op-expired" }
+    });
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
   });
 
   it("decodes a percent-encoded operation id on the wire", async () => {

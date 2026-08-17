@@ -77,8 +77,15 @@ describe("source file encoding integrity", () => {
   });
 });
 
-describe("server.ts response glyphs", () => {
-  const server = readFileSync(join(ROOT, "src", "server.ts"), "utf8");
+describe("server response glyphs", () => {
+  const serverSources = [
+    join(ROOT, "src", "server.ts"),
+    ...collectSourceFiles(join(ROOT, "src", "server")).filter(
+      (file) => !file.endsWith(".test.ts")
+    )
+  ]
+    .map((file) => readFileSync(file, "utf8"))
+    .join("\n");
 
   // Pinned by code point rather than by pasting the glyph, so this assertion
   // still means something if the test file itself is ever re-encoded.
@@ -90,11 +97,11 @@ describe("server.ts response glyphs", () => {
     ["warning sign", "26A0", "\u26A0"],
     ["rightwards arrow", "2192", "\u2192"]
   ])("still emits the %s (U+%s) verbatim", (_label, _codePoint, glyph) => {
-    expect(server).toContain(glyph);
+    expect(serverSources).toContain(glyph);
   });
 
   it("emits no replacement characters or mojibake in server output", () => {
-    expect(server).not.toContain("\uFFFD");
-    expect(server).not.toMatch(/[\u00C2\u00C3\u00E2][\u0080-\u00BF]/);
+    expect(serverSources).not.toContain("\uFFFD");
+    expect(serverSources).not.toMatch(/[\u00C2\u00C3\u00E2][\u0080-\u00BF]/);
   });
 });

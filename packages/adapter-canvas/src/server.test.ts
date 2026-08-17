@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { readFileSync } from "node:fs";
 import {
   activeDeploymentMutation,
   addGraphProgress,
@@ -2101,16 +2100,6 @@ describe("azureCliAssistMessage", () => {
 });
 
 describe("deploy failures that may leave a run in flight", () => {
-  // The resolver's unconfirmed-run guard does nothing unless the failure paths
-  // mark themselves, so the marking is pinned here as well as the reading.
-  const SERVER_SRC = readFileSync(
-    new URL("./server.ts", import.meta.url),
-    "utf8"
-  );
-  const monitor = SERVER_SRC.slice(
-    SERVER_SRC.indexOf('pathname === "/api/deploy"')
-  );
-
   it("treats an unresolved ref as proof that no run was created", () => {
     for (const stderr of [
       "No ref found for: feature-branch",
@@ -2137,31 +2126,17 @@ describe("deploy failures that may leave a run in flight", () => {
       );
   });
 
-  it("marks every failure the monitor reports without a confirmed outcome", () => {
-    // Deleting any one of these markers would leave the suite green while
-    // reopening the double-run race, so each is asserted against the source:
-    // reaching them at runtime needs a workflow that dispatches, times out, or
-    // disappears. Confirmed workflow failure is deliberately not in this list —
-    // that one is the only kind a repair may act on.
-    const blockAfter = (marker: string): string => {
-      const at = monitor.indexOf(marker);
-      expect(at).toBeGreaterThan(-1);
-      return monitor.slice(at, monitor.indexOf('deployStatus = "failed"', at));
-    };
-
-    expect(blockAfter("No deploy run found for")).toContain(
-      "DEPLOY_RUN_UNCONFIRMED_KIND"
-    );
-    expect(blockAfter("Timed out waiting for the deploy workflow")).toContain(
-      "DEPLOY_RUN_UNCONFIRMED_KIND"
-    );
-    expect(blockAfter("Deploy monitoring stopped unexpectedly")).toContain(
-      "DEPLOY_RUN_UNCONFIRMED_KIND"
-    );
-    // The dispatch failure takes its kind from the classifier above, which
-    // returns unconfirmed for everything it cannot rule out.
-    expect(
-      blockAfter("Failed to start the run rad commands workflow")
-    ).toContain("deployErrorKind = dispatchKind");
-  });
+  // The companion assertion — that every failure the monitor reports without a
+  // confirmed outcome marks itself `run-unconfirmed` — used to be a
+  // source-text probe over the `/api/deploy` legacy arm. It is now executed
+  // against the extracted services instead, where each path is reachable:
+  //   * no run found and the monitor's poll cap:
+  //     `server/services/deploy-monitor.test.ts`
+  //   * the monitor stopping unexpectedly:
+  //     `server/services/deploy-request.test.ts` and
+  //     `test/integration/http/deployments.test.ts`
+  //   * the dispatch failure taking its kind from the classifier above:
+  //     `server/services/deploy-dispatch.test.ts`
+  // A confirmed workflow failure is deliberately excluded from that set — it is
+  // the only kind a repair may act on.
 });

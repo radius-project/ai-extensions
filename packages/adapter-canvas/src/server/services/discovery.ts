@@ -69,10 +69,9 @@ export async function discoverResources(
     subnets: []
   };
 
-  // Reject a non-GUID subscriptionId before it reaches the az argv.
-  // On Windows cliExec routes az through `cmd.exe /c` and libuv only
-  // quotes args with whitespace, so "x&calc" would be split by cmd.exe
-  // as a command separator. Empty is allowed (ambient CLI context).
+  // Reject a non-GUID subscriptionId before it reaches the az argv. The Windows
+  // process adapter quotes argv values, but this remains the domain boundary and
+  // defense in depth. Empty is allowed for the ambient CLI context.
   if (
     data.subscriptionId &&
     !dependencies.isUuid(String(data.subscriptionId).trim())
