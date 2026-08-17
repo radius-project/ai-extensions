@@ -106,6 +106,24 @@ describe("environmentsPaneMarkup", () => {
     );
   });
 
+  it("numbers the wizard only in the stepper, not again in the card titles", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<div class="rad-card__title" style="margin:0;">Choose cloud credentials</div>'
+    );
+    expect(html).toContain(
+      '<div class="rad-card__title" style="margin:0;">Create Environment</div>'
+    );
+    // The stepper above the cards already carries the ordinals, so repeating
+    // "Step N" in a title would number the same thing twice.
+    const titles = [
+      ...html.matchAll(/class="rad-card__title"[^>]*>([^<]*)</g)
+    ].map((match) => match[1]);
+    expect(titles).toContain("Choose cloud credentials");
+    expect(titles).toContain("Create Environment");
+    for (const title of titles) expect(title).not.toMatch(/step/i);
+  });
+
   it("chooses the credential profile in step 1, including creating a new one", () => {
     const html = environmentsPaneMarkup(baseOptions);
     const stepOne = html.slice(

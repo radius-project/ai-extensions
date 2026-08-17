@@ -126,7 +126,7 @@ export function environmentsPaneMarkup(
   <!-- ── Step 1 · Cloud credentials ── -->
   <div id="env-step-credentials">
     <div class="rad-card" id="env-step-credentials-card">
-      <div class="rad-card__title" style="margin:0;">Step 1 · Choose cloud credentials</div>
+      <div class="rad-card__title" style="margin:0;">Choose cloud credentials</div>
       <div class="rad-section">
         <div class="rad-section__desc">Select the verified cloud account this environment deploys into, or create a new credential profile for it.</div>
         <div class="rad-field" style="max-width:520px; margin-top:14px;">
@@ -163,7 +163,7 @@ export function environmentsPaneMarkup(
   <div id="env-step-details" style="display:none;">
   <div class="rad-card">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-      <div class="rad-card__title" style="margin:0;">Step 2 · Create Environment</div>
+      <div class="rad-card__title" style="margin:0;">Create Environment</div>
       <button id="env-step2-back" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to credentials</button>
     </div>
     <!-- 1 · Name this environment -->
