@@ -407,7 +407,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
         []
       );
     }
-    return keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
+    return (
+      keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || []
+    );
   };
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
