@@ -1905,6 +1905,140 @@ describe("deploy flow", () => {
   });
 });
 
+describe("optimistic deployment rows", () => {
+  // The regression this pins: a `fresh=1` listing bypasses the cache and can
+  // take tens of seconds. When the click path blanked the table to the loading
+  // placeholder and only synthesized the pending row from the *response*, a
+  // just-started deploy showed "Loading deployments…" for the whole wait and
+  // looked like it had never registered.
+  it("shows the pending row before the refreshed listing responds", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    expect(page.tableBody.innerHTML).toContain(
+      "No application deployments yet"
+    );
+
+    const listing = createDeferred<HttpResponse>();
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => listing.promise
+    );
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({ status: "in_progress" })
+    );
+
+    page.deployBtn.dispatch("click");
+
+    expect(page.tableBody.innerHTML).toContain("Pending");
+    expect(page.tableBody.innerHTML).not.toContain("Loading deployments");
+    expect(page.tableBody.innerHTML).toContain("dev");
+
+    listing.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    expect(page.tableBody.innerHTML).toContain("Pending");
+  });
+
+  it("keeps the pending row when the refreshed listing rejects", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => Promise.reject(new Error("offline"))
+    );
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({ status: "in_progress" })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+
+    expect(page.tableBody.innerHTML).toContain("Pending");
+    expect(page.tableBody.innerHTML).not.toContain(
+      "Could not load deployments"
+    );
+  });
+
+  it("keeps the pending row when the refreshed listing reports a transient error", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => jsonResponse({ deployments: [], error: "rate limited" })
+    );
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({ status: "in_progress" })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+
+    expect(page.tableBody.innerHTML).toContain("Pending");
+    expect(page.tableBody.innerHTML).not.toContain("Retrying");
+  });
+
+  it("keeps already-loaded rows on screen while a non-quiet refresh is in flight", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          { app: "shop", environment: "prod", status: "success", runUrl: "" }
+        ]
+      }
+    });
+    init(page);
+    await flushPromises();
+    expect(page.tableBody.innerHTML).toContain("shop");
+
+    const listing = createDeferred<HttpResponse>();
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => listing.promise
+    );
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({ status: "in_progress" })
+    );
+
+    page.deployBtn.dispatch("click");
+
+    expect(page.tableBody.innerHTML).toContain("shop");
+    expect(page.tableBody.innerHTML).toContain("Pending");
+    expect(page.tableBody.innerHTML).not.toContain("Loading deployments");
+
+    listing.resolve(
+      jsonResponse({
+        deployments: [
+          { app: "shop", environment: "prod", status: "success", runUrl: "" }
+        ]
+      })
+    );
+    await flushPromises();
+    expect(page.tableBody.innerHTML).toContain("shop");
+  });
+
+  it("still shows the loading placeholder when there is nothing to render", async () => {
+    const page = fixture();
+    const listing = createDeferred<HttpResponse>();
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => listing.promise
+    );
+    init(page);
+
+    expect(page.tableBody.innerHTML).toContain("Loading deployments");
+
+    listing.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+  });
+});
+
 describe("resuming a redirected deployment", () => {
   it("resumes when ?application= and ?environment= are present", async () => {
     const page = fixture({ search: "?application=app&environment=dev" });

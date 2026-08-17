@@ -388,6 +388,7 @@ export function initializeDeployingPage(
   const overrides = new Map<string, DeploymentOverride>();
   let deployRecordsPresent = new Set<string>();
   let deployedEnvs = new Map<string, string>();
+  let lastRecords: readonly DeploymentRecord[] = [];
 
   const inlineBindings: Registration[] = [];
   const rowBindings: Registration[] = [];
@@ -596,6 +597,34 @@ export function initializeDeployingPage(
     }
   };
 
+  // Repaints the table from the newest records already held plus the local
+  // overrides, so an optimistic row never waits on a round trip. A `fresh=1`
+  // listing bypasses the cache and can take tens of seconds, and a just-started
+  // deploy that shows no row for that long reads as a deploy that never
+  // registered.
+  const renderDeployments = (): void => {
+    const { rows, present } = buildDeploymentRows(lastRecords, overrides);
+    deployRecordsPresent = present;
+    if (rows.length === 0) {
+      deployedEnvs = new Map();
+      refreshDeployBtn();
+      tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
+      return;
+    }
+    deployedEnvs = computeBlockedEnvironments(rows, overrides);
+    refreshDeployBtn();
+    tableBody.innerHTML = rows
+      .map((row) => renderDeploymentRow(row, overrides))
+      .join("");
+    wireDeleteButtons();
+  };
+
+  // True once there is something real to show. A placeholder — loading, retry
+  // or failure — must never replace it: blanking the table would discard a
+  // pending row for an operation that is still running.
+  const hasRenderableRows = (): boolean =>
+    overrides.size > 0 || lastRecords.length > 0;
+
   // A background refresh (quiet) keeps the current rows on screen until the
   // new data arrives, so periodic in-flight polling doesn't flash the table
   // back to a loading placeholder on every tick. Requests are aborted and
@@ -606,7 +635,10 @@ export function initializeDeployingPage(
       tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
       return Promise.resolve();
     }
-    if (!quiet) tableBody.innerHTML = LOADING_ROW;
+    if (!quiet) {
+      if (hasRenderableRows()) renderDeployments();
+      else tableBody.innerHTML = LOADING_ROW;
+    }
     deploymentsAbort?.abort();
     deploymentsAbort = context.net.createAbort();
     const request = ++deploymentsRequest;
@@ -622,30 +654,19 @@ export function initializeDeployingPage(
         // A transient failure returns { deployments: [], error }. Don't
         // render that as "no deployments" (which would hide real rows).
         if (readString(payload, "error")) {
-          if (!quiet) tableBody.innerHTML = RETRY_ROW;
+          if (!quiet && !hasRenderableRows()) tableBody.innerHTML = RETRY_ROW;
           return;
         }
-        const deployments = parseDeploymentRecords(payload);
-        const { rows, present } = buildDeploymentRows(deployments, overrides);
-        deployRecordsPresent = present;
-        if (rows.length === 0) {
-          deployedEnvs = new Map();
-          refreshDeployBtn();
-          tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
-          return;
-        }
-        deployedEnvs = computeBlockedEnvironments(rows, overrides);
-        refreshDeployBtn();
-        tableBody.innerHTML = rows
-          .map((row) => renderDeploymentRow(row, overrides))
-          .join("");
-        wireDeleteButtons();
+        lastRecords = parseDeploymentRecords(payload);
+        renderDeployments();
       })
       .catch((error: unknown) => {
         if (!entry.active || request !== deploymentsRequest) return;
         if (error instanceof Error && error.name === "AbortError") return;
         context.logger.error("Radius deployments could not load.", error);
-        if (!quiet) tableBody.innerHTML = LOAD_FAILURE_ROW;
+        if (!quiet && !hasRenderableRows()) {
+          tableBody.innerHTML = LOAD_FAILURE_ROW;
+        }
       });
   };
 
