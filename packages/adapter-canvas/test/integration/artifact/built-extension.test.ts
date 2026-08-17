@@ -143,7 +143,6 @@ describe("P0-C built Radius extension artifact", () => {
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/browser\/scripts\.ts$/
         ),
-        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/),
         expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/),
         expect.stringMatching(/skills\/radius-app-bicep\/SKILL\.md$/),
         expect.stringMatching(
@@ -164,6 +163,11 @@ describe("P0-C built Radius extension artifact", () => {
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
     expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
+    expect(normalizedSources).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
+      ])
+    );
 
     expect(
       readdirSync(DIST)
@@ -265,7 +269,7 @@ describe("P0-C built Radius extension artifact", () => {
       source.replaceAll("\\", "/")
     );
     const pageModules = [
-      "pages/browser-function.ts",
+      "pages/browser-state-ids.ts",
       "pages/encoding.ts",
       "pages/shell-styles.ts",
       "pages/shell.ts",
@@ -278,13 +282,7 @@ describe("P0-C built Radius extension artifact", () => {
       "pages/environment-page.ts",
       "pages/environment/environments-pane.ts",
       "pages/environment/credentials-pane.ts",
-      "pages/environment/client-environments.ts",
-      "pages/environment/client-operations.ts",
-      "pages/environment/client-profiles.ts",
-      "pages/environment/client-discovery.ts",
-      "pages/environment/client-credentials.ts",
-      "pages/deploying-page.ts",
-      "pages/deploying/client-deployments.ts"
+      "pages/deploying-page.ts"
     ];
     for (const pageModule of pageModules) {
       expect(
@@ -301,6 +299,11 @@ describe("P0-C built Radius extension artifact", () => {
     expect(
       normalizedSources.filter((source) =>
         source.endsWith("packages/adapter-canvas/src/pages.ts")
+      )
+    ).toHaveLength(0);
+    expect(
+      normalizedSources.filter((source) =>
+        source.endsWith("packages/adapter-canvas/src/pages/browser-function.ts")
       )
     ).toHaveLength(0);
     // oidcPage is reachable only through the facade — no route renders it — so
@@ -344,12 +347,23 @@ describe("P0-C built Radius extension artifact", () => {
 
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
+      "delete-dialog",
       "heartbeat",
+      "operation-chip",
+      "oidc-page",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
       "graph-page",
       "planned-graph-page",
       "graph-diff-page",
       "deployed-graph-page"
     ]);
+    expect(
+      normalizedSources.some((source) =>
+        /\/pages\/(?:environment|deploying)\/client-/.test(source)
+      )
+    ).toBe(false);
     expect(browserSources).toHaveLength(2);
     expect(browserSources).toEqual(
       expect.arrayContaining([

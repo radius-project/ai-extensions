@@ -4,7 +4,6 @@
 // operation chip), and the feedback widget that every page renders inside.
 
 import { getInlineVendorScripts, getInlineVendorStyles } from "../vendor.js";
-import { CLIENT_DELETE_DIALOG_JS, CLIENT_OPCHIP_JS } from "../client.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { escapeHtml } from "../shared.js";
 import { topNav, feedbackWidget } from "../ui.js";
@@ -42,9 +41,7 @@ ${SHELL_STYLE_CSS}
 ${topNav(active)}
 ${getInlineVendorScripts()}
 ${browserScriptTag("graph")}
-<script>
-${CLIENT_DELETE_DIALOG_JS}
-</script>
+${browserScriptTag("delete-dialog")}
 <div class="main-content">
 ${bodyContent}
 </div>
@@ -55,9 +52,7 @@ ${feedbackWidget()}
 </div>
 <style>@keyframes radius-spin { to { transform: rotate(360deg); } }</style>
 ${browserScriptTag("heartbeat")}
-<script>
-${CLIENT_OPCHIP_JS}
-</script>
+${browserScriptTag("operation-chip")}
 </body>
 </html>`;
 }
