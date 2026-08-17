@@ -17,7 +17,7 @@ describe("graphHeader / graphHeaderClose", () => {
     ];
     for (const [label, page] of expected) {
       expect(html).toContain(
-        `<a href="?page=${page}" class="rad-lede-link" onclick="radiusNavTo(event, '${page}')"><strong>${label}</strong></a>`
+        `<a href="?page=${page}" data-radius-graph-page="${page}" class="rad-lede-link"><strong>${label}</strong></a>`
       );
     }
   });
@@ -27,7 +27,7 @@ describe("graphHeader / graphHeaderClose", () => {
     // Every route referenced by a lede link must also exist as a nav sub-tab.
     const ledeRoutes = [
       ...html.matchAll(
-        /class="rad-lede-link" onclick="radiusNavTo\(event, '([^']+)'\)"/g
+        /data-radius-graph-page="([^"]+)" class="rad-lede-link"/g
       )
     ];
     expect(ledeRoutes).toHaveLength(4);
@@ -44,7 +44,7 @@ describe("graphHeader page selection", () => {
       const html = graphHeader(page);
       const active = [
         ...html.matchAll(
-          /<a href="\?page=([a-z-]+)" data-page="[a-z-]+" class="rad-subtab rad-subtab--active"/g
+          /<a href="\?page=([a-z-]+)" data-page="[a-z-]+" data-radius-graph-page="[a-z-]+" class="rad-subtab rad-subtab--active"/g
         )
       ].map((match) => match[1]);
       expect(active).toEqual([page]);
@@ -62,6 +62,10 @@ describe("graphHeader page selection", () => {
     const html = graphHeader("nope");
     expect(html).not.toContain("rad-subtab--active");
     expect(html).toContain('data-page="graph"');
+  });
+
+  it("contains no inline event handlers", () => {
+    expect(graphHeader("graph")).not.toMatch(/\son[a-z]+=/);
   });
 
   it("opens the graph content wrapper that graphHeaderClose closes", () => {

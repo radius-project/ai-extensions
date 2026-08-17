@@ -11,7 +11,13 @@
     "excludedScriptPayloads": [
       "graph — CLIENT_GRAPH_JS changed after this commit by upstream #367 (navigation cancel hook clearing window.__radiusDiffTimeout).",
       "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
-      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields."
+      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields.",
+      "heartbeat — Phase 4A rewrites this payload by design, so its source digest can no longer match. The digest is replaced by executable evidence rather than by this justification: test/fixtures/legacy-heartbeat-entry.ts freezes the exact payload the digest covered, and src/browser/heartbeat.differential.test.ts drives it and the compiled replacement through identical fakes, comparing requests, abort accounting, reload calls, overlay transition and pending timers, with the deliberate divergences pinned separately. The projected /api/ping and reconnect markup contracts are still compared through the projection fields.",
+      "repoBranch, graph - Phase 4 replaced these legacy inline payloads with importable browser modules; repository behavior is bundled into the owning page entries and graph remains a shared compiled entry. A byte digest of deleted source text cannot be preserved; behavior is pinned by collocated unit tests plus generated-script execution and renderer wiring suites. Delete-dialog and operation-chip remain deferred legacy payloads for 4C and retain their byte digests.",
+      "deployed-context markerOrder - the 'deployMode: true' marker previously matched first inside a comment in the legacy inline graph payload, which the compiler strips from the compiled bundle. The marker is still present and still ordered against the page's own script; only its accidental first match moved.",
+      "page (graph, planned, graph-diff, deployed) - Phase 4 replaced executable page payloads and source-text markers with compiled importable entries. Hidden JSON state is projected back onto the legacy state contract; executable behavior is pinned by collocated browser-page tests.",
+      "apiPaths (graph, planned, graph-diff, deployed) - the legacy endpoint order is retained in the projection only after every expected path is observed in the compiled page entry. Extra transitive paths from bundled repository helpers are ignored here and are covered by the entry behavior tests.",
+      "shell apiPaths - the repository selector library no longer runs globally on every page; its endpoints are owned by the graph page entries that use them, so the bare shell retains only open-source, heartbeat, and operation-chip paths."
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
   },
@@ -29,9 +35,7 @@
     "serializeBrowserFunction"
   ],
   "sharedScriptDigests": {
-    "repoBranch": "d687e1da6bb812314b04a0b27cc52431ddd79b75a98655b11823634a750d5324",
     "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
-    "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
     "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
     "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21"
   },
@@ -53,9 +57,7 @@
         "id=\"radius-reconnect-overlay\""
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -85,11 +87,6 @@
         "panes": [],
         "statuses": [],
         "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
           "/api/open-source",
           "/api/ping",
           "/api/operations"
@@ -121,9 +118,7 @@
         "id=\"rad-opchip-label\""
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -153,11 +148,6 @@
         "panes": [],
         "statuses": [],
         "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
           "/api/open-source",
           "/api/ping",
           "/api/operations"
@@ -185,9 +175,7 @@
         "href=\"/?page=deploying\""
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -217,11 +205,6 @@
         "panes": [],
         "statuses": [],
         "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
           "/api/open-source",
           "/api/ping",
           "/api/operations"
@@ -242,18 +225,12 @@
       "state": {},
       "markers": [
         "Select a branch to generate the application graph.",
-        "Checking for an existing app model",
-        "Drafting .radius/app.bicep",
-        "Radius app-bicep skill",
-        "requestGraphLoad()"
+        "Radius app-bicep skill"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Application Graph — Radius",
@@ -300,10 +277,7 @@
         ],
         "markerOrder": [
           0,
-          1,
-          2,
-          4,
-          3
+          1
         ],
         "missingMarkers": [],
         "initialState": {
@@ -311,9 +285,7 @@
           "CONTEXT_BRANCH": "'main'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "ac84e2c7d35b92ba3390712af290bdcb890f8946753dc02683d02e992b11be43"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -325,17 +297,12 @@
         "contextBranch": "feature/x"
       },
       "markers": [
-        "Select a branch to generate the application graph.",
-        "window.radiusGraphRetryTimer",
-        "Graph generation failed"
+        "Select a branch to generate the application graph."
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Application Graph — Radius",
@@ -381,9 +348,7 @@
           "/api/progress"
         ],
         "markerOrder": [
-          0,
-          1,
-          2
+          0
         ],
         "missingMarkers": [],
         "initialState": {
@@ -391,9 +356,7 @@
           "CONTEXT_BRANCH": "'feature/x'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "861a236d41cbd9b1474f75e63e0dcb36db9aecf201e314a6e4fff9b1a7799d98"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -426,15 +389,11 @@
         "graphBranch": "feature/x"
       },
       "markers": [
-        "radiusRenderGraph('graph-container', resources",
-        "localSource: false",
         "refresh: true",
         "Copilot is rebuilding the application graph"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -485,10 +444,8 @@
           "/api/load-graph"
         ],
         "markerOrder": [
-          1,
           0,
-          2,
-          3
+          1
         ],
         "missingMarkers": [],
         "initialState": {
@@ -530,13 +487,9 @@
         "graphBranch": "wt",
         "graphFromWorkspace": true
       },
-      "markers": [
-        "localSource: true"
-      ],
+      "markers": [],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -586,9 +539,7 @@
           "/api/discover-branches",
           "/api/load-graph"
         ],
-        "markerOrder": [
-          0
-        ],
+        "markerOrder": [],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('graph-repo').value",
@@ -608,14 +559,9 @@
         "graphResources": [],
         "contextRepo": "octo/app"
       },
-      "markers": [
-        "var resources = [];",
-        "radiusRenderGraph('graph-container'"
-      ],
+      "markers": [],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -665,10 +611,7 @@
           "/api/discover-branches",
           "/api/load-graph"
         ],
-        "markerOrder": [
-          0,
-          1
-        ],
+        "markerOrder": [],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('graph-repo').value",
@@ -688,16 +631,10 @@
         "contextBranch": "feature/x"
       },
       "markers": [
-        "Generating the planned application graph…",
-        "Select a branch to preview the planned deployment.",
-        "Create an environment to preview the planned deployment for this application.",
-        "Environments could not be loaded. Try again before planning a deployment.",
-        "RADIUS_PLAN_ENVS_STALE"
+        "Generating the planned application graph…"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -744,11 +681,7 @@
           "/api/plan-graph"
         ],
         "markerOrder": [
-          4,
-          0,
-          3,
-          1,
-          2
+          0
         ],
         "missingMarkers": [],
         "initialState": {
@@ -793,15 +726,11 @@
         "plannedFromWorkspace": true
       },
       "markers": [
-        "plannedMode: true",
-        "localSource: true",
         "Copilot is generating .radius/app.bicep with the Radius app-bicep skill",
         "The planned deployment response was incomplete. Try again."
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -847,10 +776,8 @@
           "/api/plan-graph"
         ],
         "markerOrder": [
-          2,
-          3,
-          1,
-          0
+          0,
+          1
         ],
         "missingMarkers": [],
         "initialState": {
@@ -881,14 +808,10 @@
         "diffTargetRepo": "octo/app"
       },
       "markers": [
-        "Loading branches…",
-        "radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD)",
-        "Comparing <strong>"
+        "Loading branches…"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -935,9 +858,7 @@
           "/api/diff-branches"
         ],
         "markerOrder": [
-          0,
-          1,
-          2
+          0
         ],
         "missingMarkers": [],
         "initialState": {
@@ -999,14 +920,10 @@
         "+1 added",
         "-1 removed",
         "~1 modified",
-        "1 unchanged",
-        "diffMode: true",
-        "repoUrl: DIFF_REPO_URL"
+        "1 unchanged"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -1057,9 +974,7 @@
           0,
           1,
           2,
-          3,
-          4,
-          5
+          3
         ],
         "missingMarkers": [],
         "initialState": {
@@ -1085,9 +1000,7 @@
         "Unable to compile head graph"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback"
       ],
@@ -1157,19 +1070,12 @@
       },
       "markers": [
         "Loading deployed application graph…",
-        "deployMode: true",
-        "showLegend: true",
-        "var POLL_MS = 15000",
-        "Deleting Deployment…",
-        "deploymentStatus(app, env)"
+        "Deleting Deployment…"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
-        "feedback",
-        "page"
+        "feedback"
       ],
       "expected": {
         "title": "Deployed Graph — Radius",
@@ -1232,12 +1138,8 @@
           "/api/delete-deployment"
         ],
         "markerOrder": [
-          1,
           0,
-          4,
-          3,
-          5,
-          2
+          1
         ],
         "missingMarkers": [],
         "initialState": {
@@ -1247,9 +1149,7 @@
           "FALLBACK_PROVIDER": "\"aws\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "b11f98d55ab25976dc3cc0fb5c3c47b4b2fbcae0901fb0a30547edf8b6fd9bdd"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1268,9 +1168,7 @@
         "Save Credential Profile"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -1536,9 +1434,7 @@
         "is set up, but one step is left for you"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -1805,9 +1701,7 @@
         "/api/deploy-reset"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -1858,9 +1752,7 @@
         "Deployment failed to dispatch"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -1906,9 +1798,7 @@
         "Could not load deployments."
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -1995,9 +1885,7 @@
         "Back to Deployments"
       ],
       "hashedScripts": [
-        "repoBranch",
         "deleteDialog",
-        "heartbeat",
         "opchip",
         "feedback",
         "page"
@@ -2054,9 +1942,9 @@
           "/api/deploy"
         ],
         "markerOrder": [
-          1,
           0,
           4,
+          1,
           3,
           2
         ],

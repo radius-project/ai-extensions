@@ -3,11 +3,8 @@
 // owning modules, and the cross-page contracts every renderer shares.
 
 import { describe, it, expect } from "vitest";
-import {
-  CLIENT_REPO_BRANCH_JS,
-  CLIENT_GRAPH_JS,
-  CLIENT_DELETE_DIALOG_JS
-} from "./client.js";
+import { browserScript } from "./browser/scripts.js";
+import { BROWSER_ENTRIES } from "./browser/build.js";
 import {
   pageShell,
   oidcPage,
@@ -198,25 +195,17 @@ describe("inline scripts", () => {
 // a page whose body script uses a shared helper injected *after* it dies with a
 // ReferenceError — taking every later statement with it, which surfaces as a
 // permanently stuck "Loading…". Each block parses fine alone, so only an
-// ordering check catches this. The shared libraries are exactly the code that
-// crosses block boundaries, so they are what this pins.
+// ordering check catches this. The shared behaviour is exactly the code that
+// crosses block boundaries, so it is what this pins.
+//
+// The compiled entries publish their helpers by assignment rather than by
+// declaration, so an entry's block must appear before any block that calls one
+// of its names — the same ordering rule, checked against the names the entry
+// declares it exports.
 describe("shared client helpers are injected before the page body uses them", () => {
-  const SHARED_LIBS = [
-    CLIENT_REPO_BRANCH_JS,
-    CLIENT_GRAPH_JS,
-    CLIENT_DELETE_DIALOG_JS
-  ];
-
-  // Top-level declarations of the shared libraries: the names pages may rely on.
-  const sharedHelpers = [
-    ...new Set(
-      SHARED_LIBS.flatMap((lib) =>
-        [...lib.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(
-          (m) => m[1]
-        )
-      )
-    )
-  ];
+  const entryHelpers = BROWSER_ENTRIES.flatMap((entry) =>
+    entry.globals.map((name) => [entry.name, name] as const)
+  );
 
   const renderers: Array<[string, () => string]> = [
     ["graphPage", () => graphPage({})],
@@ -229,31 +218,35 @@ describe("shared client helpers are injected before the page body uses them", ()
   ];
 
   it("finds the shared helpers to check", () => {
-    expect(sharedHelpers).toContain("radiusCreateDeleteDeploymentDialog");
-    expect(sharedHelpers).toContain("radiusApplyDeployedEnvState");
+    const names = entryHelpers.map(([, name]) => name);
+    expect(names).toContain("radiusRenderGraph");
   });
 
   it.each(renderers)(
-    "%s uses no shared helper before it is defined",
+    "%s calls no compiled entry helper before that entry's block",
     (_name, render) => {
-      // Compare by block, not by character offset: within a single block a
-      // forward reference is fine, because declarations hoist to its top.
       const blocks = (
         render().match(/<script>([\s\S]*?)<\/script>/g) || []
       ).map((b) => b.slice("<script>".length, -"</script>".length));
+      const entryBlock = new Map<string, number>();
+      for (const entry of BROWSER_ENTRIES) {
+        const compiled = browserScript(entry.name);
+        entryBlock.set(
+          entry.name,
+          blocks.findIndex((src) => src.includes(compiled))
+        );
+      }
       const violations: string[] = [];
-      for (const name of sharedHelpers) {
-        const declaredIn = blocks.findIndex((src) =>
-          new RegExp(`^function\\s+${name}\\s*\\(`, "m").test(src)
-        );
-        if (declaredIn === -1) continue;
+      for (const [entryName, helper] of entryHelpers) {
+        const definedIn = entryBlock.get(entryName) ?? -1;
+        if (definedIn === -1) continue;
         const usedIn = blocks.findIndex(
-          (src, i) =>
-            i !== declaredIn && new RegExp(`\\b${name}\\s*\\(`).test(src)
+          (src, index) =>
+            index !== definedIn && new RegExp(`\\b${helper}\\b`).test(src)
         );
-        if (usedIn !== -1 && usedIn < declaredIn) {
+        if (usedIn !== -1 && usedIn < definedIn) {
           violations.push(
-            `${name} used in block ${usedIn} but defined in block ${declaredIn}`
+            `${helper} used in block ${usedIn} but published by ${entryName} in block ${definedIn}`
           );
         }
       }
@@ -490,6 +483,60 @@ describe("no page lets state escape its inline scripts", () => {
 // this suite renders the current facade exports and compares the same
 // deterministic projection. See test/fixtures/page-renderer-compatibility.json
 // for provenance and the update policy.
+describe("compiled graph page network contracts", () => {
+  it.each([
+    [
+      "graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/progress",
+        "/api/load-graph"
+      ]
+    ],
+    [
+      "planned-graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/deploy",
+        "/api/progress",
+        "/api/plan-graph"
+      ]
+    ],
+    [
+      "graph-diff-page",
+      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+    ],
+    [
+      "deployed-graph-page",
+      [
+        "/api/deploy",
+        "/api/list-deployments",
+        "/api/deployed-graph",
+        "/api/deploy-status",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/delete-deployment"
+      ]
+    ]
+  ] as const)(
+    "%s exposes exactly its reviewed API path set",
+    (entry, expected) => {
+      const paths = [
+        ...new Set(
+          [...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)].map(
+            (match) => match[1]
+          )
+        )
+      ];
+      expect(paths).toEqual(expected);
+    }
+  );
+});
+
 describe("legacy page renderer compatibility oracle", () => {
   const fixture = parsePageCompatibilityFixture(
     JSON.parse(
@@ -626,7 +673,7 @@ describe("page renderer facade", () => {
       "<title>Deployments — Radius</title>"
     );
     expect(graphHeader("planned")).toContain(
-      '<a href="?page=planned" data-page="planned" class="rad-subtab rad-subtab--active"'
+      '<a href="?page=planned" data-page="planned" data-radius-graph-page="planned" class="rad-subtab rad-subtab--active"'
     );
     expect(graphHeaderClose()).toBe("</div>");
     expect(

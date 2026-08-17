@@ -52,23 +52,27 @@ export function summarizeCoverage(summary, baseline) {
     );
   }
 
-  const runtimeEntries = fileEntries
-    .filter(([path]) => path.includes("/packages/adapter-canvas/src/runtime/"))
-    .map(([, value]) => value);
-  if (runtimeEntries.length === 0) {
-    throw new Error("Coverage summary has no files for runtime.");
+  for (const scope of Object.keys(baseline.newlyExtracted)) {
+    const entries = fileEntries
+      .filter(([path]) =>
+        path.includes(`/packages/adapter-canvas/src/${scope}/`)
+      )
+      .map(([, value]) => value);
+    if (entries.length === 0) {
+      throw new Error(`Coverage summary has no files for ${scope}.`);
+    }
+    scopes[scope] = Object.fromEntries(
+      METRICS.map((metric) => {
+        const totals = metricTotals(entries, metric);
+        return [metric, percentage(totals.covered, totals.total)];
+      })
+    );
   }
-  scopes.runtime = Object.fromEntries(
-    METRICS.map((metric) => {
-      const totals = metricTotals(runtimeEntries, metric);
-      return [metric, percentage(totals.covered, totals.total)];
-    })
-  );
 
   return Object.entries(scopes).map(([scope, current]) => {
     const accepted =
       scope === "aggregate" ? baseline.aggregate
-      : scope === "runtime" ? baseline.newlyExtracted.runtime
+      : baseline.newlyExtracted[scope] ? baseline.newlyExtracted[scope]
       : baseline.packages[scope];
     return {
       scope,
