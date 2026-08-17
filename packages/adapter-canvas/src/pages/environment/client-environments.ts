@@ -107,34 +107,42 @@ function wireRowActions() {
     document.querySelectorAll('.js-delete-env').forEach(function(btn) {
         btn.addEventListener('click', function() {
             var envName = this.getAttribute('data-env') || '';
-            if (!envName || !confirm('Delete environment "' + envName + '"? This removes the GitHub environment and its Radius configuration.')) return;
-            this.disabled = true; this.textContent = 'Deleting…';
+            if (!envName) return;
             var delBtn = this;
-            fetch('/api/delete-environment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: envName }) })
-                .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
-                .then(function(res) {
-                    if (!res.ok) {
-                        delBtn.disabled = false; delBtn.textContent = 'Delete Env';
-                        // An environment can't be deleted while an app is still
-                        // deployed to it — show the error and send the user to the
-                        // application-deletion flow (Deployments page) to remove it.
-                        if (res.d && res.d.code === 'app-deployed') {
-                            showEnvError((res.d.error || 'Delete the application deployment first.') + ' Redirecting you to delete the application…');
-                            var target = (res.d && res.d.redirect) || '/?page=deploying';
-                            setTimeout(function() { window.location.href = target; }, 2000);
-                            return;
-                        }
-                        alert((res.d && res.d.error) || 'Could not delete the environment.');
-                        return;
-                    }
-                    loadEnvTable();
-                })
-                .catch(function() {
-                    delBtn.disabled = false; delBtn.textContent = 'Delete Env';
-                    alert('Could not delete the environment. Please try again.');
-                });
+            showConfirmDialog({
+                title: 'Delete environment?',
+                message: 'This deletes the GitHub environment "' + envName + '" and its Radius configuration. Applications already deployed to it must be deleted first.',
+                confirmLabel: 'Delete environment',
+                onConfirm: function() { deleteEnvironment(envName, delBtn); }
+            });
         });
     });
+}
+function deleteEnvironment(envName, delBtn) {
+    delBtn.disabled = true; delBtn.textContent = 'Deleting…';
+    fetch('/api/delete-environment', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, environment: envName }) })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        .then(function(res) {
+            if (!res.ok) {
+                delBtn.disabled = false; delBtn.textContent = 'Delete Env';
+                // An environment can't be deleted while an app is still
+                // deployed to it — show the error and send the user to the
+                // application-deletion flow (Deployments page) to remove it.
+                if (res.d && res.d.code === 'app-deployed') {
+                    showEnvError((res.d.error || 'Delete the application deployment first.') + ' Redirecting you to delete the application…');
+                    var target = (res.d && res.d.redirect) || '/?page=deploying';
+                    setTimeout(function() { window.location.href = target; }, 2000);
+                    return;
+                }
+                alert((res.d && res.d.error) || 'Could not delete the environment.');
+                return;
+            }
+            loadEnvTable();
+        })
+        .catch(function() {
+            delBtn.disabled = false; delBtn.textContent = 'Delete Env';
+            alert('Could not delete the environment. Please try again.');
+        });
 }
 
 // Opens the two-step wizard. A preset profile (e.g. "Create Env" from the

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { environmentPage } from "../environment-page.js";
+import { ENVIRONMENT_CONFIRM_CLIENT_JS } from "./client-confirm.js";
 import { ENVIRONMENT_TABLE_CLIENT_JS } from "./client-environments.js";
 import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./client-operations.js";
 import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./client-profiles.js";
@@ -21,9 +22,20 @@ function handlerFor(source: string, elementId: string): string {
 
 const fragments: Array<[string, string, string[]]> = [
   [
+    "client-confirm",
+    ENVIRONMENT_CONFIRM_CLIENT_JS,
+    ["showConfirmDialog", "closeConfirmDialog"]
+  ],
+  [
     "client-environments",
     ENVIRONMENT_TABLE_CLIENT_JS,
-    ["switchSubtab", "loadEnvTable", "wireRowActions", "showEnvForm"]
+    [
+      "switchSubtab",
+      "loadEnvTable",
+      "wireRowActions",
+      "showEnvForm",
+      "deleteEnvironment"
+    ]
   ],
   [
     "client-operations",
@@ -72,7 +84,14 @@ const fragments: Array<[string, string, string[]]> = [
   [
     "client-credentials",
     ENVIRONMENT_CREDENTIAL_CLIENT_JS,
-    ["loadCredTable", "showCredForm", "markVerified", "credVerifyError"]
+    [
+      "loadCredTable",
+      "showCredForm",
+      "markVerified",
+      "credVerifyError",
+      "credentialUsage",
+      "deleteCredentialProfile"
+    ]
   ]
 ];
 
@@ -184,16 +203,49 @@ describe("environment page client fragments", () => {
     }
   });
 
-  it("deletes a profile without consulting environments first", () => {
-    // Deletion is inert for existing environments — they hold their own copy of
-    // the values — so it must not become conditional on remote GitHub state.
-    const wiring = ENVIRONMENT_CREDENTIAL_CLIENT_JS.slice(
-      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf("'.js-cred-delete'"),
-      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf("function applyCredProvider")
+  it("still offers deletion when the usage lookup fails", () => {
+    // Which environments used a profile is advisory: they hold their own copy
+    // of the values, so a failed lookup must not block a local delete.
+    const usage = ENVIRONMENT_CREDENTIAL_CLIENT_JS.slice(
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf("function credentialUsage("),
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf(
+        "function deleteCredentialProfile("
+      )
     );
-    expect(wiring).toContain("/api/delete-credential-profile");
-    expect(wiring).toContain("confirm(");
-    expect(wiring).not.toContain("/api/environments");
+    expect(usage).toContain("/api/list-environments");
+    expect(usage).toContain("e.credentialProfile === name");
+    expect(usage).toContain(".catch(function() { done([], false); });");
+  });
+
+  it("confirms both deletions through the shared dialog, not window.confirm", () => {
+    for (const [name, source] of fragments) {
+      expect(source.includes("confirm('"), name).toBe(false);
+    }
+    expect(ENVIRONMENT_CREDENTIAL_CLIENT_JS).toContain("showConfirmDialog({");
+    expect(ENVIRONMENT_TABLE_CLIENT_JS).toContain("showConfirmDialog({");
+  });
+
+  it("routes dialog text through textContent so names stay inert", () => {
+    expect(ENVIRONMENT_CONFIRM_CLIENT_JS).not.toContain("innerHTML");
+    expect(ENVIRONMENT_CONFIRM_CLIENT_JS).toContain("li.textContent = item;");
+  });
+
+  it("keeps the destructive action off the initially focused control", () => {
+    const show = ENVIRONMENT_CONFIRM_CLIENT_JS.slice(
+      ENVIRONMENT_CONFIRM_CLIENT_JS.indexOf("function showConfirmDialog("),
+      ENVIRONMENT_CONFIRM_CLIENT_JS.indexOf("function closeConfirmDialog(")
+    );
+    expect(show).toContain("getElementById('env-confirm-cancel').focus()");
+    expect(show).not.toContain("getElementById('env-confirm-ok').focus()");
+  });
+
+  it("discards the pending action when the dialog closes", () => {
+    // A stale callback would let a Cancel followed by an unrelated confirm
+    // delete the earlier target.
+    expect(ENVIRONMENT_CONFIRM_CLIENT_JS).toContain("pendingConfirm = null;");
+    expect(ENVIRONMENT_CONFIRM_CLIENT_JS).toContain(
+      "var run = pendingConfirm;\n    closeConfirmDialog();\n    if (run) run();"
+    );
   });
 
   it("addresses only elements the page actually renders", () => {

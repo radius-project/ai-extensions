@@ -48,15 +48,46 @@ function wireCredRowActions(profiles) {
     document.querySelectorAll('.js-cred-delete').forEach(function(btn) {
         btn.addEventListener('click', function() {
             var name = this.getAttribute('data-name') || '';
-            // Environments already created from a profile hold their own copy of
-            // its values, so deleting one never affects an existing environment.
-            if (!name || !confirm('Delete credential profile "' + name + '"?\\n\\nEnvironments already created from it keep working — they have their own copy of these values. You will not be able to create new environments from this profile.')) return;
-            this.disabled = true; this.textContent = 'Deleting…';
-            fetch('/api/delete-credential-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, name: name }) })
-                .then(function(r) { return r.json(); }).then(function() { loadCredTable(); })
-                .catch(function() { loadCredTable(); });
+            if (!name) return;
+            var delBtn = this;
+            delBtn.disabled = true;
+            // Which environments were created from this profile is advisory
+            // only: environments hold their own copy of the credential values,
+            // so a failed lookup must still let the user confirm rather than
+            // making a local delete depend on reaching GitHub.
+            credentialUsage(name, function(usage, checked) {
+                delBtn.disabled = false;
+                showConfirmDialog({
+                    title: 'Delete credential profile?',
+                    message: 'This deletes the credential profile "' + name + '". You will not be able to create new environments from it.'
+                        + (checked ? '' : '\\n\\nCould not check which environments use this profile.'),
+                    usageLabel: usage.length === 1
+                        ? 'This environment was created from this profile and keeps working — it has its own copy of these values:'
+                        : 'These environments were created from this profile and keep working — they have their own copy of these values:',
+                    usage: usage,
+                    confirmLabel: 'Delete profile',
+                    onConfirm: function() { deleteCredentialProfile(name, delBtn); }
+                });
+            });
         });
     });
+}
+function credentialUsage(name, done) {
+    if (!CTX_REPO) { done([], true); return; }
+    fetch('/api/list-environments?repo=' + encodeURIComponent(CTX_REPO))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var envs = (data && data.environments) || [];
+            done(envs.filter(function(e) { return e.credentialProfile === name; })
+                .map(function(e) { return e.name; }), true);
+        })
+        .catch(function() { done([], false); });
+}
+function deleteCredentialProfile(name, delBtn) {
+    delBtn.disabled = true; delBtn.textContent = 'Deleting…';
+    fetch('/api/delete-credential-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, name: name }) })
+        .then(function(r) { return r.json(); }).then(function() { loadCredTable(); })
+        .catch(function() { loadCredTable(); });
 }
 
 function applyCredProvider(p) {

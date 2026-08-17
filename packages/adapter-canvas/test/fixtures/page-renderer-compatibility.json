@@ -15,7 +15,7 @@
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved.",
     "intentionalDivergences": [
-      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard elements."
+      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. Deleting an environment or a profile now confirms through one in-page modal (env-confirm-*) instead of window.confirm, and the profile dialog lists the environments created from that profile. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, roles, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard and confirmation-dialog elements."
     ]
   },
   "exports": [
@@ -1425,6 +1425,14 @@
           "cred-verify-hint",
           "save-cred-btn",
           "cancel-cred-btn",
+          "env-confirm-modal",
+          "env-confirm-title",
+          "env-confirm-message",
+          "env-confirm-usage",
+          "env-confirm-usage-label",
+          "env-confirm-usage-list",
+          "env-confirm-cancel",
+          "env-confirm-ok",
           "env-smr-modal",
           "env-smr-input",
           "env-smr-error",
@@ -1458,6 +1466,7 @@
           "listbox",
           "listbox",
           "status",
+          "dialog",
           "dialog"
         ],
         "disabled": [
@@ -1535,7 +1544,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "f2706f9aa183d9825647fc09c2194d282cac56953fd01ac57253f5426c8a2768"
+          "page": "e17b33a715b0811584f40ceba2364bdd422459ec69ecbc0c8b23a20102d0a8d1"
         }
       }
     },
@@ -1715,6 +1724,14 @@
           "cred-verify-hint",
           "save-cred-btn",
           "cancel-cred-btn",
+          "env-confirm-modal",
+          "env-confirm-title",
+          "env-confirm-message",
+          "env-confirm-usage",
+          "env-confirm-usage-label",
+          "env-confirm-usage-list",
+          "env-confirm-cancel",
+          "env-confirm-ok",
           "env-smr-modal",
           "env-smr-input",
           "env-smr-error",
@@ -1748,6 +1765,7 @@
           "listbox",
           "listbox",
           "status",
+          "dialog",
           "dialog"
         ],
         "disabled": [
@@ -1829,7 +1847,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "c15aa545dfe8ff415732720910951b1b94f7466ab4be549574e3eebd32f62444"
+          "page": "1342206dbaf288b622563d38116ba0478b416ab90560baff5d18a2f7093d805f"
         }
       }
     },

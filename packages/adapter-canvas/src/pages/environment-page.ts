@@ -8,7 +8,9 @@ import { pageShell } from "./shell.js";
 import { inlineJson, inlineJsString, safeExternalHref } from "./encoding.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
+import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
 import { ENVIRONMENT_TABLE_CLIENT_JS } from "./environment/client-environments.js";
+import { ENVIRONMENT_CONFIRM_CLIENT_JS } from "./environment/client-confirm.js";
 import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./environment/client-operations.js";
 import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./environment/client-profiles.js";
 import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./environment/client-discovery.js";
@@ -99,6 +101,8 @@ ${environmentsPaneMarkup({
 })}
 ${credentialsPaneMarkup(activeSubtab)}
 
+
+${confirmDialogMarkup()}
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:420px; width:90%;">
@@ -291,6 +295,7 @@ ${credentialsPaneMarkup(activeSubtab)}
 var CTX_REPO = '${inlineJsString(ctxRepo)}';
 var CTX_BRANCH = '${inlineJsString(ctxBranch)}';
 
+${ENVIRONMENT_CONFIRM_CLIENT_JS}
 ${ENVIRONMENT_TABLE_CLIENT_JS}
 ${ENVIRONMENT_OPERATION_CLIENT_JS}
 ${ENVIRONMENT_PROFILE_CLIENT_JS}
