@@ -809,8 +809,9 @@ describe("initializeDeployedGraphPage", () => {
     ).toBe(true);
   });
 
-  it("reopens the deploy feed for a later deployment from its own cursor", async () => {
+  it("reopens the deploy feed from zero when a later deployment resets the buffer", async () => {
     const { browser, logOutput } = fixture();
+    let bufferReads = 0;
     browser.net.handle(
       "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
       () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
@@ -818,27 +819,32 @@ describe("initializeDeployedGraphPage", () => {
     browser.net.handle("/api/deploy-status", () =>
       jsonResponse({ status: "complete", logTotal: 1 })
     );
-    browser.net.handle("/api/deploy-status?since=0", () =>
-      jsonResponse({ logsNew: ["first run"], logTotal: 1, status: "complete" })
-    );
+    browser.net.handle("/api/deploy-status?since=0", () => {
+      bufferReads++;
+      return bufferReads === 1 ?
+          jsonResponse({
+            logsNew: ["first run"],
+            logTotal: 1,
+            status: "complete"
+          })
+        : jsonResponse({
+            logsNew: ["second run"],
+            logTotal: 1,
+            status: "in_progress"
+          });
+    });
     initializeDeployedGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(logOutput.textContent).toContain("first run");
     expect(browser.clock.intervals).toBe(0);
 
-    // A second deployment starts. The feed must resume rather than stay closed
-    // because an earlier run already opened it.
-    browser.net.handle("/api/deploy-status?since=1", () =>
-      jsonResponse({
-        logsNew: ["second run"],
-        logTotal: 2,
-        status: "in_progress"
-      })
-    );
+    // A new attempt resets deployLogs and deployLogBase on the server. Reusing
+    // the first attempt's cursor would permanently skip the new buffer's start.
     browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
     await flushPromises();
 
+    expect(bufferReads).toBe(2);
     expect(logOutput.textContent).toContain("second run");
     expect(browser.clock.intervals).toBe(1);
   });

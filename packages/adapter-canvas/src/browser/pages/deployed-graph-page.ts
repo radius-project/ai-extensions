@@ -397,15 +397,15 @@ export function initializeDeployedGraphPage(
     context.dom.scrollToEnd(logOutput);
   };
 
-  const fetchLogs = (): Promise<void> =>
+  const fetchLogs = (since: number): Promise<void> =>
     context.net
-      .fetch(`/api/deploy-status?since=${logTotal}`)
+      .fetch(`/api/deploy-status?since=${since}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active) return;
         const lines = readStringArray(payload, "logsNew");
         appendLogLines(lines);
-        logTotal = readNumber(payload, "logTotal") ?? logTotal + lines.length;
+        logTotal = readNumber(payload, "logTotal") ?? since + lines.length;
         if (isTerminalDeployStatus(readString(payload, "status"))) {
           stopLogStream();
         }
@@ -415,7 +415,7 @@ export function initializeDeployedGraphPage(
       });
 
   const pollLogs = (): void => {
-    void fetchLogs();
+    void fetchLogs(logTotal);
   };
 
   // Pull the retained buffer once, then stream incrementally. The interval is
@@ -425,8 +425,10 @@ export function initializeDeployedGraphPage(
   const startLogStream = (): void => {
     if (logStreamStarted) return;
     logStreamStarted = true;
+    // Each deploy attempt owns a fresh server-side log buffer.
+    logTotal = 0;
     if (logSection) logSection.style.display = "block";
-    void fetchLogs().then(() => {
+    void fetchLogs(0).then(() => {
       if (!entry.active || !logStreamStarted) return;
       logTimer = entry.every(DEPLOYED_LOG_POLL_MS, pollLogs);
     });
