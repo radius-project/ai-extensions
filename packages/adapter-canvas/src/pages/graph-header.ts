@@ -14,14 +14,14 @@ export function graphHeader(activePage: string): string {
     .map((p) => {
       const cls =
         p.id === activePage ? "rad-subtab rad-subtab--active" : "rad-subtab";
-      return `<a href="?page=${p.id}" data-page="${p.id}" class="${cls}" onclick="radiusNavTo(event, '${p.id}')">${p.label}</a>`;
+      return `<a href="?page=${p.id}" data-page="${p.id}" data-radius-graph-page="${p.id}" class="${cls}">${p.label}</a>`;
     })
     .join("\n  ");
   // Each mode named in the lede links to its own sub-tab. Built from the same
   // `pages` list as the nav so the two can never point at different routes.
   const byLabel = Object.fromEntries(pages.map((p) => [p.label, p.id]));
   const ledeLink = (label: string) =>
-    `<a href="?page=${byLabel[label]}" class="rad-lede-link" onclick="radiusNavTo(event, '${byLabel[label]}')"><strong>${label}</strong></a>`;
+    `<a href="?page=${byLabel[label]}" data-radius-graph-page="${byLabel[label]}" class="rad-lede-link"><strong>${label}</strong></a>`;
   return `
 <div class="rad-heading">
   <h1>${radiusMark(26)}<span>Application Graph</span></h1>

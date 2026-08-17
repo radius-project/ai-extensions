@@ -7,6 +7,7 @@ import {
   sharedCredentials,
   type CanvasState
 } from "../shared.js";
+import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 
 export function oidcPage(state: CanvasState = {}): string {
@@ -87,80 +88,7 @@ export function oidcPage(state: CanvasState = {}): string {
   <button id="btn-aws">Validate</button>
   <div id="result-aws">${awsResultHtml}</div>
 </div>
-<script>
-document.getElementById('tab-azure').addEventListener('click', function() {
-    document.getElementById('tab-azure').classList.add('active');
-    document.getElementById('tab-aws').classList.remove('active');
-    document.getElementById('panel-azure').style.display = 'block';
-    document.getElementById('panel-aws').style.display = 'none';
-});
-document.getElementById('tab-aws').addEventListener('click', function() {
-    document.getElementById('tab-aws').classList.add('active');
-    document.getElementById('tab-azure').classList.remove('active');
-    document.getElementById('panel-aws').style.display = 'block';
-    document.getElementById('panel-azure').style.display = 'none';
-});
-function escapeHtmlClient(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
-    });
-}
-function renderAzureOidcResult(resultDiv, res, data) {
-    if (res.validated) {
-        resultDiv.innerHTML = '<div class="status success">' + escapeHtmlClient(res.message) + '</div>' +
-            '<div class="field"><span class="field-label">Tenant</span><div class="field-value">' + escapeHtmlClient(res.tenantId || data.tenantId) + '</div></div>' +
-            '<div class="field"><span class="field-label">Subscription</span><div class="field-value">' + (res.subscriptionName ? escapeHtmlClient(res.subscriptionName) + ' — ' : '') + escapeHtmlClient(res.subscriptionId || data.subscriptionId) + '</div></div>' +
-            (data.clientId ? '<div class="field"><span class="field-label">App Registration</span><div class="field-value">' + escapeHtmlClient(data.clientId) + '</div></div>' : '') +
-            (res.userName ? '<div class="field"><span class="field-label">Signed in as</span><div class="field-value">' + escapeHtmlClient(res.userName) + '</div></div>' : '');
-    } else {
-        resultDiv.innerHTML = '<div class="status error">' + escapeHtmlClient(res.message || 'Authentication failed') + '</div>';
-    }
-}
-function renderAwsOidcResult(resultDiv, res, data) {
-    resultDiv.innerHTML = '<div class="status success">' + escapeHtmlClient(res.message) + '</div>' +
-        '<div class="field"><span class="field-label">Account</span><div class="field-value">' + escapeHtmlClient(data.accountId) + '</div></div>' +
-        '<div class="field"><span class="field-label">Region</span><div class="field-value">' + escapeHtmlClient(data.region) + '</div></div>';
-}
-function renderOidcError(resultDiv, error) {
-    resultDiv.innerHTML = '<div class="status error">Error: ' + escapeHtmlClient(error.message) + '</div>';
-}
-document.getElementById('btn-azure').addEventListener('click', function() {
-    var data = {
-        provider: 'azure',
-        tenantId: document.getElementById('az-tenant').value.trim(),
-        subscriptionId: document.getElementById('az-sub').value.trim(),
-        clientId: document.getElementById('az-client').value.trim()
-    };
-    var btn = this;
-    btn.disabled = true;
-    btn.textContent = 'Authenticating...';
-    var resultDiv = document.getElementById('result-azure');
-    resultDiv.innerHTML = '<div class="status info">🔐 Signing in to Azure... A browser window may open.</div>';
-    fetch('/api/oidc', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
-        .then(function(r) { return r.json(); })
-        .then(function(res) {
-            btn.disabled = false;
-            btn.textContent = 'Confirm authentication';
-            renderAzureOidcResult(resultDiv, res, data);
-        })
-        .catch(function(e) { btn.disabled = false; btn.textContent = 'Confirm authentication'; renderOidcError(resultDiv, e); });
-});
-document.getElementById('btn-aws').addEventListener('click', function() {
-    var data = {
-        provider: 'aws',
-        accountId: document.getElementById('aws-account').value,
-        region: document.getElementById('aws-region').value
-    };
-    var resultDiv = document.getElementById('result-aws');
-    resultDiv.innerHTML = '<div class="status info">Validating...</div>';
-    fetch('/api/oidc', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
-        .then(function(r) { return r.json(); })
-        .then(function(res) {
-            renderAwsOidcResult(resultDiv, res, data);
-        })
-        .catch(function(e) { renderOidcError(resultDiv, e); });
-});
-<\/script>`,
+${browserScriptTag("oidc-page")}`,
     "environments"
   );
 }

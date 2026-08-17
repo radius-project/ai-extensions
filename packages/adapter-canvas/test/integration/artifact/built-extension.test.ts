@@ -7,11 +7,17 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   runArtifactSmoke,
+  type ArtifactSmokeResult,
   type ArtifactRegistrationSnapshot
 } from "../../support/artifact/harness.js";
+import {
+  BROWSER_ENTRY_NAMES,
+  compileBrowserEntry
+} from "../../../src/browser/build.js";
+import { browserEntryMarker } from "../../../src/browser/scripts.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -80,17 +86,21 @@ function assertCurrentArtifact(): void {
 }
 
 describe("P0-C built Radius extension artifact", () => {
-  it("registers the retained SDK surface exactly once and shuts down cleanly", async () => {
-    assertCurrentArtifact();
-    const result = await runArtifactSmoke(ARTIFACT);
+  let smoke: ArtifactSmokeResult;
 
-    expect(result.registration).toEqual(EXPECTED_REGISTRATION);
-    expect(result.closeCount).toBe(1);
+  beforeAll(async () => {
+    assertCurrentArtifact();
+    smoke = await runArtifactSmoke(ARTIFACT);
+  }, 30_000);
+
+  it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
+    expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
+    expect(smoke.closeCount).toBe(1);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
     // here we require graceful shutdown and reject crash-shaped diagnostics
     // without coupling ART to unrelated benign startup warnings.
-    const stderrLines = result.stderr
+    const stderrLines = smoke.stderr
       .split(/\r?\n/)
       .filter((line) => line.trim() !== "");
     expect(stderrLines).toContain(
@@ -103,7 +113,7 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
-  }, 30_000);
+  });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
     assertCurrentArtifact();
@@ -130,7 +140,9 @@ describe("P0-C built Radius extension artifact", () => {
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/pages\/environment-page\.ts$/
         ),
-        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/),
+        expect.stringMatching(
+          /packages\/adapter-canvas\/src\/browser\/scripts\.ts$/
+        ),
         expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/),
         expect.stringMatching(/skills\/radius-app-bicep\/SKILL\.md$/),
         expect.stringMatching(
@@ -151,6 +163,11 @@ describe("P0-C built Radius extension artifact", () => {
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
     expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
+    expect(normalizedSources).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
+      ])
+    );
 
     expect(
       readdirSync(DIST)
@@ -252,7 +269,7 @@ describe("P0-C built Radius extension artifact", () => {
       source.replaceAll("\\", "/")
     );
     const pageModules = [
-      "pages/browser-function.ts",
+      "pages/browser-state-ids.ts",
       "pages/encoding.ts",
       "pages/shell-styles.ts",
       "pages/shell.ts",
@@ -265,13 +282,7 @@ describe("P0-C built Radius extension artifact", () => {
       "pages/environment-page.ts",
       "pages/environment/environments-pane.ts",
       "pages/environment/credentials-pane.ts",
-      "pages/environment/client-environments.ts",
-      "pages/environment/client-operations.ts",
-      "pages/environment/client-profiles.ts",
-      "pages/environment/client-discovery.ts",
-      "pages/environment/client-credentials.ts",
-      "pages/deploying-page.ts",
-      "pages/deploying/client-deployments.ts"
+      "pages/deploying-page.ts"
     ];
     for (const pageModule of pageModules) {
       expect(
@@ -288,6 +299,11 @@ describe("P0-C built Radius extension artifact", () => {
     expect(
       normalizedSources.filter((source) =>
         source.endsWith("packages/adapter-canvas/src/pages.ts")
+      )
+    ).toHaveLength(0);
+    expect(
+      normalizedSources.filter((source) =>
+        source.endsWith("packages/adapter-canvas/src/pages/browser-function.ts")
       )
     ).toHaveLength(0);
     // oidcPage is reachable only through the facade — no route renders it — so
@@ -314,5 +330,87 @@ describe("P0-C built Radius extension artifact", () => {
     // fetched at runtime.
     expect(bundle).not.toMatch(/import\(\s*["'][^"']*pages\//);
     expect(bundle).not.toMatch(/from\s*["']\.[^"']*pages[^"']*["']/);
+  });
+
+  it("embeds compiled browser entries and ships no compiler or runtime asset", () => {
+    assertCurrentArtifact();
+    const bundle = readFileSync(ARTIFACT, "utf8");
+    const sourceMap = JSON.parse(readFileSync(SOURCE_MAP, "utf8")) as {
+      sources: string[];
+    };
+    const normalizedSources = sourceMap.sources.map((source) =>
+      source.replaceAll("\\", "/")
+    );
+    const browserSources = normalizedSources.filter((source) =>
+      source.includes("packages/adapter-canvas/src/browser/")
+    );
+
+    expect(BROWSER_ENTRY_NAMES).toEqual([
+      "graph",
+      "delete-dialog",
+      "heartbeat",
+      "operation-chip",
+      "oidc-page",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
+      "graph-page",
+      "planned-graph-page",
+      "graph-diff-page",
+      "deployed-graph-page"
+    ]);
+    expect(
+      normalizedSources.some((source) =>
+        /\/pages\/(?:environment|deploying)\/client-/.test(source)
+      )
+    ).toBe(false);
+    expect(browserSources).toHaveLength(2);
+    expect(browserSources).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /packages\/adapter-canvas\/src\/browser\/generated\.ts$/
+        ),
+        expect.stringMatching(
+          /packages\/adapter-canvas\/src\/browser\/scripts\.ts$/
+        )
+      ])
+    );
+    for (const source of [
+      "browser/build.ts",
+      "browser/context.ts",
+      "browser/heartbeat.ts",
+      "browser/registry.ts",
+      "browser/entries/heartbeat.ts"
+    ]) {
+      expect(
+        normalizedSources.filter((entry) =>
+          entry.endsWith(`packages/adapter-canvas/src/${source}`)
+        ),
+        source
+      ).toHaveLength(0);
+    }
+
+    expect(bundle).not.toMatch(/from\s*["']esbuild["']/);
+    expect(bundle).not.toMatch(/require\(\s*["']esbuild["']\s*\)/);
+    expect(bundle.split("Radius heartbeat recovery failed.").length - 1).toBe(
+      1
+    );
+    expect(bundle.split("// radius:browser-entry").length - 1).toBe(1);
+    expect(bundle).not.toMatch(/["'][^"']*\/browser\/entries\/[^"']*\.js["']/);
+
+    const marker = browserEntryMarker("heartbeat");
+    const expectedTag = `<script>\n${marker}\n${compileBrowserEntry(
+      "heartbeat"
+    )}\n</script>`;
+    expect(smoke.renderedPage.split(marker)).toHaveLength(2);
+    expect(smoke.renderedPage).toContain(expectedTag);
+    for (const name of ["graph"] as const) {
+      const entryMarker = browserEntryMarker(name);
+      expect(smoke.renderedPage.split(`\n${entryMarker}\n`)).toHaveLength(2);
+      expect(smoke.renderedPage).toContain(
+        `<script>\n${entryMarker}\n${compileBrowserEntry(name)}\n</script>`
+      );
+    }
+    expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
   });
 });

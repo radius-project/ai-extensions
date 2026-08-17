@@ -1,0 +1,2784 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEPLOY_BUTTON_ID,
+  DEPLOY_BUTTON_IDLE_LABEL,
+  ENVIRONMENT_OPERATIONS_ENTRY_KEY,
+  ERROR_BANNER_ID,
+  OPERATIONS_PATH,
+  OperationResumeError,
+  PROGRESS_IDS,
+  VERIFY_STATUS_PATH,
+  formatElapsed,
+  initializeEnvironmentOperations,
+  parseOperationResponse,
+  parseVerifyStatus
+} from "./operations.js";
+import type {
+  AppPickerChoice,
+  AppPickerRequest,
+  EnvironmentOperationsDeps,
+  OperationRecord,
+  OperationTerminalPayload
+} from "./operations.js";
+import {
+  createDeferred,
+  createFakeBrowser,
+  createFakeElement,
+  createFakeInput,
+  flushPromises,
+  jsonResponse,
+  textResponse
+} from "../../../test/support/browser/fakes.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
+import type { HttpResponse } from "../ports.js";
+
+const REPO = "octo/widgets";
+
+function operationsUrl(repo = REPO): string {
+  return `${OPERATIONS_PATH}?repo=${encodeURIComponent(repo)}`;
+}
+
+function operationUrl(operationId: string): string {
+  return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
+}
+
+function resumeUrl(operationId: string, code: string): string {
+  return `${operationUrl(operationId)}/resume/${encodeURIComponent(code)}`;
+}
+
+function abandonUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/abandon`;
+}
+
+function verifyUrl(
+  repo: string,
+  environment: string,
+  operationId: string
+): string {
+  return (
+    `${VERIFY_STATUS_PATH}?repo=${encodeURIComponent(repo)}` +
+    `&environment=${encodeURIComponent(environment)}` +
+    `&operationId=${encodeURIComponent(operationId)}`
+  );
+}
+
+function setup() {
+  const browser = createFakeBrowser();
+  const els: Record<string, FakeElement> = {};
+  for (const id of Object.values(PROGRESS_IDS)) {
+    const el = createFakeElement(id);
+    els[id] = el;
+    browser.document.add(el);
+  }
+  const errorBanner = createFakeElement(ERROR_BANNER_ID);
+  els[ERROR_BANNER_ID] = errorBanner;
+  browser.document.add(errorBanner);
+  const deployButton = createFakeInput(DEPLOY_BUTTON_ID);
+  deployButton.disabled = true;
+  deployButton.textContent = "Creating…";
+  browser.document.add(deployButton);
+  return { ...browser, els, deployButton };
+}
+
+/**
+ * Builds a browser like `setup()` but omits the given element IDs entirely,
+ * so `dom.byId`/`dom.inputById` genuinely returns null for them. Used to
+ * prove the module's optional-DOM guards degrade gracefully — a real host
+ * page can legitimately be missing an element the module treats as
+ * optional, and only the panel itself is a hard requirement.
+ */
+function setupWithout(missingIds: readonly string[]) {
+  const browser = createFakeBrowser();
+  const els: Record<string, FakeElement> = {};
+  for (const id of Object.values(PROGRESS_IDS)) {
+    if (missingIds.includes(id)) continue;
+    const el = createFakeElement(id);
+    els[id] = el;
+    browser.document.add(el);
+  }
+  if (!missingIds.includes(ERROR_BANNER_ID)) {
+    const errorBanner = createFakeElement(ERROR_BANNER_ID);
+    els[ERROR_BANNER_ID] = errorBanner;
+    browser.document.add(errorBanner);
+  }
+  if (!missingIds.includes(DEPLOY_BUTTON_ID)) {
+    const deployButton = createFakeInput(DEPLOY_BUTTON_ID);
+    deployButton.disabled = true;
+    deployButton.textContent = "Creating…";
+    browser.document.add(deployButton);
+  }
+  return { ...browser, els };
+}
+
+function op(overrides: Record<string, unknown> = {}): {
+  operation: Record<string, unknown>;
+} {
+  return {
+    operation: {
+      operationId: "op-1",
+      environment: "dev",
+      provider: "azure",
+      state: "running",
+      terminalState: null,
+      summary: "Creating dev…",
+      currentStage: "provision",
+      stages: [],
+      steps: [],
+      failure: null,
+      cleanup: null,
+      journey: null,
+      verification: null,
+      inputRequired: null,
+      startedAt: new Date(0).toISOString(),
+      endedAt: null,
+      terminal: null,
+      ...overrides
+    }
+  };
+}
+
+/**
+ * Builds a fully-normalized OperationRecord (as renderProgress/applyTerminal expect),
+ * by round-tripping test overrides through the module's own parser. This mirrors what
+ * the real fetch path produces and avoids feeding renderers a partially-shaped raw
+ * wire object that is missing normalized nested fields (e.g. cleanup.retry).
+ */
+function record(overrides: Record<string, unknown> = {}): OperationRecord {
+  const parsed = parseOperationResponse(op(overrides));
+  if (!parsed) {
+    throw new Error("test built an operation payload that failed to parse");
+  }
+  return parsed;
+}
+
+function createDeps(overrides: Partial<EnvironmentOperationsDeps> = {}) {
+  const successBanners: Array<{ provider: string; environment: string }> = [];
+  const actionRequired: Array<{
+    provider: string;
+    environment: string;
+    pullRequestUrl: string;
+    terminal: OperationTerminalPayload | null;
+  }> = [];
+  const setupWarnings: string[][] = [];
+  const errors: string[] = [];
+  let reloadCount = 0;
+  const deps: EnvironmentOperationsDeps = {
+    showSuccessBanner(provider, environment) {
+      successBanners.push({ provider, environment });
+    },
+    showActionRequired(provider, environment, pullRequestUrl, terminal) {
+      actionRequired.push({ provider, environment, pullRequestUrl, terminal });
+    },
+    showSetupWarnings(warnings) {
+      setupWarnings.push([...warnings]);
+    },
+    showError(message) {
+      errors.push(message);
+    },
+    reloadEnvironmentsTable() {
+      reloadCount += 1;
+    },
+    promptServiceManagementReference: () =>
+      Promise.reject(
+        new Error(
+          "promptServiceManagementReference was not stubbed for this test"
+        )
+      ),
+    promptAppSelection: (
+      _request: AppPickerRequest
+    ): Promise<AppPickerChoice> =>
+      Promise.reject(
+        new Error("promptAppSelection was not stubbed for this test")
+      ),
+    ...overrides
+  };
+  return {
+    deps,
+    successBanners,
+    actionRequired,
+    setupWarnings,
+    errors,
+    get reloadCount() {
+      return reloadCount;
+    }
+  };
+}
+
+async function tickClock(
+  clock: { tick(ms: number): void },
+  ms: number,
+  beats = 1
+): Promise<void> {
+  for (let index = 0; index < beats; index += 1) {
+    clock.tick(ms);
+    await flushPromises();
+  }
+}
+
+describe("formatElapsed", () => {
+  it.each([
+    [0, "0:00"],
+    [999, "0:00"],
+    [1000, "0:01"],
+    [5000, "0:05"],
+    [65000, "1:05"],
+    [600000, "10:00"],
+    [-5000, "0:00"]
+  ])("formats %i ms as %s", (ms, expected) => {
+    expect(formatElapsed(ms)).toBe(expected);
+  });
+});
+
+describe("parseOperationResponse", () => {
+  it.each([
+    ["null", null],
+    ["a string", "running"],
+    ["an array", []],
+    ["an empty envelope", {}],
+    ["a null operation", { operation: null }],
+    ["an operation with no operationId", { operation: { environment: "dev" } }],
+    [
+      "an operation with a non-string operationId",
+      { operation: { operationId: 7 } }
+    ]
+  ])("reads %s as no operation", (_name, payload) => {
+    expect(parseOperationResponse(payload)).toBeNull();
+  });
+
+  it("defaults malformed optional fields on an otherwise valid operation", () => {
+    const parsed = parseOperationResponse(
+      op({
+        terminalState: "not-a-real-state",
+        stages: "not-an-array",
+        steps: { not: "an array" },
+        failure: "not-an-object",
+        cleanup: "not-an-object",
+        journey: "not-an-object",
+        verification: "not-an-object",
+        inputRequired: "not-an-object",
+        endedAt: ""
+      })
+    );
+    expect(parsed).toMatchObject({
+      terminalState: null,
+      stages: [],
+      steps: [],
+      failure: null,
+      journey: null,
+      verification: null,
+      inputRequired: null,
+      endedAt: null
+    });
+    expect(parsed?.cleanup).toEqual({
+      state: "",
+      rollbackBeforeCommit: undefined,
+      retry: { startsCleanly: false, guidance: "" },
+      removed: [],
+      retained: [],
+      warnings: []
+    });
+  });
+
+  it.each([
+    "succeeded",
+    "succeeded_with_warnings",
+    "action_required",
+    "failed",
+    "failed_partial",
+    "cancelled"
+  ])("accepts the known terminal state %s", (terminalState) => {
+    expect(parseOperationResponse(op({ terminalState }))?.terminalState).toBe(
+      terminalState
+    );
+  });
+
+  it("reads a fully populated cleanup summary", () => {
+    const parsed = parseOperationResponse(
+      op({
+        cleanup: {
+          state: "succeeded_with_warnings",
+          rollbackBeforeCommit: false,
+          retry: { startsCleanly: true, guidance: "Retry any time." },
+          removed: [
+            { target: "rg-dev" },
+            { notATarget: true },
+            { target: "" },
+            "not-an-entry"
+          ],
+          retained: [{ target: "kv-dev" }],
+          warnings: ["partial cleanup", "", 7, null]
+        }
+      })
+    );
+    expect(parsed?.cleanup).toEqual({
+      state: "succeeded_with_warnings",
+      rollbackBeforeCommit: false,
+      retry: { startsCleanly: true, guidance: "Retry any time." },
+      removed: [{ target: "rg-dev" }],
+      retained: [{ target: "kv-dev" }],
+      warnings: ["partial cleanup"]
+    });
+  });
+
+  it("treats a non-boolean rollbackBeforeCommit as undefined, distinct from false", () => {
+    expect(
+      parseOperationResponse(op({ cleanup: { rollbackBeforeCommit: "false" } }))
+        ?.cleanup.rollbackBeforeCommit
+    ).toBeUndefined();
+    expect(
+      parseOperationResponse(op({ cleanup: { rollbackBeforeCommit: true } }))
+        ?.cleanup.rollbackBeforeCommit
+    ).toBe(true);
+  });
+
+  it("discards a malformed journey resume target", () => {
+    const parsed = parseOperationResponse(
+      op({
+        journey: { resumeTarget: "not-an-object", resumeReason: "go back" }
+      })
+    );
+    expect(parsed?.journey).toEqual({
+      resumeTarget: null,
+      resumeReason: "go back"
+    });
+  });
+
+  it("reads a well-formed journey resume target", () => {
+    const parsed = parseOperationResponse(
+      op({
+        journey: {
+          resumeTarget: {
+            page: "planned",
+            repo: "octo/widgets",
+            branch: "main"
+          },
+          resumeReason: "Continue the deploy"
+        }
+      })
+    );
+    expect(parsed?.journey).toEqual({
+      resumeTarget: { page: "planned", repo: "octo/widgets", branch: "main" },
+      resumeReason: "Continue the deploy"
+    });
+  });
+
+  it("ignores a non-finite verification.dispatchedAt", () => {
+    expect(
+      parseOperationResponse(op({ verification: { dispatchedAt: "soon" } }))
+        ?.verification
+    ).toEqual({ dispatchedAt: null });
+    expect(
+      parseOperationResponse(op({ verification: { dispatchedAt: 12345 } }))
+        ?.verification
+    ).toEqual({ dispatchedAt: 12345 });
+  });
+
+  it("discards an inputRequired prompt with no code", () => {
+    expect(
+      parseOperationResponse(op({ inputRequired: { requestedAt: "now" } }))
+        ?.inputRequired
+    ).toBeNull();
+  });
+
+  it("filters malformed app picker candidates and reads metadata defaults", () => {
+    const parsed = parseOperationResponse(
+      op({
+        inputRequired: {
+          requestedAt: "2024-01-01T00:00:00.000Z",
+          code: "app-selection-required",
+          checkpoint: { step: 3 },
+          metadata: {
+            defaultAppId: "app-2",
+            candidates: [
+              { appId: "app-1", displayName: "First" },
+              { appId: "app-3", createdDateTime: "2024-02-02T00:00:00.000Z" },
+              { appId: "app-4", servesRepos: ["octo/widgets", "octo/gizmos"] },
+              { notAnAppId: true },
+              "not-an-object"
+            ]
+          }
+        }
+      })
+    );
+    expect(parsed?.inputRequired).toEqual({
+      requestedAt: "2024-01-01T00:00:00.000Z",
+      code: "app-selection-required",
+      checkpoint: { step: 3 },
+      candidates: [
+        {
+          appId: "app-1",
+          displayName: "First",
+          createdDateTime: undefined,
+          servesRepos: undefined
+        },
+        {
+          appId: "app-3",
+          displayName: undefined,
+          createdDateTime: "2024-02-02T00:00:00.000Z",
+          servesRepos: undefined
+        },
+        {
+          appId: "app-4",
+          displayName: undefined,
+          createdDateTime: undefined,
+          servesRepos: ["octo/widgets", "octo/gizmos"]
+        }
+      ],
+      defaultAppId: "app-2"
+    });
+  });
+});
+
+describe("parseVerifyStatus", () => {
+  it("defaults every field for a malformed payload", () => {
+    expect(parseVerifyStatus(null)).toEqual({
+      state: "",
+      terminal: false,
+      error: "",
+      runUrl: "",
+      activity: ""
+    });
+  });
+
+  it("reads a well-formed payload", () => {
+    expect(
+      parseVerifyStatus({
+        state: "success",
+        terminal: true,
+        error: "",
+        runUrl: "https://example.test/run",
+        activity: "Checking credentials"
+      })
+    ).toEqual({
+      state: "success",
+      terminal: true,
+      error: "",
+      runUrl: "https://example.test/run",
+      activity: "Checking credentials"
+    });
+  });
+});
+
+describe("initializeEnvironmentOperations bootstrap", () => {
+  it("returns null when the progress panel is not on the page", () => {
+    const browser = createFakeBrowser();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(controller).toBeNull();
+  });
+
+  it("returns null for a second instance bound to the same context", () => {
+    const browser = setup();
+    const first = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(first).not.toBeNull();
+    const second = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(second).toBeNull();
+    expect(browser.bindings.has(ENVIRONMENT_OPERATIONS_ENTRY_KEY)).toBe(true);
+  });
+
+  it("hides the panel and stops tracking when the dismiss button is clicked", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(controller).not.toBeNull();
+    controller?.renderProgress(record());
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    // A second click is a no-op, not a crash.
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+});
+
+describe("trackProgress rendering", () => {
+  it("renders stage and step lists and clears them on the next render", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          stages: [
+            { state: "succeeded", label: "Provision" },
+            "not-a-stage",
+            { state: "running", label: "Configure" }
+          ],
+          steps: [
+            { state: "succeeded", label: "Create resource group" },
+            { state: "running", label: "Create key vault" }
+          ]
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    const stages = browser.els[PROGRESS_IDS.stages];
+    expect(stages.children).toHaveLength(2);
+    expect(stages.children[0].className).toBe(
+      "env-progress__stage env-progress__stage--succeeded"
+    );
+    expect(stages.children[1].children[1].textContent).toBe(
+      "Configure — running"
+    );
+    const steps = browser.els[PROGRESS_IDS.steps];
+    expect(steps.children.map((child) => child.textContent)).toEqual([
+      "✓ Create resource group",
+      "◐ Create key vault"
+    ]);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Create key vault"
+    );
+
+    controller?.renderProgress(record({ stages: [], steps: [] }));
+    expect(browser.els[PROGRESS_IDS.stages].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.steps].children).toHaveLength(0);
+  });
+
+  it("falls back to a default glyph for an unrecognized stage or step state", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        stages: [{ state: "quantum", label: "Provision" }],
+        steps: [{ state: "quantum", label: "Create resource group" }]
+      })
+    );
+    const stageGlyph = browser.els[PROGRESS_IDS.stages].children[0].children[0];
+    expect(stageGlyph.textContent).toBe("○");
+    expect(browser.els[PROGRESS_IDS.steps].children[0].textContent).toBe(
+      "· Create resource group"
+    );
+  });
+
+  it("prefers the last running step, then the last step, over the verify activity", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    controller?.renderProgress(
+      record({
+        currentStage: "verify",
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "running", label: "Step two running" }
+        ]
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Step two running"
+    );
+
+    controller?.renderProgress(
+      record({
+        currentStage: "verify",
+        steps: [{ state: "succeeded", label: "Only step" }]
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe("Only step");
+  });
+
+  it("shows the verify activity only while on the verify stage with no terminal state", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [] }))
+    );
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "pending", activity: "Waiting on GitHub Actions" })
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe("");
+
+    // The verify poll only starts once the main poller has seen no operation
+    // record after already observing one; force that by returning nothing
+    // next, then let the verify poll report activity that the next render
+    // must fold in.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+    expect(
+      browser.net.calls.some((call) => call.url.startsWith(VERIFY_STATUS_PATH))
+    ).toBe(true);
+  });
+
+  it("lets a failure message override the activity line", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        steps: [{ state: "running", label: "Configuring" }],
+        failure: { message: "Azure CLI exited 1" }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Azure CLI exited 1"
+    );
+  });
+
+  it("shows the resume link only for a terminal operation with a planned-page target", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    controller?.renderProgress(
+      record({
+        terminalState: "succeeded",
+        journey: {
+          resumeTarget: {
+            page: "planned",
+            repo: "octo/widgets",
+            branch: "feature/x"
+          },
+          resumeReason: "Back to the graph"
+        }
+      })
+    );
+    const resume = browser.els[PROGRESS_IDS.resume];
+    expect(resume.style.display).toBe("");
+    expect(resume.getAttribute("href")).toBe(
+      "/?page=planned&repo=octo%2Fwidgets&branch=feature%2Fx"
+    );
+    expect(resume.textContent).toBe("Back to the graph");
+
+    controller?.renderProgress(
+      record({ terminalState: "succeeded", journey: null })
+    );
+    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
+
+    controller?.renderProgress(
+      record({
+        terminalState: null,
+        journey: {
+          resumeTarget: { page: "planned", repo: "octo/widgets", branch: "" },
+          resumeReason: ""
+        }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
+
+    // Terminal with a planned target but no branch: canResume is true, so the
+    // href is built without a trailing `&branch=` segment, and the reason
+    // falls back to the default text.
+    controller?.renderProgress(
+      record({
+        terminalState: "succeeded",
+        journey: {
+          resumeTarget: { page: "planned", repo: "octo/widgets", branch: "" },
+          resumeReason: ""
+        }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.resume].getAttribute("href")).toBe(
+      "/?page=planned&repo=octo%2Fwidgets"
+    );
+    expect(browser.els[PROGRESS_IDS.resume].textContent).toBe(
+      "View planned graph"
+    );
+  });
+
+  it("shows dismiss and actions only once the operation is terminal", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    controller?.renderProgress(record({ terminalState: null }));
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+
+    controller?.renderProgress(record({ terminalState: "succeeded" }));
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+  });
+
+  it("renders nothing and hides the panel for a null operation", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(record());
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+
+    controller?.renderProgress(null);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
+  });
+});
+
+describe("verify status polling", () => {
+  function primeVerifyPoll(
+    browser: ReturnType<typeof setup>,
+    controller: ReturnType<typeof initializeEnvironmentOperations>,
+    overrides: Record<string, unknown> = {}
+  ): Promise<void> {
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [], ...overrides }))
+    );
+    controller?.trackProgress("dev", "azure");
+    return flushPromises().then(() => {
+      browser.net.handle(operationsUrl(), () =>
+        jsonResponse({ operation: null })
+      );
+    });
+  }
+
+  it("folds pending verify activity into the next render once the operation reappears", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    await primeVerifyPoll(browser, controller);
+    // A pending poll with no activity text must not clear or corrupt the
+    // (currently empty) tracked verify activity, then continue polling.
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "pending" })
+    );
+    await tickClock(browser.clock, 1500);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe("");
+
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "pending", activity: "Waiting on GitHub Actions" })
+    );
+    await tickClock(browser.clock, 1500);
+    expect(
+      browser.net.calls.some((call) => call.url.startsWith(VERIFY_STATUS_PATH))
+    ).toBe(true);
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [] }))
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Verifying credentials — Waiting on GitHub Actions"
+    );
+  });
+
+  it.each([
+    ["expired", "", "Credential verification is no longer being tracked."],
+    [
+      "expired",
+      "GitHub Actions run was deleted.",
+      "GitHub Actions run was deleted."
+    ],
+    ["cancelled", "", "Credential verification is no longer being tracked."]
+  ])(
+    "stops polling on a terminal verify state %s (error=%s)",
+    async (state, error, expectedActivity) => {
+      const browser = setup();
+      const controller = initializeEnvironmentOperations(browser.context, {
+        repo: REPO,
+        deps: createDeps().deps
+      });
+      await primeVerifyPoll(browser, controller);
+      browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+        jsonResponse({ state, terminal: state !== "expired", error })
+      );
+      await tickClock(browser.clock, 1500);
+
+      expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+        expectedActivity
+      );
+      expect(browser.clock.pending).toBe(0);
+    }
+  );
+
+  it("stops polling once verification exceeds its tracking window", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    await primeVerifyPoll(browser, controller, {
+      verification: { dispatchedAt: 1000 }
+    });
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "pending" })
+    );
+
+    // Jump far past the 45-minute verification tracking window; only the
+    // single already-scheduled poll timer fires during this synchronous jump.
+    browser.clock.tick(46 * 60 * 1000);
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Credential verification exceeded its tracking window. Check the GitHub Actions run before retrying."
+    );
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it("shows a success banner and reloads the table when verification succeeds", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "success" })
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(deps.successBanners).toEqual([
+      { provider: "azure", environment: "dev" }
+    ]);
+    expect(deps.reloadCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+
+  it("defaults the success banner provider to azure when trackProgress was called without one", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [], provider: "" }))
+    );
+    controller?.trackProgress("dev", "");
+    await flushPromises();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "success" })
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(deps.successBanners).toEqual([
+      { provider: "azure", environment: "dev" }
+    ]);
+  });
+
+  it("marks the panel failed with the run url when verification fails", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: "https://github.test/octo/widgets/actions/runs/9"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
+    ).toBe(true);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Credential verification failed. Actions run failed"
+    );
+    expect(browser.els[PROGRESS_IDS.details].textContent).toBe(
+      "View the run: https://github.test/octo/widgets/actions/runs/9"
+    );
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it("ignores a stale verify-status response that resolves after its session was superseded", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    await primeVerifyPoll(browser, controller);
+    const verifyResponse = createDeferred<HttpResponse>();
+    browser.net.handle(
+      verifyUrl(REPO, "dev", "op-1"),
+      () => verifyResponse.promise
+    );
+    await tickClock(browser.clock, 1500);
+
+    // The verify request is now in flight; supersede the session before it
+    // resolves. Disabling abort support means it is never rejected for the
+    // session change, so it reaches pollVerifyStatus's own continuation
+    // while genuinely stale.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          environment: "staging",
+          provider: "aws",
+          summary: "Creating staging…"
+        })
+      )
+    );
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    const timeoutsBeforeStaleSettles = browser.clock.timeouts;
+
+    verifyResponse.resolve(jsonResponse({ state: "success" }));
+    await flushPromises();
+
+    // The stale "dev" verify success must not fire a success banner for the
+    // superseded session or schedule an extra continuation.
+    expect(deps.successBanners).toEqual([]);
+    expect(browser.clock.timeouts).toBe(timeoutsBeforeStaleSettles);
+  });
+
+  it("ignores a stale verify-status rejection that arrives after its session was superseded", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    await primeVerifyPoll(browser, controller);
+    const verifyResponse = createDeferred<HttpResponse>();
+    browser.net.handle(
+      verifyUrl(REPO, "dev", "op-1"),
+      () => verifyResponse.promise
+    );
+    await tickClock(browser.clock, 1500);
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          environment: "staging",
+          provider: "aws",
+          summary: "Creating staging…"
+        })
+      )
+    );
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    const timeoutsBeforeStaleSettles = browser.clock.timeouts;
+
+    verifyResponse.reject(new Error("network drop"));
+    await flushPromises();
+
+    // The stale rejection must not schedule its own extra continuation on
+    // top of the current ("staging") session's timer.
+    expect(browser.clock.timeouts).toBe(timeoutsBeforeStaleSettles);
+  });
+});
+
+describe("failure card rendering", () => {
+  it.each([
+    ["running", undefined, "Cleanup is still running."],
+    ["pending", undefined, "Cleanup has not started yet."],
+    [
+      "anything",
+      false,
+      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+    ],
+    ["succeeded_with_warnings", undefined, "Cleanup finished with warnings."],
+    ["succeeded", undefined, "Cleanup finished."],
+    ["skipped", undefined, "Cleanup was not needed."]
+  ])(
+    "summarizes cleanup state %s (rollbackBeforeCommit=%s) as %s",
+    (state, rollbackBeforeCommit, expected) => {
+      const browser = setup();
+      const controller = initializeEnvironmentOperations(browser.context, {
+        repo: REPO,
+        deps: createDeps().deps
+      });
+      controller?.renderProgress(
+        record({
+          terminalState: "failed",
+          failure: { message: "boom" },
+          cleanup: { state, rollbackBeforeCommit }
+        })
+      );
+      expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toBe(
+        expected
+      );
+    }
+  );
+
+  it("renders removed, retained, and warning lists and hides empty ones", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        terminalState: "failed_partial",
+        failure: { message: "" },
+        cleanup: {
+          state: "succeeded_with_warnings",
+          retry: { startsCleanly: true, guidance: "Retry now." },
+          removed: [{ target: "rg-dev" }],
+          retained: [],
+          warnings: ["disk snapshot left behind"]
+        }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The setup request failed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
+      "Retry starts cleanly: Yes. Retry now."
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupRemovedBlock].style.display).toBe(
+      ""
+    );
+    expect(
+      browser.els[PROGRESS_IDS.cleanupRemovedList].children.map(
+        (c) => c.textContent
+      )
+    ).toEqual(["rg-dev"]);
+    expect(browser.els[PROGRESS_IDS.cleanupRetainedBlock].style.display).toBe(
+      "none"
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupWarningsBlock].style.display).toBe(
+      ""
+    );
+
+    // Now flip which lists are populated to cover the retained-list branch too.
+    controller?.renderProgress(
+      record({
+        terminalState: "failed_partial",
+        failure: { message: "" },
+        cleanup: {
+          state: "succeeded_with_warnings",
+          retry: {
+            startsCleanly: false,
+            guidance: "Check the deployment logs."
+          },
+          removed: [],
+          retained: [{ target: "kv-dev" }],
+          warnings: []
+        }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
+      "Retry starts cleanly: No. Check the deployment logs."
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupRemovedBlock].style.display).toBe(
+      "none"
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupRetainedBlock].style.display).toBe(
+      ""
+    );
+    expect(
+      browser.els[PROGRESS_IDS.cleanupRetainedList].children.map(
+        (c) => c.textContent
+      )
+    ).toEqual(["kv-dev"]);
+    expect(browser.els[PROGRESS_IDS.cleanupWarningsBlock].style.display).toBe(
+      "none"
+    );
+  });
+
+  it("hides the failure card outside the two failed terminal states", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(record({ terminalState: "succeeded" }));
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
+  });
+});
+
+describe("terminal handling", () => {
+  it("marks a succeeded operation and reloads the table", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    controller?.applyTerminal(
+      record({
+        terminalState: "succeeded",
+        provider: "azure",
+        environment: "dev",
+        steps: [{ state: "warning", label: "Quota is close to its limit" }]
+      })
+    );
+    expect(deps.successBanners).toEqual([
+      { provider: "azure", environment: "dev" }
+    ]);
+    expect(deps.setupWarnings).toEqual([["⚠️ Quota is close to its limit"]]);
+    expect(deps.reloadCount).toBe(1);
+    expect(browser.deployButton.textContent).toBe(DEPLOY_BUTTON_IDLE_LABEL);
+    expect(browser.deployButton.disabled).toBe(false);
+  });
+
+  it("marks succeeded_with_warnings the same as succeeded", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    controller?.applyTerminal(
+      record({ terminalState: "succeeded_with_warnings" })
+    );
+    expect(deps.successBanners).toHaveLength(1);
+  });
+
+  it("shows action-required with the pull request url and warnings", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    const terminal = { pullRequestUrl: "https://example.test/pr/1" };
+    controller?.applyTerminal(
+      record({
+        terminalState: "action_required",
+        terminal,
+        steps: [{ state: "warning", label: "Manual approval needed" }]
+      })
+    );
+    expect(deps.actionRequired).toEqual([
+      {
+        provider: "azure",
+        environment: "dev",
+        pullRequestUrl: "https://example.test/pr/1",
+        terminal
+      }
+    ]);
+    expect(deps.setupWarnings).toEqual([["⚠️ Manual approval needed"]]);
+  });
+
+  it("clears done/failed classes and reports cancellation", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.els[PROGRESS_IDS.panel].classList.add("env-progress--done");
+    controller?.applyTerminal(record({ terminalState: "cancelled" }));
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--done")
+    ).toBe(false);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Environment setup cancelled."
+    );
+  });
+
+  it("shows a failure message and marks the panel failed for failed/failed_partial", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    controller?.applyTerminal(
+      record({
+        terminalState: "failed",
+        failure: { message: "az cli: quota exceeded" }
+      })
+    );
+    expect(deps.errors).toEqual([
+      "Environment setup failed: az cli: quota exceeded"
+    ]);
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
+    ).toBe(true);
+  });
+
+  it("falls back to a generic message when a failure has none", () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    controller?.applyTerminal(
+      record({ terminalState: "failed_partial", failure: null })
+    );
+    expect(deps.errors).toEqual(["Environment setup failed: unknown error"]);
+  });
+
+  it.each(["succeeded", "action_required", "cancelled", "failed"])(
+    "reaches %s through the poller and invokes the default terminal handler",
+    async (terminalState) => {
+      const browser = setup();
+      const deps = createDeps();
+      const controller = initializeEnvironmentOperations(browser.context, {
+        repo: REPO,
+        deps: deps.deps
+      });
+      // The poller must first observe a running record for this environment
+      // before a terminal record is treated as this run's own outcome rather
+      // than a stale leftover from a previous setup of the same environment.
+      browser.net.handle(operationsUrl(), () =>
+        jsonResponse(op({ terminalState: null }))
+      );
+      controller?.trackProgress("dev", "azure");
+      await flushPromises();
+
+      browser.net.handle(operationsUrl(), () =>
+        jsonResponse(op({ terminalState }))
+      );
+      await tickClock(browser.clock, 1500);
+
+      expect(deps.reloadCount).toBe(1);
+      expect(browser.clock.pending).toBe(0);
+    }
+  );
+});
+
+describe("malformed, error, and rejected payloads", () => {
+  it("retries after a network rejection without crashing", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      Promise.reject(new Error("offline"))
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(browser.clock.timeouts).toBe(1);
+
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    await tickClock(browser.clock, 3000);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("retries when the response body is not JSON", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () => textResponse("not json"));
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("treats a non-object payload as no operation yet and keeps polling", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () => jsonResponse("not an object"));
+    browser.els[PROGRESS_IDS.panel].style.display = "marker";
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    // No render happened for an unusable payload; the panel is untouched.
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("marker");
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("keeps polling when the verify-status response itself rejects", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      Promise.reject(new Error("offline"))
+    );
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+
+    expect(browser.clock.timeouts).toBe(1);
+  });
+});
+
+describe("stale response ordering and operation identity", () => {
+  it("never lets a slow first poll overwrite a newer trackProgress call", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const first = createDeferred<HttpResponse>();
+    const second = createDeferred<HttpResponse>();
+    const responses = [first, second];
+    browser.net.handle(operationsUrl(), () => {
+      const next = responses.shift();
+      if (!next) throw new Error("unexpected third poll");
+      return next.promise;
+    });
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+
+    second.resolve(
+      jsonResponse(
+        op({ environment: "staging", provider: "aws", operationId: "op-2" })
+      )
+    );
+    await flushPromises();
+    first.resolve(
+      jsonResponse(
+        op({ environment: "dev", provider: "azure", operationId: "op-1" })
+      )
+    );
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Creating dev…");
+    // The stale "dev" response must not have been allowed to schedule its own
+    // continuation on top of the newer session's timer.
+    expect(browser.clock.timeouts).toBeLessThanOrEqual(1);
+  });
+
+  it("ignores a stale resume-prompt resolution once a newer session has started", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    const smr = createDeferred<string>();
+    deps.deps.promptServiceManagementReference = () => smr.promise;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    // Supersede the session before the SMR prompt resolves.
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    smr.resolve("11111111-1111-1111-1111-111111111111");
+    await flushPromises();
+
+    // The stale session's resolved prompt must not fire its own resume call;
+    // only the current (second) session's continuation may proceed.
+    expect(
+      browser.net.calls.filter((call) => call.url.includes("/resume/")).length
+    ).toBe(1);
+  });
+
+  it("ignores a stale resume-prompt rejection once a newer session has started", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    const smr = createDeferred<string>();
+    deps.deps.promptServiceManagementReference = () => smr.promise;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    // Supersede the session before the SMR prompt rejects.
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    smr.reject(new Error("prompt closed"));
+    await flushPromises();
+
+    // Both sessions share the same pending prompt promise, so the reject
+    // reaches both continuations. Only the current (second, still-active)
+    // session may schedule its own retry; the stale first session's own
+    // active()-check must suppress a second, duplicate retry.
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("discards a first poll response for a different environment or an already-terminal record", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    // The server-side registry can still hold the previous environment's
+    // terminal record for a moment after a new setup is requested; the very
+    // first poll must not paint that leftover as this session's state.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "staging", terminalState: "succeeded" }))
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("");
+    expect(browser.clock.timeouts).toBe(1);
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "dev", terminalState: null }))
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Creating dev…");
+  });
+
+  it("ignores a slow poll response that resolves after its session was superseded even when the network cannot abort it", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const stale = createDeferred<HttpResponse>();
+    browser.net.handle(operationsUrl(), () => stale.promise);
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    // Disabling abort support means the first poll's request is never
+    // rejected by the session change below, so its response reaches
+    // tick()'s own continuation while genuinely stale.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          environment: "staging",
+          provider: "aws",
+          summary: "Creating staging…"
+        })
+      )
+    );
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Creating staging…"
+    );
+    const timeoutsBeforeStaleSettles = browser.clock.timeouts;
+
+    stale.resolve(
+      jsonResponse(
+        op({ environment: "dev", provider: "azure", operationId: "op-1" })
+      )
+    );
+    await flushPromises();
+
+    // The stale "dev" response must not repaint the panel or schedule an
+    // extra continuation on top of the current "staging" session's timer.
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Creating staging…"
+    );
+    expect(browser.clock.timeouts).toBe(timeoutsBeforeStaleSettles);
+  });
+
+  it("keeps polling for the current environment once observed, discarding a null record until it matches", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    // trackProgress is called with an empty environment (mirrors a caller
+    // that has not yet resolved a target environment name); the first poll
+    // must match on that same empty string to mark the operation observed.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "" }))
+    );
+
+    controller?.trackProgress("", "azure");
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Creating dev…");
+
+    // Once observed, an operation-registry gap (record disappeared) with no
+    // resolvable environment must keep polling rather than fall through to
+    // verification tracking, which requires a known environment name.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(
+      browser.net.calls.some((call) => call.url.startsWith(VERIFY_STATUS_PATH))
+    ).toBe(false);
+    expect(browser.clock.pending).toBeGreaterThan(0);
+  });
+});
+
+describe("resume flow", () => {
+  it("resumes a service-management-reference prompt with the exact route and body", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () =>
+      Promise.resolve("11111111-1111-1111-1111-111111111111");
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    let resumeBody: unknown;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: { step: 2 }
+          }
+        })
+      )
+    );
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      (init) => {
+        resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
+        return jsonResponse({ ok: true });
+      }
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(resumeBody).toEqual({
+      serviceManagementReference: "11111111-1111-1111-1111-111111111111",
+      checkpoint: { step: 2 },
+      repo: REPO,
+      environment: "dev",
+      provider: "azure"
+    });
+  });
+
+  it("resumes an app-selection prompt with the candidates and default from metadata", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let requestSeen: AppPickerRequest | undefined;
+    deps.deps.promptAppSelection = (request) => {
+      requestSeen = request;
+      return Promise.resolve({ appId: "app-2" });
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    let resumeBody: unknown;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "app-selection-required",
+            checkpoint: {},
+            metadata: {
+              defaultAppId: "app-2",
+              candidates: [{ appId: "app-1" }, { appId: "app-2" }]
+            }
+          }
+        })
+      )
+    );
+    browser.net.handle(resumeUrl("op-1", "app-selection-required"), (init) => {
+      resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
+      return jsonResponse({ ok: true });
+    });
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(requestSeen?.candidates).toEqual([
+      { appId: "app-1" },
+      { appId: "app-2" }
+    ]);
+    expect(requestSeen?.defaultAppId).toBe("app-2");
+    expect(requestSeen?.allowCreateNew).toBe(true);
+    expect(resumeBody).toMatchObject({ appId: "app-2" });
+  });
+
+  it("resumes with createNew when the picker requests a new app", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptAppSelection = () => Promise.resolve({ createNew: true });
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    let resumeBody: unknown;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "app-selection-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(resumeUrl("op-1", "app-selection-required"), (init) => {
+      resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
+      return jsonResponse({ ok: true });
+    });
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(resumeBody).toMatchObject({ createNew: true });
+  });
+
+  it("does not prompt for an unrecognized input code and keeps polling", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "some-unknown-code",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url.includes("/resume/"))
+    ).toBe(false);
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("re-prompts on the next poll after a generic resume failure", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let smrCalls = 0;
+    deps.deps.promptServiceManagementReference = () => {
+      smrCalls += 1;
+      return Promise.resolve("11111111-1111-1111-1111-111111111111");
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () => jsonResponse({ error: "validation failed" }, false, 422)
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(1);
+
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(2);
+  });
+
+  it("re-prompts after a resume failure whose response body is not a JSON object", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let smrCalls = 0;
+    deps.deps.promptServiceManagementReference = () => {
+      smrCalls += 1;
+      return Promise.resolve("11111111-1111-1111-1111-111111111111");
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    // A bare JSON string (not an object) is still valid JSON, so `.json()`
+    // resolves without throwing — parseResumeFailure must fall back safely
+    // instead of assuming the payload is a record.
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () => jsonResponse("plain text failure", false, 500)
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(1);
+
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(2);
+  });
+
+  it("re-prompts after a resume failure whose response body is not valid JSON at all", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let smrCalls = 0;
+    deps.deps.promptServiceManagementReference = () => {
+      smrCalls += 1;
+      return Promise.resolve("11111111-1111-1111-1111-111111111111");
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    // The response's own `.json()` rejects entirely (e.g. an HTML error page
+    // from a proxy). The resume handler must fall back to an empty payload
+    // instead of letting the parse failure escape as an unhandled rejection.
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () => textResponse("<html>Bad Gateway</html>", false, 502)
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(1);
+
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(2);
+  });
+
+  it("does not re-prompt while a resume failure reports operation-input-expired but no usable operation", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let smrCalls = 0;
+    deps.deps.promptServiceManagementReference = () => {
+      smrCalls += 1;
+      return Promise.resolve("11111111-1111-1111-1111-111111111111");
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () => jsonResponse({ code: "operation-input-expired" }, false, 409)
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+    expect(smrCalls).toBe(1);
+
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+    await flushPromises();
+    // Same requestedAt as before, and no reset, so the prompt is not repeated.
+    expect(smrCalls).toBe(1);
+  });
+
+  it("applies the terminal record from a resume failure carrying an expired operation", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () =>
+      Promise.resolve("11111111-1111-1111-1111-111111111111");
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () =>
+        jsonResponse(
+          {
+            code: "operation-input-expired",
+            operation: op({
+              terminalState: "failed",
+              failure: { code: "operation-input-expired", message: "expired" }
+            }).operation
+          },
+          false,
+          409
+        )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(deps.errors).toEqual(["Environment setup failed: expired"]);
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it("stops silently when a resume failure's expired operation cannot itself be parsed", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () =>
+      Promise.resolve("11111111-1111-1111-1111-111111111111");
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    // The record is a genuine expired-input operation (it satisfies
+    // isOperationInputExpired), but its operationId is missing, so the
+    // record itself fails to parse into a usable OperationRecord.
+    browser.net.handle(
+      resumeUrl("op-1", "service-management-reference-required"),
+      () =>
+        jsonResponse(
+          {
+            code: "operation-input-expired",
+            operation: {
+              operationId: "",
+              failure: { code: "operation-input-expired" }
+            }
+          },
+          false,
+          409
+        )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    // Progress simply stops: no terminal callback fires and no further
+    // poll is scheduled, but nothing throws either.
+    expect(deps.errors).toEqual([]);
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it("abandons the operation when the prompt rejects with abandonOperation", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () => {
+      const error = Object.assign(new Error("cancelled"), {
+        abandonOperation: true
+      });
+      return Promise.reject(error);
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    let abandonCalled = false;
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(abandonUrl("op-1"), () => {
+      abandonCalled = true;
+      return jsonResponse({ ok: true });
+    });
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(abandonCalled).toBe(true);
+  });
+
+  it("retries after the abandon request itself fails", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () => {
+      const error = Object.assign(new Error("cancelled"), {
+        abandonOperation: true
+      });
+      return Promise.reject(error);
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(abandonUrl("op-1"), () => jsonResponse({}, false, 500));
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("retries after the abandon request rejects outright", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () => {
+      const error = Object.assign(new Error("cancelled"), {
+        abandonOperation: true
+      });
+      return Promise.reject(error);
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    browser.net.handle(abandonUrl("op-1"), () =>
+      Promise.reject(new Error("offline"))
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("is a no-op when the abandon request settles for a session that has since been superseded", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    deps.deps.promptServiceManagementReference = () => {
+      const error = Object.assign(new Error("cancelled"), {
+        abandonOperation: true
+      });
+      return Promise.reject(error);
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+    const abandonResponse = createDeferred<HttpResponse>();
+    browser.net.handle(abandonUrl("op-1"), () => abandonResponse.promise);
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    await flushPromises();
+    // The abandon POST is now in flight but unresolved. Superseding the
+    // session before it settles means scheduleTick's own staleness guard
+    // (not this handler) must suppress the reschedule it would otherwise
+    // trigger.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "prod" }))
+    );
+    controller?.trackProgress("prod", "azure");
+    await flushPromises();
+    const timeoutsBeforeSettle = browser.clock.timeouts;
+
+    abandonResponse.resolve(jsonResponse({ ok: true }));
+    await flushPromises();
+    await flushPromises();
+
+    // Only the current ("prod") session's own timer exists; the stale
+    // abandon-flow continuation scheduled nothing extra.
+    expect(browser.clock.timeouts).toBe(timeoutsBeforeSettle);
+  });
+
+  it("does not re-prompt for the same requestedAt across polls", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    let smrCalls = 0;
+    deps.deps.promptServiceManagementReference = () => {
+      smrCalls += 1;
+      return new Promise(() => {
+        /* never resolves for this test */
+      });
+    };
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "input_required",
+          inputRequired: {
+            requestedAt: "2024-01-01T00:00:00.000Z",
+            code: "service-management-reference-required",
+            checkpoint: {}
+          }
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(smrCalls).toBe(1);
+  });
+});
+
+describe("resumeProgress", () => {
+  it("does nothing when there is no repo", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: "",
+      deps: createDeps().deps
+    });
+    controller?.resumeProgress();
+    await flushPromises();
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it("rejoins a non-terminal operation and starts tracking it", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "prod" }))
+    );
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it.each([
+    ["no operation", { operation: null }],
+    ["a terminal operation", op({ terminalState: "succeeded" })]
+  ])("does not start tracking for %s", async (_name, payload) => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () => jsonResponse(payload));
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("swallows a rejected resume fetch", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      Promise.reject(new Error("offline"))
+    );
+
+    controller?.resumeProgress();
+    await expect(flushPromises()).resolves.toBeUndefined();
+  });
+
+  it("ignores a resume-progress response that resolves after a newer session has started", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const resumeResponse = createDeferred<HttpResponse>();
+    browser.net.handle(operationsUrl(), () => resumeResponse.promise);
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    // Disabling abort support means resumeProgress's own in-flight request
+    // is never rejected by the trackProgress call below, so its response
+    // reaches resumeProgress's continuation while genuinely stale.
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ environment: "prod" }))
+    );
+    controller?.trackProgress("prod", "azure");
+    await flushPromises();
+    const intervalsBeforeStaleSettles = browser.clock.intervals;
+
+    resumeResponse.resolve(jsonResponse(op({ environment: "dev" })));
+    await flushPromises();
+
+    // The stale resumeProgress response must not restart tracking on top of
+    // the current ("prod") session.
+    expect(browser.clock.intervals).toBe(intervalsBeforeStaleSettles);
+  });
+});
+
+describe("syncFailureOperation", () => {
+  it("resolves false without a network call when there is no operationId", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    await expect(controller?.syncFailureOperation({})).resolves.toBe(false);
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it("renders the operation, opens details, and hides the error banner on success", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.els[ERROR_BANNER_ID].style.display = "block";
+    browser.net.handle(operationUrl("op-9"), () =>
+      jsonResponse(op({ operationId: "op-9", terminalState: "failed" }))
+    );
+
+    await expect(
+      controller?.syncFailureOperation({ operationId: "op-9" })
+    ).resolves.toBe(true);
+    expect(browser.els[PROGRESS_IDS.details].getAttribute("open")).toBe("");
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+  });
+
+  it("also opens details for the failed_partial terminal state", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationUrl("op-10"), () =>
+      jsonResponse(
+        op({ operationId: "op-10", terminalState: "failed_partial" })
+      )
+    );
+
+    await expect(
+      controller?.syncFailureOperation({ operationId: "op-10" })
+    ).resolves.toBe(true);
+    expect(browser.els[PROGRESS_IDS.details].getAttribute("open")).toBe("");
+  });
+
+  it("resolves false when the response is not ok, missing an operation, or rejects", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationUrl("not-ok"), () =>
+      jsonResponse({}, false, 404)
+    );
+    browser.net.handle(operationUrl("missing"), () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationUrl("boom"), () =>
+      Promise.reject(new Error("offline"))
+    );
+
+    await expect(
+      controller?.syncFailureOperation({ operationId: "not-ok" })
+    ).resolves.toBe(false);
+    await expect(
+      controller?.syncFailureOperation({ operationId: "missing" })
+    ).resolves.toBe(false);
+    await expect(
+      controller?.syncFailureOperation({ operationId: "boom" })
+    ).resolves.toBe(false);
+  });
+});
+
+describe("timer uniqueness and elapsed rendering", () => {
+  it("owns exactly one elapsed interval and one progress timeout at a time", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(browser.clock.intervals).toBe(1);
+    expect(browser.clock.timeouts).toBe(1);
+
+    await tickClock(browser.clock, 1500, 3);
+    expect(browser.clock.intervals).toBe(1);
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
+  it("still tracks progress when the network port cannot create an abort handle", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    // Observe a running record first so the poller does not treat the
+    // terminal response below as a stale leftover from a previous run.
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ terminalState: "succeeded" }))
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--done")
+    ).toBe(true);
+    expect(browser.net.calls.length).toBeGreaterThan(0);
+  });
+
+  it("renders the elapsed time from clock ticks and from the operation record", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ startedAt: new Date(0).toISOString() }))
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.elapsed].textContent).toBe("0:00");
+
+    browser.clock.tick(3000);
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.elapsed].textContent).toBe("0:03");
+  });
+
+  it("uses the ended-at time once the record reports an end", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const startedAt = new Date(0).toISOString();
+    const endedAt = new Date(7000).toISOString();
+    // First observe a running record for this environment so the terminal
+    // record that follows is not treated as a stale leftover.
+    browser.net.handle(operationsUrl(), () => jsonResponse(op({ startedAt })));
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ startedAt, endedAt, terminalState: "succeeded" }))
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(browser.els[PROGRESS_IDS.elapsed].textContent).toBe("0:07");
+  });
+
+  it("ignores a malformed startedAt instead of corrupting the elapsed time", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ startedAt: "not-a-date" }))
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.elapsed].textContent).not.toContain("NaN");
+  });
+});
+
+describe("graceful degradation when optional DOM elements are missing", () => {
+  const OPTIONAL_PROGRESS_IDS = [
+    PROGRESS_IDS.activity,
+    PROGRESS_IDS.stages,
+    PROGRESS_IDS.steps,
+    PROGRESS_IDS.details,
+    PROGRESS_IDS.resume,
+    PROGRESS_IDS.dismiss,
+    PROGRESS_IDS.actions,
+    PROGRESS_IDS.failureCard,
+    PROGRESS_IDS.failureMessage,
+    PROGRESS_IDS.cleanupStatus,
+    PROGRESS_IDS.retry
+  ];
+
+  it("renders and applies terminal states without throwing when only the panel exists", () => {
+    const browser = setupWithout([
+      ...OPTIONAL_PROGRESS_IDS,
+      ERROR_BANNER_ID,
+      DEPLOY_BUTTON_ID
+    ]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(controller).not.toBeNull();
+
+    expect(() =>
+      controller?.renderProgress(
+        record({
+          terminalState: "failed",
+          stages: [{ state: "running", label: "Provision" }],
+          steps: [{ state: "running", label: "Create resource group" }],
+          journey: {
+            resumeTarget: {
+              page: "planned",
+              repo: "octo/widgets",
+              branch: "feature/x"
+            },
+            resumeReason: "Back to the graph"
+          },
+          cleanup: {
+            state: "succeeded",
+            rollbackBeforeCommit: true,
+            retry: { startsCleanly: true, guidance: "Retry any time." },
+            removed: [{ target: "rg-dev" }],
+            retained: [],
+            warnings: []
+          }
+        })
+      )
+    ).not.toThrow();
+    // The panel itself is always present and must keep reflecting state
+    // even when every optional child element is absent.
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
+    ).toBe(true);
+
+    expect(() =>
+      controller?.applyTerminal(record({ terminalState: "succeeded" }))
+    ).not.toThrow();
+    expect(() =>
+      controller?.applyTerminal(record({ terminalState: "cancelled" }))
+    ).not.toThrow();
+    expect(() =>
+      controller?.applyTerminal(
+        record({ terminalState: "failed", failure: { message: "boom" } })
+      )
+    ).not.toThrow();
+    expect(() =>
+      controller?.applyTerminal(record({ terminalState: "action_required" }))
+    ).not.toThrow();
+  });
+
+  it("skips opening details and hiding the error banner when both are missing", async () => {
+    const browser = setupWithout([PROGRESS_IDS.details, ERROR_BANNER_ID]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationUrl("op-9"), () =>
+      jsonResponse(op({ operationId: "op-9", terminalState: "failed" }))
+    );
+
+    await expect(
+      controller?.syncFailureOperation({ operationId: "op-9" })
+    ).resolves.toBe(true);
+  });
+
+  it("returns early from the cleanup list helper when its list or block element is missing", () => {
+    const browser = setupWithout([PROGRESS_IDS.cleanupRemovedBlock]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    expect(() =>
+      controller?.renderProgress(
+        record({
+          terminalState: "failed",
+          cleanup: {
+            state: "succeeded",
+            rollbackBeforeCommit: true,
+            retry: { startsCleanly: true, guidance: "Retry any time." },
+            removed: [{ target: "rg-dev" }],
+            retained: [],
+            warnings: []
+          }
+        })
+      )
+    ).not.toThrow();
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
+  });
+
+  it("skips the expired and failed verify activity/details updates, and the elapsed tick, when absent", async () => {
+    const missingIds = [
+      PROGRESS_IDS.activity,
+      PROGRESS_IDS.details,
+      PROGRESS_IDS.elapsed
+    ];
+    const browser = setupWithout(missingIds);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [] }))
+    );
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    // The elapsed interval tick fires here too, exercising its own guard
+    // for a missing elapsed element.
+    browser.clock.tick(1000);
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "expired",
+        terminal: false,
+        error: "",
+        runUrl: "",
+        activity: ""
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    // A fresh browser/controller for the failed-verify guards, so the two
+    // controllers do not contend for the same claimed entry scope.
+    const browser2 = setupWithout(missingIds);
+    const controller2 = initializeEnvironmentOperations(browser2.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(controller2).not.toBeNull();
+    browser2.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [] }))
+    );
+    controller2?.trackProgress("dev", "azure");
+    await flushPromises();
+    browser2.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    browser2.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        terminal: false,
+        error: "Actions run failed",
+        runUrl: "https://github.test/octo/widgets/actions/runs/9",
+        activity: ""
+      })
+    );
+    await tickClock(browser2.clock, 1500);
+
+    // A third fresh controller for the tracking-window-exceeded guard, which
+    // is only reachable on a still-pending verify response.
+    const browser3 = setupWithout(missingIds);
+    const controller3 = initializeEnvironmentOperations(browser3.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(controller3).not.toBeNull();
+    browser3.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          currentStage: "verify",
+          steps: [],
+          verification: { dispatchedAt: 1000 }
+        })
+      )
+    );
+    controller3?.trackProgress("dev", "azure");
+    await flushPromises();
+    browser3.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    browser3.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "pending" })
+    );
+    browser3.clock.tick(46 * 60 * 1000);
+    await flushPromises();
+  });
+});
+
+describe("focus and dismiss", () => {
+  it("focuses the panel and scrolls smoothly by default", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.focusPanel();
+    expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.panel].scrollCount).toBe(1);
+  });
+
+  it("scrolls without animation when the dependency reports reduced motion", () => {
+    const browser = setup();
+    const deps = createDeps({ prefersReducedMotion: () => true });
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: deps.deps
+    });
+    controller?.focusPanel();
+    expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
+  });
+});
+
+describe("hostile values", () => {
+  it("renders hostile labels and messages as literal text through textContent, never innerHTML", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const hostileLabel = "<img src=x onerror=alert(1)>";
+    const hostileSummary =
+      "\"><script>document.location='https://evil.test'</script>";
+    const secretShaped = "sk-live-AAAABBBBCCCCDDDDEEEEFFFF0000";
+
+    controller?.renderProgress(
+      record({
+        summary: hostileSummary,
+        steps: [{ state: "running", label: hostileLabel }],
+        failure: { message: secretShaped }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(hostileSummary);
+    expect(browser.els[PROGRESS_IDS.title].innerHTML).toBe("");
+    const stepEl = browser.els[PROGRESS_IDS.steps].children[0];
+    expect(stepEl.textContent).toBe(`◐ ${hostileLabel}`);
+    expect(stepEl.innerHTML).toBe("");
+    // The failure message wins the activity line and must still be plain text.
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(secretShaped);
+    expect(browser.els[PROGRESS_IDS.activity].innerHTML).toBe("");
+  });
+
+  it("carries a hostile resume-target repo/branch through encodeURIComponent, not string concatenation", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        terminalState: "succeeded",
+        journey: {
+          resumeTarget: {
+            page: "planned",
+            repo: "octo/<script>",
+            branch: "a&b"
+          },
+          resumeReason: ""
+        }
+      })
+    );
+    const href = browser.els[PROGRESS_IDS.resume].getAttribute("href");
+    expect(href).toBe("/?page=planned&repo=octo%2F%3Cscript%3E&branch=a%26b");
+  });
+});
+
+describe("idempotence", () => {
+  it("allows hideProgress and stopProgress to be called with nothing running", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(() => controller?.stopProgress()).not.toThrow();
+    expect(() => controller?.hideProgress()).not.toThrow();
+    expect(() => controller?.hideProgress()).not.toThrow();
+  });
+
+  it("allows teardown to be called more than once", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(() => controller?.teardown()).not.toThrow();
+    expect(() => controller?.teardown()).not.toThrow();
+  });
+});
+
+describe("teardown", () => {
+  it("stops timers, releases the binding, and prevents a late response from painting", async () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(operationsUrl(), () => pending.promise);
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    browser.els[PROGRESS_IDS.panel].style.display = "marker";
+    controller?.teardown();
+
+    expect(browser.clock.pending).toBe(0);
+    expect(browser.els[PROGRESS_IDS.dismiss].listenerCount("click")).toBe(0);
+    expect(browser.bindings.has(ENVIRONMENT_OPERATIONS_ENTRY_KEY)).toBe(false);
+    expect(browser.net.aborted).toBe(1);
+
+    pending.resolve(jsonResponse(op()));
+    await flushPromises();
+    // The torn-down instance's in-flight response must not paint.
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("marker");
+
+    // A new instance can now claim the same entry key.
+    const revived = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    expect(revived).not.toBeNull();
+  });
+});
+
+describe("OperationResumeError", () => {
+  it("carries its retry flag and operation payload", () => {
+    const error = new OperationResumeError("nope", true, { some: "payload" });
+    expect(error.message).toBe("nope");
+    expect(error.retryPrompt).toBe(true);
+    expect(error.operation).toEqual({ some: "payload" });
+    expect(error.name).toBe("OperationResumeError");
+    expect(error).toBeInstanceOf(Error);
+  });
+});

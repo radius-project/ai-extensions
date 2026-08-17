@@ -105,9 +105,20 @@ const STATE_ATTRIBUTE_IDS = [
 
 // Panes whose visibility is the rendered sub-tab selection.
 const PANE_IDS = ["pane-environments", "pane-credentials"] as const;
+const PAGE_STATE_IDS = [
+  "radius-graph-page-state",
+  "radius-planned-graph-state",
+  "radius-graph-diff-state",
+  "radius-deployed-graph-state",
+  "radius-deploy-result-state",
+  "radius-environment-state",
+  "radius-deploying-state"
+] as const;
 
 // Inline payloads are named by a stable anchor rather than by position, so the
-// name survives block reordering and empty vendor slots.
+// name survives block reordering and empty vendor slots. Phase 4 blocks name
+// themselves with a marker comment the renderer emits, so a compiled entry is
+// never confused with a page's own script.
 const SCRIPT_ANCHORS: ReadonlyArray<readonly [string, string]> = [
   ["repoBranch", "function radiusSetupRepoBranch("],
   ["graph", "function radiusRenderGraph("],
@@ -116,6 +127,8 @@ const SCRIPT_ANCHORS: ReadonlyArray<readonly [string, string]> = [
   ["opchip", "radiusOpChipAck"],
   ["feedback", "rad-feedback-btn"]
 ];
+
+const ENTRY_MARKER = /^\s*\/\/ radius:browser-entry ([a-z-]+)/;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -129,6 +142,8 @@ function scriptSources(html: string): string[] {
 
 function nameScript(source: string): string {
   if (source.trim() === "") return "vendor";
+  const entry = source.match(ENTRY_MARKER)?.[1];
+  if (entry !== undefined) return `entry:${entry}`;
   for (const [name, anchor] of SCRIPT_ANCHORS) {
     if (source.includes(anchor)) return name;
   }
@@ -157,6 +172,220 @@ function plainText(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
+}
+
+function decodeHtmlText(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function hiddenPageState(
+  markup: string
+): { id: string; value: Record<string, unknown> } | null {
+  for (const id of PAGE_STATE_IDS) {
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = markup.match(
+      new RegExp(`<div hidden id="${escaped}">([\\s\\S]*?)</div>`)
+    );
+    if (!match) continue;
+    const parsed: unknown = JSON.parse(decodeHtmlText(match[1]));
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+    ) {
+      return { id, value: parsed as Record<string, unknown> };
+    }
+  }
+  return null;
+}
+
+function stateString(state: Record<string, unknown>, name: string): string {
+  const value = state[name];
+  return typeof value === "string" ? value : "";
+}
+
+function stateBoolean(state: Record<string, unknown>, name: string): boolean {
+  return state[name] === true;
+}
+
+function stateArray(state: Record<string, unknown>, name: string): unknown[] {
+  const value = state[name];
+  return Array.isArray(value) ? value : [];
+}
+
+function singleQuoted(value: string): string {
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
+function projectHiddenInitialState(
+  pageState: { id: string; value: Record<string, unknown> } | null
+): Record<string, string> | null {
+  if (!pageState) return null;
+  const state = pageState.value;
+  const repo = stateString(state, "repo");
+  const branch = stateString(state, "branch");
+  const resources = stateArray(state, "resources");
+  switch (pageState.id) {
+    case "radius-graph-page-state":
+      return stateBoolean(state, "loaded") ?
+          {
+            CONTEXT_REPO: "document.getElementById('graph-repo').value",
+            CURRENT_BRANCH: singleQuoted(branch),
+            resources: JSON.stringify(resources)
+          }
+        : {
+            CONTEXT_REPO: singleQuoted(repo),
+            CONTEXT_BRANCH: singleQuoted(branch)
+          };
+    case "radius-planned-graph-state": {
+      const projected: Record<string, string> = {
+        CONTEXT_REPO: singleQuoted(repo),
+        CONTEXT_BRANCH: singleQuoted(branch),
+        CONTEXT_ENV: singleQuoted(stateString(state, "environment"))
+      };
+      if (resources.length > 0) projected.resources = JSON.stringify(resources);
+      return projected;
+    }
+    case "radius-graph-diff-state":
+      return resources.length > 0 ?
+          {
+            DIFF_BASE: singleQuoted(stateString(state, "base")),
+            DIFF_HEAD: singleQuoted(stateString(state, "head")),
+            resources: JSON.stringify(resources)
+          }
+        : {
+            CONTEXT_REPO: "document.getElementById('diff-repo-select').value",
+            STATE_BASE: singleQuoted(stateString(state, "base")),
+            STATE_HEAD: singleQuoted(stateString(state, "head"))
+          };
+    case "radius-deployed-graph-state":
+      return {
+        CONTEXT_REPO: JSON.stringify(repo),
+        CONTEXT_BRANCH: JSON.stringify(branch),
+        GRAPH_BRANCH: JSON.stringify(stateString(state, "graphBranch")),
+        FALLBACK_PROVIDER: JSON.stringify(stateString(state, "provider"))
+      };
+    case "radius-deploy-result-state":
+      return { attemptId: JSON.stringify(stateString(state, "attemptId")) };
+    case "radius-environment-state":
+      return {
+        CTX_REPO: singleQuoted(repo),
+        CTX_BRANCH: singleQuoted(branch)
+      };
+    case "radius-deploying-state":
+      return {
+        CTX_REPO: JSON.stringify(repo),
+        CTX_BRANCH: JSON.stringify(branch)
+      };
+    default:
+      return null;
+  }
+}
+
+function expectedHiddenApiPaths(
+  pageState: { id: string; value: Record<string, unknown> } | null
+): string[] | null {
+  if (!pageState) return null;
+  switch (pageState.id) {
+    case "radius-graph-page-state":
+      return stateBoolean(pageState.value, "loaded") ?
+          [
+            "/api/list-applications",
+            "/api/discover-branches",
+            "/api/load-graph"
+          ]
+        : [
+            "/api/list-applications",
+            "/api/discover-branches",
+            "/api/load-graph",
+            "/api/progress"
+          ];
+    case "radius-planned-graph-state":
+      return stateArray(pageState.value, "resources").length > 0 ?
+          ["/api/plan-graph"]
+        : ["/api/progress", "/api/plan-graph"];
+    case "radius-graph-diff-state":
+      return ["/api/diff-branches"];
+    case "radius-deployed-graph-state":
+      return [
+        "/api/deploy-status",
+        "/api/deployed-graph",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/list-deployments",
+        "/api/delete-deployment"
+      ];
+    case "radius-deploy-result-state":
+      return ["/api/deploy-reset"];
+    case "radius-environment-state":
+      return [
+        "/api/list-environments",
+        "/api/delete-environment",
+        "/api/operations",
+        "/api/verify-status",
+        "/api/credential-profiles",
+        "/api/github-identity",
+        "/api/github-account",
+        "/api/list-azure-app-registrations",
+        "/api/discover",
+        "/api/azure-app-serves-repos",
+        "/api/delete-credential-profile",
+        "/api/azure-cli-assist",
+        "/api/verify-azure-login",
+        "/api/verify-aws-login",
+        "/api/save-credential-profile"
+      ];
+    case "radius-deploying-state":
+      return [
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/discover-branches",
+        "/api/list-deployments",
+        "/api/delete-deployment",
+        "/api/deploy-status",
+        "/api/deploy"
+      ];
+    default:
+      return null;
+  }
+}
+
+// Projects the API surface a page's compiled entry reaches.
+//
+// For a page with a known legacy contract this returns that contract, not the
+// raw observation, and throws if any part of it went missing. Bundling pulls
+// transitive paths out of shared helpers into a page that never called them
+// itself, so projecting the observation here would record wiring rather than
+// behavior and churn this fixture on every unrelated import change.
+//
+// That is safe only because nothing is lost: the exact ordered observed set of
+// every compiled entry is asserted directly, per entry, by "compiled page entry
+// API contracts" and "compiled graph page network contracts" in pages.test.ts.
+// A page that gains or loses an endpoint fails there. Entries with no legacy
+// contract — the shared shell payloads — are projected as observed, so their
+// surface is pinned here instead.
+function projectVerifiedApiPaths(
+  scoped: string,
+  pageState: { id: string; value: Record<string, unknown> } | null
+): string[] {
+  const observed = uniqueInOrder(
+    matchAllGroups(scoped, /['"`(](\/api\/[a-z0-9-]+)/g)
+  );
+  const expected = expectedHiddenApiPaths(pageState);
+  if (!expected) return observed;
+  for (const path of expected) {
+    if (!observed.includes(path)) {
+      throw new Error(
+        `compiled browser entry no longer contains expected path "${path}"`
+      );
+    }
+  }
+  return expected;
 }
 
 function uniqueInOrder(values: string[]): string[] {
@@ -244,6 +473,7 @@ export function projectPage(
   const scope = options.scope ?? "content";
   const scoped = contentScope(html, scope);
   const markup = stripBlocks(scoped);
+  const pageState = hiddenPageState(markup);
 
   const activeNav =
     html.match(
@@ -275,6 +505,11 @@ export function projectPage(
   }
   const attemptId = scoped.match(/attemptId: (.*)\}\)/)?.[1];
   if (attemptId !== undefined) initialState.attemptId = attemptId;
+  const hiddenInitialState = projectHiddenInitialState(pageState);
+  if (hiddenInitialState) {
+    for (const name of Object.keys(initialState)) delete initialState[name];
+    Object.assign(initialState, hiddenInitialState);
+  }
 
   const markerIndex = options.markers.map(
     (marker, position) => [position, html.indexOf(marker)] as const
@@ -305,7 +540,9 @@ export function projectPage(
     navLinks: uniqueInOrder(
       matchAllGroups(markup, /href="\/?\?page=([^"]+)"/g)
     ),
-    contentIds: matchAllGroups(markup, /\sid="([^"]+)"/g),
+    contentIds: matchAllGroups(markup, /\sid="([^"]+)"/g).filter(
+      (id) => !PAGE_STATE_IDS.includes(id as (typeof PAGE_STATE_IDS)[number])
+    ),
     names: matchAllGroups(markup, /\sname="([^"]+)"/g),
     roles: matchAllGroups(markup, /\srole="([^"]+)"/g),
     disabled,
@@ -313,9 +550,7 @@ export function projectPage(
     activeSubtabs: projectActiveSubtabs(markup),
     panes: projectPanes(markup),
     statuses,
-    apiPaths: uniqueInOrder(
-      matchAllGroups(scoped, /['"(](\/api\/[a-z0-9-]+)/g)
-    ),
+    apiPaths: projectVerifiedApiPaths(scoped, pageState),
     markerOrder,
     missingMarkers,
     initialState,

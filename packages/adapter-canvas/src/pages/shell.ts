@@ -4,13 +4,7 @@
 // operation chip), and the feedback widget that every page renders inside.
 
 import { getInlineVendorScripts, getInlineVendorStyles } from "../vendor.js";
-import {
-  CLIENT_REPO_BRANCH_JS,
-  CLIENT_GRAPH_JS,
-  CLIENT_HEARTBEAT_JS,
-  CLIENT_OPCHIP_JS,
-  CLIENT_DELETE_DIALOG_JS
-} from "../client.js";
+import { browserScriptTag } from "../browser/scripts.js";
 import { escapeHtml } from "../shared.js";
 import { topNav, feedbackWidget } from "../ui.js";
 import { SHELL_STYLE_CSS } from "./shell-styles.js";
@@ -45,16 +39,9 @@ ${SHELL_STYLE_CSS}
 </head>
 <body>
 ${topNav(active)}
-<script>
-${CLIENT_REPO_BRANCH_JS}
-</script>
 ${getInlineVendorScripts()}
-<script>
-${CLIENT_GRAPH_JS}
-</script>
-<script>
-${CLIENT_DELETE_DIALOG_JS}
-</script>
+${browserScriptTag("graph")}
+${browserScriptTag("delete-dialog")}
 <div class="main-content">
 ${bodyContent}
 </div>
@@ -64,12 +51,8 @@ ${feedbackWidget()}
   <div style="font-size:13px; color:var(--rad-text-tertiary);">Reconnecting to Radius…</div>
 </div>
 <style>@keyframes radius-spin { to { transform: rotate(360deg); } }</style>
-<script>
-${CLIENT_HEARTBEAT_JS}
-</script>
-<script>
-${CLIENT_OPCHIP_JS}
-</script>
+${browserScriptTag("heartbeat")}
+${browserScriptTag("operation-chip")}
 </body>
 </html>`;
 }

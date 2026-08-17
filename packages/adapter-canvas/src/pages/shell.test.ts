@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 
 describe("pageShell", () => {
@@ -149,6 +150,8 @@ describe("operation status chip in the top navigation", () => {
   it("carries the poller that fills it in", () => {
     expect(shell).toContain("/api/operations");
     expect(shell).toContain("radiusOpChipAck");
+    expect(shell).toContain(browserEntryMarker("operation-chip"));
+    expect(shell.split(browserScript("operation-chip"))).toHaveLength(2);
   });
 
   it("stops the pulse for anyone who has asked for less motion", () => {
@@ -184,6 +187,11 @@ describe("pageShell document structure", () => {
     expect(blocks).not.toHaveLength(0);
     expect(blocks).toHaveLength(count("</script>"));
     expect(count("<style>")).toBe(count("</style>"));
+  });
+
+  it("injects the shared delete dialog entry exactly once", () => {
+    expect(html).toContain(browserEntryMarker("delete-dialog"));
+    expect(html.split(browserScript("delete-dialog"))).toHaveLength(2);
   });
 
   it.each([
@@ -238,14 +246,10 @@ describe("pageShell document structure", () => {
   });
 
   it("ships the shared client scripts before the page body that calls them", () => {
-    const repoBranch = html.indexOf("function radiusSetupRepoBranch");
-    const graph = html.indexOf("function radiusRenderGraph");
-    const deleteDialog = html.indexOf(
-      "function radiusCreateDeleteDeploymentDialog"
-    );
+    const graph = html.indexOf(browserEntryMarker("graph"));
+    const deleteDialog = html.indexOf(browserEntryMarker("delete-dialog"));
     const body = html.indexOf('<div class="main-content">');
-    expect(repoBranch).toBeGreaterThan(-1);
-    expect(graph).toBeGreaterThan(repoBranch);
+    expect(graph).toBeGreaterThan(-1);
     expect(deleteDialog).toBeGreaterThan(graph);
     expect(body).toBeGreaterThan(deleteDialog);
   });
@@ -258,6 +262,26 @@ describe("pageShell document structure", () => {
     );
     expect(html).toContain("Reconnecting to Radius…");
   });
+
+  it("injects the compiled heartbeat inline exactly once", () => {
+    const marker = browserEntryMarker("heartbeat");
+    expect(html.split(marker).length - 1).toBe(1);
+    expect(html).not.toMatch(/<script[^>]+src=/);
+    expect(html.indexOf(marker)).toBeGreaterThan(
+      html.indexOf('id="radius-reconnect-overlay"')
+    );
+  });
+
+  it.each(["graph"] as const)(
+    "injects the compiled %s entry inline exactly once",
+    (name) => {
+      const marker = browserEntryMarker(name);
+      expect(html.split(marker).length - 1).toBe(1);
+      expect(html.indexOf(marker)).toBeLessThan(
+        html.indexOf('<div class="main-content">')
+      );
+    }
+  );
 
   it("renders the feedback widget with both destinations on every page", () => {
     expect(html).toContain('id="rad-feedback-btn"');
