@@ -10,25 +10,21 @@ import { describe, it, expect, vi } from "vitest";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
-  CLIENT_HEARTBEAT_JS,
   CLIENT_OPCHIP_JS,
   CLIENT_DELETE_DIALOG_JS
 } from "./client.js";
 
 describe("client.ts exports", () => {
-  it("exports the three client script strings", () => {
+  it("exports the remaining legacy client script strings", () => {
     expect(typeof CLIENT_REPO_BRANCH_JS).toBe("string");
     expect(typeof CLIENT_GRAPH_JS).toBe("string");
-    expect(typeof CLIENT_HEARTBEAT_JS).toBe("string");
     expect(CLIENT_REPO_BRANCH_JS.length).toBeGreaterThan(0);
     expect(CLIENT_GRAPH_JS.length).toBeGreaterThan(0);
-    expect(CLIENT_HEARTBEAT_JS.length).toBeGreaterThan(0);
   });
 
   it("emits syntactically valid browser scripts", () => {
     expect(() => new Function(CLIENT_REPO_BRANCH_JS)).not.toThrow();
     expect(() => new Function(CLIENT_GRAPH_JS)).not.toThrow();
-    expect(() => new Function(CLIENT_HEARTBEAT_JS)).not.toThrow();
   });
 });
 

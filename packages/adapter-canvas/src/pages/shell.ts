@@ -7,10 +7,10 @@ import { getInlineVendorScripts, getInlineVendorStyles } from "../vendor.js";
 import {
   CLIENT_REPO_BRANCH_JS,
   CLIENT_GRAPH_JS,
-  CLIENT_HEARTBEAT_JS,
   CLIENT_OPCHIP_JS,
   CLIENT_DELETE_DIALOG_JS
 } from "../client.js";
+import { browserScriptTag } from "../browser/scripts.js";
 import { escapeHtml } from "../shared.js";
 import { topNav, feedbackWidget } from "../ui.js";
 import { SHELL_STYLE_CSS } from "./shell-styles.js";
@@ -64,9 +64,7 @@ ${feedbackWidget()}
   <div style="font-size:13px; color:var(--rad-text-tertiary);">Reconnecting to Radius…</div>
 </div>
 <style>@keyframes radius-spin { to { transform: rotate(360deg); } }</style>
-<script>
-${CLIENT_HEARTBEAT_JS}
-</script>
+${browserScriptTag("heartbeat")}
 <script>
 ${CLIENT_OPCHIP_JS}
 </script>

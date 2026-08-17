@@ -11,7 +11,8 @@
     "excludedScriptPayloads": [
       "graph — CLIENT_GRAPH_JS changed after this commit by upstream #367 (navigation cancel hook clearing window.__radiusDiffTimeout).",
       "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
-      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields."
+      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields.",
+      "heartbeat — Phase 4A replaces the legacy source-string digest with importable behavior tests, deterministic compiler checks, and an exactly-once renderer marker while retaining the projected /api/ping and reconnect markup contracts."
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
   },
@@ -31,7 +32,6 @@
   "sharedScriptDigests": {
     "repoBranch": "d687e1da6bb812314b04a0b27cc52431ddd79b75a98655b11823634a750d5324",
     "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
-    "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
     "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
     "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21"
   },

@@ -1,8 +1,6 @@
-// Canvas adapter — browser-side client JavaScript, served as inline <script>
-// text inside the page shell. Three cohesive blocks: the shared repo/branch
-// dropdown library, the shared React Flow / dagre graph renderer, and the client
-// heartbeat / auto-reconnect watchdog. Authored as ES5 the webview runs
-// directly; embedded verbatim by pageShell. No server-side interpolation here.
+// Legacy browser-side JavaScript that remains inline while Phase 4 moves each
+// cohesive behavior into importable TypeScript under src/browser. Migrated
+// entries are removed from this file rather than kept as a duplicate source.
 
 export const CLIENT_REPO_BRANCH_JS = `
 // ─── Shared Repo/Branch Library ───────────────────────────────────────────────
@@ -1820,50 +1818,6 @@ window.addEventListener('popstate', function() {
         radiusNavTo({preventDefault: function(){}}, page);
     }
 });
-`;
-
-export const CLIENT_HEARTBEAT_JS = `
-// ─── Client Heartbeat / Auto-reconnect ───────────────────────────────────────
-// Each canvas instance is backed by a local HTTP server that may be suspended or
-// killed after the extension goes idle. Ping it periodically; if it stops
-// responding, show a reconnecting overlay and, once the server is back (it now
-// rebinds the same stable port), reload once to restore a live page.
-(function() {
-  var overlay = document.getElementById('radius-reconnect-overlay');
-  var down = false;
-  var misses = 0;
-  function ping() {
-    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function() { ctrl.abort(); }, 4000) : null;
-    fetch('/api/ping', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
-      .then(function(r) {
-        if (timer) clearTimeout(timer);
-        if (!r.ok) throw new Error('bad status');
-        if (down) {
-          // Server is back after an outage — reload to get fresh state.
-          window.location.reload();
-          return;
-        }
-        misses = 0;
-      })
-      .catch(function() {
-        if (timer) clearTimeout(timer);
-        misses++;
-        // Require two consecutive misses before declaring an outage to avoid
-        // flapping on a single slow/dropped request.
-        if (misses >= 2 && !down) {
-          down = true;
-          if (overlay) overlay.style.display = 'flex';
-        }
-      });
-  }
-  setInterval(ping, 5000);
-  // Also probe immediately when the tab/panel regains focus after idle.
-  document.addEventListener('visibilitychange', function() {
-    if (document.visibilityState === 'visible') ping();
-  });
-  window.addEventListener('focus', ping);
-})();
 `;
 
 export const CLIENT_OPCHIP_JS = `
