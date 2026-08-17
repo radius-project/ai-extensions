@@ -1,0 +1,1100 @@
+// Canvas adapter — browser behavior for environment setup operations: progress
+// checklist, elapsed time, failure cards, resume, and terminal state.
+//
+// This is the importable translation of the legacy inline script that used to
+// live at pages/environment/client-operations.ts. It owns the progress panel's
+// DOM and the single poll/elapsed-timer pair that drives it, and it exposes a
+// narrow dependency contract for the pieces that still live in sibling,
+// not-yet-extracted modules (the SMR and app-selection modals, and the
+// landing's success/warning/error/action-required banners).
+
+import { setChildren } from "../dom.js";
+import { beginEntry } from "../lifecycle.js";
+import {
+  isRecord,
+  readBoolean,
+  readNumber,
+  readRecord,
+  readString,
+  readStringArray
+} from "../json.js";
+import type { ElementSpec } from "../dom.js";
+import type { ScopeTimer } from "../lifecycle.js";
+import type {
+  AbortHandle,
+  BrowserContext,
+  DomElement,
+  HttpRequestInit,
+  HttpResponse
+} from "../ports.js";
+
+export const ENVIRONMENT_OPERATIONS_ENTRY_KEY = "environment-operations";
+export const OPERATIONS_PATH = "/api/operations";
+export const VERIFY_STATUS_PATH = "/api/verify-status";
+export const DEPLOY_BUTTON_ID = "deploy-btn";
+export const ERROR_BANNER_ID = "env-error-banner";
+export const DEPLOY_BUTTON_IDLE_LABEL = "Create Environment";
+
+export const PROGRESS_IDS = {
+  panel: "env-progress-panel",
+  title: "env-progress-title",
+  activity: "env-progress-activity",
+  elapsed: "env-progress-elapsed",
+  stages: "env-progress-stages",
+  steps: "env-progress-steps",
+  details: "env-progress-details",
+  actions: "env-progress-actions",
+  resume: "env-progress-resume",
+  dismiss: "env-progress-dismiss",
+  failureCard: "env-progress-failure",
+  failureMessage: "env-progress-failure-message",
+  cleanupStatus: "env-progress-cleanup-status",
+  retry: "env-progress-retry",
+  cleanupRemovedList: "env-progress-cleanup-removed",
+  cleanupRemovedBlock: "env-progress-cleanup-removed-block",
+  cleanupRetainedList: "env-progress-cleanup-retained",
+  cleanupRetainedBlock: "env-progress-cleanup-retained-block",
+  cleanupWarningsList: "env-progress-cleanup-warnings",
+  cleanupWarningsBlock: "env-progress-cleanup-warnings-block"
+} as const;
+
+const STAGE_GLYPH: Readonly<Record<string, string>> = {
+  pending: "○",
+  running: "◐",
+  succeeded: "✓",
+  warning: "⚠",
+  failed: "✗",
+  skipped: "–"
+};
+
+const TERMINAL_STATES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "succeeded_with_warnings",
+  "action_required",
+  "failed",
+  "failed_partial",
+  "cancelled"
+]);
+
+const VERIFY_TRACKING_WINDOW_MS = 45 * 60 * 1000;
+const POLL_RETRY_MS = 1500;
+const POLL_ERROR_RETRY_MS = 3000;
+
+export type TerminalState =
+  | "succeeded"
+  | "succeeded_with_warnings"
+  | "action_required"
+  | "failed"
+  | "failed_partial"
+  | "cancelled";
+
+export interface OperationStageOrStep {
+  readonly state: string;
+  readonly label: string;
+}
+
+export interface OperationFailure {
+  readonly message: string;
+}
+
+export interface OperationCleanupEntry {
+  readonly target: string;
+}
+
+export interface OperationCleanupRetry {
+  readonly startsCleanly: boolean;
+  readonly guidance: string;
+}
+
+export interface OperationCleanup {
+  readonly state: string;
+  readonly rollbackBeforeCommit: boolean | undefined;
+  readonly retry: OperationCleanupRetry;
+  readonly removed: readonly OperationCleanupEntry[];
+  readonly retained: readonly OperationCleanupEntry[];
+  readonly warnings: readonly string[];
+}
+
+export interface OperationResumeTarget {
+  readonly page: string;
+  readonly repo: string;
+  readonly branch: string;
+}
+
+export interface OperationJourney {
+  readonly resumeTarget: OperationResumeTarget | null;
+  readonly resumeReason: string;
+}
+
+export interface AppPickerCandidate {
+  readonly appId: string;
+  readonly displayName?: string;
+  readonly createdDateTime?: string;
+  readonly servesRepos?: readonly string[];
+}
+
+export interface AppPickerRequest {
+  readonly title: string;
+  readonly intro: string;
+  readonly candidates: readonly AppPickerCandidate[];
+  readonly defaultAppId?: string;
+  readonly allowCreateNew: boolean;
+}
+
+export interface AppPickerChoice {
+  readonly appId?: string;
+  readonly createNew?: boolean;
+}
+
+export interface OperationInputPrompt {
+  readonly requestedAt: string;
+  readonly code: string;
+  readonly checkpoint: unknown;
+  readonly candidates: readonly AppPickerCandidate[];
+  readonly defaultAppId: string;
+}
+
+export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
+
+export interface OperationRecord {
+  readonly operationId: string;
+  readonly environment: string;
+  readonly provider: string;
+  readonly state: string;
+  readonly terminalState: TerminalState | null;
+  readonly summary: string;
+  readonly currentStage: string;
+  readonly stages: readonly OperationStageOrStep[];
+  readonly steps: readonly OperationStageOrStep[];
+  readonly failure: OperationFailure | null;
+  readonly cleanup: OperationCleanup;
+  readonly journey: OperationJourney | null;
+  readonly verification: { readonly dispatchedAt: number | null } | null;
+  readonly inputRequired: OperationInputPrompt | null;
+  readonly startedAt: string;
+  readonly endedAt: string | null;
+  readonly terminal: OperationTerminalPayload | null;
+}
+
+export interface VerifyStatus {
+  readonly state: string;
+  readonly terminal: boolean;
+  readonly error: string;
+  readonly runUrl: string;
+  readonly activity: string;
+}
+
+export interface EnvironmentOperationsDeps {
+  showSuccessBanner(provider: string, environment: string): void;
+  showActionRequired(
+    provider: string,
+    environment: string,
+    pullRequestUrl: string,
+    terminal: OperationTerminalPayload | null
+  ): void;
+  showSetupWarnings(warnings: readonly string[]): void;
+  showError(message: string): void;
+  reloadEnvironmentsTable(): void;
+  promptServiceManagementReference(): Promise<string>;
+  promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
+  prefersReducedMotion?(): boolean;
+}
+
+export interface EnvironmentOperationsOptions {
+  readonly repo: string;
+  readonly deps: EnvironmentOperationsDeps;
+}
+
+export interface EnvironmentOperationsController {
+  renderProgress(op: OperationRecord | null): void;
+  stopProgress(): void;
+  hideProgress(): void;
+  focusPanel(): void;
+  syncFailureOperation(data: unknown): Promise<boolean>;
+  trackProgress(
+    environment: string,
+    provider: string,
+    onTerminal?: (op: OperationRecord) => void
+  ): void;
+  resumeProgress(): void;
+  applyTerminal(op: OperationRecord): void;
+  teardown(): void;
+}
+
+function parseStageList(value: unknown): OperationStageOrStep[] {
+  if (!Array.isArray(value)) return [];
+  const list: OperationStageOrStep[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    list.push({
+      state: readString(entry, "state"),
+      label: readString(entry, "label")
+    });
+  }
+  return list;
+}
+
+function parseFailure(value: unknown): OperationFailure | null {
+  if (!isRecord(value)) return null;
+  return { message: readString(value, "message") };
+}
+
+function readOptionalBoolean(
+  record: Record<string, unknown>,
+  key: string
+): boolean | undefined {
+  const raw = record[key];
+  return typeof raw === "boolean" ? raw : undefined;
+}
+
+function parseCleanupEntries(value: unknown): OperationCleanupEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: OperationCleanupEntry[] = [];
+  for (const entry of value) {
+    const target = isRecord(entry) ? readString(entry, "target") : "";
+    if (target !== "") entries.push({ target });
+  }
+  return entries;
+}
+
+function parseCleanupRetry(value: unknown): OperationCleanupRetry {
+  const record = isRecord(value) ? value : {};
+  return {
+    startsCleanly: readBoolean(record, "startsCleanly"),
+    guidance: readString(record, "guidance")
+  };
+}
+
+const EMPTY_CLEANUP: OperationCleanup = {
+  state: "",
+  rollbackBeforeCommit: undefined,
+  retry: { startsCleanly: false, guidance: "" },
+  removed: [],
+  retained: [],
+  warnings: []
+};
+
+function parseCleanup(value: unknown): OperationCleanup {
+  if (!isRecord(value)) return EMPTY_CLEANUP;
+  return {
+    state: readString(value, "state"),
+    rollbackBeforeCommit: readOptionalBoolean(value, "rollbackBeforeCommit"),
+    retry: parseCleanupRetry(value["retry"]),
+    removed: parseCleanupEntries(value["removed"]),
+    retained: parseCleanupEntries(value["retained"]),
+    warnings: readStringArray(value, "warnings").filter((entry) => entry !== "")
+  };
+}
+
+function parseJourney(value: unknown): OperationJourney | null {
+  if (!isRecord(value)) return null;
+  const targetRaw = readRecord(value, "resumeTarget");
+  const resumeTarget: OperationResumeTarget | null =
+    targetRaw === null ? null : (
+      {
+        page: readString(targetRaw, "page"),
+        repo: readString(targetRaw, "repo"),
+        branch: readString(targetRaw, "branch")
+      }
+    );
+  return { resumeTarget, resumeReason: readString(value, "resumeReason") };
+}
+
+function parseVerification(
+  value: unknown
+): { dispatchedAt: number | null } | null {
+  if (!isRecord(value)) return null;
+  return { dispatchedAt: readNumber(value, "dispatchedAt") };
+}
+
+function parseAppCandidates(value: unknown): AppPickerCandidate[] {
+  if (!Array.isArray(value)) return [];
+  const candidates: AppPickerCandidate[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const appId = readString(entry, "appId");
+    if (appId === "") continue;
+    const displayName = readString(entry, "displayName");
+    const createdDateTime = readString(entry, "createdDateTime");
+    const servesRepos = readStringArray(entry, "servesRepos");
+    candidates.push({
+      appId,
+      displayName: displayName === "" ? undefined : displayName,
+      createdDateTime: createdDateTime === "" ? undefined : createdDateTime,
+      servesRepos: servesRepos.length === 0 ? undefined : servesRepos
+    });
+  }
+  return candidates;
+}
+
+function parseInputPrompt(value: unknown): OperationInputPrompt | null {
+  if (!isRecord(value)) return null;
+  const code = readString(value, "code");
+  if (code === "") return null;
+  const metadata = readRecord(value, "metadata");
+  return {
+    requestedAt: readString(value, "requestedAt"),
+    code,
+    checkpoint: value["checkpoint"],
+    candidates: parseAppCandidates(
+      metadata ? metadata["candidates"] : undefined
+    ),
+    defaultAppId: metadata ? readString(metadata, "defaultAppId") : ""
+  };
+}
+
+function parseTerminalState(value: string): TerminalState | null {
+  return TERMINAL_STATES.has(value) ? (value as TerminalState) : null;
+}
+
+function parseOperationRecord(
+  raw: Record<string, unknown>
+): OperationRecord | null {
+  const operationId = readString(raw, "operationId");
+  if (operationId === "") return null;
+  const endedAt = readString(raw, "endedAt");
+  return {
+    operationId,
+    environment: readString(raw, "environment"),
+    provider: readString(raw, "provider"),
+    state: readString(raw, "state"),
+    terminalState: parseTerminalState(readString(raw, "terminalState")),
+    summary: readString(raw, "summary"),
+    currentStage: readString(raw, "currentStage"),
+    stages: parseStageList(raw["stages"]),
+    steps: parseStageList(raw["steps"]),
+    failure: parseFailure(raw["failure"]),
+    cleanup: parseCleanup(raw["cleanup"]),
+    journey: parseJourney(raw["journey"]),
+    verification: parseVerification(raw["verification"]),
+    inputRequired: parseInputPrompt(raw["inputRequired"]),
+    startedAt: readString(raw, "startedAt"),
+    endedAt: endedAt === "" ? null : endedAt,
+    terminal: readRecord(raw, "terminal")
+  };
+}
+
+/**
+ * Validate an `/api/operations*` envelope. Fails closed to `null` (treated by
+ * callers the same as "no operation yet") whenever the payload is not an
+ * object, has no `operation` member, or the operation has no non-empty
+ * `operationId` — the one field this module trusts as the operation's
+ * identity across polls, resumes, and page navigation.
+ */
+export function parseOperationResponse(
+  payload: unknown
+): OperationRecord | null {
+  const raw = readRecord(payload, "operation");
+  return raw ? parseOperationRecord(raw) : null;
+}
+
+/**
+ * Validate an `error.operation` payload returned by a failed resume request.
+ * Unlike {@link parseOperationResponse} the record is not wrapped in an
+ * envelope, so this reads the record directly.
+ */
+export function parseVerifyStatus(payload: unknown): VerifyStatus {
+  return {
+    state: readString(payload, "state"),
+    terminal: readBoolean(payload, "terminal"),
+    error: readString(payload, "error"),
+    runUrl: readString(payload, "runUrl"),
+    activity: readString(payload, "activity")
+  };
+}
+
+function isOperationInputExpired(
+  operation: unknown
+): operation is Record<string, unknown> {
+  const failure = readRecord(operation, "failure");
+  return (
+    failure !== null &&
+    readString(failure, "code") === "operation-input-expired"
+  );
+}
+
+function isAbandonError(error: unknown): boolean {
+  return isRecord(error) && readBoolean(error, "abandonOperation");
+}
+
+/** Thrown when a resume POST fails; carries enough of the server's response
+ * for the caller to decide whether to re-prompt or keep retrying. */
+export class OperationResumeError extends Error {
+  readonly retryPrompt: boolean;
+  readonly operation: unknown;
+
+  constructor(message: string, retryPrompt: boolean, operation: unknown) {
+    super(message);
+    this.name = "OperationResumeError";
+    this.retryPrompt = retryPrompt;
+    this.operation = operation;
+  }
+}
+
+function parseResumeFailure(payload: unknown): OperationResumeError {
+  const message =
+    readString(payload, "error") ||
+    readString(payload, "message") ||
+    "Unable to resume environment setup.";
+  const code = readString(payload, "code");
+  const retryPrompt = code !== "operation-input-expired";
+  const operation = isRecord(payload) ? payload["operation"] : undefined;
+  return new OperationResumeError(message, retryPrompt, operation);
+}
+
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
+}
+
+function stageSpec(stage: OperationStageOrStep): ElementSpec {
+  const glyph = STAGE_GLYPH[stage.state] ?? "○";
+  return {
+    tag: "li",
+    className: `env-progress__stage env-progress__stage--${stage.state}`,
+    children: [
+      {
+        tag: "span",
+        className: "env-progress__glyph",
+        attrs: { "aria-hidden": "true" },
+        text: glyph
+      },
+      { tag: "span", text: `${stage.label} — ${stage.state}` }
+    ]
+  };
+}
+
+function stepSpec(step: OperationStageOrStep): ElementSpec {
+  const glyph = STAGE_GLYPH[step.state] ?? "·";
+  return {
+    tag: "li",
+    className: `env-progress__step env-progress__step--${step.state}`,
+    text: `${glyph} ${step.label}`
+  };
+}
+
+function operationsByRepoUrl(repo: string): string {
+  return `${OPERATIONS_PATH}?repo=${encodeURIComponent(repo)}`;
+}
+
+function operationUrl(operationId: string): string {
+  return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
+}
+
+function resumeUrl(operationId: string, code: string): string {
+  return `${operationUrl(operationId)}/resume/${encodeURIComponent(code)}`;
+}
+
+function abandonUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/abandon`;
+}
+
+function verifyStatusUrl(
+  repo: string,
+  environment: string,
+  operationId: string
+): string {
+  return (
+    `${VERIFY_STATUS_PATH}?repo=${encodeURIComponent(repo)}` +
+    `&environment=${encodeURIComponent(environment)}` +
+    `&operationId=${encodeURIComponent(operationId)}`
+  );
+}
+
+/**
+ * Create the environment operations controller. Returns `null` when the
+ * progress panel is not present in the DOM (nothing to drive) or another
+ * instance already owns this entry key, matching the return contract of the
+ * other browser entry points in this package.
+ */
+export function initializeEnvironmentOperations(
+  context: BrowserContext,
+  options: EnvironmentOperationsOptions
+): EnvironmentOperationsController | null {
+  const dom = context.dom;
+  const maybePanel = dom.byId(PROGRESS_IDS.panel);
+  if (!maybePanel) return null;
+  // Rebound to a variable whose declared type already excludes `null`: the
+  // nested function declarations below are hoisted, so TypeScript cannot
+  // carry a narrowing of `maybePanel` into their bodies — only the static
+  // type of the binding they close over.
+  const panel: DomElement = maybePanel;
+  const claimedScope = beginEntry(context, ENVIRONMENT_OPERATIONS_ENTRY_KEY);
+  if (!claimedScope) return null;
+  const scope = claimedScope;
+
+  const { repo, deps } = options;
+
+  let verifyActivity = "";
+  let progressTimer: ScopeTimer | null = null;
+  let elapsedTimer: ScopeTimer | null = null;
+  let activeAbort: AbortHandle | null = null;
+  // Bumped at the start of every resumeProgress()/trackProgress() call. Async
+  // work captures the value at its start and checks it before touching the
+  // DOM or scheduling more work, so a response that outlives its session
+  // (superseded by a newer track/resume call, or by teardown) is discarded
+  // instead of overwriting state that belongs to a newer operation.
+  let session = 0;
+
+  function abortInFlight(): void {
+    activeAbort?.abort();
+    activeAbort = null;
+  }
+
+  scope.onTeardown(() => abortInFlight());
+
+  function fetchTracked(
+    url: string,
+    init?: Omit<HttpRequestInit, "signal">
+  ): Promise<HttpResponse> {
+    const abort = context.net.createAbort();
+    activeAbort = abort;
+    return context.net
+      .fetch(url, abort ? { ...init, signal: abort.signal } : init)
+      .finally(() => {
+        if (activeAbort === abort) activeAbort = null;
+      });
+  }
+
+  function stopProgress(): void {
+    verifyActivity = "";
+    abortInFlight();
+    if (progressTimer !== null) {
+      scope.cancel(progressTimer);
+      progressTimer = null;
+    }
+    if (elapsedTimer !== null) {
+      scope.cancel(elapsedTimer);
+      elapsedTimer = null;
+    }
+  }
+
+  function hideProgress(): void {
+    stopProgress();
+    panel.style.display = "none";
+  }
+
+  function setFailureList(
+    items: readonly string[],
+    listEl: DomElement | null,
+    blockEl: DomElement | null
+  ): void {
+    if (!listEl || !blockEl) return;
+    if (items.length === 0) {
+      setChildren(dom, listEl, []);
+      blockEl.style.display = "none";
+      return;
+    }
+    setChildren(
+      dom,
+      listEl,
+      items.map((item) => ({ tag: "li", text: item }))
+    );
+    blockEl.style.display = "";
+  }
+
+  function renderFailureCard(op: OperationRecord | null): void {
+    const card = dom.byId(PROGRESS_IDS.failureCard);
+    const messageEl = dom.byId(PROGRESS_IDS.failureMessage);
+    const cleanupEl = dom.byId(PROGRESS_IDS.cleanupStatus);
+    const retryEl = dom.byId(PROGRESS_IDS.retry);
+    if (!card || !messageEl || !cleanupEl || !retryEl) return;
+    if (
+      op === null ||
+      (op.terminalState !== "failed" && op.terminalState !== "failed_partial")
+    ) {
+      card.style.display = "none";
+      return;
+    }
+
+    const cleanup = op.cleanup;
+    const cleanupStatus =
+      cleanup.state === "running" ? "Cleanup is still running."
+      : cleanup.state === "pending" ? "Cleanup has not started yet."
+      : cleanup.rollbackBeforeCommit === false ?
+        "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+      : cleanup.state === "succeeded_with_warnings" ?
+        "Cleanup finished with warnings."
+      : cleanup.state === "succeeded" ? "Cleanup finished."
+      : "Cleanup was not needed.";
+
+    messageEl.textContent =
+      op.failure && op.failure.message !== "" ?
+        op.failure.message
+      : "The setup request failed.";
+    cleanupEl.textContent = cleanupStatus;
+    retryEl.textContent =
+      cleanup.retry.guidance !== "" ?
+        `Retry starts cleanly: ${cleanup.retry.startsCleanly ? "Yes" : "No"}. ${cleanup.retry.guidance}`
+      : "";
+    setFailureList(
+      cleanup.removed.map((entry) => entry.target),
+      dom.byId(PROGRESS_IDS.cleanupRemovedList),
+      dom.byId(PROGRESS_IDS.cleanupRemovedBlock)
+    );
+    setFailureList(
+      cleanup.retained.map((entry) => entry.target),
+      dom.byId(PROGRESS_IDS.cleanupRetainedList),
+      dom.byId(PROGRESS_IDS.cleanupRetainedBlock)
+    );
+    setFailureList(
+      cleanup.warnings,
+      dom.byId(PROGRESS_IDS.cleanupWarningsList),
+      dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+    );
+    card.style.display = "";
+  }
+
+  function renderProgress(op: OperationRecord | null): void {
+    if (op === null) {
+      panel.style.display = "none";
+      renderFailureCard(null);
+      return;
+    }
+    panel.style.display = "";
+    const done =
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings" ||
+      op.terminalState === "action_required";
+    const failed =
+      op.terminalState === "failed" || op.terminalState === "failed_partial";
+    panel.classList.toggle("env-progress--done", done);
+    panel.classList.toggle("env-progress--failed", failed);
+
+    const titleEl = dom.byId(PROGRESS_IDS.title);
+    if (titleEl) titleEl.textContent = op.summary;
+
+    // The current step doubles as the activity line. When the record has
+    // nothing to say we clear it rather than substitute filler.
+    let activity = "";
+    for (let index = op.steps.length - 1; index >= 0; index -= 1) {
+      if (op.steps[index].state === "running") {
+        activity = op.steps[index].label;
+        break;
+      }
+    }
+    if (activity === "" && op.steps.length > 0) {
+      activity = op.steps[op.steps.length - 1].label;
+    }
+    if (
+      op.currentStage === "verify" &&
+      verifyActivity !== "" &&
+      op.terminalState === null
+    ) {
+      activity = `Verifying credentials — ${verifyActivity}`;
+    }
+    if (op.failure && op.failure.message !== "") activity = op.failure.message;
+    const activityEl = dom.byId(PROGRESS_IDS.activity);
+    if (activityEl) activityEl.textContent = activity;
+
+    const stagesEl = dom.byId(PROGRESS_IDS.stages);
+    if (stagesEl) setChildren(dom, stagesEl, op.stages.map(stageSpec));
+    const stepsEl = dom.byId(PROGRESS_IDS.steps);
+    if (stepsEl) setChildren(dom, stepsEl, op.steps.map(stepSpec));
+
+    renderFailureCard(op);
+
+    const detailsEl = dom.byId(PROGRESS_IDS.details);
+    if (detailsEl) {
+      detailsEl.style.display = op.steps.length > 0 ? "" : "none";
+    }
+
+    const actionsEl = dom.byId(PROGRESS_IDS.actions);
+    const resumeEl = dom.byId(PROGRESS_IDS.resume);
+    const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
+    const target = op.journey?.resumeTarget ?? null;
+    const canResume =
+      op.terminalState !== null &&
+      target !== null &&
+      target.page === "planned" &&
+      target.repo !== "";
+    if (resumeEl && canResume && target) {
+      let href = `/?page=planned&repo=${encodeURIComponent(target.repo)}`;
+      if (target.branch !== "")
+        href += `&branch=${encodeURIComponent(target.branch)}`;
+      resumeEl.setAttribute("href", href);
+      resumeEl.textContent = op.journey?.resumeReason || "View planned graph";
+    }
+    if (resumeEl) resumeEl.style.display = canResume ? "" : "none";
+    if (dismissEl)
+      dismissEl.style.display = op.terminalState !== null ? "" : "none";
+    if (actionsEl)
+      actionsEl.style.display = op.terminalState !== null ? "flex" : "none";
+  }
+
+  function focusPanel(): void {
+    // The original called `panel.focus({ preventScroll: true })` with a
+    // fallback to plain `focus()`; `DomElement.focus()` in this package's
+    // browser port takes no options, so the plain call is the only one
+    // available here.
+    panel.focus();
+    const reduceMotion = deps.prefersReducedMotion?.() ?? false;
+    panel.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start"
+    });
+  }
+
+  function syncFailureOperation(data: unknown): Promise<boolean> {
+    const operationId = readString(data, "operationId");
+    if (operationId === "") return Promise.resolve(false);
+    return fetchTracked(operationUrl(operationId))
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        const op = parseOperationResponse(payload);
+        if (!op) return false;
+        renderProgress(op);
+        const detailsEl = dom.byId(PROGRESS_IDS.details);
+        if (
+          detailsEl &&
+          (op.terminalState === "failed" ||
+            op.terminalState === "failed_partial")
+        ) {
+          detailsEl.setAttribute("open", "");
+        }
+        const errorBanner = dom.byId(ERROR_BANNER_ID);
+        if (errorBanner) errorBanner.style.display = "none";
+        return true;
+      })
+      .catch(() => false);
+  }
+
+  function applyTerminal(op: OperationRecord): void {
+    const btn = dom.inputById(DEPLOY_BUTTON_ID);
+    if (btn) {
+      btn.textContent = DEPLOY_BUTTON_IDLE_LABEL;
+      btn.disabled = false;
+    }
+    const warnings = op.steps
+      .filter((step) => step.state === "warning")
+      .map((step) => `⚠️ ${step.label}`);
+    if (op.terminalState === "action_required") {
+      deps.showSetupWarnings(warnings);
+      const pullRequestUrl = readString(op.terminal, "pullRequestUrl");
+      deps.showActionRequired(
+        op.provider,
+        op.environment,
+        pullRequestUrl,
+        op.terminal
+      );
+    } else if (
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings"
+    ) {
+      deps.showSuccessBanner(op.provider, op.environment);
+      deps.showSetupWarnings(warnings);
+    } else if (op.terminalState === "cancelled") {
+      panel.classList.remove("env-progress--done", "env-progress--failed");
+      const cancelledActivity = dom.byId(PROGRESS_IDS.activity);
+      if (cancelledActivity)
+        cancelledActivity.textContent = "Environment setup cancelled.";
+      deps.showSetupWarnings(warnings);
+    } else {
+      const message = `Environment setup failed: ${op.failure && op.failure.message !== "" ? op.failure.message : "unknown error"}`;
+      panel.classList.remove("env-progress--done");
+      panel.classList.add("env-progress--failed");
+      const activityEl = dom.byId(PROGRESS_IDS.activity);
+      if (activityEl) activityEl.textContent = message;
+      deps.showError(message);
+    }
+    deps.reloadEnvironmentsTable();
+  }
+
+  function trackProgress(
+    environment: string,
+    provider: string,
+    onTerminal: (op: OperationRecord) => void = applyTerminal
+  ): void {
+    stopProgress();
+    session += 1;
+    const mySession = session;
+    let startedAtMs = context.clock.now();
+    let observedOperation = false;
+    let operationId = "";
+    let verifyDispatchedAtMs = 0;
+    let promptingRequestedAt = "";
+    const elapsedEl = dom.byId(PROGRESS_IDS.elapsed);
+
+    function active(): boolean {
+      return scope.active && mySession === session;
+    }
+
+    elapsedTimer = scope.every(1000, () => {
+      if (elapsedEl)
+        elapsedEl.textContent = formatElapsed(
+          context.clock.now() - startedAtMs
+        );
+    });
+
+    function scheduleTick(delayMs: number): void {
+      if (!active()) return;
+      progressTimer = scope.after(delayMs, tick);
+    }
+
+    function pollVerifyStatus(): void {
+      void fetchTracked(verifyStatusUrl(repo, environment, operationId))
+        .then((response) => response.json())
+        .then((payload) => {
+          if (!active()) return;
+          const v = parseVerifyStatus(payload);
+          if (v.state === "expired" || v.terminal) {
+            stopProgress();
+            const expiredActivity = dom.byId(PROGRESS_IDS.activity);
+            if (expiredActivity) {
+              expiredActivity.textContent =
+                v.error !== "" ?
+                  v.error
+                : "Credential verification is no longer being tracked.";
+            }
+            return;
+          }
+          if (
+            verifyDispatchedAtMs &&
+            context.clock.now() - verifyDispatchedAtMs >
+              VERIFY_TRACKING_WINDOW_MS
+          ) {
+            stopProgress();
+            const timedOutActivity = dom.byId(PROGRESS_IDS.activity);
+            if (timedOutActivity) {
+              timedOutActivity.textContent =
+                "Credential verification exceeded its tracking window. Check the GitHub Actions run before retrying.";
+            }
+            return;
+          }
+          if (v.state === "success") {
+            hideProgress();
+            deps.showSuccessBanner(provider || "azure", environment);
+            deps.reloadEnvironmentsTable();
+            return;
+          }
+          if (v.state === "failed") {
+            stopProgress();
+            panel.style.display = "block";
+            panel.classList.remove("env-progress--done");
+            panel.classList.add("env-progress--failed");
+            const activityEl = dom.byId(PROGRESS_IDS.activity);
+            if (activityEl)
+              activityEl.textContent = `Credential verification failed. ${v.error}`;
+            const detailsEl = dom.byId(PROGRESS_IDS.details);
+            if (detailsEl && v.runUrl !== "")
+              detailsEl.textContent = `View the run: ${v.runUrl}`;
+            return;
+          }
+          if (v.activity !== "") verifyActivity = v.activity;
+          scheduleTick(POLL_RETRY_MS);
+        })
+        .catch(() => {
+          if (!active()) return;
+          scheduleTick(POLL_ERROR_RETRY_MS);
+        });
+    }
+
+    function resumeInputPrompt(prompt: OperationInputPrompt): boolean {
+      let answer: Promise<Record<string, unknown>> | undefined;
+      if (prompt.code === "service-management-reference-required") {
+        answer = deps
+          .promptServiceManagementReference()
+          .then((smr) => ({ serviceManagementReference: smr }));
+      } else if (prompt.code === "app-selection-required") {
+        answer = deps
+          .promptAppSelection({
+            title: "Choose a deploy identity",
+            intro:
+              "You own more than one App Registration matching this repository. Choose which identity to use for GitHub Actions deployments, or create a new one.",
+            candidates: prompt.candidates,
+            defaultAppId:
+              prompt.defaultAppId === "" ? undefined : prompt.defaultAppId,
+            allowCreateNew: true
+          })
+          .then((choice) =>
+            choice.createNew ? { createNew: true } : { appId: choice.appId }
+          );
+      }
+      if (!answer) return false;
+
+      void answer
+        .then((values) => {
+          if (!active()) return null;
+          const body = {
+            ...values,
+            checkpoint: prompt.checkpoint,
+            repo,
+            environment,
+            provider
+          };
+          return fetchTracked(resumeUrl(operationId, prompt.code), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          }).then((response) => {
+            if (response.ok) return response;
+            return response
+              .json()
+              .catch(() => ({}))
+              .then((failurePayload) => {
+                throw parseResumeFailure(failurePayload);
+              });
+          });
+        })
+        .then(
+          () => {
+            if (!active()) return;
+            scheduleTick(0);
+          },
+          (error: unknown) => {
+            if (!active()) return;
+            if (isAbandonError(error)) {
+              void fetchTracked(abandonUrl(operationId), { method: "POST" })
+                .then((response) => {
+                  if (!response.ok) {
+                    promptingRequestedAt = "";
+                    throw new Error("Unable to cancel environment setup.");
+                  }
+                  scheduleTick(0);
+                })
+                .catch(() => {
+                  scheduleTick(POLL_RETRY_MS);
+                });
+              return;
+            }
+            if (
+              error instanceof OperationResumeError &&
+              isOperationInputExpired(error.operation)
+            ) {
+              stopProgress();
+              const expired = parseOperationRecord(error.operation);
+              if (expired) onTerminal(expired);
+              return;
+            }
+            if (error instanceof OperationResumeError && error.retryPrompt) {
+              promptingRequestedAt = "";
+            }
+            scheduleTick(POLL_RETRY_MS);
+          }
+        );
+      return true;
+    }
+
+    function tick(): void {
+      void fetchTracked(operationsByRepoUrl(repo))
+        .then((response) => response.json())
+        .then((payload) => {
+          if (!active()) return;
+          const op = parseOperationResponse(payload);
+          // The registry retains the latest terminal operation for this
+          // repository. During the short gap before a new POST registers,
+          // that record belongs to the previous environment and must not
+          // replace the optimistic panel for the setup just requested.
+          if (
+            !observedOperation &&
+            op &&
+            (op.environment !== environment || op.terminalState !== null)
+          ) {
+            scheduleTick(POLL_RETRY_MS);
+            return;
+          }
+          if (!op) {
+            // A just-started setup has not necessarily reached the server
+            // operation registry yet. Verification status is historical and
+            // can still report the previous successful run for this
+            // environment name, so only use it for restart recovery after
+            // this poller has first observed the current operation.
+            if (!observedOperation) {
+              scheduleTick(POLL_RETRY_MS);
+              return;
+            }
+            // Verification is tracked separately from the process-local
+            // operation registry. If the extension restarts after dispatch,
+            // the record can disappear while the Actions run still reaches a
+            // terminal result.
+            if (!environment) {
+              scheduleTick(POLL_RETRY_MS);
+              return;
+            }
+            pollVerifyStatus();
+            return;
+          }
+          observedOperation = true;
+          operationId = op.operationId;
+          if (op.verification && op.verification.dispatchedAt !== null) {
+            verifyDispatchedAtMs = op.verification.dispatchedAt;
+          }
+          const parsedStart = Date.parse(op.startedAt);
+          if (Number.isFinite(parsedStart)) startedAtMs = parsedStart;
+          if (elapsedEl) {
+            const parsedEnd = op.endedAt ? Date.parse(op.endedAt) : NaN;
+            const referenceMs =
+              Number.isFinite(parsedEnd) ? parsedEnd : context.clock.now();
+            elapsedEl.textContent = formatElapsed(referenceMs - startedAtMs);
+          }
+          renderProgress(op);
+          if (op.terminalState !== null) {
+            stopProgress();
+            onTerminal(op);
+            return;
+          }
+          if (
+            op.state === "input_required" &&
+            op.inputRequired &&
+            op.inputRequired.requestedAt !== promptingRequestedAt
+          ) {
+            promptingRequestedAt = op.inputRequired.requestedAt;
+            if (resumeInputPrompt(op.inputRequired)) return;
+          }
+          scheduleTick(POLL_RETRY_MS);
+        })
+        .catch(() => {
+          // A dropped poll is routine — the server respawns after an idle
+          // reap and the next tick reconnects. Never surface it as failure.
+          if (!active()) return;
+          scheduleTick(POLL_ERROR_RETRY_MS);
+        });
+    }
+
+    tick();
+  }
+
+  // On load, rejoin an operation that is already running for this repo. This
+  // is what makes navigating away safe: the user can leave the page mid-setup
+  // and find the same panel, with the same history, when they come back.
+  function resumeProgress(): void {
+    if (!repo) return;
+    session += 1;
+    const mySession = session;
+    void fetchTracked(operationsByRepoUrl(repo))
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!scope.active || mySession !== session) return;
+        const op = parseOperationResponse(payload);
+        if (!op || op.terminalState !== null) return;
+        renderProgress(op);
+        trackProgress(op.environment, op.provider, applyTerminal);
+      })
+      .catch(() => {
+        /* nothing to resume */
+      });
+  }
+
+  const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
+  if (dismissEl) {
+    scope.on(dismissEl, "click", () => {
+      hideProgress();
+    });
+  }
+
+  return {
+    renderProgress,
+    stopProgress,
+    hideProgress,
+    focusPanel,
+    syncFailureOperation,
+    trackProgress,
+    resumeProgress,
+    applyTerminal,
+    teardown() {
+      scope.teardown();
+    }
+  };
+}

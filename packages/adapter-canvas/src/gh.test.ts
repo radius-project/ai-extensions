@@ -224,7 +224,7 @@ describe.sequential("cliExec", () => {
     expect(options.env).toEqual({ KEEP_ME: "yes" });
   });
 
-  it("retains the Windows cmd wrapper for non-gh CLIs", async () => {
+  it("quotes Windows CLI arguments while leaving a simple executable unquoted", async () => {
     const { cliExec } = await loadGh("win32");
     const callback = vi.fn();
 
@@ -232,8 +232,66 @@ describe.sequential("cliExec", () => {
 
     expect(childProcess.execFile).toHaveBeenCalledWith(
       "cmd.exe",
-      ["/c", "az", "account", "show"],
-      expect.objectContaining({ windowsHide: true }),
+      ["/c", 'az "account" "show"'],
+      expect.objectContaining({
+        windowsHide: true,
+        windowsVerbatimArguments: true
+      }),
+      callback
+    );
+  });
+
+  it("keeps a parenthesized Graph URL and JSON body inside separate quoted arguments", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+    const url =
+      "https://graph.microsoft.com/v1.0/applications(appId='11111111-2222-3333-4444-555555555555')";
+    const body = '{"tags":["radius-managed","radius-repo:octo/app"]}';
+
+    cliExec(
+      "az",
+      ["rest", "--method", "PATCH", "--url", url, "--body", body],
+      {},
+      callback
+    );
+
+    expect(childProcess.execFile).toHaveBeenCalledWith(
+      "cmd.exe",
+      [
+        "/c",
+        `az "rest" "--method" "PATCH" "--url" "${url}" "--body" "{\\"tags\\":[\\"radius-managed\\",\\"radius-repo:octo/app\\"]}"`
+      ],
+      expect.objectContaining({ windowsVerbatimArguments: true }),
+      callback
+    );
+  });
+
+  it("wraps a quoted Windows executable path in an outer pair of quotes", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+    const executable =
+      "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd";
+
+    cliExec(executable, ["version", "-o", "json"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledWith(
+      "cmd.exe",
+      ["/c", `""${executable}" "version" "-o" "json""`],
+      expect.objectContaining({ windowsVerbatimArguments: true }),
+      callback
+    );
+  });
+
+  it("preserves embedded quotes and trailing backslashes in Windows arguments", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+
+    cliExec("aws", ["two words", 'say "hello"', "C:\\temp\\"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledWith(
+      "cmd.exe",
+      ["/c", 'aws "two words" "say \\"hello\\"" "C:\\temp\\\\"'],
+      expect.objectContaining({ windowsVerbatimArguments: true }),
       callback
     );
   });

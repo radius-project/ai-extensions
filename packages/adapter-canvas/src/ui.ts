@@ -1,12 +1,13 @@
 // Canvas adapter — reusable UI primitives.
 //
 // Small `props => htmlString` builders that encode the refreshed Radius design
-// system (see the token block in ./pages.ts `pageShell`). Page renderers in
-// ./pages.ts compose these instead of hand-writing inline styles, so the look
+// system (see the token block in ./pages/shell-styles.ts). Page renderers in
+// ./pages/ compose these instead of hand-writing inline styles, so the look
 // stays consistent and Figma components map 1:1 to a function here.
 //
 // No I/O or state — pure string builders. All colors/spacing come from the CSS
-// custom properties defined in pageShell, so these never hard-code hex values.
+// custom properties defined in the page shell, so these never hard-code hex
+// values.
 
 import { escapeHtml } from "./shared.js";
 import { ICON_APP, ICON_ENV, ICON_DEP } from "./navicons.js";
@@ -70,7 +71,8 @@ export function topNav(active: string): string {
 }
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).
-// `items` = [{ id, label }], `active` = id, `onNav` = optional JS nav fn name.
+// `items` = [{ id, label }], `active` = id. The graph navigation entry handles
+// clicks through data-radius-graph-page, so this helper emits no inline script.
 export interface SubTab {
   id: string;
   label: string;
@@ -81,18 +83,14 @@ export interface SelectOption {
   label: string;
 }
 
-export function subTabs(
-  items: readonly SubTab[],
-  active: string,
-  onNav = "radiusNavTo"
-): string {
+export function subTabs(items: readonly SubTab[], active: string): string {
   const links = items
     .map((it) => {
       const cls =
         it.id === active ? "rad-subtab rad-subtab--active" : "rad-subtab";
       return `<a href="?page=${it.id}" data-page="${
         it.id
-      }" class="${cls}" onclick="${onNav}(event, '${it.id}')">${escapeHtml(
+      }" data-radius-graph-page="${it.id}" class="${cls}">${escapeHtml(
         it.label
       )}</a>`;
     })

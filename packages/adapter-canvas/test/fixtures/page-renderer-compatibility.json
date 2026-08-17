@@ -1,0 +1,1629 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "commit": "f2282b7ea77887a834d67dad84c3a966f9c14f30",
+    "shortCommit": "f2282b7",
+    "path": "packages/adapter-canvas/src/pages.ts",
+    "description": "Pre-extraction monolithic page renderers (the parent of d208b5b, the Phase 3 extraction commit).",
+    "generator": "One-time harness: `git archive f2282b7 packages/adapter-canvas/src` extracted to a scratch tree, then each case state rendered by that tree's pages.ts and projected with test/support/pages/compatibility-projection.ts under the repository's own Vitest transform. Regenerate by repeating those steps with the case states stored here; never by rendering current modules.",
+    "projection": "projectPage() keeps title, active top-nav page, in-order navigation targets, in-order markup ids/names/roles, disabled element ids, the values of an allowlisted set of state-carrying elements (graph-repo, diff-repo-select, target-repo, env-name-input, deploy-branch-select, az-app-name-input) as ordered id/value entries, the active secondary navigation targets read from rad-subtab--active (data-page, else data-subtab, else href), normalized visible/hidden state for the pane-environments and pane-credentials panes, status banner id+class+text, in-order unique /api paths, the case's markers as indices in document order, serialized initial-state literals, removed-token hits, and SHA-256 digests of named inline script payloads. Whole pages, snapshots and generated JavaScript are deliberately not stored.",
+    "hostileInputs": "Hostile inputs are excluded on purpose: PU-02 intentionally hardened HTML, JavaScript-string, JSON and URL encoding after this commit, so legacy output for hostile state is a known-bad oracle. Hostile behaviour is covered by the current hostile-input suites instead.",
+    "excludedScriptPayloads": [
+      "graph — CLIENT_GRAPH_JS changed after this commit by upstream #367 (navigation cancel hook clearing window.__radiusDiffTimeout).",
+      "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
+      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields.",
+      "heartbeat — Phase 4A rewrites this payload by design, so its source digest can no longer match. The digest is replaced by executable evidence rather than by this justification: test/fixtures/legacy-heartbeat-entry.ts freezes the exact payload the digest covered, and src/browser/heartbeat.differential.test.ts drives it and the compiled replacement through identical fakes, comparing requests, abort accounting, reload calls, overlay transition and pending timers, with the deliberate divergences pinned separately. The projected /api/ping and reconnect markup contracts are still compared through the projection fields.",
+      "repoBranch, graph - Phase 4 replaced these legacy inline payloads with importable browser modules; repository behavior is bundled into the owning page entries and graph remains a shared compiled entry. A byte digest of deleted source text cannot be preserved; behavior is pinned by collocated unit tests plus generated-script execution and renderer wiring suites. Delete-dialog and operation-chip were completed in Phase 4C and are pinned by collocated behavior plus exact-once renderer injection tests; because the chip renders on every page, its retired digest is additionally replaced by executable evidence in src/browser/operation-chip.differential.test.ts, which drives the frozen legacy payload in test/fixtures/legacy-operation-chip-entry.ts and the compiled replacement through identical fakes and compares requests, rendered class, label, attributes, dataset, acknowledgement and pending timers, with the deliberate divergences pinned separately.",
+      "deployed-context markerOrder - the 'deployMode: true' marker previously matched first inside a comment in the legacy inline graph payload, which the compiler strips from the compiled bundle. The marker is still present and still ordered against the page's own script; only its accidental first match moved.",
+      "page (graph, planned, graph-diff, deployed) - Phase 4 replaced executable page payloads and source-text markers with compiled importable entries. Hidden JSON state is projected back onto the legacy state contract; executable behavior is pinned by collocated browser-page tests.",
+      "apiPaths (graph, planned, graph-diff, deployed) - the legacy endpoint order is retained in the projection only after every expected path is observed in the compiled page entry. Extra transitive paths from bundled repository helpers are ignored here and are covered by the entry behavior tests.",
+      "shell apiPaths - the repository selector library no longer runs globally on every page; its endpoints are owned by the graph page entries that use them, so the bare shell retains only open-source, heartbeat, and operation-chip paths.",
+      "page (environment-result) - Phase 4C replaced the deployment-result reset payload with the compiled deploy-result-page entry and a hidden JSON state element. A byte digest of deleted source text cannot be preserved; the attempt id, the /api/deploy-reset call and the reset-then-reload behaviour are pinned by collocated browser tests plus the renderer wiring assertions.",
+      "environment-result contentIds/roles/statuses - the reset button previously reloaded on any response. It now fails closed and reports a rejected or non-ok reset in a new #deploy-reset-status alert region, so that id, its role and its empty initial status text are additions the oracle records rather than regressions.",
+      "environment-list markerOrder - Phase 4C moved executable row-action wiring into the importable environment entry, where row handlers are declared before the initial table load. Every legacy marker and semantic assertion remains present; only the declaration order changed, and collocated behavior tests execute the load-then-wire lifecycle."
+    ],
+    "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
+  },
+  "exports": [
+    "deployedGraphPage",
+    "deployingPage",
+    "environmentPage",
+    "graphDiffPage",
+    "graphHeader",
+    "graphHeaderClose",
+    "graphPage",
+    "oidcPage",
+    "pageShell",
+    "plannedGraphPage",
+    "serializeBrowserFunction"
+  ],
+  "sharedScriptDigests": {
+    "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21"
+  },
+  "cases": [
+    {
+      "id": "shell-applications",
+      "page": "pageShell",
+      "description": "PU-01 document shell: title, applications navigation, always-on scripts.",
+      "state": {},
+      "scope": "document",
+      "shellTitle": "Application Graph",
+      "shellBody": "<p id=\"shell-body\">body</p>",
+      "markers": [
+        "<!doctype html>",
+        "<nav class=\"rad-topnav\">",
+        "<div class=\"main-content\">",
+        "<p id=\"shell-body\">body</p>",
+        "id=\"rad-feedback\"",
+        "id=\"radius-reconnect-overlay\""
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "environment", "deploying"],
+        "contentIds": [
+          "rad-opchip",
+          "rad-opchip-dot",
+          "rad-opchip-label",
+          "shell-body",
+          "rad-feedback",
+          "rad-feedback-pop",
+          "rad-feedback-btn",
+          "radius-reconnect-overlay"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0, 1, 2, 3, 4, 5],
+        "missingMarkers": [],
+        "initialState": {},
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "shell-environments",
+      "page": "pageShell",
+      "description": "PU-01/PU-10 shell navigation derived from an environment title.",
+      "state": {},
+      "scope": "document",
+      "shellTitle": "Environments",
+      "shellBody": "<p id=\"shell-body\">body</p>",
+      "markers": ["id=\"rad-opchip\"", "id=\"rad-opchip-label\""],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Environments — Radius",
+        "activeNav": "environment",
+        "navLinks": ["graph", "environment", "deploying"],
+        "contentIds": [
+          "rad-opchip",
+          "rad-opchip-dot",
+          "rad-opchip-label",
+          "shell-body",
+          "rad-feedback",
+          "rad-feedback-pop",
+          "rad-feedback-btn",
+          "radius-reconnect-overlay"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {},
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "shell-explicit-nav",
+      "page": "pageShell",
+      "description": "PU-01 explicit active navigation overrides the title.",
+      "state": {},
+      "scope": "document",
+      "shellTitle": "Application Graph",
+      "shellBody": "<p id=\"shell-body\">body</p>",
+      "shellActiveNav": "deployments",
+      "markers": ["href=\"/?page=deploying\""],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "deploying",
+        "navLinks": ["graph", "environment", "deploying"],
+        "contentIds": [
+          "rad-opchip",
+          "rad-opchip-dot",
+          "rad-opchip-label",
+          "shell-body",
+          "rad-feedback",
+          "rad-feedback-pop",
+          "rad-feedback-btn",
+          "radius-reconnect-overlay"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0],
+        "missingMarkers": [],
+        "initialState": {},
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "graph-initial",
+      "page": "graph",
+      "description": "PU-03 modeled graph initial state: selectors, generation guidance, progress staging.",
+      "state": {},
+      "markers": [
+        "Select a branch to generate the application graph.",
+        "Radius app-bicep skill"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "modeled-subtitle",
+          "modeled-subtitle-hint",
+          "graph-app",
+          "graph-branch",
+          "deploy-app-btn",
+          "graph-status",
+          "graph-container-wrapper"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": ["deploy-app-btn"],
+        "stateValues": [],
+        "activeSubtabs": ["graph"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "graph-status",
+            "className": "status info",
+            "text": "Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure"
+          }
+        ],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/discover-branches",
+          "/api/load-graph",
+          "/api/progress"
+        ],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "''",
+          "CONTEXT_BRANCH": "'main'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "graph-loading-context",
+      "page": "graph",
+      "description": "PU-03 modeled graph loading with workspace context.",
+      "state": {
+        "contextRepo": "octo/app",
+        "contextBranch": "feature/x"
+      },
+      "markers": ["Select a branch to generate the application graph."],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "modeled-subtitle",
+          "modeled-subtitle-hint",
+          "graph-app",
+          "graph-branch",
+          "deploy-app-btn",
+          "graph-status",
+          "graph-container-wrapper"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": ["deploy-app-btn"],
+        "stateValues": [],
+        "activeSubtabs": ["graph"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "graph-status",
+            "className": "status info",
+            "text": "Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure"
+          }
+        ],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/discover-branches",
+          "/api/load-graph",
+          "/api/progress"
+        ],
+        "markerOrder": [0],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "'octo/app'",
+          "CONTEXT_BRANCH": "'feature/x'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "graph-resources-remote",
+      "page": "graph",
+      "description": "PU-03 resolved modeled graph from a remote branch: no workspace provenance.",
+      "state": {
+        "graphResources": [
+          {
+            "id": "app/web",
+            "name": "web",
+            "type": "Applications.Core/containers",
+            "connections": [
+              {
+                "id": "app/db",
+                "name": "db",
+                "direction": "outbound"
+              }
+            ],
+            "codeReference": "app.bicep:12"
+          },
+          {
+            "id": "app/db",
+            "name": "db",
+            "type": "Applications.Datastores/redisCaches",
+            "connections": []
+          }
+        ],
+        "graphTargetRepo": "octo/app",
+        "graphBranch": "feature/x"
+      },
+      "markers": [
+        "refresh: true",
+        "Copilot is rebuilding the application graph"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "modeled-subtitle",
+          "modeled-subtitle-hint",
+          "graph-repo",
+          "graph-app",
+          "graph-branch",
+          "deploy-app-btn",
+          "graph-container",
+          "graph-refresh-status"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "graph-repo",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "graph-refresh-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/discover-branches",
+          "/api/load-graph"
+        ],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "document.getElementById('graph-repo').value",
+          "CURRENT_BRANCH": "'feature/x'",
+          "resources": "[{\"id\":\"app/web\",\"name\":\"web\",\"type\":\"Applications.Core/containers\",\"connections\":[{\"id\":\"app/db\",\"name\":\"db\",\"direction\":\"outbound\"}],\"codeReference\":\"app.bicep:12\"},{\"id\":\"app/db\",\"name\":\"db\",\"type\":\"Applications.Datastores/redisCaches\",\"connections\":[]}]"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "graph-resources-workspace",
+      "page": "graph",
+      "description": "PU-03 workspace provenance selects local source links.",
+      "state": {
+        "graphResources": [
+          {
+            "id": "app/web",
+            "name": "web",
+            "type": "Applications.Core/containers",
+            "connections": [
+              {
+                "id": "app/db",
+                "name": "db",
+                "direction": "outbound"
+              }
+            ],
+            "codeReference": "app.bicep:12"
+          },
+          {
+            "id": "app/db",
+            "name": "db",
+            "type": "Applications.Datastores/redisCaches",
+            "connections": []
+          }
+        ],
+        "graphTargetRepo": "octo/app",
+        "graphBranch": "wt",
+        "graphFromWorkspace": true
+      },
+      "markers": [],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "modeled-subtitle",
+          "modeled-subtitle-hint",
+          "graph-repo",
+          "graph-app",
+          "graph-branch",
+          "deploy-app-btn",
+          "graph-container",
+          "graph-refresh-status"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "graph-repo",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "graph-refresh-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/discover-branches",
+          "/api/load-graph"
+        ],
+        "markerOrder": [],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "document.getElementById('graph-repo').value",
+          "CURRENT_BRANCH": "'wt'",
+          "resources": "[{\"id\":\"app/web\",\"name\":\"web\",\"type\":\"Applications.Core/containers\",\"connections\":[{\"id\":\"app/db\",\"name\":\"db\",\"direction\":\"outbound\"}],\"codeReference\":\"app.bicep:12\"},{\"id\":\"app/db\",\"name\":\"db\",\"type\":\"Applications.Datastores/redisCaches\",\"connections\":[]}]"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "graph-loaded-empty",
+      "page": "graph",
+      "description": "PU-03 a successfully loaded but empty graph stays on the rendered path.",
+      "state": {
+        "graphLoaded": true,
+        "graphResources": [],
+        "contextRepo": "octo/app"
+      },
+      "markers": [],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Application Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "modeled-subtitle",
+          "modeled-subtitle-hint",
+          "graph-repo",
+          "graph-app",
+          "graph-branch",
+          "deploy-app-btn",
+          "graph-container",
+          "graph-refresh-status"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "graph-repo",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "graph-refresh-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/discover-branches",
+          "/api/load-graph"
+        ],
+        "markerOrder": [],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "document.getElementById('graph-repo').value",
+          "CURRENT_BRANCH": "'main'",
+          "resources": "[]"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "planned-empty",
+      "page": "planned",
+      "description": "PU-04 planned graph before resolution: selectors, guidance, stale-environment error.",
+      "state": {
+        "contextRepo": "octo/app",
+        "contextBranch": "feature/x"
+      },
+      "markers": ["Generating the planned application graph…"],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Planned Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "planned-subtitle",
+          "planned-subtitle-hint",
+          "planned-app",
+          "planned-branch",
+          "planned-env",
+          "plan-btn",
+          "plan-status",
+          "graph-container-wrapper"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": ["plan-btn"],
+        "stateValues": [],
+        "activeSubtabs": ["planned"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "plan-status",
+            "className": "status info",
+            "text": "Generating the planned application graph…"
+          }
+        ],
+        "apiPaths": ["/api/progress", "/api/plan-graph"],
+        "markerOrder": [0],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "'octo/app'",
+          "CONTEXT_BRANCH": "'feature/x'",
+          "CONTEXT_ENV": "''"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "planned-resolved",
+      "page": "planned",
+      "description": "PU-04 resolved plan with recipe-pack guidance and provider context.",
+      "state": {
+        "plannedResources": [
+          {
+            "id": "app/web",
+            "name": "web",
+            "type": "Applications.Core/containers",
+            "connections": [
+              {
+                "id": "app/db",
+                "name": "db",
+                "direction": "outbound"
+              }
+            ],
+            "codeReference": "app.bicep:12"
+          },
+          {
+            "id": "app/db",
+            "name": "db",
+            "type": "Applications.Datastores/redisCaches",
+            "connections": []
+          }
+        ],
+        "plannedRepo": "octo/app",
+        "plannedBranch": "feature/x",
+        "plannedEnvironment": "prod",
+        "plannedProvider": "aws",
+        "plannedFromWorkspace": true
+      },
+      "markers": [
+        "Copilot is generating .radius/app.bicep with the Radius app-bicep skill",
+        "The planned deployment response was incomplete. Try again."
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Planned Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "planned-subtitle",
+          "planned-subtitle-hint",
+          "planned-app",
+          "planned-branch",
+          "planned-env",
+          "plan-btn",
+          "plan-status",
+          "graph-container"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": ["plan-btn"],
+        "stateValues": [],
+        "activeSubtabs": ["planned"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "plan-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": ["/api/plan-graph"],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "'octo/app'",
+          "CONTEXT_BRANCH": "'feature/x'",
+          "CONTEXT_ENV": "'prod'",
+          "resources": "[{\"id\":\"app/web\",\"name\":\"web\",\"type\":\"Applications.Core/containers\",\"connections\":[{\"id\":\"app/db\",\"name\":\"db\",\"direction\":\"outbound\"}],\"codeReference\":\"app.bicep:12\"},{\"id\":\"app/db\",\"name\":\"db\",\"type\":\"Applications.Datastores/redisCaches\",\"connections\":[]}]"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "diff-selector",
+      "page": "graph-diff",
+      "description": "PU-05 diff branch selector before a comparison exists.",
+      "state": {
+        "branches": ["main", "feature/x"],
+        "branchShas": {
+          "main": "abcdef1234567",
+          "feature/x": "0123456789ab"
+        },
+        "diffBase": "main",
+        "diffHead": "feature/x",
+        "diffTargetRepo": "octo/app"
+      },
+      "markers": ["Loading branches…"],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Graph Diff — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "graph-diff-subtitle",
+          "diff-repo-select",
+          "diff-app",
+          "base-branch",
+          "head-branch",
+          "diff-status"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "diff-repo-select",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph-diff"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "diff-status",
+            "className": "status info",
+            "text": "Loading branches…"
+          }
+        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "document.getElementById('diff-repo-select').value",
+          "STATE_BASE": "'main'",
+          "STATE_HEAD": "'feature/x'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "diff-preloaded",
+      "page": "graph-diff",
+      "description": "PU-05 preloaded diff with change counts and repo/base/head context.",
+      "state": {
+        "diffResources": [
+          {
+            "id": "a",
+            "name": "a",
+            "type": "T",
+            "connections": [],
+            "diffStatus": "added"
+          },
+          {
+            "id": "b",
+            "name": "b",
+            "type": "T",
+            "connections": [],
+            "diffStatus": "removed"
+          },
+          {
+            "id": "c",
+            "name": "c",
+            "type": "T",
+            "connections": [],
+            "diffStatus": "modified"
+          },
+          {
+            "id": "d",
+            "name": "d",
+            "type": "T",
+            "connections": [],
+            "diffStatus": "unchanged"
+          }
+        ],
+        "branches": ["main", "feature/x"],
+        "branchShas": {
+          "main": "abcdef1234567"
+        },
+        "diffBase": "main",
+        "diffHead": "feature/x",
+        "diffTargetRepo": "octo/app"
+      },
+      "markers": ["+1 added", "-1 removed", "~1 modified", "1 unchanged"],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Graph Diff — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "graph-diff-subtitle",
+          "diff-repo-select",
+          "diff-app",
+          "base-branch",
+          "head-branch",
+          "diff-status",
+          "graph-container"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "diff-repo-select",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph-diff"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "diff-status",
+            "className": "status info",
+            "text": ""
+          }
+        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0, 1, 2, 3],
+        "missingMarkers": [],
+        "initialState": {
+          "DIFF_BASE": "'main'",
+          "DIFF_HEAD": "'feature/x'",
+          "resources": "[{\"id\":\"a\",\"name\":\"a\",\"type\":\"T\",\"connections\":[],\"diffStatus\":\"added\"},{\"id\":\"b\",\"name\":\"b\",\"type\":\"T\",\"connections\":[],\"diffStatus\":\"removed\"},{\"id\":\"c\",\"name\":\"c\",\"type\":\"T\",\"connections\":[],\"diffStatus\":\"modified\"},{\"id\":\"d\",\"name\":\"d\",\"type\":\"T\",\"connections\":[],\"diffStatus\":\"unchanged\"}]"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "diff-error",
+      "page": "graph-diff",
+      "description": "PU-05 comparison failure surfaced on the selector path.",
+      "state": {
+        "diffError": "Unable to compile head graph",
+        "diffTargetRepo": "octo/app",
+        "diffBase": "main",
+        "diffHead": "feature/x"
+      },
+      "markers": ["Unable to compile head graph"],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Graph Diff — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "graph-diff-subtitle",
+          "diff-repo-select",
+          "diff-app",
+          "base-branch",
+          "head-branch",
+          "diff-status"
+        ],
+        "names": [],
+        "roles": [],
+        "disabled": [],
+        "stateValues": [
+          {
+            "id": "diff-repo-select",
+            "value": "octo/app"
+          }
+        ],
+        "activeSubtabs": ["graph-diff"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "diff-status",
+            "className": "status error",
+            "text": "Unable to compile head graph"
+          }
+        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "document.getElementById('diff-repo-select').value",
+          "STATE_BASE": "'main'",
+          "STATE_HEAD": "'feature/x'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "deployed-context",
+      "page": "deployed",
+      "description": "PU-06 deployed graph: pending/success/failure handling, activity note, progress polling.",
+      "state": {
+        "contextRepo": "octo/app",
+        "contextBranch": "feature/x",
+        "deployProvider": "aws"
+      },
+      "markers": [
+        "Loading deployed application graph…",
+        "Deleting Deployment…"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Deployed Graph — Radius",
+        "activeNav": "graph",
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
+        "contentIds": [
+          "graph-nav",
+          "graph-page-content",
+          "deployed-subtitle",
+          "deployed-subtitle-hint",
+          "deployed-app-select",
+          "deployed-env-select",
+          "deployed-delete-btn",
+          "deployed-inline-status",
+          "deployed-graph-label",
+          "deployed-mode-note",
+          "deployed-status",
+          "graph-container",
+          "deployed-log-section",
+          "deployed-log-output",
+          "deploy-delete-modal",
+          "deploy-delete-title",
+          "deploy-delete-close",
+          "deploy-delete-app",
+          "deploy-delete-env",
+          "deploy-delete-body",
+          "deployed-deleting-modal",
+          "deployed-deleting-text"
+        ],
+        "names": [],
+        "roles": ["dialog"],
+        "disabled": ["deployed-delete-btn"],
+        "stateValues": [],
+        "activeSubtabs": ["deployed"],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "deployed-status",
+            "className": "status info",
+            "text": "Loading deployed application graph…"
+          }
+        ],
+        "apiPaths": [
+          "/api/deploy-status",
+          "/api/deployed-graph",
+          "/api/list-applications",
+          "/api/list-environments",
+          "/api/list-deployments",
+          "/api/delete-deployment"
+        ],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "CONTEXT_REPO": "\"octo/app\"",
+          "CONTEXT_BRANCH": "\"feature/x\"",
+          "GRAPH_BRANCH": "\"feature/x\"",
+          "FALLBACK_PROVIDER": "\"aws\""
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "credentials-subtab",
+      "page": "credentials",
+      "description": "PU-07 credentials sub-tab: Azure and AWS forms, verification and save gating.",
+      "state": {
+        "contextRepo": "octo/app",
+        "activeSubtab": "credentials"
+      },
+      "markers": [
+        "New Credential Profile",
+        "No credential profiles yet.",
+        "Verify Credentials",
+        "Checking GitHub Packages access…",
+        "Save Credential Profile"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Environments — Radius",
+        "activeNav": "environment",
+        "navLinks": ["environment", "credentials"],
+        "contentIds": [
+          "env-subtabs",
+          "pane-environments",
+          "env-landing",
+          "env-success-banner",
+          "env-success-banner-text",
+          "env-success-banner-close",
+          "env-error-banner",
+          "env-error-banner-text",
+          "env-error-banner-close",
+          "env-warning-banner",
+          "env-warning-banner-text",
+          "env-warning-banner-close",
+          "env-action-banner",
+          "env-action-banner-text",
+          "env-action-banner-close",
+          "env-progress-panel",
+          "env-progress-title",
+          "env-progress-activity",
+          "env-progress-elapsed",
+          "env-progress-stages",
+          "env-progress-failure",
+          "env-progress-failure-message",
+          "env-progress-cleanup-status",
+          "env-progress-retry",
+          "env-progress-cleanup-removed-block",
+          "env-progress-cleanup-removed",
+          "env-progress-cleanup-retained-block",
+          "env-progress-cleanup-retained",
+          "env-progress-cleanup-warnings-block",
+          "env-progress-cleanup-warnings",
+          "env-progress-details",
+          "env-progress-steps",
+          "env-progress-actions",
+          "env-progress-resume",
+          "env-progress-dismiss",
+          "new-env-btn",
+          "env-table-body",
+          "env-form",
+          "cancel-env-btn",
+          "env-name-input",
+          "target-repo",
+          "deploy-branch-select",
+          "az-client-id",
+          "env-selected-provider",
+          "env-gh-identity-field",
+          "env-gh-account-combo",
+          "env-gh-account-button",
+          "env-gh-account-value",
+          "env-gh-account-menu",
+          "env-gh-account-options",
+          "env-gh-account-empty",
+          "env-gh-account-note",
+          "env-gh-identity-note",
+          "env-gh-recheck",
+          "env-profile-combo",
+          "env-profile-button",
+          "env-profile-value",
+          "env-profile-menu",
+          "env-profile-options",
+          "env-profile-empty",
+          "env-create-profile-link",
+          "env-profile-select",
+          "env-profile-status",
+          "env-identity-section",
+          "env-identity-azure",
+          "az-app-name-input",
+          "az-selected-app-id",
+          "az-use-existing-link",
+          "az-selected-app-note",
+          "az-clear-pin-link",
+          "env-identity-aws",
+          "env-infra-section",
+          "panel-azure",
+          "azure-discover-status",
+          "azure-refresh-btn",
+          "azure-rg-select",
+          "azure-rg-custom",
+          "azure-cluster-select",
+          "azure-cluster-custom",
+          "azure-namespace-select",
+          "azure-namespace-custom",
+          "panel-aws",
+          "aws-discover-status",
+          "aws-refresh-btn",
+          "aws-cluster-select",
+          "aws-cluster-custom",
+          "aws-namespace-select",
+          "aws-namespace-custom",
+          "aws-vpc-select",
+          "aws-vpc-custom",
+          "aws-subnets-select",
+          "aws-subnets-custom",
+          "deploy-status",
+          "deploy-btn",
+          "pane-credentials",
+          "cred-landing",
+          "cred-success-banner",
+          "cred-success-banner-text",
+          "cred-success-banner-close",
+          "new-cred-btn",
+          "cred-table-body",
+          "cred-form",
+          "cred-name-input",
+          "cred-provider-select",
+          "cred-ghcr-section",
+          "cred-ghcr-status",
+          "cred-ghcr-command-row",
+          "cred-ghcr-command",
+          "cred-ghcr-copy",
+          "cred-ghcr-retry",
+          "cred-panel-azure",
+          "az-tenant-id",
+          "az-sub-id",
+          "btn-verify-azure",
+          "cred-panel-aws",
+          "aws-account-id",
+          "aws-region",
+          "aws-role-arn",
+          "btn-verify-aws",
+          "cred-verify-status",
+          "cred-verify-hint",
+          "save-cred-btn",
+          "cancel-cred-btn",
+          "env-smr-modal",
+          "env-smr-input",
+          "env-smr-error",
+          "env-smr-cancel",
+          "env-smr-retry",
+          "env-appselect-modal",
+          "env-appselect-title",
+          "env-appselect-intro",
+          "env-appselect-caution",
+          "env-appselect-list",
+          "env-appselect-error",
+          "env-appselect-cancel",
+          "env-appselect-confirm",
+          "env-verify-modal",
+          "env-verify-title",
+          "azure-cli-assist-modal",
+          "azure-cli-assist-title",
+          "azure-cli-assist-message",
+          "azure-cli-assist-cancel",
+          "azure-cli-assist-confirm"
+        ],
+        "names": [],
+        "roles": [
+          "status",
+          "alert",
+          "status",
+          "status",
+          "region",
+          "status",
+          "alert",
+          "listbox",
+          "listbox",
+          "status",
+          "dialog"
+        ],
+        "disabled": [
+          "azure-refresh-btn",
+          "aws-refresh-btn",
+          "deploy-btn",
+          "save-cred-btn"
+        ],
+        "stateValues": [
+          {
+            "id": "env-name-input",
+            "value": "dev"
+          },
+          {
+            "id": "target-repo",
+            "value": "octo/app"
+          },
+          {
+            "id": "deploy-branch-select",
+            "value": "main"
+          },
+          {
+            "id": "az-app-name-input",
+            "value": "radius-deploy-octo-app"
+          }
+        ],
+        "activeSubtabs": ["credentials"],
+        "panes": [
+          {
+            "id": "pane-environments",
+            "visibility": "hidden"
+          },
+          {
+            "id": "pane-credentials",
+            "visibility": "visible"
+          }
+        ],
+        "statuses": [],
+        "apiPaths": [
+          "/api/list-environments",
+          "/api/delete-environment",
+          "/api/operations",
+          "/api/verify-status",
+          "/api/credential-profiles",
+          "/api/github-identity",
+          "/api/github-account",
+          "/api/list-azure-app-registrations",
+          "/api/discover",
+          "/api/azure-app-serves-repos",
+          "/api/delete-credential-profile",
+          "/api/azure-cli-assist",
+          "/api/verify-azure-login",
+          "/api/verify-aws-login",
+          "/api/save-credential-profile"
+        ],
+        "markerOrder": [1, 0, 3, 2, 4],
+        "missingMarkers": [],
+        "initialState": {
+          "CTX_REPO": "'octo/app'",
+          "CTX_BRANCH": "'main'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "environment-list",
+      "page": "environment",
+      "description": "PU-08/PU-13 environments sub-tab: listing, creation form, profile selection, operation progress and terminal states.",
+      "state": {
+        "contextRepo": "octo/app",
+        "contextBranch": "feature/x",
+        "envName": "prod",
+        "activeSubtab": "environments"
+      },
+      "markers": [
+        "No environments created yet.",
+        "Could not load environments.",
+        "1 · Name this environment",
+        "3 · Deploy identity",
+        "Delete the application deployment first.",
+        "Environment setup progress",
+        "Retry starts cleanly:",
+        "View planned graph",
+        "is set up, but one step is left for you"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Environments — Radius",
+        "activeNav": "environment",
+        "navLinks": ["environment", "credentials"],
+        "contentIds": [
+          "env-subtabs",
+          "pane-environments",
+          "env-landing",
+          "env-success-banner",
+          "env-success-banner-text",
+          "env-success-banner-close",
+          "env-error-banner",
+          "env-error-banner-text",
+          "env-error-banner-close",
+          "env-warning-banner",
+          "env-warning-banner-text",
+          "env-warning-banner-close",
+          "env-action-banner",
+          "env-action-banner-text",
+          "env-action-banner-close",
+          "env-progress-panel",
+          "env-progress-title",
+          "env-progress-activity",
+          "env-progress-elapsed",
+          "env-progress-stages",
+          "env-progress-failure",
+          "env-progress-failure-message",
+          "env-progress-cleanup-status",
+          "env-progress-retry",
+          "env-progress-cleanup-removed-block",
+          "env-progress-cleanup-removed",
+          "env-progress-cleanup-retained-block",
+          "env-progress-cleanup-retained",
+          "env-progress-cleanup-warnings-block",
+          "env-progress-cleanup-warnings",
+          "env-progress-details",
+          "env-progress-steps",
+          "env-progress-actions",
+          "env-progress-resume",
+          "env-progress-dismiss",
+          "new-env-btn",
+          "env-table-body",
+          "env-form",
+          "cancel-env-btn",
+          "env-name-input",
+          "target-repo",
+          "deploy-branch-select",
+          "az-client-id",
+          "env-selected-provider",
+          "env-gh-identity-field",
+          "env-gh-account-combo",
+          "env-gh-account-button",
+          "env-gh-account-value",
+          "env-gh-account-menu",
+          "env-gh-account-options",
+          "env-gh-account-empty",
+          "env-gh-account-note",
+          "env-gh-identity-note",
+          "env-gh-recheck",
+          "env-profile-combo",
+          "env-profile-button",
+          "env-profile-value",
+          "env-profile-menu",
+          "env-profile-options",
+          "env-profile-empty",
+          "env-create-profile-link",
+          "env-profile-select",
+          "env-profile-status",
+          "env-identity-section",
+          "env-identity-azure",
+          "az-app-name-input",
+          "az-selected-app-id",
+          "az-use-existing-link",
+          "az-selected-app-note",
+          "az-clear-pin-link",
+          "env-identity-aws",
+          "env-infra-section",
+          "panel-azure",
+          "azure-discover-status",
+          "azure-refresh-btn",
+          "azure-rg-select",
+          "azure-rg-custom",
+          "azure-cluster-select",
+          "azure-cluster-custom",
+          "azure-namespace-select",
+          "azure-namespace-custom",
+          "panel-aws",
+          "aws-discover-status",
+          "aws-refresh-btn",
+          "aws-cluster-select",
+          "aws-cluster-custom",
+          "aws-namespace-select",
+          "aws-namespace-custom",
+          "aws-vpc-select",
+          "aws-vpc-custom",
+          "aws-subnets-select",
+          "aws-subnets-custom",
+          "deploy-status",
+          "deploy-btn",
+          "pane-credentials",
+          "cred-landing",
+          "cred-success-banner",
+          "cred-success-banner-text",
+          "cred-success-banner-close",
+          "new-cred-btn",
+          "cred-table-body",
+          "cred-form",
+          "cred-name-input",
+          "cred-provider-select",
+          "cred-ghcr-section",
+          "cred-ghcr-status",
+          "cred-ghcr-command-row",
+          "cred-ghcr-command",
+          "cred-ghcr-copy",
+          "cred-ghcr-retry",
+          "cred-panel-azure",
+          "az-tenant-id",
+          "az-sub-id",
+          "btn-verify-azure",
+          "cred-panel-aws",
+          "aws-account-id",
+          "aws-region",
+          "aws-role-arn",
+          "btn-verify-aws",
+          "cred-verify-status",
+          "cred-verify-hint",
+          "save-cred-btn",
+          "cancel-cred-btn",
+          "env-smr-modal",
+          "env-smr-input",
+          "env-smr-error",
+          "env-smr-cancel",
+          "env-smr-retry",
+          "env-appselect-modal",
+          "env-appselect-title",
+          "env-appselect-intro",
+          "env-appselect-caution",
+          "env-appselect-list",
+          "env-appselect-error",
+          "env-appselect-cancel",
+          "env-appselect-confirm",
+          "env-verify-modal",
+          "env-verify-title",
+          "azure-cli-assist-modal",
+          "azure-cli-assist-title",
+          "azure-cli-assist-message",
+          "azure-cli-assist-cancel",
+          "azure-cli-assist-confirm"
+        ],
+        "names": [],
+        "roles": [
+          "status",
+          "alert",
+          "status",
+          "status",
+          "region",
+          "status",
+          "alert",
+          "listbox",
+          "listbox",
+          "status",
+          "dialog"
+        ],
+        "disabled": [
+          "azure-refresh-btn",
+          "aws-refresh-btn",
+          "deploy-btn",
+          "save-cred-btn"
+        ],
+        "stateValues": [
+          {
+            "id": "env-name-input",
+            "value": "prod"
+          },
+          {
+            "id": "target-repo",
+            "value": "octo/app"
+          },
+          {
+            "id": "deploy-branch-select",
+            "value": "feature/x"
+          },
+          {
+            "id": "az-app-name-input",
+            "value": "radius-deploy-octo-app"
+          }
+        ],
+        "activeSubtabs": ["environments"],
+        "panes": [
+          {
+            "id": "pane-environments",
+            "visibility": "visible"
+          },
+          {
+            "id": "pane-credentials",
+            "visibility": "hidden"
+          }
+        ],
+        "statuses": [],
+        "apiPaths": [
+          "/api/list-environments",
+          "/api/delete-environment",
+          "/api/operations",
+          "/api/verify-status",
+          "/api/credential-profiles",
+          "/api/github-identity",
+          "/api/github-account",
+          "/api/list-azure-app-registrations",
+          "/api/discover",
+          "/api/azure-app-serves-repos",
+          "/api/delete-credential-profile",
+          "/api/azure-cli-assist",
+          "/api/verify-azure-login",
+          "/api/verify-aws-login",
+          "/api/save-credential-profile"
+        ],
+        "markerOrder": [5, 7, 2, 3, 0, 4, 1, 8, 6],
+        "missingMarkers": [],
+        "initialState": {
+          "CTX_REPO": "'octo/app'",
+          "CTX_BRANCH": "'feature/x'"
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "environment-result-success",
+      "page": "environment",
+      "description": "PU-08 terminal deployment result with a workflow run link.",
+      "state": {
+        "deployResult": {
+          "message": "Deployment started",
+          "workflowUrl": "https://github.com/octo/app/actions/runs/1?a=1&b=2"
+        },
+        "deployAttempt": {
+          "id": "attempt-1"
+        }
+      },
+      "markers": [
+        "🚀 Deployment Initiated",
+        "View GitHub Actions workflow run",
+        "/api/deploy-reset"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Deployment Initiated — Radius",
+        "activeNav": "deploying",
+        "navLinks": [],
+        "contentIds": ["back-btn", "deploy-reset-status"],
+        "names": [],
+        "roles": ["alert"],
+        "disabled": [],
+        "stateValues": [],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "deploy-reset-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": ["/api/deploy-reset"],
+        "markerOrder": [0, 1, 2],
+        "missingMarkers": [],
+        "initialState": {
+          "attemptId": "\"attempt-1\""
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "environment-result-error",
+      "page": "environment",
+      "description": "PU-08 terminal deployment failure without a run link.",
+      "state": {
+        "deployResult": {
+          "error": "Deployment failed to dispatch"
+        }
+      },
+      "markers": ["⚠ Deployment Failed", "Deployment failed to dispatch"],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Deployment Failed — Radius",
+        "activeNav": "deploying",
+        "navLinks": [],
+        "contentIds": ["back-btn", "deploy-reset-status"],
+        "names": [],
+        "roles": ["alert"],
+        "disabled": [],
+        "stateValues": [],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [
+          {
+            "id": "deploy-reset-status",
+            "className": "status error",
+            "text": ""
+          }
+        ],
+        "apiPaths": ["/api/deploy-reset"],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "attemptId": "\"\""
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "deploying-empty",
+      "page": "deploying",
+      "description": "PU-09 deployments landing with no workspace context.",
+      "state": {},
+      "markers": ["Loading deployments…", "Could not load deployments."],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Deployments — Radius",
+        "activeNav": "deploying",
+        "navLinks": [],
+        "contentIds": [
+          "deploy-app-select",
+          "deploy-env-select",
+          "deploy-branch-select",
+          "deploy-now-btn",
+          "deploy-inline-status",
+          "deploy-table-body",
+          "deploy-progress-modal",
+          "deploy-progress-spinner",
+          "deploy-progress-failicon",
+          "deploy-progress-title",
+          "deploy-progress-subtitle",
+          "deploy-progress-fail-actions",
+          "deploy-fail-back",
+          "deploy-fail-repair-note",
+          "deploy-delete-modal",
+          "deploy-delete-title",
+          "deploy-delete-close",
+          "deploy-delete-app",
+          "deploy-delete-env",
+          "deploy-delete-body"
+        ],
+        "names": [],
+        "roles": ["dialog"],
+        "disabled": ["deploy-now-btn"],
+        "stateValues": [
+          {
+            "id": "deploy-branch-select",
+            "value": "main"
+          }
+        ],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/list-environments",
+          "/api/discover-branches",
+          "/api/list-deployments",
+          "/api/delete-deployment",
+          "/api/deploy-status",
+          "/api/deploy"
+        ],
+        "markerOrder": [0, 1],
+        "missingMarkers": [],
+        "initialState": {
+          "CTX_REPO": "\"\"",
+          "CTX_BRANCH": "\"main\""
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    },
+    {
+      "id": "deploying-context",
+      "page": "deploying",
+      "description": "PU-09 deployments listing states, delete flow and retry reporting.",
+      "state": {
+        "contextRepo": "octo/app",
+        "contextBranch": "feature/x"
+      },
+      "markers": [
+        "Loading deployments…",
+        "Deleting…",
+        "resumeRedirectedDeployment()",
+        "Copilot is analyzing the failure and will repair and redeploy if the app model caused it",
+        "Back to Deployments"
+      ],
+      "hashedScripts": ["feedback"],
+      "expected": {
+        "title": "Deployments — Radius",
+        "activeNav": "deploying",
+        "navLinks": [],
+        "contentIds": [
+          "deploy-app-select",
+          "deploy-env-select",
+          "deploy-branch-select",
+          "deploy-now-btn",
+          "deploy-inline-status",
+          "deploy-table-body",
+          "deploy-progress-modal",
+          "deploy-progress-spinner",
+          "deploy-progress-failicon",
+          "deploy-progress-title",
+          "deploy-progress-subtitle",
+          "deploy-progress-fail-actions",
+          "deploy-fail-back",
+          "deploy-fail-repair-note",
+          "deploy-delete-modal",
+          "deploy-delete-title",
+          "deploy-delete-close",
+          "deploy-delete-app",
+          "deploy-delete-env",
+          "deploy-delete-body"
+        ],
+        "names": [],
+        "roles": ["dialog"],
+        "disabled": ["deploy-now-btn"],
+        "stateValues": [
+          {
+            "id": "deploy-branch-select",
+            "value": "feature/x"
+          }
+        ],
+        "activeSubtabs": [],
+        "panes": [],
+        "statuses": [],
+        "apiPaths": [
+          "/api/list-applications",
+          "/api/list-environments",
+          "/api/discover-branches",
+          "/api/list-deployments",
+          "/api/delete-deployment",
+          "/api/deploy-status",
+          "/api/deploy"
+        ],
+        "markerOrder": [0, 4, 1, 3, 2],
+        "missingMarkers": [],
+        "initialState": {
+          "CTX_REPO": "\"octo/app\"",
+          "CTX_BRANCH": "\"feature/x\""
+        },
+        "removedTokens": [],
+        "scriptDigests": {}
+      }
+    }
+  ]
+}

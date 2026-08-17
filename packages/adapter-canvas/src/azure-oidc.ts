@@ -10,11 +10,16 @@
 // server.ts; the network reads are injected as a `runner` so this module
 // remains testable.
 
+// Imported from the `platforms` subpath rather than the package root: the root
+// barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
+// `process.env` at module scope. This module is reachable from browser code
+// (browser/environment/discovery.ts), so pulling in the barrel would ship a
+// `process is not defined` page error.
 import {
   buildOidcSubject,
   buildFederatedCredentialName
-} from "@radius-project/core";
-import type { OidcSubjectConfig } from "@radius-project/core";
+} from "@radius-project/core/platforms";
+import type { OidcSubjectConfig } from "@radius-project/core/platforms";
 
 export interface OidcError extends Error {
   code: string;
@@ -579,9 +584,9 @@ export function parseServedReposFromSubjects(
 
 /**
  * Short human label summarizing the repos an App Registration already serves,
- * for the identity-picker rows. Pure and self-contained so it can be serialized
- * into the browser bundle via .toString() (see pages.ts) — the client runs this
- * exact function rather than a hand-copied twin.
+ * for the identity-picker rows. Pure and self-contained, and imported directly
+ * by browser/environment/discovery.ts — the client bundles and runs this exact
+ * function rather than a hand-copied twin.
  *
  * @param {string[]} list
  * @returns {string}
@@ -668,8 +673,8 @@ export function selectMissingFederatedCredentials(
  * (instead of disguising them as empty arrays), so a real `az`/`aws` failure —
  * e.g. an ARM token not yet silently acquirable on Corpnet — surfaces as
  * "Discovery failed: <stderr>" rather than a misleading "Found 0 …". Pure and
- * self-contained so it is serialized into the browser bundle via .toString()
- * (see pages.ts `discoverResources`) — the client runs this exact function.
+ * self-contained, and imported directly by browser/environment/discovery.ts
+ * (`discoverResources`) — the client bundles and runs this exact function.
  *
  * @param {{clusters?:unknown[], resourceGroups?:unknown[], vpcs?:unknown[], subnets?:unknown[], error?:string, errors?:Record<string,string>}} data
  * @param {'azure'|'aws'} provider

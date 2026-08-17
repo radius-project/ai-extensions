@@ -516,6 +516,27 @@ function isGhCmd(cmd: string): boolean {
   return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
 }
 
+function quoteWindowsCmdArgument(value: string): string {
+  const escaped = value
+    .replace(/(\\*)"/g, (_match, backslashes: string) => {
+      return `${backslashes}${backslashes}\\"`;
+    })
+    .replace(/(\\*)$/, (_match, backslashes: string) => {
+      return `${backslashes}${backslashes}`;
+    });
+  return `"${escaped}"`;
+}
+
+function windowsCmdCommandLine(command: string, args: string[]): string {
+  const executableNeedsQuoting = /[\s"&|<>^()%!]/.test(command);
+  const executable =
+    executableNeedsQuoting ? quoteWindowsCmdArgument(command) : command;
+  const commandLine = [executable, ...args.map(quoteWindowsCmdArgument)].join(
+    " "
+  );
+  return executableNeedsQuoting ? `"${commandLine}"` : commandLine;
+}
+
 // Azure CLI 2.88+ "agentic session": when COPILOT_AGENT_SESSION_ID is set, az injects it as a
 // `client_session` query param + a claims challenge that BYPASSES the token cache and forces a
 // fresh ESTS fetch on every call. The GitHub Copilot app sets this var for all child processes,
@@ -533,8 +554,10 @@ function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
 // executable directly: passing it through cmd.exe would let metacharacters in an
 // API path (for example, '&' in a query string) be interpreted as shell syntax.
-// Other Windows CLIs may only provide `.cmd` shims, so retain the existing
-// cmd.exe wrapper for those commands.
+// Other Windows CLIs may only provide `.cmd` shims. Route those through cmd.exe
+// with one verbatim command line so the validated argument shapes used here
+// retain their boundaries. A simple executable name must stay unquoted because
+// cmd.exe's first-token quote stripping breaks Azure CLI's batch launcher.
 export function cliExec(
   cmd: string,
   args: string[],
@@ -547,13 +570,17 @@ export function cliExec(
     isWindowsGh ? ghExecutable()
     : isWindows ? "cmd.exe"
     : cmd;
-  const finalArgs = isWindows && !isWindowsGh ? ["/c", cmd, ...args] : args;
+  const finalArgs =
+    isWindows && !isWindowsGh ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
     ...opts,
     encoding: "utf8"
   };
+  if (isWindows && !isWindowsGh) {
+    execOpts.windowsVerbatimArguments = true;
+  }
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
   return execFile(file, finalArgs, execOpts, cb);

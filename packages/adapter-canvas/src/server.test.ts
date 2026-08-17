@@ -6,7 +6,6 @@ import {
   beginDeployAttempt,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
-  buildRoleAssignmentArgs,
   buildAzureCliAssistPrompt,
   azureCliAssistDisplayPrompt,
   azureCliAssistMessage,
@@ -22,16 +21,13 @@ import {
   endChildInput,
   ensureServicePrincipal,
   finalizeSetupFailure,
-  findFederatedCredentialNameCollision,
   graphDefinitionHash,
   isCrossSiteMutation,
   isCliCommandMissing,
   isCurrentSourceRefToken,
   isCurrentPlannedGraphRequest,
-  isReplicationLagError,
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
-  pickAksResourceGroup,
   preflightGhcrPackageWriteAccess,
   resetDeploymentViewState,
   resolveGitHubEnvironmentCreateState,
@@ -41,8 +37,12 @@ import {
   resolveDeployStatus,
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
-  triggerDeployRepairHandoff
+  triggerDeployRepairHandoff,
+  classifyDeployDispatchFailure,
+  DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
   recordAzureApp,
@@ -52,10 +52,6 @@ import {
   recordGitHubEnvironment,
   recordServicePrincipal
 } from "./operations.js";
-import {
-  buildFederatedCredentialName,
-  buildEnvironmentSuffix
-} from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 import type { DeployRepairHandoffInput } from "./server.js";
 
@@ -1052,129 +1048,6 @@ describe("addGraphProgress", () => {
   });
 });
 
-describe("isReplicationLagError", () => {
-  it("treats Graph-replication 'principal not yet visible' errors as retryable", () => {
-    for (const stderr of [
-      "Principal <id> does not exist in the directory <tenant>.",
-      "No matching principal found.",
-      "PrincipalNotFound: Principal does not exist.",
-      "Cannot find user or service principal in graph database for the given assignee.",
-      "Cannot find principal in the directory.",
-      "The assignee was not found in the directory."
-    ]) {
-      expect(isReplicationLagError(stderr), stderr).toBe(true);
-    }
-  });
-
-  it("does NOT retry genuine authorization failures or empty errors", () => {
-    expect(
-      isReplicationLagError(
-        "AuthorizationFailed: The client does not have authorization to perform action 'Microsoft.Authorization/roleAssignments/write'."
-      )
-    ).toBe(false);
-    expect(isReplicationLagError("RoleAssignmentUpdateNotPermitted")).toBe(
-      false
-    );
-    expect(isReplicationLagError("")).toBe(false);
-    expect(isReplicationLagError(undefined)).toBe(false);
-  });
-});
-
-describe("buildRoleAssignmentArgs", () => {
-  it("assigns by SP object id with an explicit ServicePrincipal principal type (never by appId)", () => {
-    const args = buildRoleAssignmentArgs({
-      objectId: "00000000-obj-id",
-      role: "Contributor",
-      scope: "/subscriptions/sub/resourceGroups/rg",
-      subscriptionId: "sub"
-    });
-    expect(args).toContain("--assignee-object-id");
-    expect(args[args.indexOf("--assignee-object-id") + 1]).toBe(
-      "00000000-obj-id"
-    );
-    expect(args).toContain("--assignee-principal-type");
-    expect(args[args.indexOf("--assignee-principal-type") + 1]).toBe(
-      "ServicePrincipal"
-    );
-    // The appId-based form is what caused the replication race — never emit it.
-    expect(args).not.toContain("--assignee");
-    expect(
-      args.slice(args.indexOf("--role"), args.indexOf("--role") + 2)
-    ).toEqual(["--role", "Contributor"]);
-    expect(
-      args.slice(args.indexOf("--scope"), args.indexOf("--scope") + 2)
-    ).toEqual(["--scope", "/subscriptions/sub/resourceGroups/rg"]);
-  });
-});
-
-describe("findFederatedCredentialNameCollision", () => {
-  // Prove the real name-collapse: two env names differing only by a char that
-  // clean() normalizes ("prod:west" vs "prod-west") build the SAME FIC name but
-  // DIFFERENT subjects (the subject keeps "%3A"). Emulates a reused app where
-  // the colon env was set up first and the hyphen env is being added.
-  const repoFullName = "octo/app";
-  const colonName = buildFederatedCredentialName({
-    repoFullName,
-    envName: "prod:west"
-  });
-  const hyphenName = buildFederatedCredentialName({
-    repoFullName,
-    envName: "prod-west"
-  });
-  const colonSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(
-    "prod:west"
-  )}`;
-  const hyphenSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(
-    "prod-west"
-  )}`;
-
-  it("names collapse but subjects differ (guards the premise of the fix)", () => {
-    expect(hyphenName).toBe(colonName);
-    expect(hyphenSubject).not.toBe(colonSubject);
-  });
-
-  it("flags a name that already exists with a different subject", () => {
-    const desired = [{ name: hyphenName, subject: hyphenSubject }];
-    const existing = new Map([[colonName, colonSubject]]);
-    const hit = findFederatedCredentialNameCollision(desired, existing);
-    expect(hit).not.toBeNull();
-    if (!hit) throw new Error("expected a credential collision");
-    expect(hit.name).toBe(hyphenName);
-    expect(hit.existingSubject).toBe(colonSubject);
-    expect(hit.desiredSubject).toBe(hyphenSubject);
-  });
-
-  it("returns null when the same name maps to the same subject (true idempotent rerun)", () => {
-    const desired = [{ name: colonName, subject: colonSubject }];
-    const existing = new Map([[colonName, colonSubject]]);
-    expect(findFederatedCredentialNameCollision(desired, existing)).toBeNull();
-  });
-
-  it("returns null when the name is not present at all", () => {
-    const desired = [{ name: hyphenName, subject: hyphenSubject }];
-    expect(findFederatedCredentialNameCollision(desired, new Map())).toBeNull();
-  });
-
-  it("accepts a plain object map as well as a Map", () => {
-    const desired = [{ name: hyphenName, subject: hyphenSubject }];
-    const hit = findFederatedCredentialNameCollision(desired, {
-      [colonName]: colonSubject
-    });
-    expect(hit && hit.name).toBe(hyphenName);
-  });
-
-  it("is null-safe on empty or missing inputs", () => {
-    expect(findFederatedCredentialNameCollision(null, new Map())).toBeNull();
-    expect(findFederatedCredentialNameCollision([], null)).toBeNull();
-    expect(
-      findFederatedCredentialNameCollision(
-        [{ subject: "s" }],
-        new Map([["n", "x"]])
-      )
-    ).toBeNull();
-  });
-});
-
 describe("isCrossSiteMutation", () => {
   // Read-only methods always pass, regardless of the header.
   it("allows GET/HEAD from any site", () => {
@@ -1220,32 +1093,6 @@ describe("isCrossSiteMutation", () => {
     expect(isCrossSiteMutation("POST", ["cross-site"])).toBe(true);
     expect(isCrossSiteMutation("POST", ["same-origin"])).toBe(false);
     expect(isCrossSiteMutation("POST", "SAME-ORIGIN")).toBe(false);
-  });
-});
-
-describe("pickAksResourceGroup", () => {
-  // The AKS Cluster Admin grant must be scoped to the resource group that
-  // actually holds the cluster, which can differ from the deployment RG the
-  // user selected. pickAksResourceGroup prefers the cluster's discovered RG.
-  it("prefers the cluster's own resource group over the deployment RG", () => {
-    expect(pickAksResourceGroup("rg-cluster", "rg-deploy")).toBe("rg-cluster");
-  });
-
-  it("falls back to the deployment RG when the cluster RG is absent", () => {
-    expect(pickAksResourceGroup("", "rg-deploy")).toBe("rg-deploy");
-    expect(pickAksResourceGroup(undefined, "rg-deploy")).toBe("rg-deploy");
-    expect(pickAksResourceGroup(null, "rg-deploy")).toBe("rg-deploy");
-  });
-
-  it("trims whitespace and falls back on a blank cluster RG", () => {
-    expect(pickAksResourceGroup("  rg-cluster  ", "rg-deploy")).toBe(
-      "rg-cluster"
-    );
-    expect(pickAksResourceGroup("   ", "rg-deploy")).toBe("rg-deploy");
-  });
-
-  it("ignores non-string cluster RG values", () => {
-    expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
   });
 });
 
@@ -1807,6 +1654,29 @@ describe("triggerDeployRepairHandoff", () => {
     expect(entry.state.deployHandoffAttempts).toBe(0);
   });
 
+  it("advances the repair count on a loop redeploy and resets it on a new deploy", () => {
+    // The count has to move exactly as resolveDeployRepairLoop projected it,
+    // or the number reported to the agent would not be the one the next call
+    // is checked against.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployRepairAttempts = 1;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployRepairAttempts).toBe(2);
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployRepairAttempts).toBe(0);
+  });
+
   describe("resolveDeployRepairLoop", () => {
     it("treats a deploy with no attempt as an ordinary deploy", () => {
       expect(
@@ -1814,20 +1684,24 @@ describe("triggerDeployRepairHandoff", () => {
           { deployAttempt: { id: "attempt-A" } } as CanvasState,
           ""
         )
-      ).toEqual({ repairLoop: false, attemptId: "" });
+      ).toEqual({ repairLoop: false, attemptId: "", repairAttempt: 0 });
       expect(resolveDeployRepairLoop({} as CanvasState, undefined)).toEqual({
         repairLoop: false,
-        attemptId: ""
+        attemptId: "",
+        repairAttempt: 0
       });
     });
 
     it("keeps a redeploy on the attempt it was handed so the loop stays addressable", () => {
       expect(
         resolveDeployRepairLoop(
-          { deployAttempt: { id: "attempt-A" } } as CanvasState,
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed"
+          } as CanvasState,
           "attempt-A"
         )
-      ).toEqual({ repairLoop: true, attemptId: "attempt-A" });
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
     });
 
     it("rejects a stale repair rather than letting it clobber a newer deploy", () => {
@@ -1847,6 +1721,122 @@ describe("triggerDeployRepairHandoff", () => {
       const orphan = resolveDeployRepairLoop({} as CanvasState, "attempt-A");
       expect(orphan.repairLoop).toBe(false);
       expect(orphan.error).toMatch(/no longer the current attempt/);
+    });
+
+    it("counts each redeploy in the loop so the agent is told its budget", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployRepairAttempts: 2
+          } as CanvasState,
+          "attempt-A"
+        ).repairAttempt
+      ).toBe(3);
+    });
+
+    it("refuses a redeploy past the repair cap instead of dispatching another run", () => {
+      // The cap is stated in the handoff prompt, but prompt text is only an
+      // instruction: enforcing it here is what actually stops a runaway loop,
+      // and refusing before dispatch means it costs no workflow run.
+      const spent = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
+          deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(spent.error).toMatch(/already used its/);
+      // Every error branch reports not-a-loop, so a caller that reads
+      // repairLoop before error cannot turn a refusal into a live loop.
+      expect(spent.repairLoop).toBe(false);
+      expect(spent.error).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    });
+
+    it("allows the final attempt within the cap", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP - 1
+          } as CanvasState,
+          "attempt-A"
+        ).error
+      ).toBeUndefined();
+    });
+
+    it("refuses a redeploy while the attempt is still running", () => {
+      // Otherwise a duplicate call would dispatch a second workflow run and a
+      // second monitor over the same state.
+      const running = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "in_progress"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(running.repairLoop).toBe(false);
+      expect(running.repairAttempt).toBe(0);
+      expect(running.error).toMatch(/still running/);
+    });
+
+    it("refuses a redeploy when the run's outcome was never confirmed", () => {
+      // The timeout path sets deployStatus to "failed" while saying the run may
+      // still be going, and a dispatch of unknown outcome does the same. Without
+      // this, an attempt-bound retry would sail through the failed check and
+      // race a second workflow against the same target.
+      const lost = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "failed",
+          deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/7"
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(lost.repairLoop).toBe(false);
+      expect(lost.repairAttempt).toBe(0);
+      expect(lost.error).toMatch(/may still be in flight/);
+      // The handoff told the agent to keep passing this id; the way out has to
+      // be spelled out or it will keep addressing an attempt that can never be
+      // repaired, because its outcome will never be confirmed.
+      expect(lost.error).toMatch(/without an attemptId/);
+      expect(lost.error).toContain(
+        "https://github.com/acme/widgets/actions/runs/7"
+      );
+    });
+
+    it("still repairs a confirmed failure that carries an unrelated error kind", () => {
+      expect(
+        resolveDeployRepairLoop(
+          {
+            deployAttempt: { id: "attempt-A" },
+            deployStatus: "failed",
+            deployErrorKind: "branch-not-pushed"
+          } as CanvasState,
+          "attempt-A"
+        )
+      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
+    });
+
+    it("refuses a redeploy on an attempt that already succeeded", () => {
+      // The attempt stays current after it settles and the agent keeps passing
+      // its id, so reuse has to be sent down the new-deploy path: a loop
+      // redeploy is marked agent-owned, which would suppress the handoff if
+      // this one failed.
+      const done = resolveDeployRepairLoop(
+        {
+          deployAttempt: { id: "attempt-A" },
+          deployStatus: "complete",
+          deployRepairAttempts: 2
+        } as CanvasState,
+        "attempt-A"
+      );
+      expect(done.repairLoop).toBe(false);
+      expect(done.error).toMatch(/without an attemptId/);
     });
   });
 
@@ -2107,4 +2097,46 @@ describe("azureCliAssistMessage", () => {
     expect(message.displayPrompt).not.toContain("COPILOT_AGENT_SESSION_ID");
     expect(message.displayPrompt.length).toBeLessThan(message.prompt.length);
   });
+});
+
+describe("deploy failures that may leave a run in flight", () => {
+  it("treats an unresolved ref as proof that no run was created", () => {
+    for (const stderr of [
+      "No ref found for: feature-branch",
+      "could not resolve to a Repository",
+      "no commit found for the ref feature-branch"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_BRANCH_NOT_PUSHED_KIND
+      );
+  });
+
+  it("treats every other dispatch failure as a run that may exist", () => {
+    // A non-zero exit is not proof GitHub created nothing: the request can be
+    // accepted and the answer lost, and the token-scope retry can dispatch
+    // twice. Guessing "no run" here is what starts a duplicate.
+    for (const stderr of [
+      "",
+      "HTTP 504: Gateway Timeout",
+      'missing required scope "workflow"',
+      "context deadline exceeded"
+    ])
+      expect(classifyDeployDispatchFailure(stderr)).toBe(
+        DEPLOY_RUN_UNCONFIRMED_KIND
+      );
+  });
+
+  // The companion assertion — that every failure the monitor reports without a
+  // confirmed outcome marks itself `run-unconfirmed` — used to be a
+  // source-text probe over the `/api/deploy` legacy arm. It is now executed
+  // against the extracted services instead, where each path is reachable:
+  //   * no run found and the monitor's poll cap:
+  //     `server/services/deploy-monitor.test.ts`
+  //   * the monitor stopping unexpectedly:
+  //     `server/services/deploy-request.test.ts` and
+  //     `test/integration/http/deployments.test.ts`
+  //   * the dispatch failure taking its kind from the classifier above:
+  //     `server/services/deploy-dispatch.test.ts`
+  // A confirmed workflow failure is deliberately excluded from that set — it is
+  // the only kind a repair may act on.
 });
